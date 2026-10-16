@@ -1,13 +1,13 @@
 """Encoder/decoder for Turn 10 "Xls" web-service structs (bin/xtsw), driven by the user's own exe.
 
-Schemas are read at startup from forza_durango_release_final.exe with tools/xls_schema.py, so no game
-data is shipped in this repo. Wire format is documented in docs/lsp.md and tools/xls_schema.py.
+Schemas are read at startup from forza_durango_release_final.exe with server/xls_schema.py, so no game
+data is shipped in this repo. Wire format is documented in docs/lsp.md and server/xls_schema.py.
 """
 import os
 import struct
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import xls_schema as S  # noqa: E402
 
 FIXED = {0: ">B", 1: ">H", 2: ">h", 3: ">i", 4: ">I", 5: ">q", 6: ">Q", 0x13: ">Q", 7: ">f", 0x11: ">?"}

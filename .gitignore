@@ -33,3 +33,6 @@ __pycache__/
 node_modules/
 *.log
 *.dmp
+
+# LSP stand-in runtime state
+/server/data/
