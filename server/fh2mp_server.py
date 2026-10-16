@@ -13,6 +13,7 @@ Wire format (recovered from the client binary):
 import selectors
 import socket
 import sys
+import struct
 import time
 
 VERSION_STRING = "6CC152FD"   # PTR_s_6CC152FD in the game binary
@@ -33,6 +34,7 @@ MSG_CLIENT_TRAFFIC_MESSAGE = 72   # server -> clients (relay of the above, appli
 MSG_FINALISE_SESSION_ENTRY = 34   # no payload, both directions
 MSG_FULL_WEATHER = 54             # atmosphere(3f,4i) + precipitation(3f) + 2 x s32
 KEEPALIVE_SECONDS = 1.0
+TIME_SYNC_SECONDS = 30.0
 MSG_OBJECT_CREATE = 7
 MSG_OBJECT_UPDATE = 8
 ROUTER_LOBBY = 6          # ILobbyRouter: SessionHostSynced (type 0), GameOptionsSynced (type 1)
@@ -73,15 +75,25 @@ MSG_STARTING_GRID = 39              # count:4 | key(idBits 7) x count (FUN_14182
 MSG_START_RACE = 40                 # start time:32 on the server clock (FUN_1418241e0)
 MSG_READY_REQUEST_RESPONSE = 42     # response:2 (FUN_141824250)
 RACE_COUNTDOWN_MS = 5000
+RACE_GRID_TIMEOUT_SECONDS = 45.0     # starting grid sent: wait this long for every Console.RenderReady, then go anyway
 CONSOLE_VAR_PARTICIPATING_IN_RACE = 2
 CONSOLE_BOOL_VAR_NAMES = {0: "RenderReady", 1: "SessionEntryFinalised", 2: "ParticipatingInRace",
                           3: "RaceInProgress", 4: "Ready", 5: "HasLoadedCarsForAllParticipants",
                           6: "HasGrid"}
-RACE_INVITE_SECONDS = 6.0           # leader requested a race: wait this long for others, then start
+RACE_INVITE_SECONDS = 20.0          # leader requested a race: wait this long for others, then start
+RACE_JOIN_GRACE_SECONDS = 90.0      # ...but keep waiting this long for clients that accepted and are picking a car
 MSG_OBJECT_DELETE = 9
 MSG_OBJECT_REQUEST_OWNERSHIP = 10   # client -> server: router:4 | typeId | key (A=1,B=0 transfer id)
 MSG_OBJECT_GRANT_OWNERSHIP = 11     # server -> client: router:4 | key | seq:8 | size:14 (+size bits)
 MSG_CAR_PREDICTION_FULL = 15
+COLLISION_TO_RECEIVER_CAR = False   # experiment: apply a reported hit to the receiver's own car (True) or to
+                                    # its copy of the sender's car (False, the first version: "better")
+MSG_CAR_COLLISION = 21             # key | 6 x u32 (contact point, 3 values)  (FUN_141804e20)
+MSG_IN_PROGRESS_SCORE_UPDATE = 43   # key | u32 | bool                       (FUN_1418041b0)
+MSG_LAP_SCORE = 44                  # key | 3 x blob | u32 lap | bool | bool  (FUN_141804380)
+MSG_SCORE_KEYFRAME = 45             # key | 5 x blob | u32 | 3 x u8 | 3 x bool (FUN_141804660)
+RACE_FLAGS_CLEAR_SECONDS = 4.0       # after InRace=0, drop RaceReady/ParticipantsSelected as well
+RACE_LAST_FINISHER_SECONDS = 30.0   # after the first finisher the others get this long (client UI: RACE ENDS IN)
 CAR_KEY_ID_BITS = 7            # FUN_141808170: object key written with 7 id bits
 RELAY_ROUTERS = (1, 2, 3, 6, 9)   # player / console / car objects other clients must see
 RELAY_HISTORY_CAP = 2000       # stored messages per client, replayed to late joiners
@@ -196,6 +208,22 @@ def time_sync(seq: int, now: int):
     return write
 
 
+def ping_live(clock):
+    """Ping stamped when the packet is built, i.e. after send() has finished any deliberate delay."""
+    def write(w: BitWriter):
+        w.bits(MSG_PING, 7)
+        w.bits(clock(), 32)
+    return write
+
+
+def time_sync_live(seq: int, clock):
+    def write(w: BitWriter):
+        w.bits(MSG_TIME_SYNC, 7)
+        w.bits(seq, 16)
+        w.bits(clock(), 32)
+    return write
+
+
 def ping(value: int):
     def write(w: BitWriter):
         w.bits(MSG_PING, 7)
@@ -214,6 +242,15 @@ def client_traffic_message(kind: int, a: int, s14: int, u5: int, b: int, flag: i
         w.bits(b, 8)
         w.bits(flag, 1)
         w.bits(seq, 32)
+    return write
+
+
+def request_race_relay():
+    """Server -> other clients: the leader requested a race. The client's MsgRequestRace Receive handler
+    (FUN_1417f6fb0) calls CLobby slot 9, which fires NetworkRaceRequestingParticipants and pops the
+    "event invite" prompt; accepting it sets Console.Ready (network.ready_for_race)."""
+    def write(w: BitWriter):
+        w.bits(MSG_REQUEST_RACE, 7)
     return write
 
 
@@ -305,6 +342,23 @@ def relay_object_message(msg_type, router, obj_id, owner, type_id, seq, id_bits,
     return write
 
 
+def transfer_update_message(router, obj_id, id_bits, seq, size, payload):
+    """Update of a *transfer object* (key A=1, B=0): an object that exists on every client from the start
+    (e.g. the lobby's GameOptions) and whose authority moves between clients. The leader writes it with
+    this key and the server forwards the same key to everybody else."""
+    def write(w: BitWriter):
+        w.bits(MSG_OBJECT_UPDATE, 7)
+        w.bits(router, 4)
+        w.bits(1, 1)
+        w.bits(0, 1)
+        w.bits(obj_id, id_bits)
+        w.bits(seq, 8)
+        w.bits(size, 14)
+        w.value |= payload << w.pos
+        w.pos += size
+    return write
+
+
 def grant_ownership(router, obj_id, id_bits, seq=0):
     """FUN_1417ab720 / FUN_1417b1e70: the client resolves its transfer object by key
     (A=1,B=0,id), then applies a sequenced message: seq:8, size:14 and size payload bits."""
@@ -324,11 +378,12 @@ def starting_grid(entries):
     'relay' = another client's car (A=0,B=1,owner follows the id)."""
     def write(w: BitWriter):
         w.bits(MSG_STARTING_GRID, 7)
+        w.bits(0, LOBBY_EVENT_KEY_BITS)
         w.bits(len(entries), 4)
         for kind, cid, owner in entries:
             if kind == "local":
-                w.bits(1, 1)
-                w.bits(0, 1)
+                w.bits(0, 1)   # no flags: the receiver's own car is the plain id (the key FUN_140a31140 gets
+                w.bits(0, 1)   # from the local car, probed at runtime) and matches by position -> grid slot
                 w.bits(cid, CAR_KEY_ID_BITS)
             else:
                 w.bits(0, 1)
@@ -338,9 +393,15 @@ def starting_grid(entries):
     return write
 
 
+LOBBY_EVENT_KEY_BITS = 4   # RouterEventMessageHandler<ILobbyRouter,ILobbyEvents> prefixes an object key:
+                           # flagA:1 | flagB:1 | id:2 (FUN_1418091c0/1418092b0); all zero = server-owned id 0,
+                           # the same key the client puts in its own MsgReadyRequest
+
+
 def start_race(start_ms):
     def write(w: BitWriter):
         w.bits(MSG_START_RACE, 7)
+        w.bits(0, LOBBY_EVENT_KEY_BITS)
         w.bits(start_ms & 0xFFFFFFFF, 32)
     return write
 
@@ -348,6 +409,7 @@ def start_race(start_ms):
 def ready_request_response(code):
     def write(w: BitWriter):
         w.bits(MSG_READY_REQUEST_RESPONSE, 7)
+        w.bits(0, LOBBY_EVENT_KEY_BITS)
         w.bits(code, 2)
     return write
 
@@ -368,6 +430,20 @@ def relay_delete_message(router, obj_id, owner, id_bits, seq):
         w.bits(obj_id, id_bits)
         w.bits(owner, 8)
         w.bits(seq, 8)
+    return write
+
+
+def relay_score_message(msg_type, car_id, owner, rest_value, rest_bits):
+    """Score messages carry the sender's car key (own object: flags 00) followed by the payload; others see
+    that car as a relay object (A=0,B=1,id,owner)."""
+    def write(w: BitWriter):
+        w.bits(msg_type, 7)
+        w.bits(0, 1)
+        w.bits(1, 1)
+        w.bits(car_id, CAR_KEY_ID_BITS)
+        w.bits(owner, 8)
+        w.value |= rest_value << w.pos
+        w.pos += rest_bits
     return write
 
 
@@ -461,8 +537,11 @@ class Peer:
         self.host_seq = 2          # next SessionHost update number for this client (create used 1)
         self.relay_next = {}       # (router, id) -> next relay sequence number (server renumbers)
         self.console_vars = {}     # latest bool Console vars reported by this client
+        self.gopts_seq = 0         # numbering of the server-owned GameOptions object sent to this client
+        self.gopts_created = False
         self.console_oid = None    # id of this client's ConsoleSynced object (router 3)
         self.last_rx = time.monotonic()
+        self.last_time_sync = time.monotonic()    # the connect handshake sends the first TimeSync
         self.cars_relayed = 0
 
     def note_packet_id(self, pid: int) -> None:
@@ -497,6 +576,7 @@ class Server:
         self.peers = {}
         self.next_owner = 1
         self.pending_race = None   # (deadline, leader Peer)
+        self.game_options = None   # (size, payload) latest GameOptionsSynced written by the leader
         self.event = None          # {"people": [Peer], "begun": bool, "start_at": float|None}
         self.log(f"listening on udp/{port} version={VERSION_STRING} game={GAME_STRING}")
 
@@ -511,8 +591,12 @@ class Server:
 
     def send(self, peer: Peer, messages) -> None:
         # The client measures RTT in whole milliseconds and discards 0 ms as invalid, which makes
-        # it fall back to a 100 ms retransmit timer. Hold replies back ~2 ms so RTT reads >= 1.
-        time.sleep(0.002)
+        # it fall back to a 100 ms retransmit timer. Hold a reply back until ~2 ms after that client's last
+        # packet so RTT reads >= 1. Packets relayed from other clients do not need it and must not stall
+        # the loop: a fixed sleep per relayed car update added latency and jitter to every remote car.
+        gap = time.monotonic() - peer.last_rx
+        if gap < 0.002:
+            time.sleep(0.002 - gap)
         ack, bits = peer.ack_fields()
         pkt = build_packet(messages, ack_id=UNRELIABLE_ID, remote_ack=ack, ack_bits=bits)
         self.sock.sendto(pkt, peer.addr)
@@ -539,6 +623,22 @@ class Server:
                                    type_bits, size, payload)
         for q in self.others(peer):
             self.send(q, [msg])
+
+    GAME_OPTIONS_TRANSFER_ID = 0   # transfer-object id of the lobby's GameOptions (router 6, type 1)
+
+    def send_game_options(self, q: Peer) -> None:
+        """Forwards the leader's GameOptions to a client under the same transfer-object key the leader wrote
+        it with (A=1,B=0,id 0). That object already exists in every client's lobby (CGameOptions); the update
+        fills in its synced variables, including the selected event id the fast-travel state needs."""
+        if not self.game_options:
+            return
+        size, payload = self.game_options
+        msg = transfer_update_message(ROUTER_LOBBY, self.GAME_OPTIONS_TRANSFER_ID, LOBBY_ID_BITS,
+                                      q.gopts_seq, size, payload)
+        q.gopts_seq = (q.gopts_seq + 1) % 0xFF
+        self.send(q, [msg])
+        self.log(f"{q.addr[1]} <- GameOptions forwarded as transfer-object update ({size} bits, seq "
+                 f"{(q.gopts_seq - 1) % 0xFF})")
 
     def replay_to(self, newcomer: Peer) -> None:
         """Late joiner: announce everything the other clients already created."""
@@ -584,11 +684,30 @@ class Server:
         self.remember_and_relay(peer, MSG_OBJECT_UPDATE, 3, peer.console_oid, None, 0, vb.pos, vb.value)
         self.log(f"{peer.addr[1]} Console.{CONSOLE_BOOL_VAR_NAMES.get(var_id, var_id)} = {value} ({why})")
 
+    def end_event(self, why: str) -> None:
+        """Back to the idle lobby: clear the SessionHost race flags so the next event starts clean."""
+        self.event = None
+        self.pending_race = None
+        for var in (SH_IN_RACE, SH_RACE_PARTICIPANTS_SELECTED, SH_RACE_READY):
+            self.set_session_host_bool(var, 0, f"event over: {why}")
+        for q in self.peers.values():
+            q.console_vars.pop(4, None)
+
+    def check_invitees_ready(self) -> None:
+        others_waiting = [q for q in self.others(self.pending_race[1])
+                          if q.connected and q.entered and not q.console_vars.get(4)]
+        if not others_waiting:   # everybody invited has accepted: no need to wait out the window
+            self.pending_race = (min(self.pending_race[0], time.monotonic() + 1.5), self.pending_race[1])
+            self.log("all invited clients ready -> starting the event now")
+
     def start_event(self, leader: Peer) -> None:
         """Participants = the leader plus every client that reported Console.Ready."""
         people = [leader] + [q for q in self.peers.values()
                              if q is not leader and q.connected and q.console_vars.get(4)]
         self.log(f"event start: {len(people)} participant(s): {[q.owner_id for q in people]}")
+        for q in self.peers.values():
+            if q is not leader:
+                self.log(f"  other client owner {q.owner_id}: connected={q.connected} Console vars={q.console_vars}")
         self.event = {"people": people, "begun": False, "start_at": None}
         for q in people:
             self.set_console_bool(q, CONSOLE_VAR_PARTICIPATING_IN_RACE, 1, "participant selected")
@@ -601,11 +720,65 @@ class Server:
         if not all(q.connected and q.console_vars.get(5) for q in ev["people"]):
             return
         ev["begun"] = True
-        self.log(f"all {len(ev['people'])} participant(s) loaded cars -> InRace=1, start in "
-                 f"{RACE_COUNTDOWN_MS} ms")
-        # MsgStartingGrid (39) is NOT sent: the client's ILobbyRouter slot for it is a no-op and the
-        # dispatch fails ("Dispatch of message 39 failed" -> disconnect due to bad packet), observed
-        # in the host log on 2026-10-16. Free Roam events are started with SessionHost flags + 40.
+        self.log(f"all {len(ev['people'])} participant(s) loaded cars -> starting grid")
+        # MsgStartingGrid (39) moves the participants onto the event route (its ILobbyEvents handler,
+        # FUN_140a2e130, raises NetworkSwitchRoute). It must arrive BEFORE SessionHost.InRace: a client
+        # still waiting in wait_for_event_to_start sees InRace=1 and returns to free roam instead.
+        for q in ev["people"]:
+            entries = [("local", 0, 0) if p is q else ("relay", 0, p.owner_id) for p in ev["people"]]
+            self.send(q, [starting_grid(entries)])
+        for q in ev["people"]:
+            q.console_vars.pop(0, None)     # RenderReady is re-reported by each client once its grid is up
+        ev["go_at"] = time.monotonic() + RACE_GRID_TIMEOUT_SECONDS
+
+    def maybe_go_race(self) -> None:
+        """Everyone's starting-grid screen is up (Console.RenderReady): release InRace + MsgStartRace."""
+        ev = self.event
+        if ev and ev.get("go_at") and all(q.connected and q.console_vars.get(0) for q in ev["people"]):
+            self.log("all participants render-ready")
+            self.go_race()
+
+    def note_lap_score(self, peer: Peer, lap: int, blobs) -> None:
+        """MsgLapScore = (lap time, best lap, total time, lap number). The lap count is in GameOptions (not
+        decoded), so only a lap whose time equals the total time counts as the finish: a one-lap event. Circuit
+        events (a lap-0 start segment precedes lap 1) are ended by the players leaving instead."""
+        ev = self.event
+        if not ev or not ev.get("racing") or peer not in ev["people"] or peer in ev["finished"]:
+            return
+        lap_t, _, total_t = (struct.unpack("<d", x.to_bytes(8, "little"))[0] for x in blobs)
+        if lap < 1 or abs(lap_t - total_t) > 1e-6:
+            return
+        ev["finished"][peer] = time.monotonic()
+        self.log(f"{peer.addr[1]} finished in {total_t:.3f} s ({len(ev['finished'])}/{len(ev['people'])} finished)")
+
+    def check_race_end(self, now: float) -> None:
+        ev = self.event
+        if ev and ev.get("clear_at") and now >= ev["clear_at"]:
+            ev["clear_at"] = None      # the "event is about to start" HUD follows RaceReady/ParticipantsSelected
+            for var in (SH_RACE_PARTICIPANTS_SELECTED, SH_RACE_READY):
+                self.set_session_host_bool(var, 0, "race over: lobby flags cleared")
+        if not ev or not ev.get("racing") or ev.get("over"):
+            return
+        fin = ev["finished"]
+        if not fin:
+            return
+        if all(q in fin for q in ev["people"] if q.connected):
+            self.end_race("everybody finished")
+        elif now >= min(fin.values()) + RACE_LAST_FINISHER_SECONDS:
+            self.end_race("time limit after the first finisher")
+
+    def end_race(self, why: str) -> None:
+        """SessionHost.InRace=0 is what the clients' NetworkWaitForRaceEnd waits for (FUN_1408eeb20)."""
+        self.event["over"] = True
+        self.event["racing"] = False
+        self.event["clear_at"] = time.monotonic() + RACE_FLAGS_CLEAR_SECONDS
+        self.set_session_host_bool(SH_IN_RACE, 0, f"race over: {why}")
+
+    def go_race(self) -> None:
+        ev = self.event
+        ev["go_at"] = None
+        ev["racing"] = True
+        ev["finished"] = {}
         self.set_session_host_bool(SH_IN_RACE, 1, "race begun")
         go = (self.now_ms() + RACE_COUNTDOWN_MS) & 0xFFFFFFFF
         self.log(f"MsgStartRace start time {go} (server clock now {self.now_ms()})")
@@ -717,6 +890,7 @@ class Server:
                 if not peer.entered:
                     peer.entered = True
                     self.replay_to(peer)
+                    self.send_game_options(peer)
 
                 def console_vars(w: BitWriter):
                     w.bits(CONSOLE_VAR_SESSION_ENTRY_FINALISED, CONSOLE_VAR_ID_BITS)
@@ -745,6 +919,12 @@ class Server:
                 self.log(f"{addr[1]} MsgRequestRace (owner {peer.owner_id}) -> RaceReady=1")
                 self.set_session_host_bool(SH_RACE_READY, 1, "race requested")
                 self.pending_race = (time.monotonic() + RACE_INVITE_SECONDS, peer)
+                self.race_hard_deadline = time.monotonic() + RACE_JOIN_GRACE_SECONDS
+                invited = [q for q in self.others(peer) if q.connected and q.entered]
+                for q in invited:
+                    self.send(q, [request_race_relay()])
+                self.log(f"MsgRequestRace relayed to {len(invited)} other client(s): "
+                         f"{[q.owner_id for q in invited]} (invite window {RACE_INVITE_SECONDS:.0f} s)")
             elif mtype == MSG_READY_REQUEST:
                 a, b = r.bits(1), r.bits(1)
                 oid = r.bits(2)
@@ -753,6 +933,11 @@ class Server:
                 ready = r.bits(1)
                 self.log(f"{addr[1]} MsgReadyRequest key={a}{b} id={oid} ready={ready} -> response 0")
                 replies.append(ready_request_response(0))
+                if ready and self.pending_race and peer is not self.pending_race[1]:
+                    # the client's accept is the MsgReadyRequest; the authority records it as Console.Ready
+                    self.set_console_bool(peer, 4, 1, "ready request accepted")
+                    peer.console_vars[4] = 1
+                    self.check_invitees_ready()
             elif mtype == MSG_TIME_SYNC:
                 r.bits(16), r.bits(32)
                 self.log(f"{addr[1]} TimeSync")
@@ -781,9 +966,16 @@ class Server:
                     first = (router, oid) not in peer.objs
                     self.log(f"{addr[1]} GameOptions {'create' if first else 'update'} relayed "
                              f"({size} bits)")
-                    self.remember_and_relay(peer, MSG_OBJECT_CREATE if first else MSG_OBJECT_UPDATE,
-                                            router, oid, TYPE_GAME_OPTIONS if first else None, seq,
-                                            size, payload)
+                    # debug: raw bits (LSB first) and where small ids (e.g. the event id 1412 = 0x584) appear
+                    bitstr = "".join(str((payload >> i) & 1) for i in range(size))
+                    self.log(f"  GameOptions payload hex={payload.to_bytes((size + 7) // 8, 'little').hex()}")
+                    for width in range(8, 17):
+                        for off in range(0, max(0, size - width + 1)):
+                            if (payload >> off) & ((1 << width) - 1) == 1412:
+                                self.log(f"  GameOptions: value 1412 at bit offset {off} width {width}")
+                    self.game_options = (size, payload)
+                    for q in self.others(peer):
+                        self.send_game_options(q)
                 elif router in RELAY_ROUTERS and a == 0 and b == 0:
                     self.remember_and_relay(peer, mtype, router, oid, tid, seq, size, payload)
                 if router == 3 and mtype == MSG_OBJECT_UPDATE and size:
@@ -801,13 +993,74 @@ class Server:
                         pass
                     if seen:
                         self.log(f"{addr[1]} Console vars: {' '.join(seen)}")
+                        if self.event and peer in self.event["people"] and peer.console_vars.get(3) == 0 \
+                                and "RaceInProgress=0" in seen:
+                            self.event["people"].remove(peer)
+                            if not self.event["people"]:
+                                self.end_event("every participant left the event")
                         self.maybe_begin_race()
+                        self.maybe_go_race()
+                        if self.pending_race and peer is not self.pending_race[1] and peer.console_vars.get(4):
+                            self.check_invitees_ready()
                 if mtype == MSG_OBJECT_CREATE and router == 3:
                     peer.console_oid = oid
                 if mtype == MSG_OBJECT_CREATE and router == 3 and not peer.console_acked:
                     peer.console_acked = True
                     replies.append(server_update(router, oid, id_bits, 0))
                     self.log(f"{addr[1]} -> ServerUpdate for client Console object id={oid}")
+            elif mtype == MSG_CAR_COLLISION:
+                # The sender reports a hit on its own car (key flags 00); the other clients apply it to
+                # their copy of that car, so a pushed car actually moves instead of being a fixed obstacle.
+                a, b = r.bits(1), r.bits(1)
+                cid = r.bits(CAR_KEY_ID_BITS)
+                if a == 0 and b == 1:
+                    r.bits(8)
+                rest = r.bits(192)
+                if COLLISION_TO_RECEIVER_CAR:
+                    def msg(w, cid=cid, rest=rest):     # key left as the plain id: the receiver's own car
+                        w.bits(MSG_CAR_COLLISION, 7)
+                        w.bits(0, 2)
+                        w.bits(cid, CAR_KEY_ID_BITS)
+                        w.value |= rest << w.pos
+                        w.pos += 192
+                else:
+                    msg = relay_score_message(mtype, cid, peer.owner_id, rest, 192)
+                for q in self.others(peer):
+                    self.send(q, [msg])
+                peer.collisions_relayed = getattr(peer, "collisions_relayed", 0) + 1
+                if peer.collisions_relayed <= 3 or peer.collisions_relayed % 200 == 0:
+                    self.log(f"{addr[1]} car collision #{peer.collisions_relayed} relayed")
+            elif mtype in (MSG_IN_PROGRESS_SCORE_UPDATE, MSG_LAP_SCORE, MSG_SCORE_KEYFRAME):
+                a, b = r.bits(1), r.bits(1)
+                cid = r.bits(CAR_KEY_ID_BITS)
+                if a == 0 and b == 1:
+                    r.bits(8)
+                start = r.pos
+                blobs = []
+
+                def blob():
+                    n = r.varlen()
+                    blobs.append(r.bits(n * 8))
+                if mtype == MSG_IN_PROGRESS_SCORE_UPDATE:
+                    r.bits(32), r.bits(1)
+                elif mtype == MSG_LAP_SCORE:
+                    blob(), blob(), blob()
+                    lap = r.bits(32)
+                    r.bits(2)
+                    self.log(f"{addr[1]} LapScore lap={lap} times="
+                             f"{[round(struct.unpack('<d', x.to_bytes(8, 'little'))[0], 3) for x in blobs]}")
+                else:
+                    for _ in range(5):
+                        blob()
+                    r.bits(32 + 24 + 3)
+                end = r.pos
+                r.pos = start
+                rest = r.bits(end - start)
+                msg = relay_score_message(mtype, cid, peer.owner_id, rest, end - start)
+                for q in self.others(peer):
+                    self.send(q, [msg])
+                if mtype == MSG_LAP_SCORE:
+                    self.note_lap_score(peer, lap, blobs)
             elif mtype == MSG_CAR_PREDICTION_FULL:
                 a, b = r.bits(1), r.bits(1)
                 cid = r.bits(CAR_KEY_ID_BITS)
@@ -833,30 +1086,51 @@ class Server:
     def tick(self) -> None:
         """Server-initiated traffic: the client times out after 10 s of silence."""
         now = time.monotonic()
+        if self.event and self.event.get("go_at") and now >= self.event["go_at"]:
+            self.go_race()
+        self.check_race_end(now)
         if self.pending_race and now >= self.pending_race[0]:
             _, leader = self.pending_race
-            self.pending_race = None
-            if leader.connected:
-                self.start_event(leader)
+            joining = [q for q in self.others(leader)
+                       if q.connected and q.entered and q.console_vars.get(3) and not q.console_vars.get(4)]
+            if joining and leader.connected and now < getattr(self, "race_hard_deadline", 0):
+                self.pending_race = (now + 2.0, leader)   # accepted the invite, still choosing a car
+            else:
+                self.pending_race = None
+                if leader.connected:
+                    self.start_event(leader)
         for peer in list(self.peers.values()):
             if peer.connected and now - peer.last_rx > STALE_SECONDS:
                 self.drop_peer(peer, f"no packets for {STALE_SECONDS:.0f} s")
                 continue
             if peer.connected and now - peer.last_keepalive >= KEEPALIVE_SECONDS:
                 peer.last_keepalive = now
-                peer.time_sync_seq = (peer.time_sync_seq + 1) & 0xFFFF
-                self.send(peer, [ping(self.now_ms()), time_sync(peer.time_sync_seq, self.now_ms())])
+                msgs = [ping_live(self.now_ms)]
+                # A TimeSync re-bases the client's network clock, which the remote cars' prediction is timed
+                # against: sent every second it showed up as a bump at that rhythm. The clock is set at
+                # connect; refresh it only rarely.
+                if now - peer.last_time_sync >= TIME_SYNC_SECONDS:
+                    peer.last_time_sync = now
+                    peer.time_sync_seq = (peer.time_sync_seq + 1) & 0xFFFF
+                    msgs.append(time_sync_live(peer.time_sync_seq, self.now_ms))
+                self.send(peer, msgs)
 
     def serve(self) -> None:
         sel = selectors.DefaultSelector()
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
+        self.sock.setblocking(False)
         sel.register(self.sock, selectors.EVENT_READ)
         while True:
-            for _ in sel.select(timeout=0.2):
-                data, addr = self.sock.recvfrom(65535)
-                try:
-                    self.handle(data, addr)
-                except Exception as exc:  # keep serving
-                    self.log(f"error handling {data.hex()}: {exc!r}")
+            if sel.select(timeout=0.01):
+                while True:     # drain everything queued before the next timer pass
+                    try:
+                        data, addr = self.sock.recvfrom(65535)
+                    except BlockingIOError:
+                        break
+                    try:
+                        self.handle(data, addr)
+                    except Exception as exc:  # keep serving
+                        self.log(f"error handling {data.hex()}: {exc!r}")
             self.tick()
 
 

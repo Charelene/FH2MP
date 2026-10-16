@@ -891,6 +891,7 @@ static void maybe_run_connect_probe(unsigned char *img)
 }
 
 #include "xhr2.inc"
+#include "dbg.inc"
 
 /*
  * Watches the game's option singleton. Logs the FreeRoam direct-IP slot and related flags as they
@@ -1174,6 +1175,9 @@ static void log_ptr_string(const char *label, unsigned long long v)
 
 static LONG CALLBACK trace_veh(EXCEPTION_POINTERS *ep)
 {
+    if (dbg_handle(ep)) {
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
     int i;
     void *a;
 
@@ -1225,7 +1229,31 @@ static LONG CALLBACK trace_veh(EXCEPTION_POINTERS *ep)
                         log_hex(ep->ContextRecord->R8, 16);
                         log_raw(" r9=");
                         log_hex(ep->ContextRecord->R9, 16);
-                        if (ep->ContextRecord->R9 > 0x10000 && !IsBadReadPtr(o, 32)) {
+                        log_raw(" rax=");
+                        log_hex(ep->ContextRecord->Rax, 16);
+                        log_raw(" rbx=");
+                        log_hex(ep->ContextRecord->Rbx, 16);
+                        if (bp->label[3] == 'V') {
+                            /* ARGV*: rdx is a vtable pointer: log [rdx], [rdx+0xe8..0x100] (the slot called) */
+                            const unsigned long long *vt = (const unsigned long long *)(ULONG_PTR)ep->ContextRecord->Rdx;
+                            const unsigned char *obj = (const unsigned char *)(ULONG_PTR)ep->ContextRecord->Rcx;
+                            log_raw(" vt[0]=");
+                            if (ep->ContextRecord->Rdx > 0x10000 && !IsBadReadPtr(vt, 8)) {
+                                log_hex(vt[0], 16);
+                            }
+                            log_raw(" vt[30]=");
+                            if (ep->ContextRecord->Rdx > 0x10000 && !IsBadReadPtr(vt + 30, 8)) {
+                                log_hex(vt[30], 16);
+                            }
+                            log_raw(" obj[0..32]=");
+                            if (ep->ContextRecord->Rcx > 0x10000 && !IsBadReadPtr(obj, 32)) {
+                                for (q = 0; q < 32; q++) {
+                                    log_hex(obj[q], 2);
+                                }
+                            }
+                            log_raw(" img=");
+                            log_hex((unsigned long long)(ULONG_PTR)g_trace_img, 16);
+                        } else if (ep->ContextRecord->R9 > 0x10000 && !IsBadReadPtr(o, 32)) {
                             log_raw(" [r9]=");
                             for (q = 0; q < 32; q++) {
                                 log_hex(o[q], 2);
@@ -1603,6 +1631,7 @@ static void init(HINSTANCE self)
     }
     chain_load_mod();
     install_trace();
+    dbg_start();
     /* Always run: it re-applies the Winsock patch and serves on-demand trace arming even when
      * no NetSessionDirectIp argument is given (its option patching is gated on the argument). */
     {
