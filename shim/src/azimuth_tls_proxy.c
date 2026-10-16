@@ -457,6 +457,87 @@ static int patch_traffic_module_offline(void)
     return 1;
 }
 
+/*
+ * Turn 10 LSP calls (Message Center, profile, ...) first ask StsAuthTokenManager for an Xbox
+ * token via Windows.Xbox.System.User.GetTokenAndSignatureAsync. Azimuth never completes that
+ * async call, so every web request parks forever and the network is never touched. FUN_140ef88b0
+ * (GetAuthToken) is replaced by a stub that completes the game's own IStsAuthReadyCallback
+ * (vtable slot 2: hr, token, signature) synchronously with placeholder strings, the same way the
+ * game's "No primary Live user" failure branch does. Disable with env FH2MP_NO_STS.
+ */
+#define FH2_STS_GETAUTH_RVA 0xef88b0u
+typedef struct {
+    wchar_t buf[8];
+    unsigned long long size;
+    unsigned long long cap;
+} msvc_wstr; /* MSVC x64 std::wstring, small-string form */
+
+static void msvc_wstr_set(msvc_wstr *w, const wchar_t *src)
+{
+    unsigned long long n = 0;
+
+    while (n < 7 && src[n]) {
+        w->buf[n] = src[n];
+        n++;
+    }
+    w->buf[n] = 0;
+    w->size = n;
+    w->cap = 7;
+}
+
+static int g_sts_stub_calls;
+
+static void sts_auth_stub(void *a, void *b, void *c, void *d, void **ref)
+{
+    void **cb = (void **)ref[1];
+    msvc_wstr tok;
+    msvc_wstr sig;
+
+    (void)a; (void)b; (void)c; (void)d;
+    msvc_wstr_set(&tok, L"fh2mp");
+    msvc_wstr_set(&sig, L"fh2mp");
+    if (g_sts_stub_calls++ < 8) {
+        log_begin();
+        log_raw("sts: GetAuthToken completed in-process\n");
+    }
+    ((void (*)(void *, long, msvc_wstr *, msvc_wstr *))(((void **)*cb)[2]))(cb, 0, &tok, &sig);
+}
+
+static int patch_sts_auth(void)
+{
+    static const unsigned char sig[] = {0x40, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57,
+                                        0x48, 0x81, 0xEC, 0xB0, 0x02, 0x00, 0x00};
+    unsigned char *img = find_fh2_image();
+    unsigned char *fn;
+    unsigned long long dest = (unsigned long long)(ULONG_PTR)&sts_auth_stub;
+    DWORD old;
+    int i;
+
+    if (!img) {
+        return 0;
+    }
+    fn = img + FH2_STS_GETAUTH_RVA;
+    for (i = 0; i < (int)sizeof sig; i++) {
+        if (fn[i] != sig[i]) {
+            log_begin();
+            log_raw("sts: unexpected bytes at GetAuthToken, not patched\n");
+            return 0;
+        }
+    }
+    if (!VirtualProtect(fn, 14, PAGE_EXECUTE_READWRITE, &old)) {
+        return 0;
+    }
+    fn[0] = 0xFF; /* jmp [rip+0] ; dq dest */
+    fn[1] = 0x25;
+    fn[2] = fn[3] = fn[4] = fn[5] = 0;
+    mem_copy(fn + 6, &dest, 8);
+    VirtualProtect(fn, 14, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), fn, 14);
+    log_begin();
+    log_raw("sts: GetAuthToken replaced; LSP requests no longer wait for an Xbox token\n");
+    return 1;
+}
+
 static int install_cmdline_hook(void)
 {
     unsigned char *target = (unsigned char *)GetModuleHandleW(NULL) + HOOK_RVA;
@@ -809,6 +890,8 @@ static void maybe_run_connect_probe(unsigned char *img)
     log_raw("probe: begin-join returned\n");
 }
 
+#include "xhr2.inc"
+
 /*
  * Watches the game's option singleton. Logs the FreeRoam direct-IP slot and related flags as they
  * change; if the singleton is up and the slot is still empty, fills it from our argument.
@@ -838,20 +921,27 @@ static DWORD WINAPI option_monitor(LPVOID unused)
         return 0;
     }
     opts = img + FH2_OPTIONS_RVA;
-    for (tick = 0; tick < 1200; tick++) {
+    for (tick = 0; tick < 24000; tick++) { /* ~3.3 h of 0.5 s ticks */
         /* Azimuth binds the game's imports after the helper loads; keep our pointers on top */
         patch_game_winsock(img);
+        patch_game_cocreate(img);
         unsigned char cur[FH2_OPT_IP_SLOT_SIZE + 4];
         unsigned i;
         int changed = 0;
 
-        if (!(img[FH2_OPTIONS_INIT_FLAG_RVA] & 1)) {
-            Sleep(500);
-            continue;
+        {
+            static wchar_t last_cwd[MAX_PATH];
+            wchar_t cwd[MAX_PATH];
+            DWORD n = GetCurrentDirectoryW(MAX_PATH, cwd);
+            if (n > 0 && n < MAX_PATH && lstrcmpW(cwd, last_cwd) != 0) {
+                lstrcpyW(last_cwd, cwd);
+                log_begin();
+                log_raw("cwd: ");
+                log_wide(cwd);
+                log_raw("\n");
+            }
         }
-        if (tick >= 30) {
-            maybe_run_connect_probe(img);
-        }
+        /* on-demand trace arming must work even before the game reads its options */
         {
             wchar_t apath[MAX_PATH];
             wchar_t adone[MAX_PATH];
@@ -863,6 +953,13 @@ static DWORD WINAPI option_monitor(LPVOID unused)
                 MoveFileExW(apath, adone, MOVEFILE_REPLACE_EXISTING);
                 arm_trace_file();
             }
+        }
+        if (!(img[FH2_OPTIONS_INIT_FLAG_RVA] & 1)) {
+            Sleep(500);
+            continue;
+        }
+        if (tick >= 30) {
+            maybe_run_connect_probe(img);
         }
         for (i = 0; i < FH2_OPT_IP_SLOT_SIZE; i++) {
             cur[i] = opts[FH2_OPT_DIRECTIP_FREEROAM + i];
@@ -1109,10 +1206,53 @@ static LONG CALLBACK trace_veh(EXCEPTION_POINTERS *ep)
                 LONG n = InterlockedIncrement(&bp->hits);
                 int is_log = bp->label[0] == 'L' && bp->label[1] == 'O' && bp->label[2] == 'G';
                 int is_vt = bp->label[0] == 'V' && bp->label[1] == 'T';
-                LONG cap = is_vt ? 2000000 : (is_log ? TRACE_LOG_CAP : TRACE_MULTI_CAP);
+                LONG cap = is_vt ? 2000000 : ((is_log || bp->label[0] == 'X') ? TRACE_LOG_CAP : TRACE_MULTI_CAP);
                 if (g_trace_multi ? n <= cap : n == 1) {
                     if (is_vt) {
                         log_vtable_once(ep, bp->label);
+                    } else if (bp->label[0] == 'X' && bp->label[1] == 'L' && bp->label[2] == 'F') {
+                        /* Xls logger forwarder: (this, hr rdx, const char *msg r8) */
+                        const char *msg = (const char *)(ULONG_PTR)ep->ContextRecord->R8;
+                        char mb[200];
+                        int q = 0;
+                        if (msg && !IsBadReadPtr(msg, 2)) {
+                            while (q < (int)sizeof mb - 1 && msg[q] && !IsBadReadPtr(msg + q, 1)) {
+                                mb[q] = (msg[q] >= 32 && msg[q] < 127) ? msg[q] : '?';
+                                q++;
+                            }
+                        }
+                        mb[q] = '\0';
+                        log_begin();
+                        log_raw("xls: ");
+                        log_raw(bp->label);
+                        log_raw(" hr=");
+                        log_hex(ep->ContextRecord->Rdx & 0xffffffffu, 8);
+                        log_raw(" ");
+                        log_raw(mb);
+                        log_raw("\n");
+                    } else if (bp->label[0] == 'X' && bp->label[1] == 'L' && bp->label[2] == 'S') {
+                        /* Xls logger sink: (this, 0, severity r8, hr r9, const char *msg = 5th arg) */
+                        const char *msg = NULL;
+                        char mb[200];
+                        int q = 0;
+                        if (!IsBadReadPtr((void *)(ULONG_PTR)(ep->ContextRecord->Rsp + 0x28), 8)) {
+                            msg = *(const char **)(ULONG_PTR)(ep->ContextRecord->Rsp + 0x28);
+                        }
+                        if (msg && !IsBadReadPtr(msg, 2)) {
+                            while (q < (int)sizeof mb - 1 && msg[q] && !IsBadReadPtr(msg + q, 1)) {
+                                mb[q] = (msg[q] >= 32 && msg[q] < 127) ? msg[q] : '?';
+                                q++;
+                            }
+                        }
+                        mb[q] = '\0';
+                        log_begin();
+                        log_raw("xls: sev=");
+                        log_dec((unsigned long)ep->ContextRecord->R8);
+                        log_raw(" hr=");
+                        log_hex(ep->ContextRecord->R9 & 0xffffffffu, 8);
+                        log_raw(" ");
+                        log_raw(mb);
+                        log_raw("\n");
                     } else if (is_log) {
                         const char *fmt = (const char *)(ULONG_PTR)ep->ContextRecord->Rdx;
                         char buf[140];
@@ -1433,9 +1573,17 @@ static void init(HINSTANCE self)
             patch_game_winsock(find_fh2_image());
         }
     }
+    {
+        wchar_t tmp[8];
+        if (GetEnvironmentVariableW(L"FH2MP_NO_STS", tmp, 8) == 0) {
+            patch_sts_auth();
+        }
+    }
     chain_load_mod();
     install_trace();
-    if (has_arg_prefix(L"NetSessionDirectIp")) {
+    /* Always run: it re-applies the Winsock patch and serves on-demand trace arming even when
+     * no NetSessionDirectIp argument is given (its option patching is gated on the argument). */
+    {
         HANDLE t = CreateThread(NULL, 0, option_monitor, NULL, 0, NULL);
         if (t) {
             CloseHandle(t);
