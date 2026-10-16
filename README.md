@@ -19,21 +19,40 @@ Two instances of the game join one server and see each other in the open world:
 - each player's car is relayed live (position, steering, wheels) and drawn in the other player's world
 - the join flow, session objects, weather and clock are served by our server, not stubbed in the client
 
+Online events work too: one player starts an event, the other gets the invite, both pick a car, line up on
+the starting grid and race, with each player's progress shown to the other.
+
 This runs on the game's own NetV2 stack (the UDP protocol the Xbox One build shipped with).
 We did not write a new multiplayer mod on top of the game; we wrote the server the game expected
 to find, and taught the client where it is.
 
-## What does not work yet
+## Progress
 
-- **Traffic is not shared.** Each client simulates its own AI traffic, so a traffic collision on one
-  screen is not a collision on the other. A proper fix means running the game's traffic server for everyone.
-- **Online events (races) do not start. Yet.** Lobby setup, ownership transfer, "race ready", participant
-  selection and the start-race message are partly implemented; the client still never leaves the
-  "event about to start" screen. Invites to other players are not working either.
-- **Bucket List cars** do not appear online.
-- **No reliability layer** on the server's side of the connection. Fine on loopback, untested anywhere else.
-- Convoys, Car Clubs, Rivals, leaderboards, Drivatars, friends, invites, voice: none of it, yet.
-- Only tested on one setup (see below). Windows, other Azimuth versions and other game builds are unknown territory.
+Percentages are a rough, honest estimate of "how close is this to how the original service behaved",
+not a measurement. 100% means "I would not notice anything missing in a play session".
+
+| Feature | Progress | State |
+|---------|----------|-------|
+| **Online Free Roam** (join, Players list, name tags, live car relay) | `█████████░` 90% | Works with two clients. Missing: a reliability layer, anything beyond two clients is untested. |
+| **Online events** (invite, accept, car select, starting grid, race, finish) | `███████░░░` 70% | A full sprint race runs end to end with two players and ends on its own, including the 30 s "last finisher" timer. Circuit end detection, events started by the *second* player (softlocks) and the results flow are not done. |
+| **Event scoreboard and progress** | `██████░░░░` 60% | Lap times, progress and positions are relayed. Position ordering during a race is only checked on one-lap events. |
+| **Car-to-car collisions** | `█████░░░░░` 50% | Hits are relayed and look right, but pushing a car slowly still gives small periodic bumps. The server timing is clean (measured), so the rest is the client's own correction of the other car. |
+| **Message Center and Community News** | `████████░░` 80% | Messages from our server show up in both. Not done: the personal inbox and a few message types. |
+| **Drivatars** | `██████░░░░` 60% | The game's Drivatar cache is served and your own Drivatar is personalized and uploaded. Quality and variety of served Drivatars is limited. |
+| **Rivals and leaderboards** | `███░░░░░░░` 30% | Speed traps and Rivals events trigger and scores are stored; the leaderboard pages themselves still come up blank. |
+| **Traffic sync** | `█░░░░░░░░░` 10% | Each client simulates its own AI traffic. A shared traffic simulation is a different, much larger job. |
+| **Reliable delivery** (retransmission on the server side) | `█░░░░░░░░░` 10% | Fine on loopback, untested on a real network. |
+| **Bucket List cars online** | `░░░░░░░░░░` 0% | Not started. |
+| **Friends, presence, join-in-progress** | `░░░░░░░░░░` 0% | Not started. |
+
+**Overall, "play Online Free Roam and an event with a friend" is at roughly 75%.**
+The rows from Traffic sync downwards are the long tail.
+
+## Other known gaps
+
+- Only tested on one setup (see below), on loopback with two local clients. Real networks, NAT and more than
+  two players are unexplored. Windows, other Azimuth versions and other game builds are unknown territory.
+- Sessions are lost when the server restarts; clients have to rejoin.
 
 ## How it works, briefly
 
@@ -41,7 +60,8 @@ to find, and taught the client where it is.
 |-------|--------------|
 | **Azimuth** (third party, not included) | A compatibility layer that runs the Xbox One build of FH2 on a PC. It stubs every online call as "offline". |
 | **`shim/`** | A small in-process DLL that replaces Azimuth's `azimuth-tls.dll` helper. It keeps the helper's job, re-enables real sockets, passes launch options to the game, and patches a few spots (for example, keeping the traffic module in single-player mode). |
-| **`server/`** | A Python server that speaks NetV2: handshake, acks, object sync, session/lobby/weather objects, and relaying one client's objects and car state to the others. |
+| **`server/`** | Python, standard library only. `fh2mp_server.py` speaks NetV2: handshake, acks, object sync, session/lobby/weather objects, events and the race flow, and relays one client's objects, car state, collisions and scores to the others. `fh2mp_lsp.py` stands in for the game's HTTP cloud services (Message Center, Drivatars, Rivals). |
+| **`shim/fh2dbg.py`** | A live debugger client for the shim's built-in debugger: breakpoints, memory watches and crash reports on a running game, without rebuilding anything. |
 
 The protocol was recovered from the client itself, not from captured Microsoft traffic.
 No Microsoft or Xbox Live service is contacted, ever. There was nothing left to sniff.
