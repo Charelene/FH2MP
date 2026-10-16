@@ -25,12 +25,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import threading  # noqa: E402
 import xls  # noqa: E402
 import drivatar  # noqa: E402
+import scoreboard  # noqa: E402
 
 SEQ = 0
 SC = None
 STATE = {}
 CTX = threading.local()   # per-request: xuid (from X-UserId)
 DRV = None                # drivatar.DrivatarStore
+SB = None                 # scoreboard.ScoreStore
+LEVELS = {}               # xuid -> currentCareerLevel as sent at Logon
 TAGS = {}                 # xuid -> gamertag, learned at Logon
 
 
@@ -69,6 +72,7 @@ def frame(payload=b"", result=0, error=0, text=b""):
 def logon(req):
     lg = req["loginData"]
     TAGS[lg["xuid"]] = lg["gamerTag"]
+    LEVELS[lg["xuid"]] = lg["currentCareerLevel"]
     log(f"  Logon xuid={lg['xuid']:#x} tag={lg['gamerTag']!r} lcid={lg['LCID']}")
     r = xls.default_struct(SC, SC.sub(SC.call_struct("ForzaUserLogon_Results")[0]))
     r.update({
@@ -206,7 +210,112 @@ def drv_for_race(req):
             "currentTime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
 
+# ---------------------------------------------------------------- scoreboards (Rivals / leaderboards)
+
+def _score_row(sc_row, rowdict):
+    """Fill a ScoreboardRow (wire dict) from a scoreboard.py row."""
+    user = rowdict["user"]
+    lvl = LEVELS.get(sc_row["xuid"], 100000 + scoreboard.hash_int(sc_row["tag"], "lvl") % 900000)
+    user.update({"qwXuid": sc_row["xuid"], "wzGamerTag": (sc_row["tag"] or TAGS.get(sc_row["xuid"], ""))[:15],
+                 "currentCareerLevel": lvl})
+    rowdict.update({
+        "position": sc_row["position"], "rank": sc_row["position"], "score": scoreboard.dbl_to_u64(sc_row["score"]),
+        "submittedTime": scoreboard.iso(sc_row["t"]), "carId": sc_row["car"], "carClassId": sc_row["cls"],
+        "carPerformanceIndex": sc_row["cpi"], "usedSTM": sc_row["stm"], "usedTCS": sc_row["tcs"],
+        "usedABS": sc_row["abs"], "isClean": sc_row["clean"], "ghostFileId": 0, "bounty": 0})
+    return rowdict
+
+
+def sb_submit_score(req):
+    xuid, tag = _me()
+    d = req["data"]
+    s = SB.submit(xuid, tag, req["type"], d)
+    log(f"  SubmitScore board=({d['scoreboardType']},{req['type']}) track={d['trackId']} car={d['carId']} "
+        f"score={s['score']:.3f} clean={d['isClean']}")
+    return None
+
+
+def sb_submit_xp(req):
+    xuid, _ = _me()
+    total = SB.add_xp(xuid, req["xp"])
+    log(f"  SubmitXpScore +{req['xp']:g} -> total {total:g}")
+    return None
+
+
+def sb_best(req):
+    xuid, _ = _me()
+    b = SB.best_of(xuid, req["scoreboardType"], req["scoreType"], req["trackId"])
+    log(f"  GetBestScore board=({req['scoreboardType']},{req['scoreType']}) gsid={req['gameScoreboardId']} "
+        f"track={req['trackId']} car={req['carId']}: "
+        f"{'%.3f' % b['score'] if b else 'none'}")
+    if not b:
+        return {"bestScore": {"score": 0, "isClean": False}, "scoreFound": False}
+    return {"bestScore": {"score": scoreboard.dbl_to_u64(b["score"]), "isClean": b["clean"]}, "scoreFound": True}
+
+
+def sb_rival(req):
+    xuid, _ = _me()
+    r = SB.rival_for(xuid, req["scoreboardType"], req["scoreType"], req["trackId"])
+    res = xls.default_struct(SC, SC.call_struct("ForzaWebServicesScoreboardGetRival_Results"))
+    if r is None:
+        log("  GetRival: no rival")
+        return res
+    sd = res["rival"]["scoreData"]
+    _score_row(r, sd)
+    log(f"  GetRival board=({req['scoreboardType']},{req['scoreType']}) event={req['rivalEventId']} "
+        f"track={req['trackId']} pivot={req['pivotId']} rivalXuid={req['rivalXuid']:#x}: {r['tag']} {r['score']:.3f}")
+    return res
+
+
+def sb_rows(req, results="ForzaWebServicesScoreboardGetRowsAnthem_Results"):
+    xuid, _ = _me()
+    page, mine, nreal, nfake = SB.rows(xuid, req["scoreboardType"], req["scoreType"], req["trackId"],
+                                      max(1, req["startAt"]), min(200, max(0, req["maxResults"])))
+    FRIENDS_VIEW = 2    # the leaderboard's "FILTER: FRIENDS" (GetRows view=2); we have no friends, so it is just you
+    if req["view"] == FRIENDS_VIEW:
+        page = [dict(mine, position=1)] if mine is not None else []
+        mine = dict(mine, position=1) if mine is not None else None
+    res = xls.default_struct(SC, SC.call_struct(results))
+    tmpl = res["userRow"]
+    res["rows"] = [_score_row(r, json.loads(json.dumps(tmpl))) for r in page]
+    if mine is not None:
+        res["userRow"] = _score_row(mine, res["userRow"])
+    log(f"  GetRows[{results[len('ForzaWebServicesScoreboard'):-8]}] board=({req['scoreboardType']},{req['scoreType']}) view={req['view']} "
+        f"track={req['trackId']} pivot={req['pivotId']}: {len(page)} rows ({nreal} real, {nfake} fake), "
+        f"you={'#%d' % mine['position'] if mine else '-'}")
+    return res
+
+
+TIME_TRIAL_TRACKS = [578, 912, 902, 856]   # trackIds the client itself asked rivals/best scores for
+
+
+def sb_time_trials(req):
+    """The rival events listed under Rivals. Category numbers are unknown, so each category gets two events
+    named after it; the Rivals tab titles then show which category belongs to which page."""
+    now = time.time()
+    tts = []
+    for cat in range(0, 4):
+        for k in range(2):
+            tts.append({"id": 100 + cat * 10 + k, "category": cat, "scoreType": 1,
+                        "name": f"FH2MP Rival C{cat}-{k + 1}", "description": f"Category {cat} test rival event {k + 1}.",
+                        "notRegisteredMessage": "", "trackId": TIME_TRIAL_TRACKS[(cat * 2 + k) % len(TIME_TRIAL_TRACKS)],
+                        "trackName": f"Test track {cat}-{k + 1}",
+                        "hopperId": 0, "gameOptionsIndex": 0, "startDate": scoreboard.iso(now - 86400),
+                        "endDate": scoreboard.iso(now + 86400 * 30), "isUserRegistered": True, "isNew": k == 0,
+                        "isFeatured": k == 0, "isActive": True})
+    n = req["maxTimeTrials"]
+    log(f"  GetTimeTrials max={n}: serving {min(n, len(tts))} rival events")
+    return {"timeTrials": tts[:max(n, 0) or len(tts)]}
+
+
 HANDLERS = {
+    ("Forza.WebServices.Scoreboard", "GetRows"): ("", lambda req: sb_rows(req, "ForzaWebServicesScoreboardGetRows_Results")),
+    ("Forza.WebServices.Scoreboard", "GetTimeTrials"): ("", sb_time_trials),
+    ("Forza.WebServices.Scoreboard", "SubmitScore"): ("", sb_submit_score),
+    ("Forza.WebServices.Scoreboard", "SubmitXpScore"): ("", sb_submit_xp),
+    ("Forza.WebServices.Scoreboard", "GetBestScore"): ("", sb_best),
+    ("Forza.WebServices.Scoreboard", "GetRival"): ("", sb_rival),
+    ("Forza.WebServices.Scoreboard", "GetRowsAnthem"): ("", sb_rows),
     ("Forza.WebServices.Drivatar", "SaveDrivatarInformation"): ("", drv_save),
     ("Forza.WebServices.Drivatar", "GetDrivatarsForCache"): ("", drv_for_cache),
     ("Forza.WebServices.Drivatar", "GetDrivatarInformationForRace"): ("", drv_for_race),
@@ -344,6 +453,9 @@ def main():
     global DRV
     DRV = drivatar.DrivatarStore(SC, os.path.join(os.path.dirname(exe), "media", "drivatarglobalcache", "DefaultCache.bin"), DATA_DIR)
     log(f"drivatar store: {len(DRV.templates)} shipped templates, {len(DRV.players)} stored players")
+    global SB
+    SB = scoreboard.ScoreStore(DATA_DIR, [t["GamerTag"] for t in DRV.templates] + [r["GamerTag"] for r in DRV.players.values()])
+    log(f"scoreboards: {len(SB.subs)} stored submissions")
     log(f"schema loaded from {exe}: {len(SC.thunks)} struct descriptors")
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     log(f"fh2mp LSP listening on 127.0.0.1:{port}")

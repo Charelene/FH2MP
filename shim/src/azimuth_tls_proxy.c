@@ -1206,10 +1206,32 @@ static LONG CALLBACK trace_veh(EXCEPTION_POINTERS *ep)
                 LONG n = InterlockedIncrement(&bp->hits);
                 int is_log = bp->label[0] == 'L' && bp->label[1] == 'O' && bp->label[2] == 'G';
                 int is_vt = bp->label[0] == 'V' && bp->label[1] == 'T';
-                LONG cap = is_vt ? 2000000 : ((is_log || bp->label[0] == 'X') ? TRACE_LOG_CAP : TRACE_MULTI_CAP);
+                LONG cap = is_vt ? 2000000 : ((is_log || bp->label[0] == 'X' || bp->label[0] == 'A') ? TRACE_LOG_CAP : TRACE_MULTI_CAP);
                 if (g_trace_multi ? n <= cap : n == 1) {
                     if (is_vt) {
                         log_vtable_once(ep, bp->label);
+                    } else if (bp->label[0] == 'A' && bp->label[1] == 'R' && bp->label[2] == 'G') {
+                        /* ARG*: log rcx/rdx/r8/r9 and, when r9 points at readable memory, 32 bytes of it */
+                        const unsigned char *o = (const unsigned char *)(ULONG_PTR)ep->ContextRecord->R9;
+                        int q;
+                        log_begin();
+                        log_raw("arg: ");
+                        log_raw(bp->label);
+                        log_raw(" rcx=");
+                        log_hex(ep->ContextRecord->Rcx, 16);
+                        log_raw(" rdx=");
+                        log_hex(ep->ContextRecord->Rdx, 16);
+                        log_raw(" r8=");
+                        log_hex(ep->ContextRecord->R8, 16);
+                        log_raw(" r9=");
+                        log_hex(ep->ContextRecord->R9, 16);
+                        if (ep->ContextRecord->R9 > 0x10000 && !IsBadReadPtr(o, 32)) {
+                            log_raw(" [r9]=");
+                            for (q = 0; q < 32; q++) {
+                                log_hex(o[q], 2);
+                            }
+                        }
+                        log_raw("\n");
                     } else if (bp->label[0] == 'X' && bp->label[1] == 'L' && bp->label[2] == 'F') {
                         /* Xls logger forwarder: (this, hr rdx, const char *msg r8) */
                         const char *msg = (const char *)(ULONG_PTR)ep->ContextRecord->R8;
