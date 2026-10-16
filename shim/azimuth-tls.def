@@ -1,0 +1,4 @@
+LIBRARY azimuth-tls.dll
+EXPORTS
+    azimuth_tls_attached DATA
+    azimuth_tls_index = fh2mp_tls_index DATA

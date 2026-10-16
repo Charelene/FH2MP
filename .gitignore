@@ -1,0 +1,35 @@
+# Game / Azimuth / mod binaries and assets - never commit or redistribute
+*.exe
+*.dll
+*.xvd
+*.xvc
+*.vbi
+*.pipelines
+*.zip
+*.7z
+*.torrent
+*.sqlite
+/game/
+/azimuth/
+/mounts/
+/extracted/
+/captures/
+*.pcap
+*.pcapng
+
+# Analysis projects (contain proprietary binaries)
+*.gpr
+*.rep/
+*.lock
+*.lock~
+
+# Local scratch and build output
+/scratch/
+/build/
+/target/
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+*.log
+*.dmp
