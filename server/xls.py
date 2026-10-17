@@ -79,7 +79,9 @@ def decode(sc, fields, data):
 
 def _write_value(sc, out, f, v):
     t = f.type
-    if t in FIXED:
+    if t == 2:  # same 16 bits on the wire; notificationType 0x8502 etc. exceed the signed range
+        out += struct.pack(">H", v & 0xFFFF)
+    elif t in FIXED:
         out += struct.pack(FIXED[t], v)
     elif t == 9 or t == 0x10:
         b = v.encode("utf-8")

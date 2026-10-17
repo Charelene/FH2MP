@@ -85,11 +85,10 @@ def logon(req):
         "defaultContentTimeoutMs": 40000,
         "defaultInGameTimeoutMs": 30000,
         "userData": {**r["userData"], "qwXuid": lg["xuid"], "wzGamerTag": lg["gamerTag"]},
-        # Names are the numeric type so the in-game tab titles reveal the type -> page mapping.
+        # The client keeps at most 7 categories; it shows the ones with a tab (1, 3, 5, 6, 7) in the Message Center.
         "notificationCategories": [
-            {"type": t, "name": f"Category {t:#x}", "description": f"Category {t:#x} description",
-             "backgroundImageFileId": 0}
-            for t in range(1, 8)  # the client keeps at most 7 categories
+            {"type": t, "name": name, "description": desc, "backgroundImageFileId": 0}
+            for t, (name, desc) in sorted(CATEGORIES.items())
         ],
     })
     return {"responseData": r}
@@ -128,9 +127,72 @@ def notif_load():
         pass
 
 
-def add_notification(message, sra="", ntype=None):
+# notificationType -> parameter struct, from the client's dispatcher FUN_140f15ec0 (struct descriptors
+# found via the exe's own names). Types not listed here are not dispatched by the client.
+NOTIF_STRUCTS = {
+    0x000: "PermissionsDirtyNotificationParameters",
+    0x100: "NewDlcNotificationParameters",
+    0x200: "MessageNotificationParameters", 0x201: "MessageNotificationParameters",
+    0x203: "MessageNotificationParameters",
+    0x600: "BannedNotificationParameters", 0x601: "UnbannedNotificationParameters",
+    0x602: "MessageNotificationParameters",
+    0x8000: "UserBadgeGrantedNotificationParameters", 0x8001: "SetCreditsNotificationParameters",
+    0x8301: "SharedCarNotificationParameters", 0x8302: "CurationPayoutNotificationParameters",
+    0x8303: "DrivatarPayoutNotificationParameters", 0x8401: "MessageNotificationParameters",
+    0x8402: "TimeTrialRecommendNotificationParameters", 0x8403: "TimeTrialTimeBeatenNotificationParameters",
+    0x8500: "GiftReceiveMoneyNotificationParameters", 0x8501: "GiftReceiveItemNotificationParameters",
+    0x8502: "GiftReceiveCarNotificationParameters", 0x8503: "StorefrontOutOfStockNotificationParameters",
+    0x8504: "StorefrontMoneyWaitingNotificationParameters",
+    # Car Club notifications (Message Center category 7): the structs have no registered name, so they
+    # are given by descriptor VA (build 1.0.0.64): 0x700 join request {requestorXuid, requestorGamertag,
+    # clubId}, 0x701 invite {sponsorXuid, clubId, clubName, clubTag, sponsorGamertag}, 0x702 removal vote,
+    # 0x703 kicked, 0x704/0x705 {clubName, clubTag}, 0x706 member left, 0x707 new member, 0x708 promotion,
+    # 0x709 noticeboard message {senderXuid, senderClubRole, senderGamertag, noticeBoardMessage}.
+    **{0x700 + i: 0x1436ead20 + 0x10 * i for i in range(10)},
+}
+STRUCT_FALLBACK = "MessageNotificationParameters"
+
+# Message Center tabs, confirmed in game 2026-10-16. Category 2 is the Community News page (not a tab), 4 never
+# showed anything.
+CATEGORIES = {
+    1: ("New Content", "New downloadable content"),
+    2: ("Announcements", "Community news and announcements"),
+    3: ("Rewards", "Payouts and rewards"),
+    4: ("Time Trials", "Time trial notices"),
+    5: ("Gifts", "Gifts from other players"),
+    6: ("Messages", "Messages and account notices"),
+    7: ("Car Club", "Car club requests and notices"),
+}
+
+# kind -> (notificationType, where it shows up). Any other dispatched type can be sent by its number.
+KINDS = {
+    "announcement": (0x200, "Community News page"), "dlc": (0x100, "category 1"),
+    "reward_curation": (0x8302, "category 3 (shown as Layer Group Reward)"),
+    "reward_drivatar": (0x8303, "category 3 (shown as Drivatar Reward)"),
+    "gift_money": (0x8500, "category 5"), "gift_item": (0x8501, "category 5 (GiftFileType 0 = tuning)"),
+    "gift_car": (0x8502, "category 5"),
+    "message": (0x602, "category 6"), "ban": (0x600, "category 6 (applies a feature ban, undo with unban)"),
+    "unban": (0x601, "category 6"),
+    "club_join_request": (0x700, "category 7"), "club_invite": (0x701, "category 7"),
+    "club_removal_vote": (0x702, "category 7"), "club_kicked": (0x703, "category 7"),
+    "club_notice_a": (0x704, "category 7"), "club_notice_b": (0x705, "category 7"),
+    "club_member_left": (0x706, "category 7"), "club_new_member": (0x707, "category 7"),
+    "club_promotion": (0x708, "category 7"), "club_noticeboard": (0x709, "category 7"),
+}
+
+
+def notif_fields(ntype):
+    s = NOTIF_STRUCTS.get(ntype, STRUCT_FALLBACK)
+    return xls.S.fields_of(SC.exe, SC.thunks, s) if isinstance(s, int) else SC.call_struct(s)
+
+
+def add_notification(message, sra="", ntype=None, params=None, xuid=0):
     n = {"id": NOTIF_NEXT_ID[0], "type": MSG_TYPE if ntype is None else ntype, "message": message,
          "sra": sra, "sent": filetime(), "read": False}
+    if params:
+        n["params"] = params
+    if xuid:
+        n["xuid"] = xuid
     NOTIF_NEXT_ID[0] += 1
     NOTIF.append(n)
     notif_save()
@@ -138,22 +200,57 @@ def add_notification(message, sra="", ntype=None):
     return n
 
 
+def _coerce(kind, v):
+    if kind in (9, 0x10):
+        return str(v)
+    if kind == 0x11:
+        return v if isinstance(v, bool) else str(v).lower() in ("1", "true", "yes")
+    if kind == 7:
+        return float(v)
+    return v if isinstance(v, int) else int(str(v), 0)
+
+
+def notif_params(ntype, extra):
+    """Admin query extras (Field=value) -> typed values for the type's parameter struct."""
+    if not extra:
+        return {}
+    fields = notif_fields(ntype)
+    kinds = {f.name: f.type for f in fields}
+    out = {}
+    for k, v in extra.items():
+        if k not in kinds:
+            raise ValueError(f"no field {k!r} in {NOTIF_STRUCTS.get(ntype, STRUCT_FALLBACK)}; have {sorted(kinds)}")
+        out[k] = _coerce(kinds[k], v)
+    return out
+
+
+def _visible():
+    """Notifications for the requesting player: broadcasts (no xuid) plus ones addressed to them."""
+    me = getattr(CTX, "xuid", 0)
+    return [n for n in NOTIF if not n.get("xuid") or n["xuid"] == me]
+
+
 def notif_retrieve(req):
     results, block = [], bytearray()
-    for n in NOTIF:
-        if n["type"] == 0x100:  # NewDlcNotificationParameters {Message, OfferId}
-            pb = xls.encode(SC, SC.call_struct("NewDlcNotificationParameters"),
-                            {"Message": n["message"], "OfferId": n["sra"]})
-        else:                   # MessageNotificationParameters {Message, SRAUri}
-            pb = xls.encode(SC, SC.call_struct("MessageNotificationParameters"),
-                            {"Message": n["message"], "SRAUri": n["sra"]})
-        results.append({"id": n["id"], "xuidRecipient": 0, "notificationType": n["type"],
+    vis = _visible()
+    for n in vis:
+        fields = notif_fields(n["type"])
+        val = xls.default_struct(SC, fields)
+        if "Message" in val:
+            val["Message"] = n["message"]
+        if "SRAUri" in val:
+            val["SRAUri"] = n["sra"]
+        if "OfferId" in val:
+            val["OfferId"] = n["sra"]
+        val.update(n.get("params", {}))
+        pb = xls.encode(SC, fields, val)
+        results.append({"id": n["id"], "xuidRecipient": n.get("xuid", 0), "notificationType": n["type"],
                         "hasThumbnail": False, "isRead": n["read"], "deleteAction": 0,
                         "expirationDate": filetime(time.time() + 86400 * 365), "sentDate": n["sent"],
                         "cbParameters": len(pb)})
         block += pb
     return {"results": results, "parameterBlock": bytes(block), "nextRetrieveSeconds": POLL_SECONDS,
-            "reconcileActiveNotifications": True, "activeNotificationIds": [n["id"] for n in NOTIF]}
+            "reconcileActiveNotifications": True, "activeNotificationIds": [n["id"] for n in vis]}
 
 
 def notif_mark_read(req):
@@ -364,6 +461,98 @@ def handle_xls(cls, method, body):
     return frame(xls.encode(SC, rfields, result))
 
 
+class ApiError(Exception):
+    def __init__(self, status, msg):
+        super().__init__(msg)
+        self.status, self.msg = status, msg
+
+
+def _field_info(ntype):
+    return [{"name": f.name, "type": S_TYPES.get(f.type, hex(f.type)), "maxLength": f.size or None}
+            for f in notif_fields(ntype)]
+
+
+S_TYPES = {0: "u8", 1: "u16", 2: "i16", 3: "i32", 4: "u32", 5: "i64", 6: "u64", 7: "float", 9: "string",
+           0x10: "datetime", 0x11: "bool"}
+
+
+def _notif_json(n):
+    return {"id": n["id"], "type": n["type"], "kind": next((k for k, v in KINDS.items() if v[0] == n["type"]), None),
+            "text": n["message"], "sra": n["sra"], "fields": n.get("params", {}), "xuid": n.get("xuid", 0),
+            "read": n["read"], "sent": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(n["sent"] / 1e7 - 11644473600))}
+
+
+def api(method, path, body):
+    """JSON admin API for notifications (no auth: the server only listens on loopback by default).
+
+    GET    /api/types                 notification kinds, categories and each type's fields
+    GET    /api/notifications         everything queued
+    POST   /api/notifications         {"kind"|"type", "text", "sra", "xuid", "fields": {...}} -> created item
+    GET    /api/notifications/<id>
+    DELETE /api/notifications/<id>    (the client drops it at its next poll)
+    DELETE /api/notifications         remove all
+    """
+    parts = [p for p in path.split("?")[0].split("/") if p]          # ["api", "notifications", id]
+    if parts[:2] == ["api", "types"] and method == "GET":
+        kinds = [{"kind": k, "type": t, "shows_in": where, "fields": _field_info(t)} for k, (t, where) in KINDS.items()]
+        known = sorted(set(NOTIF_STRUCTS) - {v[0] for v in KINDS.values()})
+        return 200, {"kinds": kinds, "otherTypes": [{"type": t, "fields": _field_info(t)} for t in known],
+                     "categories": [{"id": c, "name": n, "description": d} for c, (n, d) in sorted(CATEGORIES.items())]}
+    if parts[:2] != ["api", "notifications"]:
+        raise ApiError(404, "unknown endpoint")
+    if len(parts) == 2:
+        if method == "GET":
+            return 200, {"notifications": [_notif_json(n) for n in NOTIF]}
+        if method == "DELETE":
+            n = len(NOTIF)
+            NOTIF.clear()
+            notif_save()
+            return 200, {"removed": n}
+        if method == "POST":
+            try:
+                d = json.loads(body or b"{}")
+            except ValueError as e:
+                raise ApiError(400, f"invalid JSON: {e}")
+            if "kind" in d:
+                if d["kind"] not in KINDS:
+                    raise ApiError(400, f"unknown kind {d['kind']!r}; have {sorted(KINDS)}")
+                ntype = KINDS[d["kind"]][0]
+            elif "type" in d:
+                try:
+                    ntype = int(d["type"], 0) if isinstance(d["type"], str) else int(d["type"])
+                except ValueError:
+                    raise ApiError(400, "type must be a number")
+                if ntype not in NOTIF_STRUCTS:
+                    raise ApiError(400, f"type {ntype:#x} is not dispatched by the client")
+            else:
+                raise ApiError(400, "give \"kind\" or \"type\"")
+            try:
+                params = notif_params(ntype, d.get("fields") or {})
+                xuid = d.get("xuid", 0)
+                xuid = int(xuid, 0) if isinstance(xuid, str) else int(xuid)
+            except (ValueError, TypeError) as e:
+                raise ApiError(400, str(e))
+            if "text" in d and "Message" not in {f.name for f in notif_fields(ntype)}:
+                raise ApiError(400, f"type {ntype:#x} has no message text; set \"fields\" instead")
+            n = add_notification(str(d.get("text", "")), str(d.get("sra", "")), ntype, params, xuid)
+            return 201, _notif_json(n)
+        raise ApiError(405, "method not allowed")
+    try:
+        nid = int(parts[2])
+    except ValueError:
+        raise ApiError(404, "bad notification id")
+    n = next((x for x in NOTIF if x["id"] == nid), None)
+    if n is None:
+        raise ApiError(404, "no such notification")
+    if method == "GET":
+        return 200, _notif_json(n)
+    if method == "DELETE":
+        NOTIF.remove(n)
+        notif_save()
+        return 200, {"removed": nid}
+    raise ApiError(405, "method not allowed")
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -377,6 +566,8 @@ class Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(n) if n else b""
         if self.path.startswith("/admin/"):
             return self._admin()
+        if self.path.startswith("/api/"):
+            return self._api(body)
         host = self.headers.get("X-FH2MP-Host", "")
         cls = self.headers.get("X-ClassName", "")
         method = self.headers.get("X-Method", "")
@@ -400,6 +591,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(out)
 
+    def _api(self, body):
+        try:
+            status, obj = api(self.command, self.path, body)
+        except ApiError as e:
+            status, obj = e.status, {"error": e.msg}
+        b = json.dumps(obj, indent=1).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
     def _admin(self):
         """GET /admin/send?text=...[&type=512][&sra=...]  |  /admin/list  |  /admin/clear  |
         /admin/drivatar?tag=NAME[&xuid=0x..][&skill=0..4][&wristband=N]  (add a player)  |
@@ -408,7 +611,10 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
         if u.path == "/admin/send":
-            n = add_notification(q.get("text", ""), q.get("sra", ""), int(q["type"], 0) if "type" in q else None)
+            fixed = {"text", "sra", "type"}
+            n = add_notification(q.get("text", ""), q.get("sra", ""), int(q["type"], 0) if "type" in q else None,
+                                 notif_params(int(q["type"], 0) if "type" in q else MSG_TYPE,
+                                              {k: v for k, v in q.items() if k not in fixed}))
             out = f"queued #{n['id']}\n"
         elif u.path == "/admin/drivatar" and "remove" in q:
             out = "removed\n" if DRV.remove(int(q.get("xuid", "0"), 0)) else "no such drivatar\n"
