@@ -22,6 +22,12 @@ Two instances of the game join one server and see each other in the open world:
 Online events work too: one player starts an event, the other gets the invite, both pick a car, line up on
 the starting grid and race, with each player's progress shown to the other.
 
+**Online Road Trip** has its first working pieces (initial work, see the progress table). Two players can
+join a Road Trip session, vote on one of three randomly drawn destinations (each with its own car class and race
+types, drawn from the game's own event table), pick a car, and drive to the event with the game's own group route
+and countdown. Then they race it on a shared starting grid and see the XP championship results. Moving between the
+four events of a destination, and the Road Trip details around it, are still being worked out.
+
 This runs on the game's own NetV2 stack (the UDP protocol the Xbox One build shipped with).
 We did not write a new multiplayer mod on top of the game; we wrote the server the game expected
 to find, and taught the client where it is.
@@ -35,6 +41,7 @@ not a measurement. 100% means "I would not notice anything missing in a play ses
 |---------|----------|-------|
 | **Online Free Roam** (join, Players list, name tags, live car relay) | `█████████░` 90% | Works with two clients. Missing: a reliability layer, anything beyond two clients is untested. |
 | **Online events** (invite, accept, car select, starting grid, race, finish) | `███████░░░` 70% | A full sprint race runs end to end with two players and ends on its own, including the 30 s "last finisher" timer. Circuit end detection, events started by the *second* player (softlocks) and the results flow are not done. |
+| **Online Road Trip** (vote, car select, drive to event, race, championship results) | `████░░░░░░` 40% | First working pieces, initial work only. Works with two clients: join, a three-way destination vote with random classes and race types (no party modes yet), car select that ends early once everyone picked, the game's own group route and drive countdown, the event itself, and the XP championship screens. In progress: carrying on through all four events of a destination, then voting again (event 2 onwards has timing problems), dynamic drive times, team race types, matching the original start locations, and the overlapping cars on the pre-race and standings screens. |
 | **Event scoreboard and progress** | `██████░░░░` 60% | Lap times, progress and positions are relayed. Position ordering during a race is only checked on one-lap events. |
 | **Car-to-car collisions** | `█████░░░░░` 50% | Hits are relayed and look right, but pushing a car slowly still gives small periodic bumps. The server timing is clean (measured), so the rest is the client's own correction of the other car. |
 | **Message Center and Community News** | `████████░░` 80% | Messages from our server show up in both. Not done: the personal inbox and a few message types. |

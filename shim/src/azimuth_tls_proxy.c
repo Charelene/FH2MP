@@ -61,10 +61,19 @@ static const char FH2_FREEROAM_OLD[] = "EntityModel\\Network\\network_matchmakin
 static const char FH2_FREEROAM_NEW[] =
     "EntityModel\\Network\\network_matchmaking_freeroam_directip.xml";
 
+/* the RoadTrip entry of the same table (FUN_14080e7d0, session type 1) */
+#define FH2_ROADTRIP_LEA_RVA 0x80e801u
+#define FH2_ROADTRIP_STR_RVA 0x1e8ab70u
+static const char FH2_ROADTRIP_OLD[] = "EntityModel\\Network\\network_matchmaking_roadtrip.xml";
+static const char FH2_ROADTRIP_NEW[] =
+    "EntityModel\\Network\\network_matchmaking_roadtrip_directip.xml";
+
 /* FH2 option singleton (FUN_1402959a0 returns it): static object, lazily initialised */
 #define FH2_OPTIONS_RVA 0x34af7d0u
 #define FH2_OPTIONS_INIT_FLAG_RVA 0x34b3390u /* bit 0 set once constructed */
 #define FH2_OPT_BYPASS_MATCHMAKING 0x2ff1u
+#define FH2_OPT_SINGLE_PLAYER_EVENTS 0x30f4u /* bool: NetSessionEnableSinglePlayerFreeRoamEvents */
+#define FH2_OPT_DIRECTIP_ROADTRIP 0x3013u /* char[0x20] */
 #define FH2_OPT_DIRECTIP_FREEROAM 0x3033u /* char[0x20] */
 #define FH2_OPT_LOCAL_LOBBY_HOPPER 0x321au
 #define FH2_OPT_ENABLE_DEBUG_IP_LIST 0x321bu
@@ -643,12 +652,13 @@ static int str_equal(const char *a, const char *b)
 }
 
 /*
- * Point the FreeRoam entry of the matchmaking group table at the `_directip` group, whose
- * coordinator runs the stateflow `matchmake_freeroam_debug_ip` (NetworkRequestDirectIpMatch).
+ * Point one entry (FreeRoam or RoadTrip) of the matchmaking group table at its `_directip` group, whose
+ * coordinator runs the stateflow `matchmake_*_debug_ip` (NetworkRequestDirectIpMatch).
  * The replacement path is longer than the original string slot, so it lives in a fresh page
  * allocated within +-2GB and the lea's rip-relative displacement is rewritten.
  */
-static int redirect_freeroam_group(void)
+static int redirect_group(const char *name, unsigned lea_rva, unsigned str_rva, const char *oldstr,
+                          const char *newstr_src, unsigned newstr_len)
 {
     unsigned char *img = find_fh2_image();
     unsigned char *lea;
@@ -666,17 +676,18 @@ static int redirect_freeroam_group(void)
         log_raw("redirect: FH2 1.0.0.64 image not found in this process\n");
         return 0;
     }
-    lea = img + FH2_FREEROAM_LEA_RVA;
+    lea = img + lea_rva;
     log_begin();
-    log_raw("redirect: FH2 image found, lea at rva 0x80e868\n");
+    log_raw("redirect: FH2 image found, patching the ");
+    log_raw(name);
+    log_raw(" entry\n");
     if (lea[0] != 0x4c || lea[1] != 0x8d || lea[2] != 0x05) {
         log_begin();
         log_raw("redirect: unexpected instruction bytes, skipping\n");
         return 0;
     }
     mem_copy(&oldDisp, lea + 3, 4);
-    if ((lea + 7 + oldDisp) != (img + FH2_FREEROAM_STR_RVA) ||
-        !str_equal((const char *)(img + FH2_FREEROAM_STR_RVA), FH2_FREEROAM_OLD)) {
+    if ((lea + 7 + oldDisp) != (img + str_rva) || !str_equal((const char *)(img + str_rva), oldstr)) {
         log_begin();
         log_raw("redirect: call site does not reference the expected path string, skipping\n");
         return 0;
@@ -705,8 +716,8 @@ static int redirect_freeroam_group(void)
         log_raw("redirect: could not allocate a page near the game image\n");
         return 0;
     }
-    for (i = 0; i < sizeof FH2_FREEROAM_NEW; i++) {
-        newstr[i] = (unsigned char)FH2_FREEROAM_NEW[i];
+    for (i = 0; i < newstr_len; i++) {
+        newstr[i] = (unsigned char)newstr_src[i];
     }
     newDisp = (long long)(newstr - (lea + 7));
     if (newDisp > 0x7fffffffll || newDisp < -0x80000000ll) {
@@ -726,8 +737,24 @@ static int redirect_freeroam_group(void)
         FlushInstructionCache(GetCurrentProcess(), lea, 8);
     }
     log_begin();
-    log_raw("redirect: FreeRoam matchmaking group -> network_matchmaking_freeroam_directip.xml\n");
+    log_raw("redirect: ");
+    log_raw(name);
+    log_raw(" matchmaking group -> ");
+    log_raw(newstr_src);
+    log_raw("\n");
     return 1;
+}
+
+static int redirect_freeroam_group(void)
+{
+    return redirect_group("FreeRoam", FH2_FREEROAM_LEA_RVA, FH2_FREEROAM_STR_RVA, FH2_FREEROAM_OLD,
+                          FH2_FREEROAM_NEW, sizeof FH2_FREEROAM_NEW);
+}
+
+static int redirect_roadtrip_group(void)
+{
+    return redirect_group("RoadTrip", FH2_ROADTRIP_LEA_RVA, FH2_ROADTRIP_STR_RVA, FH2_ROADTRIP_OLD,
+                          FH2_ROADTRIP_NEW, sizeof FH2_ROADTRIP_NEW);
 }
 
 /* value of the first `<prefix><value>` argument as narrow ASCII; returns 0 when absent */
@@ -903,13 +930,19 @@ static DWORD WINAPI option_monitor(LPVOID unused)
     unsigned char *opts;
     char want[FH2_OPT_IP_SLOT_SIZE];
     int have_want;
+    char want_rt[FH2_OPT_IP_SLOT_SIZE];
+    int have_want_rt;
+    int have_single_events;
     int patched = 0;
+    int patched_rt = 0;
     int tick;
     unsigned char last[FH2_OPT_IP_SLOT_SIZE + 4];
     int first = 1;
 
     (void)unused;
     have_want = arg_value_ascii(L"NetSessionDirectIpFreeRoam=", want, sizeof want);
+    have_want_rt = arg_value_ascii(L"NetSessionDirectIpRoadTrip=", want_rt, sizeof want_rt);
+    have_single_events = has_arg_prefix(L"NetSessionEnableSinglePlayerFreeRoamEvents");
     for (tick = 0; tick < 60 && !img; tick++) {
         img = find_fh2_image();
         if (!img) {
@@ -998,6 +1031,22 @@ static DWORD WINAPI option_monitor(LPVOID unused)
             patched = 1;
             log_begin();
             log_raw("monitor: slot was empty after parse, wrote it from argument\n");
+        }
+        if (!patched_rt && have_want_rt && opts[FH2_OPT_DIRECTIP_ROADTRIP] == 0 && tick >= 20) {
+            unsigned n = 0;
+            while (want_rt[n] && n < FH2_OPT_IP_SLOT_SIZE - 1) {
+                opts[FH2_OPT_DIRECTIP_ROADTRIP + n] = (unsigned char)want_rt[n];
+                n++;
+            }
+            opts[FH2_OPT_DIRECTIP_ROADTRIP + n] = 0;
+            patched_rt = 1;
+            log_begin();
+            log_raw("monitor: RoadTrip slot was empty after parse, wrote it from argument\n");
+        }
+        if (have_single_events && opts[FH2_OPT_SINGLE_PLAYER_EVENTS] == 0 && tick >= 20) {
+            opts[FH2_OPT_SINGLE_PLAYER_EVENTS] = 1;
+            log_begin();
+            log_raw("monitor: single-player events enabled from argument\n");
         }
         Sleep(1000);
     }
@@ -1607,6 +1656,9 @@ static void init(HINSTANCE self)
         log_raw("\"\n");
     }
     install_cmdline_hook();
+    if (has_arg_prefix(L"NetSessionDirectIpRoadTrip=")) {
+        redirect_roadtrip_group();
+    }
     if (has_arg_prefix(L"NetSessionDirectIpFreeRoam=")) {
         redirect_freeroam_group();
         {

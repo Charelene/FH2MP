@@ -10,6 +10,8 @@ Wire format (recovered from the client binary):
   * Each message:  type:7 | payload
   * String:        varlen(len) | len*8 bits        varlen = cls:2 | value:(cls*8+6)
 """
+import os
+import random
 import selectors
 import socket
 import sys
@@ -49,7 +51,8 @@ ROUTER_BITS = {
     2: (7, 0),   # id+type total = 7
     3: (7, 0),   # IConsoleManager: maxObjects 0x40 -> 7 bits, one type
     6: (2, 2),   # ILobbyRouter: SessionHost / GameOptions
-    9: (0, 6),   # id+type total = 6
+    9: (4, 2),   # IRoadTripRouter (FUN_1418120c0 registers it as router 9; FUN_141811f90: maxObjects 13 -> 4 id bits,
+                 # 3 object types -> 2 type bits). The client owns a RoadTripPlayerSynced here in every session type.
 }
 # WeatherSynced (router 10): one object -> 1 id bit, 1 type; max vars 0xb -> 4-bit var ids.
 # Flattened member order from the ctors: atmosphere 0..4, precipitation 5..8 (struct ids unverified).
@@ -95,6 +98,39 @@ MSG_SCORE_KEYFRAME = 45             # key | 5 x blob | u32 | 3 x u8 | 3 x bool (
 RACE_FLAGS_CLEAR_SECONDS = 4.0       # after InRace=0, drop RaceReady/ParticipantsSelected as well
 RACE_LAST_FINISHER_SECONDS = 30.0   # after the first finisher the others get this long (client UI: RACE ENDS IN)
 CAR_KEY_ID_BITS = 7            # FUN_141808170: object key written with 7 id bits
+# Road Trip (router 9): RoadTripObjectTypes 0 RoadTripSynced (server-owned), 1 RoadTripEventSelection,
+# 2 RoadTripPlayerSynced (client-owned). RoadTripSynced vars (ctor FUN_141812ae0, 10 vars -> 4-bit var ids);
+# widths other than the state enum are assumed (32-bit ints, 1-bit bool) until the client confirms them.
+ROUTER_ROADTRIP = 9
+RT_TYPE_SYNCED, RT_TYPE_EVENT_SELECTION, RT_TYPE_PLAYER = 0, 1, 2
+RT_VAR_ID_BITS = 4
+LOBBY_PLAYER_PLAYER_HOST = 1     # var index in Nerd::LobbyPlayer (FUN_14180bf50): Ready 0, PlayerHost 1, ...
+RT_INIT_SECONDS = float(os.environ.get("FH2MP_RT_INIT", "3.0"))   # dev knob: hold the state in Initialising         # Initialising -> DestinationVote delay after the connection (the client waits in Initialising
+                              # and only sends its session-entry message once the state has changed)
+RT_EXCLUDED_MODES = {25, 26}     # King, Infection: party modes, not offered for now (RaceModes.id)
+RT_CAR_CLASSES = 6               # CarClasses 0..5 = D C B A S1 S2 (6 = X and 7 = R are rental/event-specific)
+RT_EXCLUDED_LOCATIONS = {9}      # Storm Island: expansion content, not offered for now
+RT_VOTE_MS = 60 * 1000          # length of the destination vote
+RT_ALL_VOTED_MS = 10 * 1000      # everybody voted: close the vote after this long
+RT_ALL_PICKED_MS = 3 * 1000      # everybody picked a car: end car select after this long
+RT_CAR_SELECT_MS = 30 * 1000     # car select phase length
+RT_DRIVE_MS = 180 * 1000         # time allowed to drive to the event; the route starts wherever the car is (the free-roam
+                                 # airport the first time, then the last hub), ~5-6 km for a far destination
+RT_PREPARE_MS = 2 * 60 * 1000    # prepare-for-event phase length
+RT_FINALISE_MS = 240 * 1000      # fallback only: the next drive starts once every participant has left the event
+RT_FIRST_ARRIVED_MS = 30 * 1000  # once one player has arrived, the others get this long to follow
+MSG_RT_CONFIGURE_GAME_OPTIONS = 50   # server -> leader: u32 | u32          ([ConfigureGameOptionsForRoadTripEvent])
+MSG_RT_SELECTED_NEXT_EVENT = 49      # leader -> server: bool                ([SelectedNextRoadTripEvent])
+MSG_RT_CONFIGURED_GAME_OPTIONS = 51  # leader -> server: u32 | u16           ([ConfiguredGameOptionsForRoadTripEvent])
+MSG_VOTE_FOR_TRACK = 47          # lobby-event key (idBits 2) | location index:32     (FUN_141811f20)
+LOBBY_TYPE_ROAD_TRIP = 1      # Nerd::NetworkLobbyType (FUN_1401123b0); width bit_length(7) = 3, assumed
+RT_VARS = {"CurrentLocationId": (0, 32), "CompletedEventCount": (1, 3), "EventRaceId": (2, 32),
+           "NextRaceId": (3, 32), "MinimumDriveToDestinationReward": (4, 14),
+           "MaximumDriveToDestinationReward": (5, 14), "MaximumDriveToDestinationRewardEarntBefore": (6, 32),
+           "DecreaseXPEnabled": (7, 1), "State": (8, 4), "StateEndTime": (9, 32)}
+# RoadTripServerState (FUN_140113da0)
+RT_INITIALISING, RT_DESTINATION_VOTE, RT_CAR_SELECT, RT_STATE_3, RT_DRIVE_TO_EVENT = 0, 1, 2, 3, 4
+RT_ARRIVED_AT_DESTINATION, RT_PREPARE_FOR_EVENT, RT_IN_EVENT, RT_FINALISE_EVENT = 5, 6, 7, 8
 RELAY_ROUTERS = (1, 2, 3, 6, 9)   # player / console / car objects other clients must see
 RELAY_HISTORY_CAP = 2000       # stored messages per client, replayed to late joiners
 STALE_SECONDS = 20.0
@@ -495,6 +531,118 @@ def weather_create(seq=1, intensity=0.0, tick=1):
     return object_message(MSG_OBJECT_CREATE, ROUTER_WEATHER, 0, 0, seq, 1, 0, vars_)
 
 
+def road_trip_vars(**values):
+    """Writer for RoadTripSynced variables, by name (see RT_VARS)."""
+    def write(w: BitWriter):
+        for name, value in values.items():
+            vid, width = RT_VARS[name]
+            w.bits(vid, RT_VAR_ID_BITS)
+            w.bits(int(value), width)
+    return write
+
+
+# RoadTripEventSelectionSynced (ctor FUN_141813f80; layout read from a live client): 61 vars, 7-bit var ids.
+#   var 0            LocationIds   SyncedArray<long,3>             3 x 32 bits
+#   vars 1..30       3 x block of 10 (the vote), vars 31..60 another 3 blocks (not used by the vote screen)
+#   block (10 vars)  4 x [event id: 32 bits, SyncedInt<uchar 0..12>: 4 bits], CarClass: 3 bits, VoteCount: 5 bits
+RT_ES_VAR_ID_BITS = 7
+RT_ES_OBJECT_ID = 1            # server-owned id on router 9 (RoadTripSynced is id 0)
+
+
+def road_trip_event_selection_vars(locations, events, classes=(0, 0, 0), mins=None, votes=(0, 0, 0)):
+    """locations: 3 RoadTripLocation ids; events: 3 lists of 4 AnthemOnlineEvent ids; votes: tally per location."""
+    def write(w: BitWriter):
+        w.bits(0, RT_ES_VAR_ID_BITS)
+        for loc in locations:
+            w.bits(loc & 0xFFFFFFFF, 32)
+        for first_var in (1, 31):
+            for b in range(3):
+                base = first_var + 10 * b
+                for k in range(4):
+                    w.bits(base + 2 * k, RT_ES_VAR_ID_BITS)
+                    w.bits(events[b][k] & 0xFFFFFFFF, 32)
+                    w.bits(base + 2 * k + 1, RT_ES_VAR_ID_BITS)
+                    w.bits(mins[b][k] if mins else 0, 4)       # RoadTripEvent.MinimumPlayers
+                w.bits(base + 8, RT_ES_VAR_ID_BITS)
+                w.bits(classes[b], 3)   # CarClass: SyncedEnum<CarClassSynced,0,3,0> is 3 bits wide
+                w.bits(base + 9, RT_ES_VAR_ID_BITS)
+                w.bits(votes[b], 5)     # VoteCount
+    return write
+
+
+def road_trip_event_selection_update(seq, locations, events, classes=(0, 0, 0), mins=None, votes=(0, 0, 0)):
+    """Fill the client's RoadTripEventSelection *transfer object* (key A=1,B=0, id 0): the vote screen reads that
+    instance (probed live: key 0x80000000), not a server-owned one. Same mechanism as the lobby's GameOptions."""
+    body = BitWriter()
+    road_trip_event_selection_vars(locations, events, classes, mins, votes)(body)
+    return transfer_update_message(ROUTER_ROADTRIP, 0, 4, seq, body.pos, body.value)
+
+
+def road_trip_vote_counts_update(seq, votes):
+    """Only the three VoteCount variables (var 10/20/30 of the vote blocks, and their twins 40/50/60)."""
+    body = BitWriter()
+    for first_var in (1, 31):
+        for b in range(3):
+            body.bits(first_var + 10 * b + 9, RT_ES_VAR_ID_BITS)
+            body.bits(votes[b], 5)
+    return transfer_update_message(ROUTER_ROADTRIP, 0, 4, seq, body.pos, body.value)
+
+
+def pick_road_trip_candidates(gamedb_path, players=1, rng=None):
+    """3 random road-trip locations, 4 events each from the game's own event table, mixing race types where the
+    location has them, a different car class per location. Only race modes that can run with `players` players
+    are offered (RaceModes.MinimumPlayers: King and Infection need 2, a P2P or lap race 1)."""
+    import random
+    import sqlite3
+    rng = rng or random.Random()
+    db = sqlite3.connect(f"file:{gamedb_path}?mode=ro&immutable=1", uri=True)
+    try:
+        rows = db.execute("SELECT e.AnthemOnlineEventId, e.RoadTripLocationId, e.RaceModeId, m.MinimumPlayers "
+                          "FROM AnthemOnlineEvents e JOIN RaceModes m ON m.id = e.RaceModeId "
+                          "WHERE e.RoadTripLocationId > 0 AND m.MinimumPlayers <= ? AND e.RaceModeId NOT IN (%s)"
+                          % ",".join(str(m) for m in RT_EXCLUDED_MODES), (max(1, players),)).fetchall()
+    finally:
+        db.close()
+    by_loc = {}
+    min_players = {}
+    for ev, loc, mode, minp in rows:
+        by_loc.setdefault(loc, {}).setdefault(mode, []).append(ev)
+        min_players[ev] = minp
+    eligible = [l for l, modes in by_loc.items()
+                if l not in RT_EXCLUDED_LOCATIONS and sum(len(v) for v in modes.values()) >= 4]
+    locs = rng.sample(eligible, 3)
+    events = []
+    for l in locs:
+        pools = {m: rng.sample(v, len(v)) for m, v in by_loc[l].items()}
+        picked = []
+        while len(picked) < 4:                      # round-robin over the race types, shuffled
+            for m in rng.sample(list(pools), len(pools)):
+                if pools[m] and len(picked) < 4:
+                    picked.append(pools[m].pop())
+        events.append(picked)
+    classes = rng.sample(range(RT_CAR_CLASSES), 3)   # a different car class per location
+    mins = [[min_players[e] for e in row] for row in events]
+    return locs, events, classes, mins
+
+
+def road_trip_configure_game_options(a: int, b: int):
+    def write(w: BitWriter):
+        w.bits(MSG_RT_CONFIGURE_GAME_OPTIONS, 7)
+        w.bits(a & 0xFFFFFFFF, 32)
+        w.bits(b & 0xFFFFFFFF, 32)
+    return write
+
+
+def road_trip_create(seq=1, **values):
+    """The server-owned RoadTripSynced (router 9, type 0, id 0)."""
+    return object_message(MSG_OBJECT_CREATE, ROUTER_ROADTRIP, 0, RT_TYPE_SYNCED, seq, 4, 2,
+                          road_trip_vars(**values))
+
+
+def road_trip_update(seq, **values):
+    return object_message(MSG_OBJECT_UPDATE, ROUTER_ROADTRIP, 0, 0, seq, 4, 0, road_trip_vars(**values))
+
+
 def session_host_create(seq=1, write_vars=None):
     return object_message(MSG_OBJECT_CREATE, ROUTER_LOBBY, 0, TYPE_SESSION_HOST, seq,
                           LOBBY_ID_BITS, LOBBY_TYPE_BITS, write_vars)
@@ -520,6 +668,11 @@ class Peer:
 
     def __init__(self, addr):
         self.addr = addr
+        self.rt_seq = 1            # Road Trip: seq of the last message on the server-owned RoadTripSynced
+        self.rt_started = False    # Road Trip: Initialising -> DestinationVote already sent
+        self.connected_at = 0.0
+        self.es_seq = 0            # server updates to the client's RoadTripEventSelection transfer object
+        self.player_seq = 0        # server updates to this client's LobbyPlayer object (router 1)
         self.last_id = NO_ID
         self.seen = set()
         self.connected = False
@@ -566,11 +719,28 @@ class Peer:
 
 
 class Server:
-    def __init__(self, port: int, logpath):
+    def __init__(self, port: int, logpath, roadtrip: bool = False):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind(("0.0.0.0", port))
         self.log_file = open(logpath, "a", buffering=1) if logpath else None
+        self.rt_state = RT_INITIALISING   # shared Road Trip session state
+        self.rt_end_ms = 0
+        self.rt_votes = {}                # Peer -> location index
+        self.rt_winner = None
+        self.rt_cfg_deadline = 0.0
+        self.rt_drive_not_before = 0.0
+        self.rt_drive_wait = False        # DriveToEvent sent, countdown (StateEndTime) held until the clients wait for it
+        self.rt_drive_deadline = 0.0
+        self.rt_drive_ready_at = 0.0
+        self.rt_idx = 0                   # which of the destination's 4 events is next
+        self.rt_pending_drive = False     # next event of the block: waiting for the leader's game options
+        self.rt_picked = set()            # peers whose car pick was seen during CarSelect
+        self.rt_configured = False        # the leader answered ConfigureGameOptionsForRoadTripEvent for this round
+        self.rt_gamedb = None
+        self.rt_candidates = None  # (location ids, events per location) for the Road Trip vote
+        self.roadtrip = roadtrip   # serve a Road Trip session (router 9 RoadTripSynced) instead of Free Roam
+        self.rt_seq = 1
         self.server_counter = 1
         self.start = time.monotonic()
         self.peers = {}
@@ -579,6 +749,15 @@ class Server:
         self.game_options = None   # (size, payload) latest GameOptionsSynced written by the leader
         self.event = None          # {"people": [Peer], "begun": bool, "start_at": float|None}
         self.log(f"listening on udp/{port} version={VERSION_STRING} game={GAME_STRING}")
+        if roadtrip:
+            gamedb = os.environ.get("FH2MP_GAMEDB")
+            if gamedb:
+                self.rt_gamedb = gamedb
+                self.rt_candidates = pick_road_trip_candidates(gamedb)
+                self.log(f"road trip candidates: locations {self.rt_candidates[0]} events {self.rt_candidates[1]} "
+                         f"classes {self.rt_candidates[2]}")
+            else:
+                self.log("road trip: FH2MP_GAMEDB (path to the game's gamedbRC.slt) not set; the vote will be empty")
 
     def now_ms(self) -> int:
         return int((time.monotonic() - self.start) * 1000) & 0xFFFFFFFF
@@ -692,6 +871,64 @@ class Server:
             self.set_session_host_bool(var, 0, f"event over: {why}")
         for q in self.peers.values():
             q.console_vars.pop(4, None)
+        if self.roadtrip:
+            self.rt_next_event()
+
+    def rt_numlaps(self, race: int) -> int:
+        """Laps of a Road Trip event (AnthemOnlineEvents.NumLaps in the game's own database)."""
+        import sqlite3
+        try:
+            db = sqlite3.connect(f"file:{self.rt_gamedb}?mode=ro&immutable=1", uri=True)
+            try:
+                row = db.execute("SELECT NumLaps FROM AnthemOnlineEvents WHERE AnthemOnlineEventId = ?",
+                                 (race,)).fetchone()
+            finally:
+                db.close()
+            return max(1, row[0]) if row else 1
+        except Exception:
+            return 1
+
+    def rt_race(self) -> int:
+        return self.rt_candidates[1][self.rt_winner][self.rt_idx]
+
+    def rt_next_event(self) -> None:
+        """A destination is a block of four events: vote -> drive -> event 1 -> drive -> event 2 ... then vote again."""
+        if self.rt_winner is None or self.rt_idx + 1 >= len(self.rt_candidates[1][self.rt_winner]):
+            self.rt_new_round()
+            return
+        self.rt_idx += 1
+        race = self.rt_race()
+        self.log(f"road trip: event {self.rt_idx + 1}/{len(self.rt_candidates[1][self.rt_winner])} of the destination "
+                 f"is {race}")
+        self.rt_pending_drive = True
+        self.rt_end_ms = 0
+        self.rt_send_configure()
+        self.rt_cfg_deadline = time.monotonic() + 12.0
+        self.rt_drive_not_before = time.monotonic() + 6.0      # let the clients finish returning to free roam
+        self.rt_broadcast(CompletedEventCount=self.rt_idx, NextRaceId=race)
+
+    def rt_new_round(self) -> None:
+        """The event is over (or abandoned): a fresh destination vote, like the game's own loop."""
+        if self.rt_gamedb:
+            here = sum(1 for c in self.peers.values() if c.connected)
+            self.rt_candidates = pick_road_trip_candidates(self.rt_gamedb, here)
+        self.rt_votes.clear()
+        self.rt_winner = None
+        self.rt_idx = 0
+        self.rt_pending_drive = False
+        self.rt_state = RT_DESTINATION_VOTE
+        self.rt_end_ms = self.now_ms() + RT_VOTE_MS
+        self.log(f"road trip: new round, candidates {self.rt_candidates[0] if self.rt_candidates else None}")
+        for q in self.peers.values():
+            if not (q.connected and q.rt_started):
+                continue
+            msgs = []
+            if self.rt_candidates:
+                msgs.append(road_trip_event_selection_update(q.es_seq, *self.rt_candidates, votes=self.rt_counts()))
+                q.es_seq = (q.es_seq + 1) % 0xFF
+            q.rt_seq = (q.rt_seq + 1) % 0xFF
+            msgs.append(road_trip_update(q.rt_seq, CompletedEventCount=0, State=self.rt_state, StateEndTime=self.rt_end_ms))
+            self.send(q, msgs)
 
     def check_invitees_ready(self) -> None:
         others_waiting = [q for q in self.others(self.pending_race[1])
@@ -708,7 +945,9 @@ class Server:
         for q in self.peers.values():
             if q is not leader:
                 self.log(f"  other client owner {q.owner_id}: connected={q.connected} Console vars={q.console_vars}")
-        self.event = {"people": people, "begun": False, "start_at": None}
+        self.event = {"people": people, "begun": False, "start_at": None,
+                      "numlaps": self.rt_numlaps(self.rt_race()) if self.roadtrip and self.rt_winner is not None
+                      and self.rt_gamedb else None}
         for q in people:
             self.set_console_bool(q, CONSOLE_VAR_PARTICIPATING_IN_RACE, 1, "participant selected")
         self.set_session_host_bool(SH_RACE_PARTICIPANTS_SELECTED, 1, "participants selected")
@@ -724,8 +963,10 @@ class Server:
         # MsgStartingGrid (39) moves the participants onto the event route (its ILobbyEvents handler,
         # FUN_140a2e130, raises NetworkSwitchRoute). It must arrive BEFORE SessionHost.InRace: a client
         # still waiting in wait_for_event_to_start sees InRace=1 and returns to free roam instead.
+        order = list(ev["people"])
+        random.shuffle(order)                   # grid slots are drawn, not by join order
         for q in ev["people"]:
-            entries = [("local", 0, 0) if p is q else ("relay", 0, p.owner_id) for p in ev["people"]]
+            entries = [("local", 0, 0) if p is q else ("relay", 0, p.owner_id) for p in order]
             self.send(q, [starting_grid(entries)])
         for q in ev["people"]:
             q.console_vars.pop(0, None)     # RenderReady is re-reported by each client once its grid is up
@@ -746,7 +987,11 @@ class Server:
         if not ev or not ev.get("racing") or peer not in ev["people"] or peer in ev["finished"]:
             return
         lap_t, _, total_t = (struct.unpack("<d", x.to_bytes(8, "little"))[0] for x in blobs)
-        if lap < 1 or abs(lap_t - total_t) > 1e-6:
+        laps = ev.get("numlaps")
+        if laps:
+            if lap < laps:       # Road Trip event: the lap count comes from the event table
+                return
+        elif lap < 1 or abs(lap_t - total_t) > 1e-6:
             return
         ev["finished"][peer] = time.monotonic()
         self.log(f"{peer.addr[1]} finished in {total_t:.3f} s ({len(ev['finished'])}/{len(ev['people'])} finished)")
@@ -773,11 +1018,20 @@ class Server:
         self.event["racing"] = False
         self.event["clear_at"] = time.monotonic() + RACE_FLAGS_CLEAR_SECONDS
         self.set_session_host_bool(SH_IN_RACE, 0, f"race over: {why}")
+        if self.roadtrip:
+            self.rt_state = RT_FINALISE_EVENT
+            self.rt_end_ms = self.now_ms() + RT_FINALISE_MS
+            # the results screens show the number of COMPLETED events ("EVENT n/4"), so it counts up here
+            self.rt_broadcast(CompletedEventCount=min(self.rt_idx + 1, 4), State=RT_FINALISE_EVENT,
+                              StateEndTime=self.rt_end_ms)
 
     def go_race(self) -> None:
         ev = self.event
         ev["go_at"] = None
         ev["racing"] = True
+        if self.roadtrip and self.rt_state != RT_IN_EVENT:
+            self.rt_state = RT_IN_EVENT
+            self.rt_broadcast(State=RT_IN_EVENT, StateEndTime=0)
         ev["finished"] = {}
         self.set_session_host_bool(SH_IN_RACE, 1, "race begun")
         go = (self.now_ms() + RACE_COUNTDOWN_MS) & 0xFFFFFFFF
@@ -787,6 +1041,9 @@ class Server:
 
     def drop_peer(self, peer: Peer, why: str) -> None:
         self.peers.pop(peer.addr, None)
+        self.rt_votes.pop(peer, None)
+        if self.roadtrip and not any(c.connected for c in self.peers.values()):
+            self.rt_state, self.rt_end_ms, self.rt_winner = RT_INITIALISING, 0, None   # the next group starts fresh
         self.log(f"{peer.addr[1]} removed ({why}); owner {peer.owner_id} had {len(peer.objs)} objects")
         for (router, oid) in peer.objs:
             id_bits, _ = ROUTER_BITS[router]
@@ -849,14 +1106,28 @@ class Server:
                 self.log(f"{addr[1]} OpenConnectionResponse code={code} echo={echo} counter={theirs}")
                 if code == RESPONSE_ACK and not peer.connected:
                     peer.connected = True
+                    peer.connected_at = time.monotonic()
                     peer.owner_id = self.next_owner
                     self.next_owner = self.next_owner % 250 + 1
                     self.log(f"{addr[1]} *** CONNECTED *** (relay owner id {peer.owner_id})")
                     replies.append(time_sync(0, self.now_ms()))
                     replies.append(connection_sync_done(self.server_counter))
-                    replies.append(session_host_create(seq=1))
+                    if self.roadtrip:
+                        # SessionHost.LobbyType (var 0, enum NetworkLobbyType: 1 RoadTrip, 2 FreeRoam, 3 CarMeet, ...):
+                        # the client loads the session entity group registered for this value (FUN_140804210)
+                        def lobby_type(w: BitWriter):
+                            w.bits(0, SESSION_HOST_VAR_ID_BITS)
+                            w.bits(LOBBY_TYPE_ROAD_TRIP, 3)
+                        replies.append(session_host_create(seq=1, write_vars=lobby_type))
+                    else:
+                        replies.append(session_host_create(seq=1))
                     replies.append(weather_create(seq=1))
                     self.log(f"{addr[1]} -> TimeSync, ConnectionSyncDone, SessionHost + Weather create")
+                    if self.roadtrip:
+                        # Created in Initialising; the switch to DestinationVote follows from tick() once the client has
+                        # entered. The leader's client picks the vote candidates when it sees that state *change*.
+                        replies.append(road_trip_create(seq=peer.rt_seq, State=RT_INITIALISING))
+                        self.log(f"{addr[1]} -> RoadTripSynced create (State=Initialising)")
             elif mtype == MSG_CLOSE_CONNECTION:
                 reason, x, y = r.bits(3), r.bits(32), r.bits(32)
                 self.log(f"{addr[1]} CloseConnection reason={reason} {x:#x} {y:#x}")
@@ -933,6 +1204,12 @@ class Server:
                 ready = r.bits(1)
                 self.log(f"{addr[1]} MsgReadyRequest key={a}{b} id={oid} ready={ready} -> response 0")
                 replies.append(ready_request_response(0))
+                if ready and self.roadtrip and self.rt_state in (RT_DRIVE_TO_EVENT, RT_PREPARE_FOR_EVENT) and not self.event:
+                    # a player that arrives first reports ready while the others are still driving
+                    self.set_console_bool(peer, 4, 1, "ready request accepted")
+                    peer.console_vars[4] = 1
+                    if self.rt_state == RT_PREPARE_FOR_EVENT:
+                        self.rt_check_ready()
                 if ready and self.pending_race and peer is not self.pending_race[1]:
                     # the client's accept is the MsgReadyRequest; the authority records it as Console.Ready
                     self.set_console_bool(peer, 4, 1, "ready request accepted")
@@ -960,6 +1237,32 @@ class Server:
                 payload = r.bits(size) if size else 0
                 self.log(f"{addr[1]} obj {'create' if mtype == 7 else 'update'} router={router} "
                          f"flags={a}{b} id={oid} type={tid} seq={seq} varbits={size}")
+                if router == 1 and mtype == MSG_OBJECT_UPDATE and size >= 1000 and self.roadtrip:
+                    self.rt_car_picked(peer)
+                if router == ROUTER_ROADTRIP and mtype == MSG_OBJECT_UPDATE and a == 0 and b == 0 and self.roadtrip:
+                    pr = BitReader(payload.to_bytes((size + 7) // 8, "little"))
+                    seen_vars = []
+                    try:
+                        while pr.pos + 3 <= size:
+                            vid = pr.bits(3)
+                            seen_vars.append(("State", pr.bits(4)) if vid == 0 else
+                                             (("CompletedEventCount" if vid == 1 else "XPOnDestinationJoin"), pr.bits(32)))
+                    except ValueError:
+                        pass
+                    self.log(f"{addr[1]} RoadTripPlayerSynced update seq={seq}: {seen_vars} ({size} bits)")
+                    for name, val in seen_vars:
+                        if name == "State":
+                            peer.rt_pstate = val
+                    if self.rt_state == RT_DRIVE_TO_EVENT:
+                        voters = [q for q in self.peers.values() if q.connected and q.rt_started]
+                        arrived = [q for q in voters if getattr(q, "rt_pstate", 0) >= RT_ARRIVED_AT_DESTINATION]
+                        if voters and len(arrived) == len(voters):
+                            self.rt_end_ms = self.now_ms()      # everybody arrived: the drive is over now
+                            self.log("everybody arrived: ending the drive")
+                        elif arrived and self.rt_end_ms > self.now_ms() + RT_FIRST_ARRIVED_MS:
+                            self.rt_end_ms = self.now_ms() + RT_FIRST_ARRIVED_MS
+                            self.rt_broadcast(StateEndTime=self.rt_end_ms)
+                            self.log(f"first arrival: the others get {RT_FIRST_ARRIVED_MS // 1000} s")
                 if router == ROUTER_LOBBY and a == 1 and b == 0:
                     # the leader's GameOptionsSynced after ownership transfer: others see it as a
                     # relay object owned by the leader (created once, then updated)
@@ -1008,6 +1311,17 @@ class Server:
                     peer.console_acked = True
                     replies.append(server_update(router, oid, id_bits, 0))
                     self.log(f"{addr[1]} -> ServerUpdate for client Console object id={oid}")
+            elif mtype == MSG_RT_SELECTED_NEXT_EVENT:
+                self.log(f"{addr[1]} SelectedNextRoadTripEvent ok={r.bits(1)}")
+            elif mtype == MSG_RT_CONFIGURED_GAME_OPTIONS:
+                self.log(f"{addr[1]} ConfiguredGameOptionsForRoadTripEvent a={r.bits(32)} b={r.bits(16)}")
+                self.rt_configured = True
+            elif mtype == MSG_VOTE_FOR_TRACK:
+                a, b = r.bits(1), r.bits(1)
+                r.bits(2)
+                if a == 0 and b == 1:
+                    r.bits(8)
+                self.rt_vote(peer, r.bits(32))
             elif mtype == MSG_CAR_COLLISION:
                 # The sender reports a hit on its own car (key flags 00); the other clients apply it to
                 # their copy of that car, so a pushed car actually moves instead of being a fixed obstacle.
@@ -1083,12 +1397,198 @@ class Server:
         if replies or hdr["ack_id"] != UNRELIABLE_ID:
             self.send(peer, replies)
 
+    # ---- Road Trip session (router 9): the server owns RoadTripSynced and tallies the votes ----
+    def rt_broadcast(self, **values) -> None:
+        for q in self.peers.values():
+            if q.connected and q.rt_started:
+                q.rt_seq = (q.rt_seq + 1) % 0xFF
+                self.send(q, [road_trip_update(q.rt_seq, **values)])
+
+    def rt_counts(self):
+        counts = [0, 0, 0]
+        for idx in self.rt_votes.values():
+            if 0 <= idx < 3:
+                counts[idx] += 1
+        return counts
+
+    def rt_vote(self, peer: Peer, idx: int) -> None:
+        if self.rt_state != RT_DESTINATION_VOTE or not 0 <= idx < 3:
+            return
+        self.rt_votes[peer] = idx
+        counts = self.rt_counts()
+        self.log(f"{peer.addr[1]} voted for location index {idx} ({self.rt_candidates[0][idx]}); tally {counts}")
+        for q in self.peers.values():
+            if q.connected and q.rt_started:
+                self.send(q, [road_trip_vote_counts_update(q.es_seq, counts)])
+                q.es_seq = (q.es_seq + 1) % 0xFF
+        voters = [q for q in self.peers.values() if q.connected and q.rt_started]
+        if voters and all(q in self.rt_votes for q in voters):
+            self.rt_end_ms = min(self.rt_end_ms, self.now_ms() + RT_ALL_VOTED_MS)
+            self.rt_broadcast(StateEndTime=self.rt_end_ms)
+            self.log("everybody voted: closing the vote shortly")
+
+    def rt_car_picked(self, peer: Peer) -> None:
+        """A client's car pick during CarSelect shows up as a large update of its player object (router 1)."""
+        if self.rt_state != RT_CAR_SELECT:
+            return
+        self.rt_picked.add(peer)
+        voters = [q for q in self.peers.values() if q.connected and q.rt_started]
+        if voters and all(q in self.rt_picked for q in voters):
+            self.rt_end_ms = min(self.rt_end_ms, self.now_ms() + RT_ALL_PICKED_MS)
+            self.rt_broadcast(StateEndTime=self.rt_end_ms)
+            self.log("everybody picked a car: ending car select shortly")
+
+    def rt_finish_vote(self) -> None:
+        counts = self.rt_counts()
+        best = max(counts)
+        winner = counts.index(best)             # ties go to the first of the tied locations
+        self.rt_winner = winner
+        self.rt_state = RT_CAR_SELECT
+        self.rt_end_ms = self.now_ms() + RT_CAR_SELECT_MS
+        loc = self.rt_candidates[0][winner]
+        self.log(f"vote closed {counts}: location {loc} wins; State -> CarSelect")
+        # NextRaceId (RoadTripSynced var 3, read by the client's StartDrive handler FUN_140819de0 through the getter
+        # at vtable+0xd0 -> [obj+0x100]) is the event the group drives to next; 0 makes that handler do nothing.
+        race = self.rt_candidates[1][winner][0]
+        # CurrentLocationId must be one of the 3 voted locations: the client's BuildRouteForDrive (FUN_140805340) finds its
+        # index in the EventSelection (FUN_140a40a70) and indexes with -1 (crash) otherwise.
+        self.rt_picked.clear()
+        self.rt_idx = 0
+        self.rt_broadcast(CurrentLocationId=loc, NextRaceId=race, State=RT_CAR_SELECT, StateEndTime=self.rt_end_ms)
+        self.rt_send_configure()
+
+    def rt_send_configure(self) -> None:
+        """Ask the leader's client to build the GameOptions of the round's event. The client's StartDrive handler
+        (FUN_140819de0) looks the event up by the id in those options, so it must exist before DriveToEvent."""
+        race = self.rt_race()
+        self.rt_configured = False
+        self.rt_cfg_deadline = time.monotonic() + RT_CAR_SELECT_MS / 1000 + 5.0
+        host = min((c for c in self.peers.values() if c.connected and c.rt_started), key=lambda c: c.owner_id,
+                   default=None)
+        if host:
+            self.send(host, [road_trip_configure_game_options(race, 1)])
+            self.log(f"{host.addr[1]} -> ConfigureGameOptionsForRoadTripEvent({race}, 1)")
+
+    def rt_check_ready(self, force: bool = False) -> None:
+        """PrepareForEvent: once every player is ready (or the phase ran out) the event starts, using the same
+        participant selection and race flow as a Free Roam event."""
+        peers = [q for q in self.peers.values() if q.connected and q.rt_started]
+        ready = [q for q in peers if q.console_vars.get(4)]
+        if not ready or not (force or len(ready) == len(peers)):
+            return
+        leader = min(ready, key=lambda c: c.owner_id)
+        # The server stays in PrepareForEvent until the race begins (go_race): a client that sees InEvent while it is
+        # still waiting for NetworkSwitchRoute takes the "event started without us" exit back to free roam.
+        self.rt_end_ms = 0
+        self.log(f"road trip: {len(ready)}/{len(peers)} players ready: event starts (State stays PrepareForEvent)")
+        self.rt_broadcast(StateEndTime=0)
+        self.start_event(leader)
+
+    def rt_start_drive(self) -> None:
+        """Car select is over: everybody drives to the first event of the winning location."""
+        loc = self.rt_candidates[0][self.rt_winner]
+        race = self.rt_race()
+        self.rt_state = RT_DRIVE_TO_EVENT
+        for q in self.peers.values():
+            q.rt_pstate = 0
+        self.rt_end_ms = self.now_ms() + RT_DRIVE_MS
+        self.log(f"car select over: State -> DriveToEvent (location {loc}, event {race})")
+        # the clients cancel their drive-to-event wait while SessionHost.RaceReady is off (NetworkIsServerRaceReady)
+        self.set_session_host_bool(SH_RACE_READY, 1, "road trip: the next event is chosen")
+        # The client raises NetworkStartDriveToDestination (route + drive HUD) from RoadTripSynced's variable-changed
+        # handler (FUN_140a43a20) only when, in state DriveToEvent, StateEndTime goes from 0 to non-zero. So the
+        # state change carries StateEndTime=0 and the countdown follows as its own update.
+        self.rt_broadcast(CurrentLocationId=loc, CompletedEventCount=self.rt_idx, EventRaceId=race, NextRaceId=race,
+                          State=RT_DRIVE_TO_EVENT, StateEndTime=0)
+        if self.rt_idx == 0:
+            self.rt_broadcast(StateEndTime=self.rt_end_ms)
+        else:
+            # Between events the clients are still on the results screen: the state change makes them leave it, and
+            # a StartDrive raised before they are back in free roam is ignored. Hold the countdown until they
+            # report player State DriveToEvent.
+            self.rt_end_ms = 0
+            self.rt_drive_wait = True
+            self.rt_drive_ready_at = 0.0
+            self.rt_drive_deadline = time.monotonic() + 180.0   # a DNF'd car can take minutes to get back to free roam
+
+    def road_trip_tick(self, now: float) -> None:
+        host = min((c.owner_id for c in self.peers.values() if c.connected), default=None)
+        for q in list(self.peers.values()):
+            if not q.connected or q.rt_started or now - q.connected_at < RT_INIT_SECONDS:
+                continue
+            q.rt_started = True
+            if self.rt_state == RT_INITIALISING:       # first client: the session leaves Initialising
+                if self.rt_gamedb:
+                    here = sum(1 for c in self.peers.values() if c.connected)
+                    self.rt_candidates = pick_road_trip_candidates(self.rt_gamedb, here)   # fresh random vote
+                    self.rt_votes.clear()
+                    self.rt_winner = None
+                    self.log(f"road trip candidates: locations {self.rt_candidates[0]} events "
+                             f"{self.rt_candidates[1]} classes {self.rt_candidates[2]}")
+                self.rt_state = RT_DESTINATION_VOTE
+                self.rt_end_ms = self.now_ms() + RT_VOTE_MS
+            msgs = []
+            if q.owner_id == host:
+                # the game's "local player is the leader" test reads LobbyPlayer.PlayerHost (var 1 of 162, 8-bit var
+                # ids, SyncedBool)
+                def host_flag(w: BitWriter):
+                    w.bits(LOBBY_PLAYER_PLAYER_HOST, 8)
+                    w.bits(1, 1)
+                msgs.append(server_update(1, 0, ROUTER_BITS[1][0], q.player_seq, host_flag))
+                q.player_seq = (q.player_seq + 1) % 0xFF
+            if self.rt_candidates:
+                msgs.append(road_trip_event_selection_update(q.es_seq, *self.rt_candidates, votes=self.rt_counts()))
+                q.es_seq = (q.es_seq + 1) % 0xFF
+            q.rt_seq = (q.rt_seq + 1) % 0xFF
+            values = {"State": self.rt_state, "StateEndTime": self.rt_end_ms}
+            if self.rt_winner is not None:
+                values["CurrentLocationId"] = self.rt_candidates[0][self.rt_winner]
+                values["NextRaceId"] = self.rt_race()
+            msgs.append(road_trip_update(q.rt_seq, **values))
+            self.send(q, msgs)
+            self.log(f"{q.addr[1]} Road Trip session state sent: State={self.rt_state}")
+        if self.rt_drive_wait and self.rt_state == RT_DRIVE_TO_EVENT:
+            voters = [q for q in self.peers.values() if q.connected and q.rt_started]
+            if self.rt_drive_ready_at == 0.0 and voters and all(getattr(q, "rt_pstate", 0) == RT_DRIVE_TO_EVENT
+                                                               for q in voters):
+                self.rt_drive_ready_at = now + 1.5
+            if (self.rt_drive_ready_at and now >= self.rt_drive_ready_at) or now >= self.rt_drive_deadline:
+                self.rt_drive_wait = False
+                self.rt_end_ms = self.now_ms() + RT_DRIVE_MS
+                self.rt_broadcast(StateEndTime=self.rt_end_ms)
+                self.log("clients are waiting: drive countdown started")
+        if self.rt_pending_drive and now >= self.rt_drive_not_before and \
+                (self.rt_configured or now >= self.rt_cfg_deadline):
+            self.rt_pending_drive = False
+            self.rt_start_drive()
+        if self.rt_state == RT_FINALISE_EVENT and self.event and not self.rt_pending_drive and \
+                all(getattr(q, "rt_pstate", 0) >= RT_FINALISE_EVENT for q in self.event["people"] if q.connected):
+            self.end_event("event finished")      # the clients sit on the results until the server state moves
+        if self.rt_end_ms and self.now_ms() >= self.rt_end_ms:
+            if self.rt_state == RT_DESTINATION_VOTE:
+                self.rt_finish_vote()
+            elif self.rt_state == RT_CAR_SELECT:
+                if self.rt_configured or now >= self.rt_cfg_deadline:   # wait (bounded) for the leader's options
+                    self.rt_start_drive()
+            elif self.rt_state == RT_PREPARE_FOR_EVENT:
+                self.rt_check_ready(force=True)
+            elif self.rt_state == RT_FINALISE_EVENT:
+                self.end_event("event finished")
+            elif self.rt_state == RT_DRIVE_TO_EVENT:
+                self.rt_state = RT_PREPARE_FOR_EVENT
+                self.rt_end_ms = self.now_ms() + RT_PREPARE_MS
+                self.log("drive over: State -> PrepareForEvent")
+                self.rt_broadcast(State=RT_PREPARE_FOR_EVENT, StateEndTime=self.rt_end_ms)
+                self.rt_check_ready()       # players that arrived earlier are already ready
+
     def tick(self) -> None:
         """Server-initiated traffic: the client times out after 10 s of silence."""
         now = time.monotonic()
         if self.event and self.event.get("go_at") and now >= self.event["go_at"]:
             self.go_race()
         self.check_race_end(now)
+        if self.roadtrip:
+            self.road_trip_tick(now)
         if self.pending_race and now >= self.pending_race[0]:
             _, leader = self.pending_race
             joining = [q for q in self.others(leader)
@@ -1135,9 +1635,10 @@ class Server:
 
 
 if __name__ == "__main__":
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 5000
-    logfile = sys.argv[2] if len(sys.argv) > 2 else None
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    port = int(args[0]) if len(args) > 0 else 5000
+    logfile = args[1] if len(args) > 1 else None
     try:
-        Server(port, logfile).serve()
+        Server(port, logfile, roadtrip="--roadtrip" in sys.argv).serve()
     except KeyboardInterrupt:
         pass
