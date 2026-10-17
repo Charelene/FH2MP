@@ -8,6 +8,7 @@
 """
 import json
 import os
+import random
 import struct
 import sys
 
@@ -17,6 +18,41 @@ import xls_schema as S  # noqa: E402
 NATIVE = {0: "<B", 1: "<H", 2: "<h", 3: "<i", 4: "<I", 5: "<q", 6: "<Q", 0x13: "<Q", 7: "<f", 0x11: "<?"}
 REC_SIZE = 0x2650
 REC_STRIDE = REC_SIZE + 8
+
+# Every shipped Drivatar carries the same gamertag ("ton3s") in the exe's data, so a lobby of shipped ones looked like a
+# crowd of clones. Each template gets its own name instead: from a private local list when there is one (see _local_names),
+# otherwise two plain words plus a number (at most 15 characters, the
+# gamertag limit), derived from the template's index so it keeps its name across calls and every client sees the same one.
+_ADJECTIVES = ("Swift", "Rapid", "Silent", "Brave", "Crimson", "Golden", "Iron", "Lucky", "Wild", "Neon", "Rusty", "Sunny",
+               "Cosmic", "Frozen", "Turbo", "Smooth", "Fierce", "Mellow", "Dusty", "Electric", "Hidden", "Noble", "Quick",
+               "Stormy", "Velvet", "Amber", "Bold", "Clever", "Daring", "Misty")
+_NOUNS = ("Falcon", "Comet", "Badger", "Otter", "Raven", "Tiger", "Piston", "Rocket", "Lynx", "Mustang", "Cobra", "Bison",
+          "Panda", "Hornet", "Gecko", "Viper", "Pelican", "Marlin", "Wolf", "Drifter", "Rider", "Sparrow", "Ember",
+          "Phoenix", "Bandit", "Fox", "Heron", "Jaguar", "Kestrel", "Orca")
+
+
+def _local_names():
+    """Names from a private list (one per line): env FH2MP_DRIVATAR_NAMES, else server/data/drivatar_names.txt. That folder is
+    not part of the repository, so a list of your own stays local; without one the generated names below are used."""
+    path = os.environ.get("FH2MP_DRIVATAR_NAMES") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "data",
+                                                                    "drivatar_names.txt")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return [ln.strip()[:15] for ln in f if ln.strip()]
+    except OSError:
+        return []
+
+
+_LOCAL_NAMES = _local_names()
+
+
+def generated_tag(i):
+    """Stable, distinct name for the i-th shipped Drivatar."""
+    if _LOCAL_NAMES:
+        return _LOCAL_NAMES[i % len(_LOCAL_NAMES)]
+    adjective = _ADJECTIVES[i % len(_ADJECTIVES)]
+    noun = _NOUNS[(i // len(_ADJECTIVES) + i) % len(_NOUNS)]
+    return (adjective + noun + str(i % 100))[:15]
 
 
 def read_native(sc, fields, buf, base):
@@ -61,6 +97,8 @@ class DrivatarStore:
                 if b + REC_SIZE > len(d):
                     break
                 self.templates.append(read_native(sc, self.rec_fields, d, b))
+            for i, t in enumerate(self.templates):
+                t["GamerTag"] = generated_tag(i)
         self.players = {}   # xuid(str) -> record dict (wire shaped)
         self.car_override = {}
         self._load()
@@ -175,6 +213,12 @@ class DrivatarStore:
                    if r["Xuid"] != exclude_xuid and r["Xuid"] not in skip
                    and (any_skill_players or skill is None or r["UserSkillLevel"] == skill)]
         tpl = [t for t in self.templates if skill is None or t["UserSkillLevel"] == skill]
+        tpl = [t for t in tpl if t.get("Xuid") not in skip]
         if near_wristband is not None:
             tpl.sort(key=lambda t: abs(t["wristbandLevel"] - near_wristband))
-        return (players + tpl)[:limit]
+        room = max(0, limit - len(players))
+        window = tpl[:max(room * 4, 40)]                 # nearest car values, but not always the same ones
+        chosen = random.sample(window, min(room, len(window)))
+        out = (players + chosen)[:limit]
+        random.shuffle(out)
+        return out

@@ -203,6 +203,42 @@ typedef struct {
     DWORD pos;
 } xhr_stream;
 
+/* The stream most recently read from on each thread. Embedded XSAPI copies a response into a Windows DataWriter and
+ * reads it back as text; in this environment that round trip loses the body (docs/matchmaking.md), so
+ * patch_xsapi_body() recovers the bytes from here. Entries are dropped when their stream is freed. */
+#define XHR_CAP_MAX 32
+static struct {
+    volatile LONG tid;
+    xhr_stream *s;
+} g_cap[XHR_CAP_MAX];
+
+static void cap_set(DWORD tid, xhr_stream *s)
+{
+    int i;
+    for (i = 0; i < XHR_CAP_MAX; i++) {
+        if ((DWORD)g_cap[i].tid == tid) {
+            g_cap[i].s = s;
+            return;
+        }
+    }
+    for (i = 0; i < XHR_CAP_MAX; i++) {
+        if (InterlockedCompareExchange(&g_cap[i].tid, (LONG)tid, 0) == 0) {
+            g_cap[i].s = s;
+            return;
+        }
+    }
+}
+
+static void cap_forget(xhr_stream *s)
+{
+    int i;
+    for (i = 0; i < XHR_CAP_MAX; i++) {
+        if (g_cap[i].s == s) {
+            g_cap[i].s = NULL;
+        }
+    }
+}
+
 static HRESULT STDMETHODCALLTYPE st_qi(void *self, const GUID *iid, void **out)
 {
     if (xhr_guid_eq(iid, &XHR_IID_IUNKNOWN) || xhr_guid_eq(iid, &XHR_IID_SEQSTREAM)) {
@@ -227,6 +263,7 @@ static ULONG STDMETHODCALLTYPE st_release(void *self)
     LONG r = InterlockedDecrement(&s->ref);
 
     if (r == 0) {
+        cap_forget(s);
         xhr_free(s->data);
         xhr_free(s);
     }
@@ -238,6 +275,9 @@ static HRESULT STDMETHODCALLTYPE st_read(void *self, void *buf, ULONG cb, ULONG 
     xhr_stream *s = (xhr_stream *)self;
     ULONG n = s->len - s->pos;
 
+    if (s->pos == 0) {
+        cap_set(GetCurrentThreadId(), s);
+    }
     if (n > cb) {
         n = cb;
     }
@@ -247,6 +287,23 @@ static HRESULT STDMETHODCALLTYPE st_read(void *self, void *buf, ULONG cb, ULONG 
     s->pos += n;
     if (got) {
         *got = n;
+    }
+    {
+        static volatile LONG reads;
+        if (InterlockedIncrement(&reads) <= 400) { /* who reads the response, how much, when (debugging aid) */
+            log_begin();
+            log_raw("xhr: stream read req=");
+            log_dec(cb);
+            log_raw(" got=");
+            log_dec(n);
+            log_raw(" pos=");
+            log_dec(s->pos);
+            log_raw("/");
+            log_dec(s->len);
+            log_raw(" tid=");
+            log_dec(GetCurrentThreadId());
+            log_raw("\n");
+        }
     }
     return n == cb ? S_OK : S_FALSE;
 }
@@ -831,4 +888,164 @@ static void patch_game_cocreate(unsigned char *img)
         log_begin();
         log_raw("xhr: game CoCreateInstance import hooked; XMLHTTP60 requests go to the local LSP server\n");
     }
+}
+
+/*
+ * XSAPI (Microsoft.Xbox.Services.dll, loaded by Azimuth) makes its own HTTP calls through IXMLHTTPRequest2 obtained
+ * with its own CoCreateInstance import, which Azimuth resolves to its offline request stub. Pointing that slot at
+ * hooked_cocreate too sends XSAPI's requests (QoS servers, sessions, tickets) to the local LSP, like the game's.
+ */
+static void patch_xsapi_cocreate(void)
+{
+    static int announced;
+    unsigned char *img;
+    void **slot;
+    DWORD old;
+    wchar_t tmp[8];
+
+    if (GetEnvironmentVariableW(L"FH2MP_NO_XHR", tmp, 8) > 0) {
+        return;
+    }
+    img = find_xsapi_image();
+    if (!img) {
+        return;
+    }
+    slot = xs_find_import_slot(img, "CoCreateInstance");
+    if (!slot || *slot == (void *)hooked_cocreate || *slot == NULL) {
+        return;
+    }
+    if (!VirtualProtect(slot, 8, PAGE_READWRITE, &old)) {
+        return;
+    }
+    if (!g_real_cocreate) {
+        g_real_cocreate = (co_create_fn)*slot;
+    }
+    *slot = (void *)hooked_cocreate;
+    VirtualProtect(slot, 8, old, &old);
+    if (!announced) {
+        announced = 1;
+        log_begin();
+        log_raw("xhr: XSAPI CoCreateInstance import hooked; its HTTP requests go to the local LSP server\n");
+    }
+}
+
+/*
+ * XSAPI response body. XSAPI's RestCall completion (module +0x378b0) builds a RestCallResponse (+0x28 buffer, +0x30
+ * cached body string, +0x38 status) and hands it to FUN_1800014d0 (module +0x14d0, two register arguments). It reads the
+ * body from the buffer with Windows DataReader::ReadString, but its DataWriter round trip delivers an empty buffer, so
+ * BodyToString returns null and every deserialization (sessions, achievements, ...) is skipped: WriteSessionAsync
+ * returns a null session, which parks the matchmaker. The accessor (+0x35ec0) uses the cached string when it is
+ * non-empty, so this wraps the call at the end of the completion: it fills the cache from the stream the shim just
+ * delivered (UTF-8 -> UTF-16, WindowsCreateString taken from the module's import table), then calls the original.
+ * Disable with env FH2MP_NO_XSBODY.
+ */
+#define XS_COMPLETE_RVA 0x378b0u
+#define XS_COMPLETE_END 0x37d50u
+#define XS_RESP_CTOR_RVA 0x35d70u
+#define XS_RESP_STORE_RVA 0x14d0u
+
+static void (*g_xs_store_orig)(void *, void *);
+static LONG (*g_xs_mkstr)(const WCHAR *, unsigned, void **);
+
+static void xs_response_store_stub(void *slot, void *resp)
+{
+    DWORD tid = GetCurrentThreadId();
+    int i;
+
+    if (resp && g_xs_mkstr && *(void **)((unsigned char *)resp + 0x30) == NULL) {
+        for (i = 0; i < XHR_CAP_MAX; i++) {
+            xhr_stream *st = g_cap[i].s;
+            if ((DWORD)g_cap[i].tid == tid && st) {
+                unsigned char *p = st->data;
+                DWORD n = st->len;
+                if (n >= 3 && p[0] == 0xEF && p[1] == 0xBB && p[2] == 0xBF) {
+                    p += 3;
+                    n -= 3;
+                }
+                if (n) {
+                    int wn = MultiByteToWideChar(CP_UTF8, 0, (const char *)p, (int)n, NULL, 0);
+                    if (wn > 0) {
+                        WCHAR *w = (WCHAR *)xhr_alloc(((SIZE_T)wn + 1) * sizeof(WCHAR));
+                        if (w) {
+                            void *h = NULL;
+                            MultiByteToWideChar(CP_UTF8, 0, (const char *)p, (int)n, w, wn);
+                            if (g_xs_mkstr(w, (unsigned)wn, &h) >= 0) {
+                                *(void **)((unsigned char *)resp + 0x30) = h;
+                            }
+                            xhr_free(w);
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
+    g_xs_store_orig(slot, resp);
+}
+
+/* 0: module not there yet (retry), 1: patched, 2: unusable (do not retry) */
+static int patch_xsapi_body(void)
+{
+    unsigned char *img = find_xsapi_image();
+    unsigned char *code, *site = NULL, *ctor_site = NULL, *cave = NULL;
+    unsigned i;
+    DWORD old;
+    long long rel;
+    int rel32;
+    unsigned char jmp[12] = {0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xE0};
+    ULONGLONG t;
+
+    if (!img) {
+        return 0;
+    }
+    code = img + XS_COMPLETE_RVA;
+    for (i = 0; i + 5 < XS_COMPLETE_END - XS_COMPLETE_RVA; i++) {
+        if (code[i] == 0xE8) {
+            int r;
+            mem_copy(&r, code + i + 1, 4);
+            if ((long long)XS_COMPLETE_RVA + i + 5 + r == XS_RESP_CTOR_RVA && !ctor_site) {
+                ctor_site = code + i;
+            } else if (ctor_site && !site && (long long)XS_COMPLETE_RVA + i + 5 + r == XS_RESP_STORE_RVA) {
+                site = code + i;
+            }
+        }
+    }
+    g_xs_mkstr = (LONG(*)(const WCHAR *, unsigned, void **))xs_find_import(img, "WindowsCreateString");
+    if (!site || !g_xs_mkstr || site - ctor_site > 0x100) {
+        log_begin();
+        log_raw("xsbody: call sites or WindowsCreateString not found, not patched\n");
+        return 2;
+    }
+    for (i = 0; i < 512; i++) { /* a code cave within +-2 GB of the call so a rel32 call reaches it */
+        cave = (unsigned char *)VirtualAlloc(img + 0x600000u + (SIZE_T)i * 0x10000u, 0x1000, MEM_COMMIT | MEM_RESERVE,
+                                              PAGE_EXECUTE_READWRITE);
+        if (cave) {
+            break;
+        }
+    }
+    if (!cave) {
+        log_begin();
+        log_raw("xsbody: no code cave near the XSAPI module, not patched\n");
+        return 2;
+    }
+    t = (ULONGLONG)(ULONG_PTR)xs_response_store_stub;
+    for (i = 0; i < 8; i++) {
+        jmp[2 + i] = (unsigned char)(t >> (8 * i));
+    }
+    mem_copy(cave, jmp, 12);
+    rel = (long long)(cave - (site + 5));
+    rel32 = (int)rel;
+    if ((long long)rel32 != rel) {
+        return 2;
+    }
+    g_xs_store_orig = (void (*)(void *, void *))(img + XS_RESP_STORE_RVA);
+    if (!VirtualProtect(site, 5, PAGE_EXECUTE_READWRITE, &old)) {
+        return 2;
+    }
+    mem_copy(site + 1, &rel32, 4);
+    VirtualProtect(site, 5, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), site, 5);
+    log_begin();
+    log_raw("xsbody: XSAPI response bodies are now filled from the HTTP stream\n");
+    return 1;
 }

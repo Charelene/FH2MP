@@ -59,6 +59,29 @@ ROUTER_BITS = {
 ROUTER_WEATHER = 10
 WEATHER_VAR_ID_BITS = 4
 ROUTER_BITS[ROUTER_WEATHER] = (1, 0)
+# Car Meet (router 11, ICarMeetRouter: FUN_1417dccb0 configures maxObjects 1 -> 1 id bit and one object type, the server-owned
+# CarMeetSynced). Its 18 vars (ctor FUN_141806910) use 5-bit var ids: 0 GameModeInviteType (enum 0..2, 2 bits),
+# 1 InviteCountDownTime (u32, default 10000), 2 JoinEndTimeWagerRace (u32), 3 JoinEndTimeGameMode (u32),
+# 4..15 JoinTypes[12] (CarMeetJoinTypeWrapperSynced), 16 GameModeSessionName / 17 GameModeSessionTemplateName (strings <= 64).
+ROUTER_CARMEET = 11
+ROUTER_BITS[ROUTER_CARMEET] = (1, 0)
+CARMEET_VAR_ID_BITS = 5
+MSG_CARMEET_INVITE_REQUEST = 26        # client -> server: inviteType:2 | value:32          ([MsgCarMeetPlayerInviteRequest])
+MSG_CARMEET_JOIN_OR_CANCEL = 27        # client -> server: join:1 | joinType:2 | value:32   ([MsgCarMeetPlayerJoinOrCancelRequest])
+MSG_CARMEET_LAUNCH_WAGER_RACE = 28     # server -> client: no payload
+MSG_CARMEET_NOTIFY_PENDING = 29        # server -> client: pendingActionType:2
+MSG_CARMEET_CONFIGURE_WAGER = 30       # server -> client: no payload
+MSG_CARMEET_CONFIGURED_WAGER = 31      # client -> server: u32
+CM_VARS = {"GameModeInviteType": (0, 2), "InviteCountDownTime": (1, 32), "JoinEndTimeWagerRace": (2, 32),
+           "JoinEndTimeGameMode": (3, 32)}       # then JoinTypes[12] = vars 4..15 (2 bits each), 16/17 session strings
+CM_VAR_JOIN0, CM_VAR_SESSION, CM_VAR_TEMPLATE = 4, 16, 17
+CM_INVITE_NONE, CM_INVITE_FREE_ROAM, CM_INVITE_ROAD_TRIP = 0, 1, 2    # CarMeetInviteType (assumed order)
+CM_JOIN_NONE, CM_JOIN_WAGER, CM_JOIN_GAMEMODE = 0, 1, 2                # CarMeetJoinType (assumed order)
+# CarMeetGameModePendingActionType, read from the client handler FUN_1407d6720: 0 clears, 1 = wait for the session and join it,
+# 2/3 = create it (they set the creator flags +0x26d)
+CM_PENDING_NONE, CM_PENDING_WAIT, CM_PENDING_CREATE_A, CM_PENDING_CREATE_B = 0, 1, 2, 3
+CM_JOIN_WINDOW_MS = 20000
+MSG_CARMEET_SESSION_READY = 32         # server -> client: string(<=64) session name | string(<=64) template name
 WEATHER_VARS = {
     "atm.CurrentIntensity": 0, "atm.CurrentTick": 1, "atm.DesiredIntensity": 2,
     "atm.DesiredTick": 3, "atm.DesiredPresetIndex": 4,
@@ -123,6 +146,7 @@ MSG_RT_CONFIGURE_GAME_OPTIONS = 50   # server -> leader: u32 | u32          ([Co
 MSG_RT_SELECTED_NEXT_EVENT = 49      # leader -> server: bool                ([SelectedNextRoadTripEvent])
 MSG_RT_CONFIGURED_GAME_OPTIONS = 51  # leader -> server: u32 | u16           ([ConfiguredGameOptionsForRoadTripEvent])
 MSG_VOTE_FOR_TRACK = 47          # lobby-event key (idBits 2) | location index:32     (FUN_141811f20)
+LOBBY_TYPE_CAR_MEET = 3
 LOBBY_TYPE_ROAD_TRIP = 1      # Nerd::NetworkLobbyType (FUN_1401123b0); width bit_length(7) = 3, assumed
 RT_VARS = {"CurrentLocationId": (0, 32), "CompletedEventCount": (1, 3), "EventRaceId": (2, 32),
            "NextRaceId": (3, 32), "MinimumDriveToDestinationReward": (4, 14),
@@ -643,6 +667,56 @@ def road_trip_update(seq, **values):
     return object_message(MSG_OBJECT_UPDATE, ROUTER_ROADTRIP, 0, 0, seq, 4, 0, road_trip_vars(**values))
 
 
+def car_meet_create(seq=1, write_vars=None):
+    return object_message(MSG_OBJECT_CREATE, ROUTER_CARMEET, 0, 0, seq, ROUTER_BITS[ROUTER_CARMEET][0], 0, write_vars)
+
+
+def car_meet_update(seq, write_vars):
+    return object_message(MSG_OBJECT_UPDATE, ROUTER_CARMEET, 0, 0, seq, ROUTER_BITS[ROUTER_CARMEET][0], 0, write_vars)
+
+
+def car_meet_vars(invite_type=None, countdown=None, wager_end=None, mode_end=None, joins=None, session=None, template=None):
+    """Writer for CarMeetSynced variables (5-bit var ids); joins = {slot: CarMeetJoinType}; strings are 7-bit length + UTF-16."""
+    def write(w: BitWriter):
+        def put(name, value):
+            vid, width = CM_VARS[name]
+            w.bits(vid, CARMEET_VAR_ID_BITS)
+            w.bits(int(value) & ((1 << width) - 1), width)
+        if invite_type is not None:
+            put("GameModeInviteType", invite_type)
+        if countdown is not None:
+            put("InviteCountDownTime", countdown)
+        if wager_end is not None:
+            put("JoinEndTimeWagerRace", wager_end)
+        if mode_end is not None:
+            put("JoinEndTimeGameMode", mode_end)
+        for slot, jt in sorted((joins or {}).items()):
+            w.bits(CM_VAR_JOIN0 + slot, CARMEET_VAR_ID_BITS)
+            w.bits(jt, 2)
+        for vid, text in ((CM_VAR_SESSION, session), (CM_VAR_TEMPLATE, template)):
+            if text is not None:
+                w.bits(vid, CARMEET_VAR_ID_BITS)
+                w.bits(len(text), 7)
+                for ch in text[:64]:
+                    w.bits(ord(ch), 16)
+    return write
+
+
+def car_meet_notify_pending(action):
+    def write(w: BitWriter):
+        w.bits(MSG_CARMEET_NOTIFY_PENDING, 7)
+        w.bits(action, 2)
+    return write
+
+
+def car_meet_session_ready(name, template):
+    def write(w: BitWriter):
+        w.bits(MSG_CARMEET_SESSION_READY, 7)
+        w.string(name)
+        w.string(template)
+    return write
+
+
 def session_host_create(seq=1, write_vars=None):
     return object_message(MSG_OBJECT_CREATE, ROUTER_LOBBY, 0, TYPE_SESSION_HOST, seq,
                           LOBBY_ID_BITS, LOBBY_TYPE_BITS, write_vars)
@@ -696,6 +770,10 @@ class Peer:
         self.last_rx = time.monotonic()
         self.last_time_sync = time.monotonic()    # the connect handshake sends the first TimeSync
         self.cars_relayed = 0
+        self.lobby_type = 0        # OpenConnection field a: Nerd::NetworkLobbyType the client joined (1 RoadTrip, 2 FreeRoam, 3 CarMeet)
+        self.xuid = 0              # the client's Xbox user id (OpenConnection playerId)
+        self.cm_seq = 1            # Car Meet: seq of the last CarMeetSynced message sent to this client (create = 1)
+        self.world = None          # (lobby type, lobby name): clients only see each other inside one world
 
     def note_packet_id(self, pid: int) -> None:
         if pid == UNRELIABLE_ID:
@@ -719,11 +797,21 @@ class Peer:
 
 
 class Server:
-    def __init__(self, port: int, logpath, roadtrip: bool = False):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind(("0.0.0.0", port))
-        self.log_file = open(logpath, "a", buffering=1) if logpath else None
+    def __init__(self, port: int, logpath, roadtrip: bool = False, carmeet: bool = False, sock=None, log_file=None,
+                 tag: str = ""):
+        """One world: the peers of a single lobby, with their own race / Road Trip state. The Hub creates one per lobby
+        and shares the UDP socket; run standalone (sock=None) it binds the port itself."""
+        if sock is None:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.sock.bind(("0.0.0.0", port))
+            self.log_file = open(logpath, "a", buffering=1) if logpath else None
+        else:
+            self.sock = sock
+            self.log_file = log_file
+        self.tag = tag
+        self.assign = {}
+        self.ctl = None
         self.rt_state = RT_INITIALISING   # shared Road Trip session state
         self.rt_end_ms = 0
         self.rt_votes = {}                # Peer -> location index
@@ -739,6 +827,9 @@ class Server:
         self.rt_configured = False        # the leader answered ConfigureGameOptionsForRoadTripEvent for this round
         self.rt_gamedb = None
         self.rt_candidates = None  # (location ids, events per location) for the Road Trip vote
+        self.gm = {"type": 0, "phase": "idle", "end": 0, "starter": None, "joined": {}, "session": None}  # Car Meet game-mode invite
+        self.hub = None
+        self.carmeet = carmeet     # serve a Car Meet session (SessionHost.LobbyType = 3)
         self.roadtrip = roadtrip   # serve a Road Trip session (router 9 RoadTripSynced) instead of Free Roam
         self.rt_seq = 1
         self.server_counter = 1
@@ -763,7 +854,7 @@ class Server:
         return int((time.monotonic() - self.start) * 1000) & 0xFFFFFFFF
 
     def log(self, msg: str) -> None:
-        line = f"{time.strftime('%H:%M:%S')} {msg}"
+        line = f"{time.strftime('%H:%M:%S')} {self.tag}{msg}"
         print(line, flush=True)
         if self.log_file:
             self.log_file.write(line + "\n")
@@ -781,7 +872,8 @@ class Server:
         self.sock.sendto(pkt, peer.addr)
 
     def others(self, peer: Peer):
-        return [q for q in self.peers.values() if q is not peer and q.connected and q.entered]
+        return [q for q in self.peers.values()
+                if q is not peer and q.connected and q.entered and q.world == peer.world]
 
     def remember_and_relay(self, peer: Peer, mtype, router, oid, tid, seq, size, payload) -> None:
         id_bits, type_bits = ROUTER_BITS[router]
@@ -822,7 +914,7 @@ class Server:
     def replay_to(self, newcomer: Peer) -> None:
         """Late joiner: announce everything the other clients already created."""
         for q in self.peers.values():
-            if q is newcomer or not q.connected:
+            if q is newcomer or not q.connected or q.world != newcomer.world:
                 continue
             batch = []
             for (router, oid), hist in q.objs.items():
@@ -838,7 +930,7 @@ class Server:
 
     def set_session_host_bool(self, var_id: int, value: int, why: str) -> None:
         for q in self.peers.values():
-            if not q.connected:
+            if not q.connected or q.lobby_type == LOBBY_TYPE_CAR_MEET:
                 continue
 
             def vars_(w, var_id=var_id, value=value):
@@ -1097,8 +1189,13 @@ class Server:
                 elif game != GAME_STRING:
                     result = RESULT_GAME_MISMATCH
                 peer.client_counter = counter
+                peer.xuid = player_id
+                peer.lobby_type = a if a in (1, 2, 3) else (LOBBY_TYPE_CAR_MEET if self.carmeet else
+                                                          LOBBY_TYPE_ROAD_TRIP if self.roadtrip else 2)
+                peer.world = ("", )
                 self.log(f"{addr[1]} OpenConnection version={version!r} game={game!r} "
-                         f"id={player_id:#x} counter={counter} -> result {result}")
+                         f"id={player_id:#x} flag={flag2} a={a:#x} b={b:#x} counter={counter} -> result {result} "
+                         f"(lobby type {peer.lobby_type})")
                 replies.append(open_connection_response(flag2, result, counter, self.server_counter))
             elif mtype == MSG_OPEN_CONNECTION_RESPONSE:
                 flag2, code = r.bits(2), r.bits(3)
@@ -1112,16 +1209,20 @@ class Server:
                     self.log(f"{addr[1]} *** CONNECTED *** (relay owner id {peer.owner_id})")
                     replies.append(time_sync(0, self.now_ms()))
                     replies.append(connection_sync_done(self.server_counter))
-                    if self.roadtrip:
+                    if self.roadtrip or peer.lobby_type == LOBBY_TYPE_CAR_MEET:
                         # SessionHost.LobbyType (var 0, enum NetworkLobbyType: 1 RoadTrip, 2 FreeRoam, 3 CarMeet, ...):
                         # the client loads the session entity group registered for this value (FUN_140804210)
-                        def lobby_type(w: BitWriter):
+                        lobby = LOBBY_TYPE_ROAD_TRIP if self.roadtrip else LOBBY_TYPE_CAR_MEET
+
+                        def lobby_type(w: BitWriter, lobby=lobby):
                             w.bits(0, SESSION_HOST_VAR_ID_BITS)
-                            w.bits(LOBBY_TYPE_ROAD_TRIP, 3)
+                            w.bits(lobby, 3)
                         replies.append(session_host_create(seq=1, write_vars=lobby_type))
                     else:
                         replies.append(session_host_create(seq=1))
                     replies.append(weather_create(seq=1))
+                    if peer.lobby_type == LOBBY_TYPE_CAR_MEET:
+                        replies.append(car_meet_create(seq=1))
                     self.log(f"{addr[1]} -> TimeSync, ConnectionSyncDone, SessionHost + Weather create")
                     if self.roadtrip:
                         # Created in Initialising; the switch to DestinationVote follows from tick() once the client has
@@ -1389,6 +1490,26 @@ class Server:
                     for q in self.others(peer):
                         self.send(q, [msg])
                 break
+            elif mtype == MSG_CARMEET_INVITE_REQUEST:
+                invite_type, value = r.bits(2), r.bits(32)
+                self.log(f"{addr[1]} CarMeet InviteRequest type={invite_type} value={value:#x} (owner {peer.owner_id})")
+                self.cm_invite(peer, invite_type)
+            elif mtype == MSG_CARMEET_JOIN_OR_CANCEL:
+                join, join_type, value = r.bits(1), r.bits(2), r.bits(32)
+                self.log(f"{addr[1]} CarMeet JoinOrCancel join={join} joinType={join_type} value={value:#x} "
+                         f"(owner {peer.owner_id})")
+                self.cm_join(peer, join, join_type)
+            elif mtype == MSG_CARMEET_SESSION_READY:
+                at = r.pos
+                bits_left = r.size - r.pos
+                tail = r.bits(min(bits_left, 600)) if bits_left else 0
+                r.pos = at
+                self.log(f"{addr[1]} CarMeet SessionReady raw: {bits_left} bits left, "
+                         f"{tail.to_bytes((min(bits_left, 600) + 7) // 8, 'little').hex()}")
+                name, template = r.string(), r.string()
+                self.cm_session_ready(peer, name, template)
+            elif mtype == MSG_CARMEET_CONFIGURED_WAGER:
+                self.log(f"{addr[1]} CarMeet ConfiguredGameOptionsForWagerRace value={r.bits(32):#x}")
             else:
                 # message layouts beyond the transport layer are not decoded yet
                 self.log(f"{addr[1]} id={hdr['ack_id']} types={types} first-unknown={mtype} "
@@ -1396,6 +1517,116 @@ class Server:
                 break
         if replies or hdr["ack_id"] != UNRELIABLE_ID:
             self.send(peer, replies)
+
+    # ---- Car Meet: game-mode invites (Free Roam / Road Trip / Showdown) ----
+    def cm_members(self):
+        return [q for q in self.peers.values() if q.connected and q.entered and q.lobby_type == LOBBY_TYPE_CAR_MEET]
+
+    def cm_slot(self, peer):
+        order = sorted(self.cm_members(), key=lambda c: c.owner_id)
+        return order.index(peer) if peer in order else 0
+
+    def cm_broadcast(self, write_vars, only=None) -> None:
+        for q in (only if only is not None else self.cm_members()):
+            q.cm_seq = (q.cm_seq + 1) % 0xFF
+            self.send(q, [car_meet_update(q.cm_seq, write_vars)])
+
+    def cm_invite(self, peer, invite_type: int) -> None:
+        g = self.gm
+        if invite_type in (CM_INVITE_FREE_ROAM, CM_INVITE_ROAD_TRIP):
+            if g["phase"] != "idle":
+                self.log(f"{peer.addr[1]} CarMeet invite ignored: a game-mode invite is already {g['phase']}")
+                return
+            g.update(type=invite_type, phase="joining", starter=peer, end=(self.now_ms() + CM_JOIN_WINDOW_MS) & 0xFFFFFFFF,
+                     joined={peer: CM_JOIN_GAMEMODE}, session=None)
+            self.cm_broadcast(car_meet_vars(invite_type=invite_type, countdown=CM_JOIN_WINDOW_MS, mode_end=g["end"],
+                                            joins={self.cm_slot(peer): CM_JOIN_GAMEMODE}))
+            self.log(f"CarMeet: game-mode invite type {invite_type} started by owner {peer.owner_id}, join window "
+                     f"{CM_JOIN_WINDOW_MS} ms")
+        else:
+            self.log(f"{peer.addr[1]} CarMeet showdown (wager race) invite: not served yet")
+
+    def cm_joins(self):
+        """Every member's join state, so a lost update cannot leave a client's join list stale."""
+        g = self.gm
+        return {self.cm_slot(q): (CM_JOIN_GAMEMODE if q in g["joined"] else CM_JOIN_NONE) for q in self.cm_members()}
+
+    def cm_join(self, peer, join: int, join_type: int) -> None:
+        g = self.gm
+        if join_type == CM_JOIN_WAGER or g["phase"] != "joining":
+            return
+        # Observed in game (2026-10-17): for the game-mode invite the bit means the opposite of its name. Accepting (Y on "Join")
+        # arrives as join=0, while the client's own automatic messages (one around 1-4 s after the invite starts, a second one
+        # a few seconds later) arrive as 0 then 1 and put a player who never pressed anything into the lobby.
+        join = 0 if join else 1
+        if join:
+            g["joined"][peer] = CM_JOIN_GAMEMODE
+        else:
+            g["joined"].pop(peer, None)
+        self.cm_broadcast(car_meet_vars(joins=self.cm_joins()))
+        self.log(f"CarMeet: owner {peer.owner_id} {'joined' if join else 'left'} the game-mode invite "
+                 f"({len(g['joined'])} joined)")
+
+    def cm_create_session(self, mode: int, xuids=()):
+        """The game-mode session is created by the LSP (MPSD stand-in) on the server's behalf: the client's own creation path
+        does not complete here. Returns (name, template) or (None, None)."""
+        import json
+        import urllib.request
+        base = os.environ.get("FH2MP_LSP", "http://127.0.0.1:5080")
+        try:
+            with urllib.request.urlopen(f"{base}/admin/gamemode?type={mode}&xuids={','.join(str(x) for x in xuids)}", timeout=3) as resp:
+                doc = json.loads(resp.read().decode())
+            return doc["name"], doc["template"]
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"CarMeet: could not create a game-mode session through the LSP: {exc!r}")
+            return None, None
+
+    def cm_tick(self, now_ms: int) -> None:
+        g = self.gm
+        if g["phase"] == "ready" and ((now_ms - g["reset"]) & 0xFFFFFFFF) < 0x80000000:
+            g.update(phase="idle", type=0, starter=None, joined={}, session=None)
+            self.cm_broadcast(car_meet_vars(invite_type=CM_INVITE_NONE))
+            return
+        if g["phase"] == "joining" and now_ms - g.get("snap", 0) >= 1000:
+            g["snap"] = now_ms
+            self.cm_broadcast(car_meet_vars(joins=self.cm_joins()))      # updates are unreliable: repeat the full state
+        if g["phase"] == "joining" and ((now_ms - g["end"]) & 0xFFFFFFFF) < 0x80000000:
+            starter = g["starter"]
+            joined = [q for q in g["joined"] if q.connected]
+            if starter is None or not starter.connected or not joined:
+                self.log("CarMeet: game-mode invite cancelled (nobody left)")
+                g.update(phase="idle", type=0, starter=None, joined={})
+                self.cm_broadcast(car_meet_vars(invite_type=CM_INVITE_NONE))
+                return
+            g["phase"] = "creating"
+            # nobody creates the session on the client side: everyone waits for the one the server makes
+            for q in joined:
+                self.send(q, [car_meet_notify_pending(CM_PENDING_WAIT)])
+            name, template = self.cm_create_session(g["type"], [q.xuid for q in joined if q.xuid])
+            if not name:
+                g.update(phase="idle", type=0, starter=None, joined={})
+                self.cm_broadcast(car_meet_vars(invite_type=CM_INVITE_NONE))
+                return
+            g.update(phase="ready", session=(name, template), reset=(now_ms + 30000) & 0xFFFFFFFF)
+            for q in joined:
+                if self.hub is not None:
+                    self.hub.assign[q.xuid] = name      # they join this lobby's world when they connect
+            self.cm_broadcast(car_meet_vars(session=name, template=template))
+            for q in joined:
+                self.send(q, [car_meet_session_ready(name, template)])
+            self.log(f"CarMeet: join window over ({len(joined)} joined): session {name} ({template}) sent to "
+                     f"{[q.owner_id for q in joined]}")
+
+    def cm_session_ready(self, peer, name: str, template: str) -> None:
+        g = self.gm
+        self.log(f"CarMeet: GameModeSessionReady from owner {peer.owner_id}: session {name!r} template {template!r}")
+        if g["phase"] != "creating" or peer is not g["starter"]:
+            return
+        g.update(phase="ready", session=(name, template))
+        self.cm_broadcast(car_meet_vars(session=name, template=template))
+        for q in g["joined"]:
+            if q is not peer and q.connected:
+                self.send(q, [car_meet_session_ready(name, template)])
 
     # ---- Road Trip session (router 9): the server owns RoadTripSynced and tallies the votes ----
     def rt_broadcast(self, **values) -> None:
@@ -1587,6 +1818,8 @@ class Server:
         if self.event and self.event.get("go_at") and now >= self.event["go_at"]:
             self.go_race()
         self.check_race_end(now)
+        if self.carmeet or any(q.lobby_type == LOBBY_TYPE_CAR_MEET for q in self.peers.values()):
+            self.cm_tick(self.now_ms())
         if self.roadtrip:
             self.road_trip_tick(now)
         if self.pending_race and now >= self.pending_race[0]:
@@ -1634,11 +1867,144 @@ class Server:
             self.tick()
 
 
+class Hub:
+    """One UDP port, many worlds. Each lobby the matchmaking side creates (the LSP announces "assign <xuid> <lobby>" on the
+    control port) is its own Server instance with its own peers, races and Road Trip state; a client is routed to the world of
+    its lobby when it opens the connection. The connect request's field a is the lobby type (1 Road Trip, 2 Free Roam,
+    3 Car Meet); clients without an assignment (direct IP) share one default world per type."""
+    IDLE_WORLD_SECONDS = 120.0
+
+    def __init__(self, port: int, logpath, roadtrip: bool = False, carmeet: bool = False):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(("0.0.0.0", port))
+        self.log_file = open(logpath, "a", buffering=1) if logpath else None
+        self.default_type = LOBBY_TYPE_CAR_MEET if carmeet else LOBBY_TYPE_ROAD_TRIP if roadtrip else 2
+        self.assign = {}      # xuid -> lobby name
+        self.worlds = {}      # (lobby type, lobby name) -> Server
+        self.route = {}       # client address -> Server
+        self.empty_since = {}
+        self.ctl = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.ctl.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            self.ctl.bind(("127.0.0.1", int(os.environ.get("FH2MP_CONTROL_PORT", port + 90))))
+        except OSError:
+            self.ctl = None
+        self.idle = Server(port, None, sock=self.sock, log_file=self.log_file, tag="[idle] ")
+        self.idle.log(f"hub listening on udp/{port}, control udp/{self.ctl.getsockname()[1] if self.ctl else '-'}")
+
+    def log(self, msg: str) -> None:
+        self.idle.log(msg)
+
+    def world_for(self, lobby_type: int, name: str):
+        key = (lobby_type, name)
+        w = self.worlds.get(key)
+        if w is None:
+            tag = f"[{ {1: 'roadtrip', 2: 'freeroam', 3: 'carmeet'}.get(lobby_type, lobby_type) }:{name[:8] or 'default'}] "
+            w = Server(0, None, roadtrip=lobby_type == LOBBY_TYPE_ROAD_TRIP, carmeet=lobby_type == LOBBY_TYPE_CAR_MEET,
+                       sock=self.sock, log_file=self.log_file, tag=tag)
+            w.hub_key = key
+            w.hub = self
+            self.worlds[key] = w
+            self.log(f"new world {key}")
+        return w
+
+    def control(self) -> None:
+        """Text datagrams from the matchmaking side: "assign <xuid hex> <lobby name>"."""
+        while self.ctl:
+            try:
+                data, _ = self.ctl.recvfrom(1024)
+            except (BlockingIOError, OSError):
+                return
+            parts = data.decode("utf-8", "replace").split()
+            if len(parts) == 3 and parts[0] == "assign":
+                try:
+                    self.assign[int(parts[1], 16)] = parts[2]
+                    self.log(f"control: player {parts[1]} assigned to lobby {parts[2]}")
+                except ValueError:
+                    pass
+
+    def open_connection_fields(self, data: bytes):
+        """(player id, lobby type) when the datagram starts with an OpenConnection, else None."""
+        try:
+            r = BitReader(data)
+            hdr = parse_header(r)
+            if hdr["count"] < 1 or r.bits(7) != MSG_OPEN_CONNECTION:
+                return None
+            r.string(), r.string()
+            r.bits(2)
+            player_id = r.bits(64)
+            a = r.bits(32)
+            return player_id, (a if a in (1, 2, 3) else self.default_type)
+        except ValueError:
+            return None
+
+    def handle(self, data: bytes, addr) -> None:
+        opened = self.open_connection_fields(data)
+        cur = self.route.get(addr)
+        if opened:
+            player_id, ltype = opened
+            target = self.world_for(ltype, self.assign.get(player_id, ""))
+            if cur is not None and cur is not target:
+                old = cur.peers.get(addr)
+                if old is not None:
+                    cur.drop_peer(old, "moved to another lobby")
+                    cur.peers.pop(addr, None)
+            self.route[addr] = cur = target
+        if cur is None:
+            cur = self.idle        # a client that survived a server restart: it gets a CloseConnection
+        cur.handle(data, addr)
+
+    def sweep(self) -> None:
+        now = time.monotonic()
+        for addr, w in list(self.route.items()):
+            if addr not in w.peers:
+                del self.route[addr]
+        for key, w in list(self.worlds.items()):
+            if any(p.connected for p in w.peers.values()):
+                self.empty_since.pop(key, None)
+            elif now - self.empty_since.setdefault(key, now) > self.IDLE_WORLD_SECONDS:
+                self.log(f"world {key} closed (empty)")
+                del self.worlds[key]
+                self.empty_since.pop(key, None)
+
+    def serve(self) -> None:
+        sel = selectors.DefaultSelector()
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
+        self.sock.setblocking(False)
+        sel.register(self.sock, selectors.EVENT_READ)
+        if self.ctl:
+            self.ctl.setblocking(False)
+            sel.register(self.ctl, selectors.EVENT_READ)
+        last_sweep = 0.0
+        while True:
+            if sel.select(timeout=0.01):
+                self.control()
+                while True:     # drain everything queued before the next timer pass
+                    try:
+                        data, addr = self.sock.recvfrom(65535)
+                    except BlockingIOError:
+                        break
+                    try:
+                        self.handle(data, addr)
+                    except Exception as exc:  # keep serving
+                        self.log(f"error handling {data.hex()}: {exc!r}")
+            for w in list(self.worlds.values()):
+                try:
+                    w.tick()
+                except Exception as exc:  # one broken world must not stop the others
+                    w.log(f"tick error: {exc!r}")
+            now = time.monotonic()
+            if now - last_sweep > 1.0:
+                last_sweep = now
+                self.sweep()
+
+
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     port = int(args[0]) if len(args) > 0 else 5000
     logfile = args[1] if len(args) > 1 else None
     try:
-        Server(port, logfile, roadtrip="--roadtrip" in sys.argv).serve()
+        Hub(port, logfile, roadtrip="--roadtrip" in sys.argv, carmeet="--carmeet" in sys.argv).serve()
     except KeyboardInterrupt:
         pass

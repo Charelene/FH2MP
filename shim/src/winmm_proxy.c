@@ -77,6 +77,16 @@ static wchar_t g_args[MAX_ARGS][MAX_ARG_CHARS];
 static wchar_t *g_argv[MAX_ARGS + 1];
 static int g_argc;
 
+static int mem_equal(const unsigned char *a, const unsigned char *b, SIZE_T n)
+{
+    while (n--) {
+        if (*a++ != *b++) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static void mem_copy(void *dst, const void *src, SIZE_T n)
 {
     volatile unsigned char *d = dst;
@@ -446,6 +456,654 @@ static int patch_traffic_module_offline(void)
     FlushInstructionCache(GetCurrentProcess(), fn, 5);
     log_begin();
     log_raw("traffic: module go-online redirected to go-offline; single-player traffic stays active\n");
+    return 1;
+}
+
+/*
+ * Stateflow `network.is_match_making_allowed` (lambda thunk 0x7fff20 -> FUN_14080f6b0) returns 0, and the
+ * game answers "matchmaking failed", whenever the CLobby singleton's byte at +0xf0 is 0. Its constructor sets
+ * that byte to 1, but under Azimuth's offline platform layer it ends up 0, so the cloud matchmaking flow
+ * (NetworkInitializeMatchRequester, cloud config, hopper) never starts. The test is
+ *   mov rax,[CLobby] ; cmp [rax+0xf0],bl(=0) ; je -> return 0
+ * and the je is turned into a 6-byte nop. The user, sign-in-state and privilege checks that follow stay.
+ * Disable with env FH2MP_NO_MMALLOW. See docs/matchmaking.md.
+ */
+#define FH2_MM_ALLOWED_JE_RVA 0x80f6d3u
+static int patch_matchmaking_allowed(void)
+{
+    /* cmp byte [rax+0xf0],bl  ;  je +0xbd */
+    static const unsigned char want[] = {0x38, 0x98, 0xF0, 0x00, 0x00, 0x00, 0x0F, 0x84, 0xBD, 0x00, 0x00, 0x00};
+    static const unsigned char nop6[] = {0x66, 0x0F, 0x1F, 0x44, 0x00, 0x00};
+    unsigned char *img = find_fh2_image();
+    unsigned char *at;
+    DWORD old;
+    int i;
+
+    if (!img) {
+        return 0;
+    }
+    at = img + FH2_MM_ALLOWED_JE_RVA - 6;
+    for (i = 0; i < (int)sizeof want; i++) {
+        if (at[i] != want[i]) {
+            log_begin();
+            log_raw("mmallow: unexpected bytes in IsMatchMakingAllowed, not patched\n");
+            return 0;
+        }
+    }
+    at += 6;
+    if (!VirtualProtect(at, 6, PAGE_EXECUTE_READWRITE, &old)) {
+        return 0;
+    }
+    mem_copy(at, nop6, 6);
+    VirtualProtect(at, 6, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), at, 6);
+    log_begin();
+    log_raw("mmallow: IsMatchMakingAllowed no longer requires the CLobby flag at +0xf0\n");
+    return 1;
+}
+
+/*
+ * Match-request QoS step. When the QoS ticket session comes up, the game measures the QoS servers through the
+ * lambda FUN_1417940f0: it asks the platform for a secure-device-association template and calls CreateAssociationAsync;
+ * under Azimuth that task throws ("offline secure association creation"), the continuation FUN_14178f140 catches
+ * it and records failure ([manager+0x278] = 0), so the match request ends with result 2 and the lobby falls back to
+ * Drivatars ("Unable to join session"). This patches the lambda so it always takes its existing "no interface" branch
+ * (which only queues the callback and sets the flag) and makes that branch report success: the
+ *   test rdi,rdi ; jne <do the association>      -> jne becomes a 2-byte nop        (RVA 0x17941db)
+ *   mov byte [rax+0x278], 0                       -> immediate becomes 1            (RVA 0x1794216)
+ * The matchmaker then continues to the real ticket request. Disable with env FH2MP_NO_QOSOK. See docs/matchmaking.md.
+ */
+#define FH2_QOS_JNE_RVA 0x17941dbu
+#define FH2_QOS_FLAG_RVA 0x1794216u
+static int patch_qos_assume_success(void)
+{
+    static const unsigned char want_jne[] = {0x48, 0x85, 0xFF, 0x75, 0x56, 0x48, 0x8B, 0x1E};
+    static const unsigned char want_flag[] = {0xC6, 0x80, 0x78, 0x02, 0x00, 0x00, 0x00};
+    unsigned char *img = find_fh2_image();
+    unsigned char *a, *b;
+    DWORD old;
+    int i;
+
+    if (!img) {
+        return 0;
+    }
+    a = img + FH2_QOS_JNE_RVA - 3;
+    b = img + FH2_QOS_FLAG_RVA - 6;
+    for (i = 0; i < (int)sizeof want_jne; i++) {
+        if (a[i] != want_jne[i]) {
+            log_begin();
+            log_raw("qosok: unexpected bytes in the match-request QoS lambda, not patched\n");
+            return 0;
+        }
+    }
+    for (i = 0; i < (int)sizeof want_flag; i++) {
+        if (b[i] != want_flag[i]) {
+            log_begin();
+            log_raw("qosok: unexpected flag store in the match-request QoS lambda, not patched\n");
+            return 0;
+        }
+    }
+    if (!VirtualProtect(a + 3, 2, PAGE_EXECUTE_READWRITE, &old)) {
+        return 0;
+    }
+    a[3] = 0x90;
+    a[4] = 0x90;
+    VirtualProtect(a + 3, 2, old, &old);
+    if (!VirtualProtect(b + 6, 1, PAGE_EXECUTE_READWRITE, &old)) {
+        return 0;
+    }
+    b[6] = 0x01;
+    VirtualProtect(b + 6, 1, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), a, 8);
+    FlushInstructionCache(GetCurrentProcess(), b, 7);
+    log_begin();
+    log_raw("qosok: match-request QoS step reports success without creating a secure association\n");
+    return 1;
+}
+
+/*
+ * Secure device association. Once the lobby session lists a game server, Nerd::MatchRequester (FUN_14179f640) creates a
+ * Nerd::SecureIPResolver for it (FUN_1417a0b90 -> FUN_1417b2340 ProcessSecureData -> FUN_1417a0ff0), which asks the
+ * platform to CreateAssociationAsync for the server's secure device address; Azimuth's offline layer ends the process
+ * there ("STOPPED offline secure association creation"). When the association completes the resolver signals
+ * SecureIPResolvedArgs to MatchRequester::OnSecureIPResolved (FUN_1417aec90). With hr == 0 and no endpoint list in the
+ * args (+0xd8), that handler builds the endpoint from the ServerInfo host name (the session's
+ * servers.gameServerPlatform...hostName) and the literal service "5000", then continues (FUN_14179f440). This replaces
+ * FUN_1417a0ff0 with a stub that calls the handler right away with such a result. Disable with env FH2MP_NO_SECUREIP.
+ * See docs/matchmaking.md.
+ */
+static void xs_write_jump(unsigned char *fn, void *target);
+#define FH2_SECURE_RESOLVE_RVA 0x17a0ff0u
+#define FH2_RESOLVED_HANDLER_RVA 0x17aec90u
+#define FH2_MATCHREQUESTER_RVA 0x36e2960u
+static unsigned char *g_secure_img;
+
+static void secure_resolve_stub(void *resolver)
+{
+    void *mr = *(void **)(g_secure_img + FH2_MATCHREQUESTER_RVA);
+    unsigned char *args;
+    (void)resolver;
+    if (!mr) {
+        return;
+    }
+    args = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x100); /* hr = 0, endpoints = NULL */
+    if (!args) {
+        return;
+    }
+    ((void (*)(void *, void *))(g_secure_img + FH2_RESOLVED_HANDLER_RVA))(mr, args);
+}
+
+static int patch_secure_association(void)
+{
+    static const unsigned char want_fn[] = {0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x56, 0x48, 0x8D, 0xAC, 0x24, 0x50};
+    static const unsigned char want_handler[] = {0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x56};
+    unsigned char *img = find_fh2_image();
+    int i;
+
+    if (!img) {
+        return 0;
+    }
+    for (i = 0; i < (int)sizeof want_fn; i++) {
+        if (img[FH2_SECURE_RESOLVE_RVA + i] != want_fn[i]) {
+            log_begin();
+            log_raw("secureip: unexpected bytes in SecureIPResolver, not patched\n");
+            return 0;
+        }
+    }
+    for (i = 0; i < (int)sizeof want_handler; i++) {
+        if (img[FH2_RESOLVED_HANDLER_RVA + i] != want_handler[i]) {
+            log_begin();
+            log_raw("secureip: unexpected bytes in the resolved handler, not patched\n");
+            return 0;
+        }
+    }
+    g_secure_img = img;
+    xs_write_jump(img + FH2_SECURE_RESOLVE_RVA, (void *)secure_resolve_stub);
+    log_begin();
+    log_raw("secureip: SecureIPResolver reports success without a secure association (host from the session)\n");
+    return 1;
+}
+
+/*
+ * Joining a Car Meet game-mode invite. The Car Meet component (FUN_1407d4790) joins the Free Roam / Road Trip session the
+ * invite names with FUN_1417b8c50 (MatchRequester::SetSession: stores the session at +0x118, state 8). The lobby type that
+ * the connect request then carries (OpenConnection field a) is MatchRequester+0x160, which only CreatePrivateGame
+ * (FUN_1417b6de0) and a match set; a joiner would still send the Car Meet type (3) and land in a Car Meet world. So set it
+ * from the synced invite type the way the creator does (FUN_1407d00e0): Road Trip = 1, Free Roam = 2. Takes over the whole
+ * function (it is small). Disable with env FH2MP_NO_INVITETYPE.
+ */
+#define FH2_SETSESSION_RVA 0x17b8c50u
+#define FH2_CARMEET_SYNCED_GLOBAL_RVA 0x34d5c68u
+#define FH2_WEAKGET_RVA 0x4021b0u
+static unsigned char *g_invite_img;
+
+static void set_session_stub(void *mr, void **refp)
+{
+    unsigned char *img = g_invite_img;
+    void *ref = *refp;
+    void *old;
+    void *synced = *(void **)(img + FH2_CARMEET_SYNCED_GLOBAL_RVA);
+    if (synced) {
+        void **holder = ((void **(*)(void *))(img + FH2_WEAKGET_RVA))(synced);
+        void *obj = holder ? *holder : NULL;
+        if (obj) {
+            unsigned char invite = ((unsigned char (*)(void *))(*(void ***)obj)[0xa0 / 8])(obj);
+            if (invite == 1 || invite == 2) {
+                *(int *)((unsigned char *)mr + 0x160) = invite == 2 ? 1 : 2;
+                log_begin();
+                log_raw(invite == 2 ? "invitetype: joining a Road Trip invite, lobby type 1\n"
+                                    : "invitetype: joining a Free Roam invite, lobby type 2\n");
+            }
+        }
+    }
+    if (ref) {
+        ((void (*)(void *))(*(void ***)ref)[0x10 / 8])(ref);
+    }
+    old = *(void **)((unsigned char *)mr + 0x118);
+    *(void **)((unsigned char *)mr + 0x118) = ref;
+    if (old) {
+        ((void (*)(void *))(*(void ***)old)[0x18 / 8])(old);
+    }
+    *(int *)((unsigned char *)mr + 0xb0) = 8;
+    if (*refp) {
+        ((void (*)(void *))(*(void ***)*refp)[0x18 / 8])(*refp);
+    }
+}
+
+static int patch_invite_type(void)
+{
+    static const unsigned char want[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20};
+    unsigned char *img = find_fh2_image();
+    int i;
+    if (!img) {
+        return 0;
+    }
+    for (i = 0; i < (int)sizeof want; i++) {
+        if (img[FH2_SETSESSION_RVA + i] != want[i]) {
+            log_begin();
+            log_raw("invitetype: unexpected bytes in MatchRequester::SetSession, not patched\n");
+            return 0;
+        }
+    }
+    g_invite_img = img;
+    xs_write_jump(img + FH2_SETSESSION_RVA, (void *)set_session_stub);
+    log_begin();
+    log_raw("invitetype: joining an invite session sets the lobby type from the invite\n");
+    return 1;
+}
+
+/*
+ * Server port. The resolved-address handler (FUN_1417aec90) builds the endpoint from the ServerInfo host and the literal
+ * service string "5000" (a 4-character constant in the game's .rdata, RVA 0x1e9b0f4). Env FH2MP_SERVER_PORT=<4 digits>
+ * replaces it, which lets a test client use a different server instance (e.g. one per lobby type).
+ */
+#define FH2_PORT_LITERAL_RVA 0x1e9b0f4u
+static int patch_server_port(void)
+{
+    WCHAR env[8];
+    DWORD n = GetEnvironmentVariableW(L"FH2MP_SERVER_PORT", env, 8);
+    unsigned char *img = find_fh2_image();
+    unsigned char *at;
+    DWORD old;
+    int i;
+
+    if (n != 4 || !img) {
+        return 0;
+    }
+    at = img + FH2_PORT_LITERAL_RVA;
+    if (at[0] != '5' || at[1] != '0' || at[2] != '0' || at[3] != '0' || at[4] != 0) {
+        return 0;
+    }
+    for (i = 0; i < 4; i++) {
+        if (env[i] < L'0' || env[i] > L'9') {
+            return 0;
+        }
+    }
+    if (!VirtualProtect(at, 4, PAGE_READWRITE, &old)) {
+        return 0;
+    }
+    for (i = 0; i < 4; i++) {
+        at[i] = (unsigned char)env[i];
+    }
+    VirtualProtect(at, 4, old, &old);
+    log_begin();
+    log_raw("serverport: the game connects to the port from FH2MP_SERVER_PORT\n");
+    return 1;
+}
+
+/*
+ * "Connected to Xbox Live" menu gates. Live-only menu actions (Show Gamercard in a Car Meet's player actions, and the other
+ * Live-gated entries) test the byte at CLobby+0xf0 (CLobby = TBasicSingleton at RVA 0x34d6348):
+ *     cmp byte [rax+0xf0], 0 ; jne <allowed>      else: popup "NO NETWORK ACCESS ... not connected to Xbox Live"
+ * in FUN_140c86a70, FUN_140e68760 and FUN_140e0d6b0. The constructor sets the byte to 1; under Azimuth's offline platform layer
+ * it ends up 0. Forcing the byte itself crashed the game (it also turns on Live presence code that is not ready), so
+ * the three branches are patched instead: jne (0F 85 rel32) becomes jmp (E9 rel32+1) + nop, i.e. always allowed.
+ * Disable with env FH2MP_NO_LIVEGATE. See docs/matchmaking.md.
+ */
+static int patch_live_gates(void)
+{
+    static const unsigned cmp_rva[3] = {0xc86a9bu, 0xe6879du, 0xe0d756u};
+    static const unsigned char cmp_bytes[7] = {0x80, 0xB8, 0xF0, 0x00, 0x00, 0x00, 0x00};
+    unsigned char *img = find_fh2_image();
+    int i, j, done = 0;
+    DWORD old;
+
+    if (!img) {
+        return 0;
+    }
+    for (i = 0; i < 3; i++) {
+        unsigned char *c = img + cmp_rva[i];
+        unsigned char *jne = c + 7;
+        int rel;
+        for (j = 0; j < 7; j++) {
+            if (c[j] != cmp_bytes[j]) {
+                break;
+            }
+        }
+        if (j != 7 || jne[0] != 0x0F || jne[1] != 0x85) {
+            if (jne[0] == 0xE9) {
+                done++;           /* already patched */
+                continue;
+            }
+            log_begin();
+            log_raw("livegate: unexpected bytes at a Live gate, skipped\n");
+            continue;
+        }
+        mem_copy(&rel, jne + 2, 4);
+        rel += 1;
+        if (!VirtualProtect(jne, 6, PAGE_EXECUTE_READWRITE, &old)) {
+            continue;
+        }
+        jne[0] = 0xE9;
+        mem_copy(jne + 1, &rel, 4);
+        jne[5] = 0x90;
+        VirtualProtect(jne, 6, old, &old);
+        FlushInstructionCache(GetCurrentProcess(), jne, 6);
+        done++;
+    }
+    if (done) {
+        log_begin();
+        log_raw("livegate: Live-only menu entries no longer check the connected-to-Live byte\n");
+    }
+    return done;
+}
+
+/*
+ * Car Meet "is this an online meet" test. The Car Meet view model's tick (FUN_140830ad0) sets IsOnlineCarMeet (which gates
+ * "Start Online Session" / "Start Showdown Race" and their actions, FUN_140ca0d50) from a chain of checks: the CarMeetSynced object
+ * exists, the local player's lobby entry is valid, the network connection is up (+0x10 == 1) and, last,
+ *     car = FUN_1407cfdc0(...);  car->vtable[0xb0]()      -- the local player's ForzaCarNetworked is "ready"
+ * That last one is false under this setup, so the meet looks offline and the online entries stay hidden. Forcing the debug option
+ * byte at options+0x2dfc shows the entries but disables their actions, so instead the failing `je` after that call is
+ * turned into a 2-byte nop. Disable with env FH2MP_NO_ONLINEMEET. See docs/matchmaking.md.
+ */
+#define FH2_ONLINEMEET_TEST_RVA 0x830b8cu
+static int patch_online_meet(void)
+{
+    static const unsigned char want[] = {0x84, 0xC0, 0x74, 0x05, 0x40, 0xB7, 0x01, 0xEB, 0x03, 0x40, 0x32, 0xFF};
+    unsigned char *img = find_fh2_image();
+    unsigned char *at;
+    DWORD old;
+    int i;
+
+    if (!img) {
+        return 0;
+    }
+    at = img + FH2_ONLINEMEET_TEST_RVA;
+    for (i = 0; i < (int)sizeof want; i++) {
+        if (at[i] != want[i]) {
+            if (at[2] == 0x90 && at[3] == 0x90) {
+                return 1;       /* already patched */
+            }
+            log_begin();
+            log_raw("onlinemeet: unexpected bytes in the Car Meet view model, not patched\n");
+            return 0;
+        }
+    }
+    if (!VirtualProtect(at + 2, 2, PAGE_EXECUTE_READWRITE, &old)) {
+        return 0;
+    }
+    at[2] = 0x90;
+    at[3] = 0x90;
+    VirtualProtect(at + 2, 2, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), at, 4);
+    log_begin();
+    log_raw("onlinemeet: the Car Meet counts as online once connected (online entries available)\n");
+    return 1;
+}
+
+/*
+ * XSAPI token stub. Azimuth loads Microsoft's genuine Microsoft.Xbox.Services.dll (Xbox One build, PE timestamp
+ * 0x5431cfcd) from the game folder. Its HTTP layer asks Authentication::GetTokenAndSignature (module +0x309a0, or
+ * the *ForAllUsers variant +0x30d90) for a token before every request, and that goes to
+ * Windows.Xbox.System.User.GetTokenAndSignatureAsync, which Azimuth implements as Azimuth.OfflineTokenRequest:
+ * an async object already completed with 0x800704cf (network unreachable). So every XSAPI REST call (QoS servers,
+ * sessions, tickets) fails before any HTTP request is sent, and the game reports "Unable to connect to the Live
+ * configuration servers". Both functions return a Microsoft::Xbox::Services::Authentication object (0x48 bytes; the
+ * HTTP layer reads the Token HSTRING at +0x20 and the Signature HSTRING at +0x28). This replaces them with a stub
+ * that returns one such object carrying placeholder strings, built with the module's own allocator, constructor
+ * (+0x30860) and Azimuth's WindowsCreateString (found through the module's import table).
+ * Disable with env FH2MP_NO_XSTOKEN. See docs/matchmaking.md.
+ */
+#define XS_TIMESTAMP 0x5431cfcdu
+#define XS_SIZE_OF_IMAGE 0x579000u
+#define XS_GETTOKEN_RVA 0x309a0u
+#define XS_GETTOKEN_ALL_RVA 0x30d90u
+#define XS_AUTH_CTOR_RVA 0x30860u
+#define XS_ALLOC_CALL_OFF 0xdcu /* mov ecx,0x48 ; call [rip+disp] inside GetTokenAndSignature */
+
+static unsigned char *find_xsapi_image(void)
+{
+    SYSTEM_INFO si;
+    unsigned char *addr;
+    MEMORY_BASIC_INFORMATION mbi;
+
+    GetSystemInfo(&si);
+    addr = (unsigned char *)si.lpMinimumApplicationAddress;
+    while (addr < (unsigned char *)si.lpMaximumApplicationAddress &&
+           VirtualQuery(addr, &mbi, sizeof mbi) == sizeof mbi) {
+        if (mbi.State == MEM_COMMIT && mbi.BaseAddress == mbi.AllocationBase && mbi.RegionSize >= 0x1000) {
+            const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)mbi.AllocationBase;
+            if (!IsBadReadPtr(dos, sizeof *dos) && dos->e_magic == IMAGE_DOS_SIGNATURE &&
+                dos->e_lfanew > 0 && dos->e_lfanew < 0x1000) {
+                const IMAGE_NT_HEADERS64 *nt =
+                    (const IMAGE_NT_HEADERS64 *)((unsigned char *)dos + dos->e_lfanew);
+                if (!IsBadReadPtr(nt, sizeof *nt) && nt->Signature == IMAGE_NT_SIGNATURE &&
+                    nt->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 &&
+                    nt->FileHeader.TimeDateStamp == XS_TIMESTAMP &&
+                    nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC &&
+                    nt->OptionalHeader.SizeOfImage == XS_SIZE_OF_IMAGE) {
+                    return (unsigned char *)mbi.AllocationBase;
+                }
+            }
+        }
+        addr = (unsigned char *)mbi.BaseAddress + mbi.RegionSize;
+    }
+    return NULL;
+}
+
+/* IAT slot of a by-name import (the loader has already filled it) */
+static void **xs_find_import_slot(unsigned char *img, const char *want)
+{
+    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)img;
+    const IMAGE_NT_HEADERS64 *nt = (const IMAGE_NT_HEADERS64 *)(img + dos->e_lfanew);
+    const IMAGE_DATA_DIRECTORY *dd = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    const IMAGE_IMPORT_DESCRIPTOR *d;
+
+    if (!dd->VirtualAddress) {
+        return NULL;
+    }
+    for (d = (const IMAGE_IMPORT_DESCRIPTOR *)(img + dd->VirtualAddress); d->Name; d++) {
+        const ULONGLONG *oft = (const ULONGLONG *)(img + (d->OriginalFirstThunk ? d->OriginalFirstThunk : d->FirstThunk));
+        void **iat = (void **)(img + d->FirstThunk);
+        unsigned i;
+        for (i = 0; oft[i]; i++) {
+            const char *n;
+            unsigned k = 0;
+            if (oft[i] & 0x8000000000000000ull) {
+                continue; /* by ordinal */
+            }
+            n = (const char *)(img + (oft[i] & 0x7fffffffu) + 2);
+            while (want[k] && n[k] == want[k]) {
+                k++;
+            }
+            if (!want[k] && !n[k]) {
+                return &iat[i];
+            }
+        }
+    }
+    return NULL;
+}
+
+static void *xs_find_import(unsigned char *img, const char *want)
+{
+    void **slot = xs_find_import_slot(img, want);
+    return slot ? *slot : NULL;
+}
+
+static void *g_xs_auth; /* the shared Authentication object returned by the stub */
+
+static void *xs_token_stub(void *a, void *b, void *c, void *d)
+{
+    void **vt;
+    (void)a; (void)b; (void)c; (void)d;
+    vt = *(void ***)g_xs_auth;
+    ((ULONG(*)(void *))vt[1])(g_xs_auth); /* AddRef, as a returned reference */
+    return g_xs_auth;
+}
+
+static void xs_write_jump(unsigned char *fn, void *target)
+{
+    DWORD old;
+    unsigned char j[12] = {0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xE0}; /* mov rax,imm64 ; jmp rax */
+    ULONGLONG t = (ULONGLONG)(ULONG_PTR)target;
+    int i;
+    for (i = 0; i < 8; i++) {
+        j[2 + i] = (unsigned char)(t >> (8 * i));
+    }
+    VirtualProtect(fn, 12, PAGE_EXECUTE_READWRITE, &old);
+    mem_copy(fn, j, 12);
+    VirtualProtect(fn, 12, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), fn, 12);
+}
+
+/* 0: module not there yet (retry), 1: patched, 2: unusable (do not retry) */
+/* Identity. Azimuth gives every client the same Xbox user id, 0x0009000000000000 (a movabs immediate in the code that
+ * formats User.XboxUserId). Two clients (or two players on different machines) would be one person to every service, so
+ * the shim derives a stable per-install id: 0x0009000000000000 | a random 32-bit number kept in fh2mp-identity.txt next to the
+ * log (override with env FH2MP_XUID=<hex>), patches the immediate, and carries the id in the XSAPI token ("XBL3.0
+ * x=fh2mp;<decimal xuid>") so the stand-in services can tell the callers apart. Disable with env FH2MP_NO_IDENTITY. */
+static unsigned long long g_xuid = 0x0009000000000000ULL;
+
+static void xuid_decimal(WCHAR *out)
+{
+    WCHAR t[24];
+    int n = 0, i;
+    unsigned long long v = g_xuid;
+    do {
+        t[n++] = (WCHAR)(L'0' + (int)(v % 10));
+        v /= 10;
+    } while (v);
+    for (i = 0; i < n; i++) {
+        out[i] = t[n - 1 - i];
+    }
+    out[n] = 0;
+}
+
+static int patch_xsapi_token(void)
+{
+    static const unsigned char sig_get[12] = {0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41};
+    static const unsigned char sig_all[12] = {0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x56, 0x41, 0x57, 0x48};
+    static const unsigned char alloc_sig[7] = {0xB9, 0x48, 0x00, 0x00, 0x00, 0xFF, 0x15};
+    static const WCHAR tok_head[] = L"XBL3.0 x=fh2mp;";
+    static const WCHAR sgn[] = L"fh2mp";
+    WCHAR tok[64];
+    unsigned tok_len;
+    unsigned char *img = find_xsapi_image();
+    unsigned char *f1, *f2, *call;
+    void *(*alloc)(ULONGLONG);
+    void *(*ctor)(void *);
+    LONG (*mkstr)(const WCHAR *, unsigned, void **);
+    void *mem, *obj, *h_tok = NULL, *h_sig = NULL;
+    unsigned i;
+    int rel;
+
+    if (!img) {
+        return 0;
+    }
+    f1 = img + XS_GETTOKEN_RVA;
+    f2 = img + XS_GETTOKEN_ALL_RVA;
+    for (i = 0; i < 12; i++) {
+        if (f1[i] != sig_get[i] || f2[i] != sig_all[i]) {
+            log_begin();
+            log_raw("xstoken: unexpected bytes in the XSAPI token functions, not patched\n");
+            return 2;
+        }
+    }
+    call = f1 + XS_ALLOC_CALL_OFF;
+    for (i = 0; i < 7; i++) {
+        if (call[i] != alloc_sig[i]) {
+            log_begin();
+            log_raw("xstoken: allocator call not where expected, not patched\n");
+            return 2;
+        }
+    }
+    mem_copy(&rel, call + 7, 4);
+    alloc = *(void *(**)(ULONGLONG))(call + 11 + rel);
+    mkstr = (LONG(*)(const WCHAR *, unsigned, void **))xs_find_import(img, "WindowsCreateString");
+    ctor = (void *(*)(void *))(img + XS_AUTH_CTOR_RVA);
+    if (!alloc || !mkstr) {
+        log_begin();
+        log_raw("xstoken: could not resolve the allocator or WindowsCreateString, not patched\n");
+        return 2;
+    }
+    mem = alloc(0x48);
+    if (!mem) {
+        return 2;
+    }
+    obj = ctor(mem);
+    lstrcpyW(tok, tok_head);
+    xuid_decimal(tok + (sizeof tok_head / sizeof tok_head[0] - 1));
+    tok_len = (unsigned)lstrlenW(tok);
+    if (!obj || mkstr(tok, tok_len, &h_tok) < 0 ||
+        mkstr(sgn, (unsigned)(sizeof sgn / sizeof sgn[0] - 1), &h_sig) < 0) {
+        log_begin();
+        log_raw("xstoken: could not build the Authentication object, not patched\n");
+        return 2;
+    }
+    *(void **)((unsigned char *)obj + 0x20) = h_tok;
+    *(void **)((unsigned char *)obj + 0x28) = h_sig;
+    {
+        void **vt = *(void ***)obj;
+        for (i = 0; i < 1000000; i++) { /* keep it alive however many references the callers drop */
+            ((ULONG(*)(void *))vt[1])(obj);
+        }
+    }
+    g_xs_auth = obj;
+    xs_write_jump(f1, (void *)xs_token_stub);
+    xs_write_jump(f2, (void *)xs_token_stub);
+    log_begin();
+    log_raw("xstoken: XSAPI GetTokenAndSignature(+ForAllUsers) now return a placeholder token\n");
+    return 1;
+}
+
+/*
+ * Local secure device address string. When the game creates or updates its multiplayer session it takes the local
+ * Windows.Xbox.Networking.SecureDeviceAddress (FUN_1417a5f50 = SecureDeviceAddress::GetLocal) and asks it for its
+ * Base64 string (FUN_1417a5b00, vtable slot 0x50). Azimuth's offline address returns a null string, the session
+ * member property "secureDeviceAddress" is then empty, and the embedded XSAPI refuses to serialize the session
+ * (E_INVALIDARG in SerializerBase::SerializeStringToJsonObject, serialization.cpp:0x2af), which the game reports
+ * as "Unable to join session". This replaces FUN_1417a5b00 with a stub that returns a placeholder Base64 string.
+ * Disable with env FH2MP_NO_SDASTR. See docs/matchmaking.md.
+ */
+#define FH2_SDA_STR_RVA 0x17a5b00u
+static LONG (*g_sda_mkstr)(const WCHAR *, unsigned, void **);
+
+static void *sda_string_stub(void *self)
+{
+    static const WCHAR s[] = L"RkgyTVAtU0RBLTAwMDAwMDA=";
+    void *h = NULL;
+    (void)self;
+    if (g_sda_mkstr && g_sda_mkstr(s, (unsigned)(sizeof s / sizeof s[0] - 1), &h) >= 0) {
+        return h; /* the caller owns it and releases it with WindowsDeleteString */
+    }
+    return NULL;
+}
+
+static int patch_sda_string(void)
+{
+    static const unsigned char sig[] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x30, 0x48, 0xC7, 0x44, 0x24, 0x20, 0xFE,
+                                        0xFF, 0xFF, 0xFF, 0x33, 0xDB, 0x48, 0x89, 0x5C, 0x24, 0x40};
+    unsigned char *img = find_fh2_image();
+    unsigned char *xs = find_xsapi_image();
+    unsigned char *fn;
+    void *mk = NULL;
+    unsigned i;
+
+    if (!img || !xs) {
+        return 0; /* both must be mapped (XSAPI supplies WindowsCreateString) */
+    }
+    fn = img + FH2_SDA_STR_RVA;
+    for (i = 0; i < sizeof sig; i++) {
+        if (fn[i] != sig[i]) {
+            log_begin();
+            log_raw("sdastr: unexpected bytes at the secure device address string getter, not patched\n");
+            return 2;
+        }
+    }
+    mk = xs_find_import(img, "WindowsCreateString");
+    if (!mk) {
+        mk = xs_find_import(xs, "WindowsCreateString");
+    }
+    if (!mk) {
+        log_begin();
+        log_raw("sdastr: WindowsCreateString not found, not patched\n");
+        return 2;
+    }
+    g_sda_mkstr = (LONG(*)(const WCHAR *, unsigned, void **))mk;
+    xs_write_jump(fn, (void *)sda_string_stub);
+    log_begin();
+    log_raw("sdastr: local secure device address string now returns a placeholder\n");
     return 1;
 }
 
@@ -948,6 +1606,29 @@ static DWORD WINAPI option_monitor(LPVOID unused)
         /* Azimuth binds the game's imports after the helper loads; keep our pointers on top */
         patch_game_winsock(img);
         patch_game_cocreate(img);
+        patch_xsapi_cocreate();
+        {
+            static int xb_state;
+            wchar_t xb_env[8];
+            if (xb_state == 0 && GetEnvironmentVariableW(L"FH2MP_NO_XSBODY", xb_env, 8) == 0) {
+                xb_state = patch_xsapi_body();
+            }
+        }
+        {
+            /* XSAPI is mapped a few seconds after the game image; retry until it is there */
+            static int xs_state;
+            wchar_t xs_env[8];
+            if (xs_state == 0 && GetEnvironmentVariableW(L"FH2MP_NO_XSTOKEN", xs_env, 8) == 0) {
+                xs_state = patch_xsapi_token();
+            }
+        }
+        {
+            static int sda_state;
+            wchar_t sda_env[8];
+            if (sda_state == 0 && GetEnvironmentVariableW(L"FH2MP_NO_SDASTR", sda_env, 8) == 0) {
+                sda_state = patch_sda_string();
+            }
+        }
         unsigned char cur[FH2_OPT_IP_SLOT_SIZE + 4];
         unsigned i;
         int changed = 0;
@@ -1093,7 +1774,7 @@ static void log_cxx_exception(EXCEPTION_POINTERS *ep)
     USHORT i;
     unsigned char *exe = (unsigned char *)GetModuleHandleW(NULL);
 
-    if (n > 200) {
+    if (n > 3000) { /* was 200, which hid everything after the first minute of a session */
         return;
     }
     got = RtlCaptureStackBackTrace(0, 12, frames, NULL);
@@ -1672,12 +2353,13 @@ static DWORD WINAPI late_init(LPVOID unused)
     }
     if (has_arg_prefix(L"NetSessionDirectIpFreeRoam=")) {
         redirect_freeroam_group();
-        {
-            wchar_t tmp2[8];
-            if (GetEnvironmentVariableW(L"FH2MP_NET_TRAFFIC", tmp2, 8) == 0) {
-                patch_traffic_local_mode();
-                patch_traffic_module_offline();
-            }
+    }
+    {
+        /* every online mode (direct IP and the cloud matchmaking / Car Meet invite flow): each client simulates its own traffic */
+        wchar_t tmp2[8];
+        if (GetEnvironmentVariableW(L"FH2MP_NET_TRAFFIC", tmp2, 8) == 0) {
+            patch_traffic_local_mode();
+            patch_traffic_module_offline();
         }
     }
     {
@@ -1692,11 +2374,149 @@ static DWORD WINAPI late_init(LPVOID unused)
             patch_sts_auth();
         }
     }
+    {
+        wchar_t tmp[8];
+        if (GetEnvironmentVariableW(L"FH2MP_NO_MMALLOW", tmp, 8) == 0) {
+            patch_matchmaking_allowed();
+        }
+    }
+    {
+        wchar_t tmp[8];
+        if (GetEnvironmentVariableW(L"FH2MP_NO_QOSOK", tmp, 8) == 0) {
+            patch_qos_assume_success();
+        }
+    }
+    {
+        wchar_t tmp[8];
+        if (GetEnvironmentVariableW(L"FH2MP_NO_SECUREIP", tmp, 8) == 0) {
+            patch_secure_association();
+        }
+        patch_server_port();
+        {
+            wchar_t it_env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_INVITETYPE", it_env, 8) == 0) {
+                patch_invite_type();
+            }
+        }
+        {
+            wchar_t om_env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_ONLINEMEET", om_env, 8) == 0) {
+                patch_online_meet();
+            }
+        }
+        {
+            wchar_t lg_env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_LIVEGATE", lg_env, 8) == 0) {
+                patch_live_gates();
+            }
+        }
+    }
     install_trace();
     dbg_start();
     /* Always run: it re-applies the Winsock patch and serves on-demand trace arming even when
      * no NetSessionDirectIp argument is given (its option patching is gated on the argument). */
     return option_monitor(NULL);
+}
+
+static int identity_load(void)
+{
+    WCHAR path[MAX_PATH], env[32];
+    char buf[24];
+    DWORD got = 0, i;
+    unsigned long long v = 0;
+    HANDLE f;
+
+    if (GetEnvironmentVariableW(L"FH2MP_XUID", env, 32)) {
+        for (i = 0; env[i]; i++) {
+            WCHAR c = env[i];
+            v = v * 16 + (unsigned)(c >= L'0' && c <= L'9' ? c - L'0' : (c | 0x20) - L'a' + 10);
+        }
+        if (v) {
+            g_xuid = v;
+            return 1;
+        }
+    }
+    lstrcpyW(path, g_dir);
+    lstrcatW(path, L"\\fh2mp-identity.txt");
+    f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f != INVALID_HANDLE_VALUE) {
+        if (ReadFile(f, buf, 16, &got, NULL)) {
+            for (i = 0; i < got; i++) {
+                char c = buf[i];
+                if (c >= '0' && c <= '9') {
+                    v = v * 16 + (unsigned)(c - '0');
+                } else if ((c | 0x20) >= 'a' && (c | 0x20) <= 'f') {
+                    v = v * 16 + (unsigned)((c | 0x20) - 'a' + 10);
+                } else {
+                    break;
+                }
+            }
+        }
+        CloseHandle(f);
+    }
+    if (v == 0) {
+        unsigned long r = 0;
+        BOOLEAN (WINAPI *rnd)(PVOID, ULONG) = NULL;
+        HMODULE adv = LoadLibraryW(L"advapi32.dll");
+        if (adv) {
+            rnd = (BOOLEAN(WINAPI *)(PVOID, ULONG))GetProcAddress(adv, "SystemFunction036");
+        }
+        if (!rnd || !rnd(&r, sizeof r)) {
+            r = GetTickCount() * 2654435761u ^ GetCurrentProcessId();
+        }
+        v = (unsigned long long)(r | 1u);
+        f = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (f != INVALID_HANDLE_VALUE) {
+            static const char hx[] = "0123456789abcdef";
+            for (i = 0; i < 8; i++) {
+                buf[i] = hx[(v >> (28 - 4 * i)) & 15];
+            }
+            buf[8] = '\n';
+            WriteFile(f, buf, 9, &got, NULL);
+            CloseHandle(f);
+        }
+    }
+    g_xuid = 0x0009000000000000ULL | (v & 0xFFFFFFFFULL);
+    return 1;
+}
+
+/* movabs r8, 0x0009000000000000 (49 B8 imm64) in Azimuth's User.XboxUserId formatting code */
+static int patch_identity(void)
+{
+    static const unsigned char pat[10] = {0x49, 0xB8, 0, 0, 0, 0, 0, 0, 0x09, 0};
+    unsigned char *base = (unsigned char *)GetModuleHandleW(NULL);
+    IMAGE_NT_HEADERS *nt;
+    IMAGE_SECTION_HEADER *sec;
+    unsigned i, hits = 0;
+
+    if (!base) {
+        return 0;
+    }
+    nt = (IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew);
+    sec = IMAGE_FIRST_SECTION(nt);
+    for (i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+        unsigned char *p = base + sec[i].VirtualAddress;
+        DWORD n = sec[i].Misc.VirtualSize, j;
+        if (!(sec[i].Characteristics & IMAGE_SCN_CNT_CODE) || n < sizeof pat) {
+            continue;
+        }
+        for (j = 0; j + sizeof pat <= n; j++) {
+            if (p[j] == 0x49 && p[j + 1] == 0xB8 && mem_equal(p + j, pat, sizeof pat)) {
+                DWORD old;
+                if (VirtualProtect(p + j + 2, 8, PAGE_EXECUTE_READWRITE, &old)) {
+                    mem_copy(p + j + 2, &g_xuid, 8);
+                    VirtualProtect(p + j + 2, 8, old, &old);
+                    FlushInstructionCache(GetCurrentProcess(), p + j, 10);
+                    hits++;
+                }
+            }
+        }
+    }
+    log_begin();
+    log_raw("identity: xuid 0x");
+    log_hex(g_xuid, 16);
+    log_raw(hits ? " (Azimuth's XboxUserId patched)\n" : " (Azimuth's XboxUserId constant NOT found)\n");
+    return (int)hits;
 }
 
 static void init(HINSTANCE self)
@@ -1737,6 +2557,13 @@ static void init(HINSTANCE self)
         log_raw("]=\"");
         log_wide(g_argv[i]);
         log_raw("\"\n");
+    }
+    {
+        wchar_t tmp[8];
+        identity_load();
+        if (GetEnvironmentVariableW(L"FH2MP_NO_IDENTITY", tmp, 8) == 0) {
+            patch_identity();
+        }
     }
     install_cmdline_hook();
     winmm_forward_init(chain_load_mod());

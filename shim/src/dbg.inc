@@ -672,6 +672,10 @@ static void dbg_bp_hit(int idx, EXCEPTION_POINTERS *ep)
         sb_dec(&o, GetCurrentThreadId());
         sb_str(&o, " rax=0x");
         sb_hex(&o, c->Rax, 0);
+        if (g_dbp[b->owner].nmem > 0) { /* mem= on a ret breakpoint dumps memory at the returned pointer */
+            sb_str(&o, " mem[rax]=");
+            dbg_hexbytes(&o, c->Rax, g_dbp[b->owner].memlen[0]);
+        }
         ev_add(o.p);
         b->enabled = 0;
         return;

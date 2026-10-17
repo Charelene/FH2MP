@@ -16,6 +16,7 @@ Usage: python3 -I server/fh2mp_lsp.py [port] <path-to-forza_durango_release_fina
 """
 import json
 import os
+import re
 import struct
 import sys
 import time
@@ -26,12 +27,15 @@ import threading  # noqa: E402
 import xls  # noqa: E402
 import drivatar  # noqa: E402
 import scoreboard  # noqa: E402
+import cardb  # noqa: E402
+import xbl  # noqa: E402
 
 SEQ = 0
 SC = None
 STATE = {}
 CTX = threading.local()   # per-request: xuid (from X-UserId)
 DRV = None                # drivatar.DrivatarStore
+CARS = None               # cardb.CarDb (the user's own game database)
 SB = None                 # scoreboard.ScoreStore
 LEVELS = {}               # xuid -> currentCareerLevel as sent at Logon
 TAGS = {}                 # xuid -> gamertag, learned at Logon
@@ -405,7 +409,69 @@ def sb_time_trials(req):
     return {"timeTrials": tts[:max(n, 0) or len(tts)]}
 
 
+# ---------------------------------------------------------------- permissions
+
+def permissions_table(req):
+    """Every feature enabled. The client looks features up by methodId (FUN_14126c2b0 -> FUN_140f09930):
+    a feature missing from the table reads as 4 ("locked", e.g. the "server not available" popup when
+    downloading a gifted car), an entry with access 0 reads as allowed."""
+    n = min(req["maxPermissions"] if req else 0, 255) or 255
+    log(f"  GetPermissionsTable max={req['maxPermissions'] if req else None}: enabling features 1..{n}")
+    return {"permissions": [{"methodId": i, "tier": 0, "isEnabled": True, "access": 0} for i in range(1, n + 1)],
+            "featureAreasBanMask": 0, "userFlags": 0}
+
+
+# ---------------------------------------------------------------- gifting (Message Center category 5)
+
+class XlsError(Exception):
+    def __init__(self, text, code=1):
+        super().__init__(text)
+        self.text, self.code = text, code
+
+
+def _gift(giftid, types):
+    """The unclaimed gift notification with this GiftId, for the requesting player."""
+    for n in _visible():
+        if n["type"] in types and n.get("params", {}).get("GiftId") == giftid:
+            if n.get("claimed"):
+                raise XlsError("gift already retrieved")
+            return n
+    raise XlsError("no such gift")
+
+
+def gift_credits(req):
+    n = _gift(req["giftId"], (0x8500,))
+    n["claimed"] = True
+    notif_save()
+    p = n["params"]
+    log(f"  RetrieveCreditsGift #{req['giftId']}: {p.get('Amount', 0)} CR from {p.get('SenderGamerTag', '')!r}")
+    return {"sendingXuid": p.get("SenderXuid", 0), "creditAmount": p.get("Amount", 0)}
+
+
+def gift_car(req):
+    n = _gift(req["giftId"], (0x8502,))
+    p = n["params"]
+    car_id = n.get("carId") or p.get("ModelId", 0)
+    car = CARS.car_struct(car_id)
+    if car is None:
+        raise XlsError(f"unknown carId {car_id}")
+    n["claimed"] = True
+    notif_save()
+    res = xls.default_struct(SC, SC.call_struct("ForzaGiftingRetrieveCarGift_Results"))
+    res["car"].update(car)
+    res["giftListing"].update({"giftId": req["giftId"], "senderXuid": p.get("SenderXuid", 0),
+                               "reason": p.get("Reason", 0)})
+    res["carHistory"]["base"]["originalOwner"] = p.get("SenderGamerTag", "")[:31]
+    log(f"  RetrieveCarGift #{req['giftId']}: carId {car_id} (make {car['make']}, {car['year']}) "
+        f"from {p.get('SenderGamerTag', '')!r}; blob sizes asked {req['liveryDetailsBufferSize']}/"
+        f"{req['partsInstalledBufferSize']}/{req['partsInTrunkBufferSize']}")
+    return res
+
+
 HANDLERS = {
+    ("Forza.WebServices.User", "GetPermissionsTable"): ("", permissions_table),
+    ("Forza.WebServices.Gifting", "RetrieveCreditsGift"): ("", gift_credits),
+    ("Forza.WebServices.Gifting", "RetrieveCarGift"): ("", gift_car),
     ("Forza.WebServices.Scoreboard", "GetRows"): ("", lambda req: sb_rows(req, "ForzaWebServicesScoreboardGetRows_Results")),
     ("Forza.WebServices.Scoreboard", "GetTimeTrials"): ("", sb_time_trials),
     ("Forza.WebServices.Scoreboard", "SubmitScore"): ("", sb_submit_score),
@@ -451,7 +517,11 @@ def handle_xls(cls, method, body):
     if rfields is None and key not in HANDLERS:
         log(f"  no schema for {cls} {method}; answering OK with empty body")
         return frame()
-    result = HANDLERS[key][1](req) if key in HANDLERS else None
+    try:
+        result = HANDLERS[key][1](req) if key in HANDLERS else None
+    except XlsError as e:
+        log(f"  -> error result: {e.text}")
+        return frame(result=2, error=e.code, text=e.text.encode())
     if result is None:
         if rfields is None:
             return frame()
@@ -526,8 +596,19 @@ def api(method, path, body):
                     raise ApiError(400, f"type {ntype:#x} is not dispatched by the client")
             else:
                 raise ApiError(400, "give \"kind\" or \"type\"")
+            fields = dict(d.get("fields") or {})
+            car_id = None
+            if ntype == 0x8502 and "carId" in fields:   # convenience: look make/model up in the game database
+                car_id = int(fields.pop("carId"))
+                mm = CARS.make_model(car_id)
+                if mm is None:
+                    raise ApiError(400, f"unknown carId {car_id} (not in the game database)")
+                fields.setdefault("MakeId", mm[0])
+                fields.setdefault("ModelId", mm[1])
+            if ntype in (0x8500, 0x8501, 0x8502) and not fields.get("GiftId"):
+                fields["GiftId"] = NOTIF_NEXT_ID[0] & 0x7FFFFFFF
             try:
-                params = notif_params(ntype, d.get("fields") or {})
+                params = notif_params(ntype, fields)
                 xuid = d.get("xuid", 0)
                 xuid = int(xuid, 0) if isinstance(xuid, str) else int(xuid)
             except (ValueError, TypeError) as e:
@@ -535,6 +616,9 @@ def api(method, path, body):
             if "text" in d and "Message" not in {f.name for f in notif_fields(ntype)}:
                 raise ApiError(400, f"type {ntype:#x} has no message text; set \"fields\" instead")
             n = add_notification(str(d.get("text", "")), str(d.get("sra", "")), ntype, params, xuid)
+            if car_id is not None:
+                n["carId"] = car_id
+                notif_save()
             return 201, _notif_json(n)
         raise ApiError(405, "method not allowed")
     try:
@@ -551,6 +635,64 @@ def api(method, path, body):
         notif_save()
         return 200, {"removed": nid}
     raise ApiError(405, "method not allowed")
+
+
+GSI_VERSION = "6CC152FD"   # build version string in the exe (PTR_s_6CC152FD); same value as the NetV2 handshake
+
+
+def gsds_variants():
+    """Answer for POST gameserverds.xboxlive.com/titles/<tid>/variants (Xbox GSDS, GetVariants in the exe).
+    Shape from Microsoft's open-source XSAPI (branch 1807_xdk_qfe_preview, Source/Services/GameServerPlatform):
+    every field is a JSON *string* (isPublisher "True"/"False", rank and player counts numeric strings).
+    The game matches the GSI set names against a regex, by default `Release_<version>\\..*` (FUN_141838d70), and
+    takes the "initialize failed" exit of the matchmaking-init state when none matches (docs/matchmaking.md), so the
+    sets are named Release_<version>.<mode>."""
+    schema = "00000000-0000-0000-0000-000000000002"
+    modes = ("FreeRoam", "CarMeet", "RoadTrip")
+    return json.dumps({
+        "variants": [{"gamevariantId": "00000000-0000-0000-0000-00000000000%d" % (i + 1), "name": "Release_%s.%s" % (GSI_VERSION, m),
+                      "isPublisher": "True", "rank": "0", "gameVariantSchemaId": schema} for i, m in enumerate(modes)],
+        "variantSchemas": [{"variantSchemaId": schema, "schemaContent": "{}", "name": "FreeRoam"}],
+        "gsiSets": [{"minRequiredPlayers": "1", "maxAllowedPlayers": str(MAX_LOBBY_PLAYERS),
+                     "gsiSetId": "00000000-0000-0000-0000-00000000010%d" % i, "gsiSetName": "Release_%s.%s" % (GSI_VERSION, m),
+                     "selectionOrder": str(i), "variantSchemaId": schema} for i, m in enumerate(modes)],
+    }).encode()
+
+
+MAX_LOBBY_PLAYERS = 12   # engine ceiling seen so far (traffic server 12 slots); docs/matchmaking.md
+
+
+def gsds_qos_servers():
+    """GET gameserverds.xboxlive.com/titles/<tid>/qosservers; {"qosServers":[{serverFqdn, serverSecureDeviceAddress,
+    targetLocation}]}, all strings (XSAPI source). The list must not be empty: XSAPI then returns a null vector from its
+    QoS async and the game dereferences it (crash at game+0x41fd28, docs/matchmaking.md). The host comes from the
+    FH2MP_PUBLIC_HOST environment variable (default 127.0.0.1); the secure device address is an opaque base64 blob."""
+    import base64
+    host = os.environ.get("FH2MP_PUBLIC_HOST", "127.0.0.1")
+    sda = base64.b64encode(b"FH2MP-SDA-0000000").decode()
+    return json.dumps({"qosServers": [{"serverFqdn": host, "serverSecureDeviceAddress": sda,
+                                       "targetLocation": "North Central US"}]}).encode()
+
+
+def xbl_xuid(headers):
+    """The caller's Xbox user id: the shim's XSAPI token is "XBL3.0 x=fh2mp;<decimal xuid>" (shim/src/winmm_proxy.c)."""
+    m = re.search(r"x=fh2mp;(\d+)", headers.get("Authorization", ""))
+    return m.group(1) if m else None
+
+
+def gsms_cluster():
+    """POST gameserverms.xboxlive.com/titles/<tid>/clusters (AllocateClusterAsync) -> ClusterResult JSON (key names read from
+    Microsoft.Xbox.Services.dll: fulfillmentState fulfilled|queued|aborted, pollIntervalMilliseconds, hostName, region,
+    portMappings[{Key, Value{external, internal}}]). Every allocation is answered at once with this server
+    (FH2MP_PUBLIC_HOST, FH2MP_GAME_PORT, default 127.0.0.1:5000)."""
+    host = os.environ.get("FH2MP_PUBLIC_HOST", "127.0.0.1")
+    port = int(os.environ.get("FH2MP_GAME_PORT", "5000"))
+    # Value types checked in Microsoft.Xbox.Services.dll (Windows.Data.Json ValueType, wrong type -> 0x83750005):
+    # pollIntervalMilliseconds / fulfillmentState / hostName / region / Key are strings, Value is an object whose
+    # external / internal are numbers.
+    return json.dumps({"fulfillmentState": "fulfilled", "pollIntervalMilliseconds": "1000", "hostName": host,
+                       "region": "North Central US",
+                       "portMappings": [{"Key": "NetV2", "Value": {"external": port, "internal": port}}]}).encode()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -585,8 +727,63 @@ class Handler(BaseHTTPRequestHandler):
                 traceback.print_exc()
                 msg = f"fh2mp: {e}".encode()
                 out = frame(result=2, error=0x1, text=msg)
-        self.send_response(200)
-        self.send_header("Content-Type", "bin/xtsw")
+        ctype = "bin/xtsw"
+        status = 200
+        extra = []
+        if host == "gameserverds.xboxlive.com" and self.path.endswith("/variants"):
+            out, ctype = gsds_variants(), "application/json"
+            log(f"  GSDS variants -> {out.decode()}")
+        elif host == "gameserverds.xboxlive.com" and "qosservers" in self.path:
+            out, ctype = gsds_qos_servers(), "application/json"
+            log(f"  GSDS qos -> {out.decode()}")
+        elif host == "gameserverms.xboxlive.com" and self.path.rstrip("/").endswith("/clusters"):
+            out, ctype = gsms_cluster(), "application/json"
+            log(f"  GSMS cluster -> {out.decode()}")
+        elif host == "achievements.xboxlive.com":
+            # The game polls GetAchievementsForTitleIdAsync every frame it is set; a 200 with no usable list makes the
+            # embedded XSAPI complete with a NULL result and the game dereferences it (docs/matchmaking.md). Fail it.
+            out, ctype, status = b'{"code":0,"description":"achievements unavailable"}', "application/json", 404
+            log("  achievements -> 404")
+        elif host == "sessiondirectory.xboxlive.com" and xbl.parse_path(self.path) is not None:
+            # MPSD session document (PUT create/update, GET read, DELETE); see server/xbl.py
+            if self.command == "DELETE":
+                st, doc = xbl.delete_session(self.path), None
+                out, status = b"", 204
+            else:
+                st, doc = (xbl.put_session(self.path, body, xbl_xuid(self.headers)) if self.command in ("PUT", "POST")
+                           else xbl.get_session(self.path, xbl_xuid(self.headers)))
+                status = st
+                out = json.dumps(doc).encode() if doc is not None else b"{}"
+            ctype = "application/json"
+            if doc is not None:
+                extra.append(("ETag", xbl.etag(doc)))
+            who = ""
+            if doc is not None and "defaultTemplate_qos" not in self.path:
+                who = " members=" + ",".join(
+                    f"{m['constants']['system']['xuid'][-5:]}{'+' if m['properties']['system'].get('active') else '-'}"
+                    for m in doc.get("members", {}).values())
+            log(f"  MPSD {self.command} session -> {status} ({len(out)} bytes, {xbl.count()} session(s)){who}")
+        elif host == "momatch.xboxlive.com" and xbl.parse_momatch(self.path) is not None:
+            if self.command == "DELETE":
+                status, doc = xbl.delete_ticket(self.path), None
+            elif self.command == "POST":
+                status, doc = xbl.create_ticket(self.path, body, xbl_xuid(self.headers))
+            else:
+                status, doc = xbl.get_ticket(self.path)
+            out = json.dumps(doc).encode() if doc is not None else b""
+            ctype = "application/json"
+            log(f"  MOMATCH {self.command} -> {status} {out.decode()[:300]}")
+        elif host == "sessiondirectory.xboxlive.com" and self.command == "GET" and "/sessions" in self.path:
+            # MPSD session query (MultiplayerService.GetSessionsAsync). Any 200 answer (empty body or {"results":[]}) makes
+            # the embedded XSAPI complete the async with a NULL result and the game dereferences it (crash at
+            # game+0x41fd28, docs/matchmaking.md). An HTTP error leaves the async in the Error state, which the game's
+            # poll loop (FUN_140415030) skips, as when Azimuth's offline stub failed the request.
+            out, ctype, status = b'{"code":0,"description":"no sessions"}', "application/json", 404
+            log("  MPSD sessions -> 404")
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        for k, v in extra:
+            self.send_header(k, v)
         self.send_header("Content-Length", str(len(out)))
         self.end_headers()
         self.wfile.write(out)
@@ -610,7 +807,11 @@ class Handler(BaseHTTPRequestHandler):
         from urllib.parse import parse_qs, urlparse
         u = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
-        if u.path == "/admin/send":
+        if u.path == "/admin/gamemode":
+            name, template = xbl.create_game_session(int(q.get("type", "1")), [x for x in q.get("xuids", "").split(",") if x])
+            out = json.dumps({"name": name, "template": template}) + "\n"
+            log(f"  game-mode session created: {name} ({template}) type {q.get('type', '1')}")
+        elif u.path == "/admin/send":
             fixed = {"text", "sra", "type"}
             n = add_notification(q.get("text", ""), q.get("sra", ""), int(q["type"], 0) if "type" in q else None,
                                  notif_params(int(q["type"], 0) if "type" in q else MSG_TYPE,
@@ -655,6 +856,9 @@ def main():
     if not exe or not os.path.exists(exe):
         sys.exit("usage: fh2mp_lsp.py [port] <path-to-forza_durango_release_final.exe>  (or set FH2MP_EXE)")
     SC = xls.Schema(exe)
+    global CARS
+    CARS = cardb.CarDb(exe)
+    log(f"car database: {'found' if CARS.db else 'NOT found'} ({CARS.path})")
     notif_load()
     global DRV
     DRV = drivatar.DrivatarStore(SC, os.path.join(os.path.dirname(exe), "media", "drivatarglobalcache", "DefaultCache.bin"), DATA_DIR)
