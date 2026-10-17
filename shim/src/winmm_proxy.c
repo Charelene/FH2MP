@@ -1,55 +1,38 @@
 /*
- * FH2MP shim: drop-in replacement for Azimuth's native static-TLS helper (azimuth-tls.dll).
+ * FH2MP shim: a winmm.dll proxy loaded by azimuth.exe (0.9.10+) from its own folder.
  *
- * Contract required by azimuth.exe 0.9.7 (FUN_140092150):
- *   - export data `azimuth_tls_index`    : this DLL's loader-assigned TLS index, never -1
- *   - export data `azimuth_tls_attached` : id of the thread that loaded the DLL
- *   - a static TLS block of 0x150 bytes, 16-aligned, matching the game's zero template
- * The game image is already mapped when this DLL loads, so DllMain can patch host code.
+ * Azimuth 0.9.10 verifies azimuth-tls.dll against its own SHA-256, so the shim can no longer replace
+ * that helper. azimuth.exe imports WINMM.dll (timeBeginPeriod), so a winmm.dll placed next to it is
+ * loaded in-process before the game starts. This is the same mechanism FH2 Extra Options 0.2.88 uses.
  *
- * On top of that this shim:
- *   1. chain-loads the FH2 Extra Options mod DLL if it is present as azimuth-tls-mod.dll
- *   2. hooks azimuth.exe's Platform::Details::GetCmdArguments so the game receives launch
+ * This DLL:
+ *   1. forwards every winmm export to the system winmm.dll (winmm_forward.inc, generated)
+ *   2. chain-loads the FH2 Extra Options winmm proxy if it is present as fh2extra\winmm.dll
+ *   3. hooks azimuth.exe's Platform::Details::GetCmdArguments so the game receives launch
  *      arguments (stock Azimuth always returns argv == [""]).
+ *   4. once Azimuth has loaded its own azimuth-tls.dll (the game image is mapped by then), applies
+ *      the game patches (Winsock, matchmaking groups, traffic, STS auth) and starts the monitor.
  *
- * Argument sources, in order: env FH2MP_ARGS (space separated), then fh2mp-args.txt next to
- * this DLL (one argument per line, '#' starts a comment).
+ * Argument sources, in order: env FH2MP_ARGS (space separated), then fh2mp-args.txt in data\bin next
+ * to azimuth-tls.dll (one argument per line, '#' starts a comment). Logs and probe files live there too.
  *
- * Only KERNEL32 is used, like the stock helper (no CRT).
+ * Only KERNEL32 is used (no CRT).
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-#define TLS_BLOCK_SIZE 0x150
 #define MAX_ARGS 32
 #define MAX_ARG_CHARS 256
 
-/* azimuth.exe 0.9.7: Platform::Details::GetCmdArguments(int*) */
-#define HOOK_RVA 0x86aa0u
+/* Platform::Details::GetCmdArguments(int*): same 301-byte function in each supported azimuth.exe */
 #define HOOK_SIZE 301u
-#define HOOK_FNV1A64 0x4f194c70f6d9967cull
-
-/*
- * Static TLS block, hand-built so the PE TLS directory is exactly TLS_BLOCK_SIZE bytes, 16-aligned,
- * without MinGW's TLS runtime (which would add padding and CRT imports). The loader stores this
- * module's TLS index into fh2mp_tls_index (exported as azimuth_tls_index).
- */
-static unsigned char fh2mp_tls_block[TLS_BLOCK_SIZE]
-    __attribute__((section(".tls"), aligned(16), used));
-ULONG fh2mp_tls_index;
-static const ULONGLONG fh2mp_tls_callbacks[1] = {0};
-
-const IMAGE_TLS_DIRECTORY64 _tls_used __attribute__((section(".rdata$T"), used)) = {
-    (ULONGLONG)(ULONG_PTR)fh2mp_tls_block,
-    (ULONGLONG)(ULONG_PTR)fh2mp_tls_block + TLS_BLOCK_SIZE,
-    (ULONGLONG)(ULONG_PTR)&fh2mp_tls_index,
-    (ULONGLONG)(ULONG_PTR)fh2mp_tls_callbacks,
-    0,
-    0x00500000, /* IMAGE_SCN_ALIGN_16BYTES */
+typedef struct {
+    unsigned rva;
+    unsigned long long fnv1a64;
+} hook_build;
+static const hook_build g_hook_builds[] = {
+    {0xc0850u, 0xb2987ae53c46b28cull}, /* azimuth.exe 0.9.10 (sha256 78a5f635...3739) */
 };
-
-/* exported through azimuth-tls.def */
-volatile DWORD azimuth_tls_attached;
 
 /* forza_durango_release_final.exe 1.0.0.64 (image identity, as checked by the Extra Options mod) */
 #define FH2_TIMESTAMP 0x565501edu
@@ -549,21 +532,27 @@ static int patch_sts_auth(void)
 
 static int install_cmdline_hook(void)
 {
-    unsigned char *target = (unsigned char *)GetModuleHandleW(NULL) + HOOK_RVA;
-    unsigned long long h;
+    unsigned char *exe = (unsigned char *)GetModuleHandleW(NULL);
+    unsigned char *target = NULL;
+    unsigned long long h = 0;
     unsigned long long dest = (unsigned long long)(ULONG_PTR)&hooked_get_cmd_arguments;
     unsigned char stub[12];
     DWORD old;
+    size_t i;
 
-    if (IsBadReadPtr(target, HOOK_SIZE)) {
-        log_begin();
-        log_raw("hook: target unreadable, host is not a supported Azimuth build\n");
-        return 0;
+    for (i = 0; i < sizeof g_hook_builds / sizeof g_hook_builds[0]; i++) {
+        unsigned char *cand = exe + g_hook_builds[i].rva;
+        if (!IsBadReadPtr(cand, HOOK_SIZE)) {
+            h = fnv1a64(cand, HOOK_SIZE);
+            if (h == g_hook_builds[i].fnv1a64) {
+                target = cand;
+                break;
+            }
+        }
     }
-    h = fnv1a64(target, HOOK_SIZE);
-    if (h != HOOK_FNV1A64) {
+    if (!target) {
         log_begin();
-        log_raw("hook: GetCmdArguments bytes differ (fnv1a64=");
+        log_raw("hook: GetCmdArguments not found in this azimuth.exe (last fnv1a64=");
         log_hex(h, 16);
         log_raw("), skipping; launch arguments will not be injected\n");
         return 0;
@@ -1600,62 +1589,84 @@ static void install_trace(void)
     log_raw("trace: ready (breakpoints arm when fh2mp-connect.txt is used)\n");
 }
 
-static void chain_load_mod(void)
+#include "winmm_forward.inc"
+
+/*
+ * Fills the forwarding table. When the Extra Options proxy is present, every export is forwarded to
+ * *its* export of the same name (it forwards on to the system winmm itself): the mod does its
+ * initialisation inside its exported timeBeginPeriod, which azimuth.exe calls, so the call must reach it.
+ */
+static void winmm_forward_init(HMODULE mod)
+{
+    wchar_t path[MAX_PATH];
+    HMODULE real;
+    int i;
+
+    if (GetSystemDirectoryW(path, MAX_PATH - 16) == 0) {
+        return;
+    }
+    lstrcatW(path, L"\\winmm.dll");
+    real = LoadLibraryW(path); /* full path: never resolves back to this proxy */
+    if (!real) {
+        log_begin();
+        log_raw("winmm: cannot load the system winmm.dll, error ");
+        log_dec(GetLastError());
+        log_raw("\n");
+        return;
+    }
+    for (i = 0; i < WINMM_FWD_COUNT; i++) {
+        void *fn = mod ? (void *)GetProcAddress(mod, g_winmm_names[i]) : NULL;
+        g_winmm_real[i] = fn ? fn : (void *)GetProcAddress(real, g_winmm_names[i]);
+    }
+}
+
+static wchar_t g_exe_dir[MAX_PATH];
+
+/* Extra Options 0.2.88 is itself a winmm proxy; it hooks Azimuth's loader import and waits for the
+ * stock TLS helper, so it must be loaded before Azimuth gets that far (and before our late init). */
+static HMODULE chain_load_mod(void)
 {
     wchar_t path[MAX_PATH];
     HMODULE m;
 
-    lstrcpyW(path, g_dir);
-    lstrcatW(path, L"\\azimuth-tls-mod.dll");
+    lstrcpyW(path, g_exe_dir);
+    lstrcatW(path, L"\\fh2extra\\winmm.dll");
     log_begin();
     if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) {
-        log_raw("chain: no azimuth-tls-mod.dll present\n");
-        return;
+        log_raw("chain: no fh2extra\\winmm.dll present\n");
+        return NULL;
     }
     m = LoadLibraryW(path);
     if (m) {
-        log_raw("chain: loaded azimuth-tls-mod.dll\n");
+        log_raw("chain: loaded fh2extra\\winmm.dll\n");
     } else {
-        log_raw("chain: LoadLibrary azimuth-tls-mod.dll failed, error ");
+        log_raw("chain: LoadLibrary fh2extra\\winmm.dll failed, error ");
         log_dec(GetLastError());
         log_raw("\n");
     }
+    return m;
 }
 
-static void init(HINSTANCE self)
+/*
+ * Everything that needs the game image runs here, once Azimuth has loaded its own TLS helper
+ * (it maps the game first). Same order as when the shim was the helper itself.
+ */
+static DWORD WINAPI late_init(LPVOID unused)
 {
-    wchar_t path[MAX_PATH];
-    DWORD n = GetModuleFileNameW(self, g_dir, MAX_PATH);
-    int i;
+    int tick;
 
-    if (n == 0 || n >= MAX_PATH) {
-        return;
+    (void)unused;
+    /* Azimuth shows its launcher first: the helper (and the game) appear only after Play is clicked,
+     * which can take arbitrarily long, so wait for it without a limit. */
+    while (!GetModuleHandleW(L"azimuth-tls.dll")) {
+        Sleep(5);
     }
-    while (n > 0 && g_dir[n - 1] != L'\\' && g_dir[n - 1] != L'/') {
-        n--;
+    for (tick = 0; tick < 12000 && !find_fh2_image(); tick++) { /* up to ~60 s for the game image */
+        Sleep(5);
     }
-    if (n > 0) {
-        g_dir[n - 1] = L'\0';
-    }
-    lstrcpyW(path, g_dir);
-    lstrcatW(path, L"\\fh2mp.log");
-    g_log = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-                        OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     log_begin();
-    log_raw("--- fh2mp shim attached, tid=");
-    log_dec(azimuth_tls_attached);
-    log_raw("\n");
-
-    load_args();
-    for (i = 0; i < g_argc; i++) {
-        log_begin();
-        log_raw("arg[");
-        log_dec((unsigned long)i);
-        log_raw("]=\"");
-        log_wide(g_argv[i]);
-        log_raw("\"\n");
-    }
-    install_cmdline_hook();
+    log_raw(find_fh2_image() ? "late: game image mapped, applying patches\n"
+                             : "late: game image not found, applying what is possible\n");
     if (has_arg_prefix(L"NetSessionDirectIpRoadTrip=")) {
         redirect_roadtrip_group();
     }
@@ -1681,13 +1692,56 @@ static void init(HINSTANCE self)
             patch_sts_auth();
         }
     }
-    chain_load_mod();
     install_trace();
     dbg_start();
     /* Always run: it re-applies the Winsock patch and serves on-demand trace arming even when
      * no NetSessionDirectIp argument is given (its option patching is gated on the argument). */
+    return option_monitor(NULL);
+}
+
+static void init(HINSTANCE self)
+{
+    wchar_t path[MAX_PATH];
+    DWORD n = GetModuleFileNameW(self, g_exe_dir, MAX_PATH);
+    int i;
+
+    if (n == 0 || n >= MAX_PATH) {
+        return;
+    }
+    while (n > 0 && g_exe_dir[n - 1] != L'\\' && g_exe_dir[n - 1] != L'/') {
+        n--;
+    }
+    if (n > 0) {
+        g_exe_dir[n - 1] = L'\0';
+    }
+    /* logs, args and probe files live in data\bin (where the stock helper sits) when it exists */
+    lstrcpyW(g_dir, g_exe_dir);
+    lstrcatW(g_dir, L"\\data\\bin");
+    if (GetFileAttributesW(g_dir) == INVALID_FILE_ATTRIBUTES) {
+        lstrcpyW(g_dir, g_exe_dir);
+    }
+    lstrcpyW(path, g_dir);
+    lstrcatW(path, L"\\fh2mp.log");
+    g_log = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                        OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    log_begin();
+    log_raw("--- fh2mp winmm shim attached, tid=");
+    log_dec(GetCurrentThreadId());
+    log_raw("\n");
+
+    load_args();
+    for (i = 0; i < g_argc; i++) {
+        log_begin();
+        log_raw("arg[");
+        log_dec((unsigned long)i);
+        log_raw("]=\"");
+        log_wide(g_argv[i]);
+        log_raw("\"\n");
+    }
+    install_cmdline_hook();
+    winmm_forward_init(chain_load_mod());
     {
-        HANDLE t = CreateThread(NULL, 0, option_monitor, NULL, 0, NULL);
+        HANDLE t = CreateThread(NULL, 0, late_init, NULL, 0, NULL);
         if (t) {
             CloseHandle(t);
         }
@@ -1698,7 +1752,6 @@ BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID reserved)
 {
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
-        azimuth_tls_attached = GetCurrentThreadId();
         init(self);
     }
     return TRUE;

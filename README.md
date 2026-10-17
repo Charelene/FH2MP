@@ -66,7 +66,7 @@ The rows from Traffic sync downwards are the long tail.
 | Piece | What it does |
 |-------|--------------|
 | **Azimuth** (third party, not included) | A compatibility layer that runs the Xbox One build of FH2 on a PC. It stubs every online call as "offline". |
-| **`shim/`** | A small in-process DLL that replaces Azimuth's `azimuth-tls.dll` helper. It keeps the helper's job, re-enables real sockets, passes launch options to the game, and patches a few spots (for example, keeping the traffic module in single-player mode). |
+| **`shim/`** | A small in-process `winmm.dll` proxy that Azimuth loads from its own folder (Azimuth 0.9.10 checks its `azimuth-tls.dll` helper's hash, so that file can no longer be replaced). It re-enables real sockets, passes launch options to the game, and patches a few spots (for example, keeping the traffic module in single-player mode). |
 | **`server/`** | Python, standard library only. `fh2mp_server.py` speaks NetV2: handshake, acks, object sync, session/lobby/weather objects, events and the race flow, and relays one client's objects, car state, collisions and scores to the others. `fh2mp_lsp.py` stands in for the game's HTTP cloud services (Message Center, Drivatars, Rivals). |
 | **`shim/fh2dbg.py`** | A live debugger client for the shim's built-in debugger: breakpoints, memory watches and crash reports on a running game, without rebuilding anything. |
 
@@ -76,8 +76,9 @@ No Microsoft or Xbox Live service is contacted, ever. There was nothing left to 
 ## Requirements (what it was actually tested on)
 
 - A **legitimately owned copy** of Forza Horizon 2 (Xbox One build **1.0.0.64**). No game files are in this repo and none ever will be.
-- **Azimuth 0.9.7** (the shim's hooks are checked against byte signatures from that build and skip anything that does not match).
-- Optionally the **FH2 Extra Options** mod: the shim chain-loads it if you rename its DLL (see below).
+- **Azimuth 0.9.10** (the shim's hooks are checked against byte signatures from that build and skip anything that does not match; 0.9.7 is no longer supported).
+- Optionally the **FH2 Extra Options 0.2.88** mod: put its `Azimuth/winmm.dll`, ini and PNG in an `fh2extra` folder next to `azimuth.exe`; the shim chain-loads it and routes winmm calls through it (the mod initializes inside its `timeBeginPeriod` export).
+- Install the shim as `winmm.dll` next to `azimuth.exe` (`shim/build.sh` builds `shim/build/winmm.dll`) and launch with `WINEDLLOVERRIDES=winmm=n,b` so Wine uses it instead of its builtin.
 - Linux with Wine/Proton (CachyOS, Proton-CachyOS 11). Windows should work in principle, but is untested.
 - `python3` (standard library only) for the server; `x86_64-w64-mingw32-gcc` to build the shim.
 

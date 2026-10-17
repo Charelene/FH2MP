@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Builds shim/build/azimuth-tls.dll (mingw-w64, KERNEL32 only) and the contract test harness.
+# Builds shim/build/winmm.dll (mingw-w64, KERNEL32 only): the Azimuth 0.9.10+ winmm proxy.
 set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p build
 CC=${CC:-x86_64-w64-mingw32-gcc}
-$CC -O2 -Wall -Wextra -shared -s -o build/azimuth-tls.dll src/azimuth_tls_proxy.c azimuth-tls.def \
+python3 -I gen_winmm.py
+$CC -O2 -Wall -Wextra -shared -s -o build/winmm.dll src/winmm_proxy.c winmm.def \
     -nostartfiles -Wl,--entry=DllMain -static-libgcc -lkernel32
-$CC -O2 -Wall -municode -o build/tls_contract_test.exe test/tls_contract_test.c
 echo "built: $(ls -1 build | tr '\n' ' ')"
