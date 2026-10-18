@@ -18,6 +18,9 @@ import sys
 import struct
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import traffic as traffic_mod  # noqa: E402
+
 VERSION_STRING = "6CC152FD"   # PTR_s_6CC152FD in the game binary
 GAME_STRING = "Flagship"      # PTR_s_Flagship
 HEADER_BITS = 88
@@ -121,6 +124,7 @@ MSG_LAP_SCORE = 44                  # key | 3 x blob | u32 lap | bool | bool  (F
 MSG_SCORE_KEYFRAME = 45             # key | 5 x blob | u32 | 3 x u8 | 3 x bool (FUN_141804660)
 RACE_FLAGS_CLEAR_SECONDS = 4.0       # after InRace=0, drop RaceReady/ParticipantsSelected as well
 RACE_LAST_FINISHER_SECONDS = 30.0   # after the first finisher the others get this long (client UI: RACE ENDS IN)
+CAR_PREDICTION_BODY_BITS = 710      # CarPredictionFull body, see the handler
 CAR_KEY_ID_BITS = 7            # FUN_141808170: object key written with 7 id bits
 # Road Trip (router 9): RoadTripObjectTypes 0 RoadTripSynced (server-owned), 1 RoadTripEventSelection,
 # 2 RoadTripPlayerSynced (client-owned). RoadTripSynced vars (ctor FUN_141812ae0, 10 vars -> 4-bit var ids);
@@ -867,6 +871,12 @@ class Server:
         # tod_seconds = timescale * (network_ms / 1000) % 86400), so a clock that starts at 0 means every world starts at midnight.
         # A random start under 24 h gives each world its own time of day; it stays small so the plain comparisons on now_ms() hold.
         self.clock_offset_ms = int(os.environ.get("FH2MP_CLOCK_OFFSET_MS", random.randrange(CLOCK_OFFSET_MAX_MS)))
+        self.traffic = traffic_mod.TrafficWorld(self.send, lambda: [p for p in self.peers.values() if p.connected and p.entered],
+                                                self.log)
+        self.leftover_logged = 0
+        self.big_logged = 0
+        self.mt_seen = {}          # message type -> count (debug histogram, logged every 30 s)
+        self.mt_next = time.monotonic() + 30
         self.wx = None
         self.wx_next = 0.0         # monotonic time of the next weather change
         self.weather_init()
@@ -1229,6 +1239,7 @@ class Server:
 
     def drop_peer(self, peer: Peer, why: str) -> None:
         self.peers.pop(peer.addr, None)
+        self.traffic.leave(peer)
         self.rt_votes.pop(peer, None)
         if self.roadtrip and not any(c.connected for c in self.peers.values()):
             self.rt_state, self.rt_end_ms, self.rt_winner = RT_INITIALISING, 0, None   # the next group starts fresh
@@ -1265,6 +1276,7 @@ class Server:
         for _ in range(hdr["count"]):
             try:
                 mtype = r.bits(7)
+                self.mt_seen[mtype] = self.mt_seen.get(mtype, 0) + 1
             except ValueError:
                 break
             types.append(mtype)
@@ -1340,17 +1352,9 @@ class Server:
                 kind = r.bits(4)
                 a, s14, u5, b, flag = r.bits(8), r.bits(14), r.bits(5), r.bits(8), r.bits(1)
                 seq = r.bits(32)
-                peer.traffic_relayed += 1
-                if peer.traffic_relayed <= 12 or peer.traffic_relayed % 200 == 0:
-                    self.log(f"{addr[1]} traffic msg kind={kind} id={a} s14={s14} u5={u5} "
-                             f"u8={b} flag={flag} seq={seq} -> relay #{peer.traffic_relayed} "
-                             f"(assigned id {peer.next_traffic_id - 1 if kind == 7 and a == 255 else a})")
-                assigned = a
-                if kind == 7 and a == 255:
-                    # a spawn request: the authority assigns the traffic car id
-                    assigned = peer.next_traffic_id
-                    peer.next_traffic_id = (peer.next_traffic_id + 1) % 250
-                replies.append(client_traffic_message(kind, assigned, s14, u5, b, flag, seq))
+                self.traffic.on_message(peer, kind, a, s14, u5, b, flag, seq)
+            elif mtype in traffic_mod.UPDATE_LAYOUT:
+                self.traffic.on_update(peer, mtype, r)
             elif mtype == MSG_FINALISE_SESSION_ENTRY:
                 self.log(f"{addr[1]} FinaliseSessionEntry -> echo + FullWeather + "
                          f"Console.SessionEntryFinalised=1")
@@ -1360,6 +1364,7 @@ class Server:
                     peer.entered = True
                     self.replay_to(peer)
                     self.send_game_options(peer)
+                    self.traffic.join(peer)
 
                 def console_vars(w: BitWriter):
                     w.bits(CONSOLE_VAR_SESSION_ENTRY_FINALISED, CONSOLE_VAR_ID_BITS)
@@ -1576,7 +1581,9 @@ class Server:
             elif mtype == MSG_CAR_PREDICTION_FULL:
                 a, b = r.bits(1), r.bits(1)
                 cid = r.bits(CAR_KEY_ID_BITS)
-                rest_bits = r.size - r.pos
+                # The body is a fixed 710 bits (FUN_141822400, the message's size function: 96 + 326 + 4 x 64 + 32); the
+                # client appends its other messages (traffic updates ...) after it, so it must not be read to the end.
+                rest_bits = CAR_PREDICTION_BODY_BITS if r.size - r.pos >= CAR_PREDICTION_BODY_BITS else r.size - r.pos
                 rest = r.bits(rest_bits)
                 peer.cars_relayed += 1
                 if peer.cars_relayed <= 3 or peer.cars_relayed % 500 == 0:
@@ -1586,7 +1593,6 @@ class Server:
                     msg = relay_car_prediction(cid, peer.owner_id, rest, rest_bits)
                     for q in self.others(peer):
                         self.send(q, [msg])
-                break
             elif mtype == MSG_CARMEET_INVITE_REQUEST:
                 invite_type, value = r.bits(2), r.bits(32)
                 self.log(f"{addr[1]} CarMeet InviteRequest type={invite_type} value={value:#x} (owner {peer.owner_id})")
@@ -1612,6 +1618,15 @@ class Server:
                 self.log(f"{addr[1]} id={hdr['ack_id']} types={types} first-unknown={mtype} "
                          f"bits-left={r.size - r.pos} raw={data.hex()}")
                 break
+        else:
+            left = r.size - r.pos
+            if left >= 16 and self.leftover_logged < 8:
+                self.leftover_logged += 1
+                self.log(f"{addr[1]} packet of {len(data)} bytes: {left} bits left after {hdr['count']} messages "
+                         f"types={types[-6:]} tail={(r.value >> r.pos).to_bytes((left + 7) // 8, 'little')[:60].hex()}")
+        if len(data) > 122 and 71 not in types and self.big_logged < 10:
+            self.big_logged += 1
+            self.log(f"{addr[1]} big packet {len(data)} bytes types={types}: {data.hex()}")
         if replies or hdr["ack_id"] != UNRELIABLE_ID:
             self.send(peer, replies)
 
@@ -1930,6 +1945,12 @@ class Server:
                 if leader.connected:
                     self.start_event(leader)
         self.weather_tick(now)
+        self.traffic.tick(now)
+        if now >= self.mt_next:
+            self.mt_next = now + 30
+            if self.mt_seen and any(p.connected for p in self.peers.values()):
+                self.log("msg types seen (last 30 s): " + " ".join(f"{k}:{v}" for k, v in sorted(self.mt_seen.items(), key=lambda kv: str(kv[0]))))
+            self.mt_seen = {}
         for peer in list(self.peers.values()):
             if peer.connected and now - peer.last_rx > STALE_SECONDS:
                 self.drop_peer(peer, f"no packets for {STALE_SECONDS:.0f} s")
@@ -2042,7 +2063,8 @@ class Hub:
         cur = self.route.get(addr)
         if opened:
             player_id, ltype = opened
-            target = self.world_for(ltype, self.assign.get(player_id, ""))
+            name = self.assign.get(player_id)
+            target = self.world_for(ltype, name) if name else self.open_world_for(ltype)
             if cur is not None and cur is not target:
                 old = cur.peers.get(addr)
                 if old is not None:
@@ -2052,6 +2074,17 @@ class Hub:
         if cur is None:
             cur = self.idle        # a client that survived a server restart: it gets a CloseConnection
         cur.handle(data, addr)
+
+    def open_world_for(self, lobby_type: int):
+        """A player with no lobby assignment (joined from the menu: the matchmaking side cannot reach this hub's control port from the
+        PC) goes to the busiest world of that type that has room, so menu joiners meet each other and whoever is already
+        playing; the shared default world only when there is nobody yet."""
+        best, best_n = None, 0
+        for (ltype, _name), w in self.worlds.items():
+            n = sum(1 for p in w.peers.values() if p.connected)
+            if ltype == lobby_type and 0 < n < 12 and n > best_n:
+                best, best_n = w, n
+        return best if best is not None else self.world_for(lobby_type, "")
 
     def sweep(self) -> None:
         now = time.monotonic()

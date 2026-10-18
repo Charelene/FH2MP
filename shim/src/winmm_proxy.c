@@ -770,6 +770,44 @@ static int patch_mp_difficulty(void)
 }
 
 /*
+ * Traffic ownership on collisions. A client sends RequestOwnership for a traffic car it hit (FUN_140717410, called from the collision
+ * handler FUN_140408af0) only if the car's "can take" flag (+0xaa) is set, and that flag is set only by FUN_140723b40 (the
+ * CanTakeOwnership sender), which rarely runs, so most collisions asked for nothing and the car stayed with its owner: the hitter saw
+ * it react locally, then snap back. The `cmp byte [rcx+0xaa],0 ; je` at RVA 0x717445 (the je is 74 7d) is turned into two nops, so
+ * every collision with a car the local client does not own requests it (the 2 s limit between requests stays). Disable with
+ * env FH2MP_NO_TRAFFICOWN.
+ */
+#define FH2_TRAFFIC_REQOWN_RVA 0x717445u
+static int patch_traffic_request_ownership(void)
+{
+    static const unsigned char cmp_ctx[] = {0x80, 0xB9, 0xAA, 0x00, 0x00, 0x00, 0x00};
+    unsigned char *img = find_fh2_image();
+    unsigned char *at;
+    DWORD old;
+
+    if (!img) {
+        return 0;
+    }
+    at = img + FH2_TRAFFIC_REQOWN_RVA;
+    if (at[0] == 0x90 && at[1] == 0x90) {
+        return 1;
+    }
+    if (memcmp(at - sizeof cmp_ctx, cmp_ctx, sizeof cmp_ctx) != 0 || at[0] != 0x74 || at[1] != 0x7D ||
+        !VirtualProtect(at, 2, PAGE_EXECUTE_READWRITE, &old)) {
+        log_begin();
+        log_raw("trafficown: unexpected bytes in the RequestOwnership trigger, not patched\n");
+        return 0;
+    }
+    at[0] = 0x90;
+    at[1] = 0x90;
+    VirtualProtect(at, 2, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), at, 2);
+    log_begin();
+    log_raw("trafficown: a collision with a traffic car always requests its ownership\n");
+    return 1;
+}
+
+/*
  * "Connected to Xbox Live" menu gates. Live-only menu actions (Show Gamercard in a Car Meet's player actions, and the other
  * Live-gated entries) test the byte at CLobby+0xf0 (CLobby = TBasicSingleton at RVA 0x34d6348):
  *     cmp byte [rax+0xf0], 0 ; jne <allowed>      else: popup "NO NETWORK ACCESS ... not connected to Xbox Live"
@@ -2539,6 +2577,12 @@ static DWORD WINAPI late_init(LPVOID unused)
             wchar_t md_env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_MPDIFF", md_env, 8) == 0) {
                 patch_mp_difficulty();
+            }
+        }
+        {
+            wchar_t to_env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_TRAFFICOWN", to_env, 8) == 0) {
+                patch_traffic_request_ownership();
             }
         }
     }
