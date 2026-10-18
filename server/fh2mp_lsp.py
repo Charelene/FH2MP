@@ -27,7 +27,11 @@ import threading  # noqa: E402
 import xls  # noqa: E402
 import drivatar  # noqa: E402
 import scoreboard  # noqa: E402
+import rivals  # noqa: E402
+import catalog  # noqa: E402
 import cardb  # noqa: E402
+import db  # noqa: E402
+import notifstore  # noqa: E402
 import xbl  # noqa: E402
 
 SEQ = 0
@@ -37,6 +41,8 @@ CTX = threading.local()   # per-request: xuid (from X-UserId)
 DRV = None                # drivatar.DrivatarStore
 CARS = None               # cardb.CarDb (the user's own game database)
 SB = None                 # scoreboard.ScoreStore
+DB = None                 # db.Database (SQLite, server/data/fh2mp.sqlite)
+NOTIF = None              # notifstore.NotificationStore
 LEVELS = {}               # xuid -> currentCareerLevel as sent at Logon
 TAGS = {}                 # xuid -> gamertag, learned at Logon
 
@@ -77,6 +83,8 @@ def logon(req):
     lg = req["loginData"]
     TAGS[lg["xuid"]] = lg["gamerTag"]
     LEVELS[lg["xuid"]] = lg["currentCareerLevel"]
+    with DB.tx() as c:
+        db.touch_player(c, lg["xuid"], lg["gamerTag"], level=lg["currentCareerLevel"])
     log(f"  Logon xuid={lg['xuid']:#x} tag={lg['gamerTag']!r} lcid={lg['LCID']}")
     r = xls.default_struct(SC, SC.sub(SC.call_struct("ForzaUserLogon_Results")[0]))
     r.update({
@@ -89,6 +97,10 @@ def logon(req):
         "defaultContentTimeoutMs": 40000,
         "defaultInGameTimeoutMs": 30000,
         "userData": {**r["userData"], "qwXuid": lg["xuid"], "wzGamerTag": lg["gamerTag"]},
+        # The client's permission table comes from here (it never calls GetPermissionsTable in practice); an empty
+        # table makes every feature gate read "locked" (rival races, gift cars: "cannot connect to Xbox Live").
+        # Capacity of the array is 256 x 16 bytes.
+        "permissions": all_permissions(255),
         # The client keeps at most 7 categories; it shows the ones with a tab (1, 3, 5, 6, 7) in the Message Center.
         "notificationCategories": [
             {"type": t, "name": name, "description": desc, "backgroundImageFileId": 0}
@@ -100,35 +112,10 @@ def logon(req):
 
 # ---------------------------------------------------------------- notifications (Message Center)
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")   # runtime state, git-ignored
-NOTIF_FILE = os.path.join(DATA_DIR, "notifications.json")
-NOTIF = []          # dicts: id, type, message, sra, sent, read
-NOTIF_NEXT_ID = [int(time.time())]  # unique across restarts so the client never sees a reused id
+DATA_DIR = os.environ.get("FH2MP_DATA_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")   # runtime state, git-ignored
 POLL_SECONDS = 5
 MSG_TYPE = 0x200    # notificationType carrying MessageNotificationParameters (to be confirmed in game)
-
-
-def filetime(unix=None):
-    return int(((time.time() if unix is None else unix) + 11644473600) * 10_000_000)
-
-
-def notif_save():
-    os.makedirs(DATA_DIR, exist_ok=True)
-    tmp = NOTIF_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump({"next_id": NOTIF_NEXT_ID[0], "items": NOTIF}, f, indent=1)
-    os.replace(tmp, NOTIF_FILE)
-
-
-def notif_load():
-    try:
-        with open(NOTIF_FILE) as f:
-            d = json.load(f)
-        NOTIF[:] = d["items"]
-        NOTIF_NEXT_ID[0] = max(NOTIF_NEXT_ID[0], d.get("next_id", 0))
-        log(f"loaded {len(NOTIF)} stored notifications")
-    except FileNotFoundError:
-        pass
+filetime = notifstore.filetime
 
 
 # notificationType -> parameter struct, from the client's dispatcher FUN_140f15ec0 (struct descriptors
@@ -190,16 +177,8 @@ def notif_fields(ntype):
     return xls.S.fields_of(SC.exe, SC.thunks, s) if isinstance(s, int) else SC.call_struct(s)
 
 
-def add_notification(message, sra="", ntype=None, params=None, xuid=0):
-    n = {"id": NOTIF_NEXT_ID[0], "type": MSG_TYPE if ntype is None else ntype, "message": message,
-         "sra": sra, "sent": filetime(), "read": False}
-    if params:
-        n["params"] = params
-    if xuid:
-        n["xuid"] = xuid
-    NOTIF_NEXT_ID[0] += 1
-    NOTIF.append(n)
-    notif_save()
+def add_notification(message, sra="", ntype=None, params=None, xuid=0, car_id=None, gift_id=False):
+    n = NOTIF.add(message, sra, MSG_TYPE if ntype is None else ntype, params, xuid, car_id, gift_id)
     log(f"  + notification #{n['id']} type={n['type']:#x}: {message!r}")
     return n
 
@@ -230,8 +209,7 @@ def notif_params(ntype, extra):
 
 def _visible():
     """Notifications for the requesting player: broadcasts (no xuid) plus ones addressed to them."""
-    me = getattr(CTX, "xuid", 0)
-    return [n for n in NOTIF if not n.get("xuid") or n["xuid"] == me]
+    return NOTIF.visible(getattr(CTX, "xuid", 0))
 
 
 def notif_retrieve(req):
@@ -258,16 +236,12 @@ def notif_retrieve(req):
 
 
 def notif_mark_read(req):
-    for n in NOTIF:
-        if n["id"] == req["notificationId"]:
-            n["read"] = True
-    notif_save()
+    NOTIF.mark_read(getattr(CTX, "xuid", 0), req["notificationId"])
     return None
 
 
 def notif_clear(req):
-    NOTIF[:] = [n for n in NOTIF if n["id"] != req["notificationId"]]
-    notif_save()
+    NOTIF.clear(getattr(CTX, "xuid", 0), req["notificationId"])      # clears it for this player only
     return None
 
 
@@ -292,8 +266,9 @@ def drv_for_cache(req):
     n = req["numberOfDrivatars"]
     # The client replaces its built-in set with whatever we return here, so send the whole shipped
     # set plus the players' own Drivatars, never a short or empty list.
-    recs = DRV.pool(max(n, len(DRV.templates) + len(DRV.players)))
-    log(f"  ForCache numberOfDrivatars={n}: serving {len(recs)} ({len(DRV.players)} player + shipped)")
+    nplayers = DRV.count()
+    recs = DRV.pool(max(n, len(DRV.templates) + nplayers))
+    log(f"  ForCache numberOfDrivatars={n}: serving {len(recs)} ({nplayers} player + shipped)")
     return {"drivatarInfos": recs}
 
 
@@ -301,6 +276,7 @@ def drv_for_race(req):
     xuid, tag = _me()
     me = DRV.for_player(xuid, tag)
     me["wristbandLevel"] = DRV.bucket_wristband(req["bucketId"])   # the car the player is driving now
+    DRV.set_wristband(xuid, me["wristbandLevel"])
     cached = set(req["cachedDrivatars"]) | set(req["cachedDrivatarsNewCars"])
     skill = req["skillSelection"] if 0 <= req["skillSelection"] <= 4 else None
     others = DRV.pool(max(0, req["numberOfDrivatars"]), skill=skill, near_wristband=me["wristbandLevel"],
@@ -321,9 +297,9 @@ def _score_row(sc_row, rowdict):
                  "currentCareerLevel": lvl})
     rowdict.update({
         "position": sc_row["position"], "rank": sc_row["position"], "score": scoreboard.dbl_to_u64(sc_row["score"]),
-        "submittedTime": scoreboard.iso(sc_row["t"]), "carId": sc_row["car"], "carClassId": sc_row["cls"],
+        "submittedTime": scoreboard.iso(sc_row["t"]), "carId": sc_row["car"], "carClassId": min(sc_row["cls"], TOP_CLASS),
         "carPerformanceIndex": sc_row["cpi"], "usedSTM": sc_row["stm"], "usedTCS": sc_row["tcs"],
-        "usedABS": sc_row["abs"], "isClean": sc_row["clean"], "ghostFileId": 0, "bounty": 0})
+        "usedABS": sc_row["abs"], "isClean": sc_row["clean"], "ghostFileId": sc_row.get("ghost", 0), "bounty": 0})
     return rowdict
 
 
@@ -331,9 +307,96 @@ def sb_submit_score(req):
     xuid, tag = _me()
     d = req["data"]
     s = SB.submit(xuid, tag, req["type"], d)
+    if s is None:
+        log(f"  SubmitScore board=({d['scoreboardType']},{req['type']}) track={d['trackId']}: ignored, score is not a finite number")
+        return None
     log(f"  SubmitScore board=({d['scoreboardType']},{req['type']}) track={d['trackId']} car={d['carId']} "
-        f"score={s['score']:.3f} clean={d['isClean']}")
+        f"score={s['score']:.3f} clean={d['isClean']} -> ghost upload for score {s['score_id'].hex()[:8]}")
+    try:
+        notify_beaten(xuid, tag, req["type"], d, s)
+    except Exception as ex:          # a notification problem must never fail the score submission
+        log(f"  notify_beaten failed: {ex!r}")
+    return {"scoreId": s["score_id"], "uploadFiles": True}
+
+
+def notify_beaten(xuid, tag, score_type, d, s):
+    """A new personal best on a Monthly event tells every other real player whose best on that event is slower: "<tag> beat you in
+    the <event> challenge" (Message Center type 0x8403, shown under Rivals > My Rivals [C]). One notification per (beaten player,
+    beater, event): a newer one replaces the old, so repeat laps do not pile up."""
+    e = event_info(d["gameScoreboardId"]) if d["scoreboardType"] == 3 else None
+    if e is None:
+        return
+    best = SB._best_per_player(3, score_type, -1, pivot=e["id"])
+    mine = best.get(xuid)
+    if mine is None or abs(mine["score"] - s["score"]) > 1e-9:
+        return                                   # not the submitter's best on this event
+    for other_xuid, row in best.items():
+        if other_xuid == xuid or not SB.better(score_type, s["score"], row["score"]):
+            continue
+        send_beaten(other_xuid, xuid, tag, e, d["carId"], d["carClassId"], score_type, s["score"])
+
+
+def send_beaten(beaten_xuid, beater_xuid, beater_tag, e, car_id, car_class, score_type, score):
+    """Message Center 0x8403 to `beaten_xuid`; replaces an older one from the same beater for the same event."""
+    for n in NOTIF.visible(beaten_xuid):
+        p = n.get("params") or {}
+        if n["type"] == 0x8403 and p.get("timeTrialId") == e["id"] and p.get("senderXuid") == beater_xuid:
+            NOTIF.delete(n["id"])
+    params = {"senderXuid": beater_xuid, "senderGamertag": (beater_tag or "Rival")[:31], "senderClubTag": "", "senderClubRole": 0,
+              "senderFlags": 0, "timeTrialId": e["id"], "carId": car_id, "carClassId": min(car_class, TOP_CLASS),
+              "localizedTimeTrialName": e["name"][:127], "trackName": e["trackname"][:63], "trackId": e["track"],
+              "score": scoreboard.dbl_to_u64(score), "scoreType": score_type, "category": MONTHLY_CATEGORY}
+    add_notification("", "", 0x8403, params, xuid=beaten_xuid)
+    log(f"  {beater_tag or beater_xuid} beat player {beaten_xuid:#x} on event {e['id']}: told them (0x8403)")
+
+
+def sb_notify_rival(req):
+    """The client says it beat `rivalXuid` in event `rivalEventId` with score `myScoreId` (Scoreboard.NotifyRival, no result): that
+    rival gets the "beat you" message, as in retail [inferred: the call is made when a real rival is beaten]. Made-up rivals have
+    xuid 0 and are ignored."""
+    xuid, tag = _me()
+    sub = SB.by_score_id(req["myScoreId"])
+    e = event_info(req["rivalEventId"])
+    log(f"  NotifyRival event={req['rivalEventId']} rival={req['rivalXuid']:#x} score={'%.3f' % sub['score'] if sub else '?'}")
+    if sub is None or e is None or not req["rivalXuid"] or req["rivalXuid"] == xuid:
+        return None
+    send_beaten(req["rivalXuid"], xuid, tag or sub["tag"], e, sub["car"], sub["cls"], sub["st"], sub["score"])
     return None
+
+
+def announce_rotation():
+    """Once per rotation, a Rival Recommendation (0x8402) to everyone for one of the new events (Message Center / My Rivals)."""
+    if RIV is None:
+        return
+    month, n = RIV.serial()
+    key = f"{month}:{n}"
+    r = DB.one("SELECT value FROM meta WHERE key='rival_announced'")
+    if r and r["value"] == key:
+        return
+    evs = RIV.events()
+    if not evs:
+        return
+    e = evs[(month * 7 + n * 3) % len(evs)]
+    params = {"TimeTrialId": e["id"], "localizedTimeTrialName": e["name"][:127], "trackName": e["trackname"][:63],
+              "description": e["description"][:511], "category": MONTHLY_CATEGORY}
+    add_notification("", "", 0x8402, params, xuid=0)
+    with DB.tx() as c:
+        c.execute("INSERT INTO meta (key, value) VALUES ('rival_announced', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key,))
+    log(f"  announced rotation {key}: recommended event {e['id']} ({e['name']})")
+
+
+def sb_upload_file(req):
+    sid = SB.attach_ghost(req["scoreId"], req["data"])
+    log(f"  UploadFile scoreId={bytes(req['scoreId']).hex()[:8]} {len(req['data'])} bytes -> ghost #{sid}")
+    return None
+
+
+def sb_download_file(req):
+    data = SB.ghost(req["id"]) if req["id"] > 0 else None
+    log(f"  DownloadFile id={req['id']} maxSize={req['maxSize']}: {len(data) if data else 'no ghost'}")
+    if data is None or len(data) > req["maxSize"]:
+        return {"data": b""}
+    return {"data": data}
 
 
 def sb_submit_xp(req):
@@ -345,7 +408,7 @@ def sb_submit_xp(req):
 
 def sb_best(req):
     xuid, _ = _me()
-    b = SB.best_of(xuid, req["scoreboardType"], req["scoreType"], req["trackId"])
+    b = SB.best_of(xuid, req["scoreboardType"], req["scoreType"], req["trackId"], req["gameScoreboardId"])
     log(f"  GetBestScore board=({req['scoreboardType']},{req['scoreType']}) gsid={req['gameScoreboardId']} "
         f"track={req['trackId']} car={req['carId']}: "
         f"{'%.3f' % b['score'] if b else 'none'}")
@@ -356,13 +419,14 @@ def sb_best(req):
 
 def sb_rival(req):
     xuid, _ = _me()
-    r = SB.rival_for(xuid, req["scoreboardType"], req["scoreType"], req["trackId"])
+    r = SB.rival_for(xuid, req["scoreboardType"], req["scoreType"], req["trackId"], req["pivotId"])
     res = xls.default_struct(SC, SC.call_struct("ForzaWebServicesScoreboardGetRival_Results"))
     if r is None:
         log("  GetRival: no rival")
         return res
     sd = res["rival"]["scoreData"]
     _score_row(r, sd)
+    sd["bounty"] = res["rival"]["bounty"] = SB.bounty_for(_bounty_track(req), r["position"])
     log(f"  GetRival board=({req['scoreboardType']},{req['scoreType']}) event={req['rivalEventId']} "
         f"track={req['trackId']} pivot={req['pivotId']} rivalXuid={req['rivalXuid']:#x}: {r['tag']} {r['score']:.3f}")
     return res
@@ -371,7 +435,7 @@ def sb_rival(req):
 def sb_rows(req, results="ForzaWebServicesScoreboardGetRowsAnthem_Results"):
     xuid, _ = _me()
     page, mine, nreal, nfake = SB.rows(xuid, req["scoreboardType"], req["scoreType"], req["trackId"],
-                                      max(1, req["startAt"]), min(200, max(0, req["maxResults"])))
+                                      max(1, req["startAt"]), min(200, max(0, req["maxResults"])), req["pivotId"])
     FRIENDS_VIEW = 2    # the leaderboard's "FILTER: FRIENDS" (GetRows view=2); we have no friends, so it is just you
     if req["view"] == FRIENDS_VIEW:
         page = [dict(mine, position=1)] if mine is not None else []
@@ -381,29 +445,86 @@ def sb_rows(req, results="ForzaWebServicesScoreboardGetRowsAnthem_Results"):
     res["rows"] = [_score_row(r, json.loads(json.dumps(tmpl))) for r in page]
     if mine is not None:
         res["userRow"] = _score_row(mine, res["userRow"])
+    # `available` (GetRows) / `totalRowCount` (GetRowsAnthem) = size of the whole board. Left at 0 the
+    # leaderboard page shows "RESULTS UNAVAILABLE" even with valid rows [inferred from the schema; verify in game].
+    total = 1 if req["view"] == FRIENDS_VIEW and mine is not None else (0 if req["view"] == FRIENDS_VIEW else nreal + nfake)
+    res["available"] = total
+    if "totalRowCount" in res:
+        res["totalRowCount"] = total
     log(f"  GetRows[{results[len('ForzaWebServicesScoreboard'):-8]}] board=({req['scoreboardType']},{req['scoreType']}) view={req['view']} "
         f"track={req['trackId']} pivot={req['pivotId']}: {len(page)} rows ({nreal} real, {nfake} fake), "
         f"you={'#%d' % mine['position'] if mine else '-'}")
     return res
 
 
-TIME_TRIAL_TRACKS = [578, 912, 902, 856]   # trackIds the client itself asked rivals/best scores for
+MONTHLY_CATEGORY = 4          # the Monthly Rivals page lists GetTimeTrials entries of category 4 [C]; other categories are unmapped
+RIV = None                    # rivals.RivalCatalog: seeded monthly rotation of circuit events with restriction themes
+CLASS_NAMES = ("D", "C", "B", "A", "S1", "S2")
+TOP_CLASS = 5          # classes 6 (X) and 7 (R) exist in the game DB but the client reports them for maxed cars; relayed as S2 [display choice]
+
+
+def event_info(event_id):
+    return RIV.by_id(event_id) if RIV is not None else None
+
+
+def event_cars(event_id):
+    """Cars a rival event's restriction allows (the fake rivals drive these, so a D Class Dash rival is in a D class car)."""
+    e = event_info(event_id)
+    return RIV.cars_for(e["attrs"]) if e else None
+
+
+def _bounty_track(req):
+    e = event_info(req["rivalEventId"])
+    return e["track"] if e else req["trackId"]
+
+
+def game_options_xml(e):
+    """`<GameOptions>` for a rival event in the game's own format (GameTunableSettings.zip: CareerRaceModes.xml "Laps Race" and
+    GameOptionPresets.xml). UsePFXCheckpoints / anti-griefing are what the career Laps Race mode uses; the confirmed effect so far is
+    the lap count and the class limit. Other restriction attributes (BodyFamilyId, MakeId, ModelId, YearMin/Max, DriveTypeId, CountryId)
+    are named after the exe's option table [inferred, being tested]. The track is not part of it (GetTimeTrials.trackId)."""
+    attrs = "".join(f' {k}="{v}"' for k, v in e["attrs"].items())
+    buckets = f"<Buckets><Bucket><CarRestrictions{attrs}/></Bucket></Buckets>" if e["attrs"] else ""
+    tod = f' TimeOfDay="{rivals.tod_seconds(e["tod"])}"' if e.get("tod") is not None else ""   # seconds since midnight [C]
+    weather = ""
+    if e.get("weather") is not None:
+        # DirectWeatherControlSettings: attribute names from the exe's strings (ControlWeather, ControlAtmosphericPreset,
+        # AtmosphericPresetIndex, Control/Desired AtmosphericWetness | EnvironmentalWetness | PrecipitationLevel) [inferred, under test]
+        weather = ('<DirectWeatherControlSettings ControlWeather="true" ControlAtmosphericPreset="true" '
+                   f'AtmosphericPresetIndex="{e["weather"]}" ControlEnvironmentalWetness="true" '
+                   f'DesiredEnvironmentalWetness="{e["wetness"]}" ControlAtmosphericWetness="true" '
+                   f'DesiredAtmosphericWetness="{e["wetness"]}" ControlPrecipitationLevel="true" '
+                   f'DesiredPrecipitationLevel="{e["precip"]}"/>')
+    return ('<GameOptions UiRacificationMode="Race" DrivatarTrainingDisabled="false" UseOnlineAntiGriefing="true" '
+            f'UsePFXCheckpoints="true" PositionCPFlaresFromCentre="false" HasTraffic="false"{tod}>'
+            f'{buckets}<StartingGridOptions GridOrderingType="Random" Ascending="1"/>'
+            f'<EndConditionOptions Type="NumLaps" NumLaps="{e["laps"]}"/>'
+            '<ScoringOptions Type="TimeBased" TargetScoreEnabled="1" BiggerIsBetter="0" FinishingPlaceRelevant="true"/>'
+            f'{weather}</GameOptions>')
+
+
+def hopper_game_options(req):
+    e = event_info(req["hopperId"])
+    if e is None:
+        log(f"  GetGameOptions hopper={req['hopperId']} round={req['roundNumber']}: not a rival event, empty")
+        return {"gameOptionsXml": b""}
+    xml = game_options_xml(e).encode("utf-8")
+    log(f"  GetGameOptions rival event {e['id']} ({e['kind']} {e['attrs']}): {e['laps']} lap(s) ({len(xml)} bytes)")
+    return {"gameOptionsXml": xml[:max(0, req["optionXmlMaxLength"])]}
 
 
 def sb_time_trials(req):
-    """The rival events listed under Rivals. Category numbers are unknown, so each category gets two events
-    named after it; the Rivals tab titles then show which category belongs to which page."""
+    """The rival events listed under Rivals > Monthly (see rivals.py). The race uses the event's trackId; laps and the car
+    restriction come from Hopper.GetGameOptions, keyed on hopperId = event id."""
+    announce_rotation()
     now = time.time()
     tts = []
-    for cat in range(0, 4):
-        for k in range(2):
-            tts.append({"id": 100 + cat * 10 + k, "category": cat, "scoreType": 1,
-                        "name": f"FH2MP Rival C{cat}-{k + 1}", "description": f"Category {cat} test rival event {k + 1}.",
-                        "notRegisteredMessage": "", "trackId": TIME_TRIAL_TRACKS[(cat * 2 + k) % len(TIME_TRIAL_TRACKS)],
-                        "trackName": f"Test track {cat}-{k + 1}",
-                        "hopperId": 0, "gameOptionsIndex": 0, "startDate": scoreboard.iso(now - 86400),
-                        "endDate": scoreboard.iso(now + 86400 * 30), "isUserRegistered": True, "isNew": k == 0,
-                        "isFeatured": k == 0, "isActive": True})
+    for k, e in enumerate(RIV.events()):
+        tts.append({"id": e["id"], "category": MONTHLY_CATEGORY, "scoreType": 1, "name": e["name"],
+                    "description": e["description"], "notRegisteredMessage": "", "trackId": e["track"],
+                    "trackName": e["trackname"], "hopperId": e["id"], "gameOptionsIndex": 0,
+                    "startDate": scoreboard.iso(now - 86400), "endDate": scoreboard.iso(now + 86400 * 30),
+                    "isUserRegistered": True, "isNew": k < 3, "isFeatured": k == 0, "isActive": True})
     n = req["maxTimeTrials"]
     log(f"  GetTimeTrials max={n}: serving {min(n, len(tts))} rival events")
     return {"timeTrials": tts[:max(n, 0) or len(tts)]}
@@ -411,13 +532,17 @@ def sb_time_trials(req):
 
 # ---------------------------------------------------------------- permissions
 
+def all_permissions(n=255):
+    return [{"methodId": i, "tier": 0, "isEnabled": True, "access": 0} for i in range(1, n + 1)]
+
+
 def permissions_table(req):
     """Every feature enabled. The client looks features up by methodId (FUN_14126c2b0 -> FUN_140f09930):
     a feature missing from the table reads as 4 ("locked", e.g. the "server not available" popup when
     downloading a gifted car), an entry with access 0 reads as allowed."""
     n = min(req["maxPermissions"] if req else 0, 255) or 255
     log(f"  GetPermissionsTable max={req['maxPermissions'] if req else None}: enabling features 1..{n}")
-    return {"permissions": [{"methodId": i, "tier": 0, "isEnabled": True, "access": 0} for i in range(1, n + 1)],
+    return {"permissions": all_permissions(n),
             "featureAreasBanMask": 0, "userFlags": 0}
 
 
@@ -453,10 +578,15 @@ def _gift(giftid, types):
     raise XlsError("no such gift")
 
 
+def _claim(n):
+    """Atomic exactly-once claim for the requesting player; the check in _gift() is only the fast path."""
+    if not NOTIF.claim(getattr(CTX, "xuid", 0), n["id"]):
+        raise XlsError("gift already retrieved")
+
+
 def gift_credits(req):
     n = _gift(req["giftId"], (0x8500,))
-    n["claimed"] = True
-    notif_save()
+    _claim(n)
     p = n["params"]
     log(f"  RetrieveCreditsGift #{req['giftId']}: {p.get('Amount', 0)} CR from {p.get('SenderGamerTag', '')!r}")
     return {"sendingXuid": p.get("SenderXuid", 0), "creditAmount": p.get("Amount", 0)}
@@ -469,8 +599,7 @@ def gift_car(req):
     car = CARS.car_struct(car_id)
     if car is None:
         raise XlsError(f"unknown carId {car_id}")
-    n["claimed"] = True
-    notif_save()
+    _claim(n)
     res = xls.default_struct(SC, SC.call_struct("ForzaGiftingRetrieveCarGift_Results"))
     res["car"].update(car)
     res["giftListing"].update({"giftId": req["giftId"], "senderXuid": p.get("SenderXuid", 0),
@@ -489,7 +618,11 @@ HANDLERS = {
     ("Forza.WebServices.Gifting", "RetrieveCarGift"): ("", gift_car),
     ("Forza.WebServices.Scoreboard", "GetRows"): ("", lambda req: sb_rows(req, "ForzaWebServicesScoreboardGetRows_Results")),
     ("Forza.WebServices.Scoreboard", "GetTimeTrials"): ("", sb_time_trials),
+    ("Forza.WebServices.Hopper", "GetGameOptions"): ("", hopper_game_options),
     ("Forza.WebServices.Scoreboard", "SubmitScore"): ("", sb_submit_score),
+    ("Forza.WebServices.Scoreboard", "UploadFile"): ("", sb_upload_file),
+    ("Forza.WebServices.Scoreboard", "NotifyRival"): ("", sb_notify_rival),
+    ("Forza.WebServices.Scoreboard", "DownloadFile"): ("", sb_download_file),
     ("Forza.WebServices.Scoreboard", "SubmitXpScore"): ("", sb_submit_xp),
     ("Forza.WebServices.Scoreboard", "GetBestScore"): ("", sb_best),
     ("Forza.WebServices.Scoreboard", "GetRival"): ("", sb_rival),
@@ -564,7 +697,7 @@ S_TYPES = {0: "u8", 1: "u16", 2: "i16", 3: "i32", 4: "u32", 5: "i64", 6: "u64", 
 def _notif_json(n):
     return {"id": n["id"], "type": n["type"], "kind": next((k for k, v in KINDS.items() if v[0] == n["type"]), None),
             "text": n["message"], "sra": n["sra"], "fields": n.get("params", {}), "xuid": n.get("xuid", 0),
-            "read": n["read"], "sent": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(n["sent"] / 1e7 - 11644473600))}
+            "read": n["read"], "readBy": n.get("readBy", []), "sent": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(n["sent"] / 1e7 - 11644473600))}
 
 
 def api(method, path, body):
@@ -587,12 +720,9 @@ def api(method, path, body):
         raise ApiError(404, "unknown endpoint")
     if len(parts) == 2:
         if method == "GET":
-            return 200, {"notifications": [_notif_json(n) for n in NOTIF]}
+            return 200, {"notifications": [_notif_json(n) for n in NOTIF.all()]}
         if method == "DELETE":
-            n = len(NOTIF)
-            NOTIF.clear()
-            notif_save()
-            return 200, {"removed": n}
+            return 200, {"removed": NOTIF.delete_all()}
         if method == "POST":
             try:
                 d = json.loads(body or b"{}")
@@ -620,8 +750,7 @@ def api(method, path, body):
                     raise ApiError(400, f"unknown carId {car_id} (not in the game database)")
                 fields.setdefault("MakeId", mm[0])
                 fields.setdefault("ModelId", mm[1])
-            if ntype in (0x8500, 0x8501, 0x8502) and not fields.get("GiftId"):
-                fields["GiftId"] = NOTIF_NEXT_ID[0] & 0x7FFFFFFF
+            is_gift = ntype in (0x8500, 0x8501, 0x8502) and not fields.get("GiftId")    # GiftId = the new id, set on insert
             try:
                 params = notif_params(ntype, fields)
                 xuid = d.get("xuid", 0)
@@ -630,24 +759,20 @@ def api(method, path, body):
                 raise ApiError(400, str(e))
             if "text" in d and "Message" not in {f.name for f in notif_fields(ntype)}:
                 raise ApiError(400, f"type {ntype:#x} has no message text; set \"fields\" instead")
-            n = add_notification(str(d.get("text", "")), str(d.get("sra", "")), ntype, params, xuid)
-            if car_id is not None:
-                n["carId"] = car_id
-                notif_save()
+            n = add_notification(str(d.get("text", "")), str(d.get("sra", "")), ntype, params, xuid, car_id, is_gift)
             return 201, _notif_json(n)
         raise ApiError(405, "method not allowed")
     try:
         nid = int(parts[2])
     except ValueError:
         raise ApiError(404, "bad notification id")
-    n = next((x for x in NOTIF if x["id"] == nid), None)
+    n = NOTIF.get(nid)
     if n is None:
         raise ApiError(404, "no such notification")
     if method == "GET":
         return 200, _notif_json(n)
     if method == "DELETE":
-        NOTIF.remove(n)
-        notif_save()
+        NOTIF.delete(nid)
         return 200, {"removed": nid}
     raise ApiError(405, "method not allowed")
 
@@ -848,12 +973,15 @@ class Handler(BaseHTTPRequestHandler):
                                int(q["wristband"]) if "wristband" in q else None)
             out = f"drivatar {r['GamerTag']!r} xuid={r['Xuid']:#x} skill={r['UserSkillLevel']} " \
                   f"wristband={r['wristbandLevel']}\n"
+        elif u.path in ("/admin/rotate", "/admin/rivals"):
+            evs = RIV.rotate() if u.path == "/admin/rotate" else RIV.events()
+            announce_rotation()
+            out = "".join(f"#{e['id']} track {e['track']} {e['kind']} {e['attrs']} :: {e['name']}\n" for e in evs)
         elif u.path == "/admin/clear":
-            NOTIF.clear()
-            notif_save()
+            NOTIF.delete_all()
             out = "cleared\n"
         else:
-            out = "".join(f"#{n['id']} type={n['type']:#x} read={n['read']} {n['message']!r}\n" for n in NOTIF)
+            out = "".join(f"#{n['id']} type={n['type']:#x} read={n['read']} {n['message']!r}\n" for n in NOTIF.all())
         b = out.encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
@@ -871,16 +999,30 @@ def main():
     if not exe or not os.path.exists(exe):
         sys.exit("usage: fh2mp_lsp.py [port] <path-to-forza_durango_release_final.exe>  (or set FH2MP_EXE)")
     SC = xls.Schema(exe)
-    global CARS
-    CARS = cardb.CarDb(exe)
-    log(f"car database: {'found' if CARS.db else 'NOT found'} ({CARS.path})")
-    notif_load()
+    global CARS, DB, NOTIF
+    DB = db.open_db(DATA_DIR)
+    mount = os.path.dirname(os.path.abspath(exe))
+    cat = catalog.ensure(mount, os.path.join(DATA_DIR, "gamedata.sqlite"), log=log)     # derived game catalog (git-ignored, local)
+    DB.attach("game", cat)                                                              # state and game data joinable as game.<table>
+    CARS = cardb.CarDb(exe, catalog=cat)
+    log(f"game catalog: {cat} (attached as `game`)")
+    NOTIF = notifstore.NotificationStore(DB)
+    log(f"database {DB.path}: {NOTIF.count()} notifications")
+    for r in DB.query("SELECT xuid, gamertag, career_level FROM players WHERE gamertag <> ''"):
+        TAGS.setdefault(r["xuid"], r["gamertag"])           # identities survive a restart
+        if r["career_level"]:
+            LEVELS.setdefault(r["xuid"], r["career_level"])
     global DRV
-    DRV = drivatar.DrivatarStore(SC, os.path.join(os.path.dirname(exe), "media", "drivatarglobalcache", "DefaultCache.bin"), DATA_DIR)
-    log(f"drivatar store: {len(DRV.templates)} shipped templates, {len(DRV.players)} stored players")
+    DRV = drivatar.DrivatarStore(SC, os.path.join(os.path.dirname(exe), "media", "drivatarglobalcache", "DefaultCache.bin"), DB)
+    log(f"drivatar store: {len(DRV.templates)} shipped templates, {DRV.count()} stored players")
     global SB
-    SB = scoreboard.ScoreStore(DATA_DIR, [t["GamerTag"] for t in DRV.templates] + [r["GamerTag"] for r in DRV.players.values()])
-    log(f"scoreboards: {len(SB.subs)} stored submissions")
+    SB = scoreboard.ScoreStore(DB, [t["GamerTag"] for t in DRV.templates] + DRV.gamertags(), cars=CARS.fake_pool(), route_length=CARS.route_length, event_info=event_info,
+                          event_cars=event_cars)
+    log(f"scoreboards: {SB.count()} stored submissions")
+    global RIV
+    RIV = rivals.RivalCatalog(CARS, mount, DB)
+    log(f"rival event texts refreshed: {RIV.refresh_texts()}")
+    log(f"rival events: {len(RIV.events())} this rotation (month {RIV.serial()[0]}, re-roll {RIV.serial()[1]})")
     log(f"schema loaded from {exe}: {len(SC.thunks)} struct descriptors")
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     log(f"fh2mp LSP listening on 127.0.0.1:{port}")

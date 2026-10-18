@@ -865,6 +865,48 @@ static int patch_live_gates(void)
 }
 
 /*
+ * Rivals "race this event" gate. Pressing A on a Rivals event (Monthly, Festival Routes, ...) calls FUN_140d7b680, which only
+ * starts the race when FUN_140666f40 (RVA 0x666f40) returns true, else it raises FUN_140e68760's "Feature unavailable: cannot connect
+ * to Xbox Live" popup. That function begins with the same CLobby+0xf0 test as the Live gates above:
+ *     cmp byte [rax+0xf0], 0 ; jne +7 ; xor al,al ; ret      (80 B8 F0 00 00 00 00 75 07 32 C0 ...)
+ * then checks the Live sign-in state (FUN_140a42090) and the permissions 0x56..0x58 and the user flag mask 0x80. Those pass once the
+ * Logon response carries the permission table (server/fh2mp_lsp.py), so only the byte test is removed: jne (75 07) becomes jmp (EB 07).
+ * Setting the byte to 1 at runtime made "Setting Up Rivals Event" start (2026-10-18). Disable with env FH2MP_NO_RIVALGATE.
+ */
+static int patch_rival_gate(void)
+{
+    static const unsigned char want[9] = {0x80, 0xB8, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x75, 0x07};
+    unsigned char *img = find_fh2_image();
+    unsigned char *at;
+    DWORD old;
+    int i;
+
+    if (!img) {
+        return 0;
+    }
+    at = img + 0x666f4b;
+    if (at[7] == 0xEB) {
+        return 1;                 /* already patched */
+    }
+    for (i = 0; i < 9; i++) {
+        if (at[i] != want[i]) {
+            log_begin();
+            log_raw("rivalgate: unexpected bytes in the Rivals race gate, not patched\n");
+            return 0;
+        }
+    }
+    if (!VirtualProtect(at + 7, 1, PAGE_EXECUTE_READWRITE, &old)) {
+        return 0;
+    }
+    at[7] = 0xEB;
+    VirtualProtect(at + 7, 1, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), at + 7, 1);
+    log_begin();
+    log_raw("rivalgate: Rivals events no longer require the connected-to-Live byte\n");
+    return 1;
+}
+
+/*
  * Car Meet "is this an online meet" test. The Car Meet view model's tick (FUN_140830ad0) sets IsOnlineCarMeet (which gates
  * "Start Online Session" / "Start Showdown Race" and their actions, FUN_140ca0d50) from a chain of checks: the CarMeetSynced object
  * exists, the local player's lobby entry is valid, the network connection is up (+0x10 == 1) and, last,
@@ -2571,6 +2613,12 @@ static DWORD WINAPI late_init(LPVOID unused)
             wchar_t lg_env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_LIVEGATE", lg_env, 8) == 0) {
                 patch_live_gates();
+            }
+        }
+        {
+            wchar_t rg_env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_RIVALGATE", rg_env, 8) == 0) {
+                patch_rival_gate();
             }
         }
         {

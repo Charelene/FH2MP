@@ -3,7 +3,7 @@
 * Reads the game's shipped Drivatar records (media/drivatarglobalcache/DefaultCache.bin: u32 version,
   u32 count, then `count` x (0x2650-byte native struct + 8 trailing bytes)) with the field offsets from
   the exe's own descriptors, giving wire-ready dicts for server/xls.py.
-* Keeps the Drivatars players upload (SaveDrivatarInformation) in server/data/drivatars.json.
+* Keeps the Drivatars players upload (SaveDrivatarInformation) in the `drivatars` table (db.py).
 * Builds a Drivatar for a player profile from a shipped one used as a template.
 """
 import json
@@ -11,8 +11,10 @@ import os
 import random
 import struct
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import db  # noqa: E402
 import xls_schema as S  # noqa: E402
 
 NATIVE = {0: "<B", 1: "<H", 2: "<h", 3: "<i", 4: "<I", 5: "<q", 6: "<Q", 0x13: "<Q", 7: "<f", 0x11: "<?"}
@@ -83,11 +85,11 @@ def read_native(sc, fields, buf, base):
 
 
 class DrivatarStore:
-    def __init__(self, sc, default_cache_path, data_dir):
+    def __init__(self, sc, default_cache_path, db):
         self.sc = sc
+        self.db = db
         arr = sc.call_struct("ForzaWebServicesDrivatarGetDrivatarsForCache_Results")[0]
         self.rec_fields = sc.sub(S.Field(sc.exe, arr.elem))
-        self.path = os.path.join(data_dir, "drivatars.json")
         self.templates = []
         if default_cache_path and os.path.exists(default_cache_path):
             d = open(default_cache_path, "rb").read()
@@ -99,24 +101,35 @@ class DrivatarStore:
                 self.templates.append(read_native(sc, self.rec_fields, d, b))
             for i, t in enumerate(self.templates):
                 t["GamerTag"] = generated_tag(i)
-        self.players = {}   # xuid(str) -> record dict (wire shaped)
         self.car_override = {}
-        self._load()
 
-    # ---- persistence
-    def _load(self):
-        try:
-            with open(self.path) as f:
-                self.players = json.load(f).get("players", {})
-        except FileNotFoundError:
-            pass
+    # ---- persistence (table `drivatars`: wire-shaped record as JSON plus the columns we select on)
+    def count(self):
+        return self.db.one("SELECT COUNT(*) FROM drivatars")[0]
 
-    def _save(self):
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        tmp = self.path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump({"players": self.players}, f)
-        os.replace(tmp, self.path)
+    def gamertags(self):
+        return [r[0] for r in self.db.query("SELECT gamertag FROM drivatars ORDER BY rowid")]
+
+    @staticmethod
+    def _rec(row):
+        rec = json.loads(row["record"])
+        if row["locked"]:
+            rec["_locked"] = True
+        return rec
+
+    def _get(self, c, xuid):
+        r = c.execute("SELECT record, locked FROM drivatars WHERE xuid=?", (xuid,)).fetchone()
+        return self._rec(r) if r else None
+
+    @staticmethod
+    def _put(c, rec):
+        """Insert or replace a player's Drivatar (the lock flag travels as rec["_locked"])."""
+        stored = {k: v for k, v in rec.items() if k != "_locked"}
+        c.execute("INSERT INTO drivatars (xuid, gamertag, skill, wristband, locked, record, updated) VALUES (?,?,?,?,?,?,?) "
+                  "ON CONFLICT(xuid) DO UPDATE SET gamertag=excluded.gamertag, skill=excluded.skill, "
+                  "wristband=excluded.wristband, locked=excluded.locked, record=excluded.record, updated=excluded.updated",
+                  (stored["Xuid"], stored["GamerTag"], stored["UserSkillLevel"], stored["wristbandLevel"],
+                   int(bool(rec.get("_locked"))), json.dumps(stored), time.time()))
 
     # ---- records
     # A player's own Drivatar borrows its driving style from the shipped one closest to these. The
@@ -133,23 +146,28 @@ class DrivatarStore:
         return min(self.templates, key=lambda t: (abs(t["UserSkillLevel"] - skill),
                                                   abs(t["wristbandLevel"] - wristband)))
 
-    def for_player(self, xuid, gamertag):
-        """The Drivatar record for a player: their upload when we have one, else a profile-based fake."""
-        key = str(xuid)
-        rec = self.players.get(key)
+    def _for_player(self, c, xuid, gamertag):
+        rec = self._get(c, xuid)
+        before = json.dumps(rec, sort_keys=True)
         if rec is None:
             t = self.template()
             if t is None:
                 return None
             rec = json.loads(json.dumps(t))
             rec["IsFriend"] = False
-            self.players[key] = rec
         rec["GamerTag"] = gamertag or rec["GamerTag"]
         rec["Xuid"] = xuid
-        if key in self.car_override:
-            rec["CarId"] = self.car_override[key]
-        self._save()
+        if str(xuid) in self.car_override:
+            rec["CarId"] = self.car_override[str(xuid)]
+        if json.dumps(rec, sort_keys=True) != before:
+            db.touch_player(c, xuid, gamertag)
+            self._put(c, rec)
         return rec
+
+    def for_player(self, xuid, gamertag):
+        """The Drivatar record for a player: their upload when we have one, else a profile-based fake."""
+        with self.db.tx() as c:
+            return self._for_player(c, xuid, gamertag)
 
     def add_player(self, xuid, gamertag, skill=None, wristband=None):
         """Creates (or replaces) a stored player Drivatar from the nearest shipped template."""
@@ -158,45 +176,55 @@ class DrivatarStore:
             return None
         rec = json.loads(json.dumps(t))
         rec.update({"GamerTag": gamertag[:15], "Xuid": xuid, "IsFriend": False})
-        self.players[str(xuid)] = rec
-        self._save()
+        with self.db.tx() as c:
+            db.touch_player(c, xuid, rec["GamerTag"])
+            self._put(c, rec)
         return rec
 
     def remove(self, xuid):
-        return self.players.pop(str(xuid), None) is not None and (self._save() or True)
+        with self.db.tx() as c:
+            return c.execute("DELETE FROM drivatars WHERE xuid=?", (xuid,)).rowcount > 0
 
     def edit(self, xuid, sets, lock=None):
         """Hand-tune a stored Drivatar. `sets` maps UserInfo field names (e.g. sideswipeMean, or base fields
         like timeRatioMean) or UserSkillLevel / wristbandLevel / CarId to values. lock=True keeps the
         game's own training uploads from overwriting the player's stats; lock=False releases it."""
-        rec = self.players.get(str(xuid))
-        if rec is None:
-            return None
-        ui = rec["UserInfo"]
-        for k, v in sets.items():
-            if k in ui and not isinstance(ui[k], dict):
-                ui[k] = float(v)
-            elif k in ui["base"]:
-                ui["base"][k] = float(v)
-            elif k in ("UserSkillLevel", "wristbandLevel", "CarId", "BucketId"):
-                rec[k] = int(v)
-            else:
-                raise KeyError(k)
-        if lock is not None:
-            rec["_locked"] = bool(lock)
-        self._save()
-        return rec
+        with self.db.tx() as c:
+            rec = self._get(c, xuid)
+            if rec is None:
+                return None
+            ui = rec["UserInfo"]
+            for k, v in sets.items():
+                if k in ui and not isinstance(ui[k], dict):
+                    ui[k] = float(v)
+                elif k in ui["base"]:
+                    ui["base"][k] = float(v)
+                elif k in ("UserSkillLevel", "wristbandLevel", "CarId", "BucketId"):
+                    rec[k] = int(v)
+                else:
+                    raise KeyError(k)       # rolls the transaction back, nothing half-applied
+            if lock is not None:
+                rec["_locked"] = bool(lock)
+            self._put(c, rec)
+            return rec
 
     def save_upload(self, xuid, gamertag, info, curves, segments):
-        rec = self.for_player(xuid, gamertag)
-        if rec is None:
-            return
-        if rec.get("_locked"):
-            return
-        rec["UserInfo"] = info
-        rec["Curves"] = curves
-        rec["Segments"] = segments
-        self._save()
+        with self.db.tx() as c:
+            rec = self._for_player(c, xuid, gamertag)
+            if rec is None or rec.get("_locked"):
+                return
+            rec["UserInfo"] = info
+            rec["Curves"] = curves
+            rec["Segments"] = segments
+            self._put(c, rec)
+
+    def set_wristband(self, xuid, wristband):
+        """The car-value bucket of the car the player drives now (kept on their stored Drivatar)."""
+        with self.db.tx() as c:
+            rec = self._get(c, xuid)
+            if rec is not None and rec["wristbandLevel"] != wristband:
+                rec["wristbandLevel"] = wristband
+                self._put(c, rec)
 
     def bucket_wristband(self, bucket):
         """Car-value bucket index (as the client sends it) -> the shipped Drivatars' wristband value.
@@ -209,9 +237,13 @@ class DrivatarStore:
         """Real players' Drivatars first (whatever their skill: there are few of them), then the shipped
         ones of the requested `skill`, nearest car-value bucket first."""
         skip = set(exclude_xuids)
-        players = [r for r in self.players.values()
-                   if r["Xuid"] != exclude_xuid and r["Xuid"] not in skip
-                   and (any_skill_players or skill is None or r["UserSkillLevel"] == skill)]
+        where, args = ["xuid <> ?", "xuid NOT IN (SELECT value FROM json_each(?))"], [exclude_xuid or 0, json.dumps(sorted(skip))]
+        if not any_skill_players and skill is not None:
+            where.append("skill = ?")
+            args.append(skill)
+        rows = self.db.query(f"SELECT record, locked FROM drivatars WHERE {' AND '.join(where)} ORDER BY rowid LIMIT ?",
+                             args + [max(0, limit)])
+        players = [self._rec(r) for r in rows]
         tpl = [t for t in self.templates if skill is None or t["UserSkillLevel"] == skill]
         tpl = [t for t in tpl if t.get("Xuid") not in skip]
         if near_wristband is not None:

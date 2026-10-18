@@ -5,17 +5,21 @@ GetBestScore / GetRival / GetRowsAnthem. Boards are keyed (scoreboardType, score
 is a big-endian IEEE double carried as a u64 on the wire. Direction (lower is better for times, higher
 for everything else) is a guess by scoreType, see ASCENDING. Real rows are topped up with deterministic
 fake rivals (drawn from the Drivatar names) so a board is never empty; they are marked in the log only.
-Persistence: server/data/scores.json.
+Persistence: score_submissions / player_xp tables (db.py); best-per-player is a query, not a cached table.
 """
+import db
 import hashlib
-import json
 import os
+import math
 import struct
 import time
 
 ASCENDING = {1}          # scoreTypes where a smaller score wins (lap/race times) [guess]
 XP_BOARD = (4, 9)        # (scoreboardType, scoreType) of the XP ladder [guess from SubmitXpScore traffic]
 FAKE_ROWS = 40
+CLASS_AVG_KMH = (88, 103, 119, 134, 150, 166)   # km/h; first race data: A-class Huracan averaged ~144 km/h on route 8001
+EVENT_BOARDS = {3, 6}   # scoreboardType whose pivotId is the rival event id (Monthly = 3, Showcase = 6) and SubmitScore.gameScoreboardId matches it [C]
+CLASS_PIVOT_BOARDS = {1}   # scoreboardType whose pivotId is the car class (Festival Routes rivals: pivot 0..5 = D..S2) [inferred from GetRival calls]
 SPEED_BOARDS = {9}       # scoreboardType of the speed trap / speed zone boards: score = m/s (32.565 shows as 117.23 km/h)
 
 
@@ -32,97 +36,178 @@ def iso(t):
 
 
 class ScoreStore:
-    def __init__(self, data_dir, names):
-        self.path = os.path.join(data_dir, "scores.json")
+    def __init__(self, db, names, cars=None, route_length=None, event_info=None, event_cars=None):
+        self.db = db
+        self.route_length = route_length or (lambda track: None)   # track id -> metres or None
+        self.event_info = event_info or (lambda event: None)       # rival event id -> {"track","laps","cls"} or None
+        self.event_cars = event_cars or (lambda event: None)       # rival event id -> [(car id, class, PI, top m/s)] the event allows
         self.names = list(dict.fromkeys(n for n in names if n)) or ["Rival"]   # unique, order kept
-        self.subs = []     # submissions: dict
-        self.xp = {}       # xuid(str) -> accumulated xp
-        try:
-            with open(self.path) as f:
-                d = json.load(f)
-            self.subs, self.xp = d.get("subs", []), d.get("xp", {})
-        except FileNotFoundError:
-            pass
+        self.cars = sorted(cars or [], key=lambda c: c[2])   # (carId, class, pi, top m/s) from the game database, by PI
 
-    def _save(self):
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        tmp = self.path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump({"subs": self.subs, "xp": self.xp}, f)
-        os.replace(tmp, self.path)
+    def count(self):
+        return self.db.one("SELECT COUNT(*) FROM score_submissions")[0]
 
     # ---- writes
     def submit(self, xuid, tag, score_type, d):
-        s = {"xuid": xuid, "tag": tag, "sb": d["scoreboardType"], "st": score_type, "gsid": d["gameScoreboardId"],
-             "track": d["trackId"], "car": d["carId"], "cls": d["carClassId"], "cpi": d["carPerformanceIndex"],
-             "score": u64_to_dbl(d["score"]), "clean": d["isClean"], "stm": d["usedSTM"], "tcs": d["usedTCS"],
-             "abs": d["usedABS"], "t": time.time()}
-        self.subs.append(s)
-        self.subs = self.subs[-5000:]
-        self._save()
-        return s
+        """Stores one submission and returns it as a row dict, or None if the score is not a finite number
+        (SQLite turns NaN into NULL, and a NaN/inf time must never reach a public board anyway)."""
+        score = u64_to_dbl(d["score"])
+        if not math.isfinite(score):
+            return None
+        now = time.time()
+        score_id = os.urandom(16)
+        with self.db.tx() as c:
+            db.touch_player(c, xuid, tag, now)
+            cur = c.execute("INSERT INTO score_submissions (xuid, sb, st, gsid, track, car, cls, cpi, score, clean, stm, tcs, "
+                            "abs, submitted, score_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            (xuid, d["scoreboardType"], score_type, d["gameScoreboardId"], d["trackId"], d["carId"],
+                             d["carClassId"], d["carPerformanceIndex"], score, int(d["isClean"]), int(d["usedSTM"]),
+                             int(d["usedTCS"]), int(d["usedABS"]), now, score_id))
+        return {"id": cur.lastrowid, "score_id": score_id, "xuid": xuid, "tag": tag, "sb": d["scoreboardType"],
+                "st": score_type, "score": score}
+
+    def attach_ghost(self, score_id, data):
+        """Stores the ghost the client uploads for a SubmitScore (matched by the scoreId we issued). Returns the
+        submission id, or None if the id is unknown."""
+        with self.db.tx() as c:
+            r = c.execute("SELECT id FROM score_submissions WHERE score_id=?", (bytes(score_id),)).fetchone()
+            if r is None:
+                return None
+            c.execute("INSERT OR REPLACE INTO score_ghosts (submission_id, data, uploaded) VALUES (?,?,?)",
+                      (r["id"], bytes(data), time.time()))
+            return r["id"]
+
+    def by_score_id(self, score_id):
+        """The stored submission a client refers to by the scoreId we issued (None if unknown)."""
+        r = self.db.one("SELECT s.*, COALESCE(p.gamertag, '') AS tag, 0 AS ghost FROM score_submissions s "
+                        "LEFT JOIN players p ON p.xuid = s.xuid WHERE s.score_id=?", (bytes(score_id),))
+        return _row(r) | {"id": r["id"]} if r else None
+
+    def ghost(self, ghost_id):
+        r = self.db.one("SELECT data FROM score_ghosts WHERE submission_id=?", (ghost_id,))
+        return bytes(r["data"]) if r else None
 
     def add_xp(self, xuid, xp):
-        self.xp[str(xuid)] = self.xp.get(str(xuid), 0.0) + xp
-        self._save()
-        return self.xp[str(xuid)]
+        """Atomic increment (one statement, so concurrent submissions cannot lose an update)."""
+        if not math.isfinite(xp):
+            return self.xp_of(xuid)
+        with self.db.tx() as c:
+            db.touch_player(c, xuid, "", time.time())
+            return c.execute("INSERT INTO player_xp (xuid, xp, updated) VALUES (?,?,?) ON CONFLICT(xuid) "
+                             "DO UPDATE SET xp = xp + excluded.xp, updated = excluded.updated RETURNING xp",
+                             (xuid, xp, time.time())).fetchone()[0]
+
+    def xp_of(self, xuid):
+        r = self.db.one("SELECT xp FROM player_xp WHERE xuid=?", (xuid,))
+        return r[0] if r else 0.0
 
     # ---- reads
     def better(self, st, a, b):
         return a < b if st in ASCENDING else a > b
 
-    def best_of(self, xuid, sb, st, track):
-        best = None
-        for s in self.subs:
-            if s["xuid"] == xuid and s["sb"] == sb and s["st"] == st and (track in (-1, 65535) or s["track"] == track):
-                if best is None or self.better(st, s["score"], best["score"]):
-                    best = s
-        if (sb, st) == XP_BOARD and str(xuid) in self.xp:
-            x = self.xp[str(xuid)]
-            if best is None or x > best["score"]:
-                best = {"xuid": xuid, "tag": "", "sb": sb, "st": st, "track": track, "car": 0, "cls": 0, "cpi": 0.0,
-                        "score": x, "clean": True, "stm": False, "tcs": False, "abs": False, "t": time.time()}
+    def _best_per_player(self, sb, st, track, xuid=None, pivot=-1):
+        """Each player's best submission on a board (any track when `track` is -1/65535), as row dicts keyed by
+        xuid. The XP ladder also takes the accumulated XP when that beats a submitted score."""
+        asc = st in ASCENDING
+        where, args = "s.sb=? AND s.st=?", [sb, st]
+        if sb in EVENT_BOARDS and pivot > 0:           # event boards: one board per event (the client's track field is 0 or the track)
+            where += " AND s.gsid=?"
+            args.append(pivot)
+        elif track not in (-1, 65535):
+            where += " AND s.track=?"
+            args.append(track)
+        if xuid is not None:
+            where += " AND s.xuid=?"
+            args.append(xuid)
+        if sb in CLASS_PIVOT_BOARDS and 0 <= pivot <= 5:     # one board per car class (the submission's carClassId)
+            where += " AND s.cls=?"
+            args.append(pivot)
+        # ties go to the earlier submission (lowest id), as the in-memory scan did
+        sql = ("SELECT * FROM (SELECT s.*, COALESCE(p.gamertag, '') AS tag, "
+               "CASE WHEN g.submission_id IS NULL THEN 0 ELSE s.id END AS ghost, ROW_NUMBER() OVER "
+               f"(PARTITION BY s.xuid ORDER BY s.score {'ASC' if asc else 'DESC'}, s.id) AS rn "
+               "FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid "
+               f"LEFT JOIN score_ghosts g ON g.submission_id = s.id WHERE {where}) WHERE rn = 1")
+        best = {r["xuid"]: _row(r) for r in self.db.query(sql, args)}
+        if (sb, st) == XP_BOARD:
+            q = "SELECT x.xuid, x.xp, COALESCE(p.gamertag, '') AS tag FROM player_xp x LEFT JOIN players p ON p.xuid = x.xuid"
+            for r in self.db.query(q + (" WHERE x.xuid=?" if xuid is not None else ""), (xuid,) if xuid is not None else ()):
+                cur = best.get(r["xuid"])
+                if cur is None or r["xp"] > cur["score"]:
+                    best[r["xuid"]] = {"xuid": r["xuid"], "tag": r["tag"], "sb": sb, "st": st, "track": track, "car": 0,
+                                       "cls": 0, "cpi": 0.0, "score": r["xp"], "clean": True, "stm": False,
+                                       "tcs": False, "abs": False, "t": time.time()}
         return best
 
-    def _fake(self, sb, st, track, anchor, n):
+    def best_of(self, xuid, sb, st, track, pivot=-1):
+        return self._best_per_player(sb, st, track, xuid, pivot).get(xuid)
+
+    def _fake(self, sb, st, track, anchor, n, pivot=-1):
         """Deterministic fake rivals around `anchor` (the player's best, or a default scale)."""
         out = []
+        ev_cars = self.event_cars(pivot) if sb in EVENT_BOARDS and pivot > 0 else None   # rivals drive cars the event allows
         for i in range(n):
-            nm = self.names[(i * 7 + (hash_int(sb, st, track) % len(self.names))) % len(self.names)]
-            r = hash_frac(sb, st, track, nm, i)
+            nm = self.names[(i * 7 + (hash_int(sb, st, track, pivot) % len(self.names))) % len(self.names)]
+            r = hash_frac(sb, st, track, pivot, nm, i)
             if st in ASCENDING:
-                base = anchor if anchor else 100.0
-                score = base * (0.6 + 0.9 * r)                  # 60% .. 150% of the anchor time
+                length = None if track in (-1, 0, 65535) else self.route_length(track)
+                ev = self.event_info(pivot) if sb in EVENT_BOARDS and pivot > 0 else None
+                if ev:
+                    length = (self.route_length(ev["track"]) or 0) * ev["laps"] or length
+                if anchor:
+                    score = anchor * (0.6 + 0.9 * r)            # 60% .. 150% of the player's own time
+                elif length:
+                    # average speed over a lap by car class (D..S2), km/h, incl. corners [guess]; the route is
+                    # a polyline of waypoints, so add 10% for the road between them
+                    cls_ = (ev["cls"] if ev["cls"] is not None else 4) if ev else (pivot if (sb in CLASS_PIVOT_BOARDS and 0 <= pivot <= 5) else 4)   # open events: assume S1-ish
+                    score = length * 1.1 / (CLASS_AVG_KMH[cls_] / 3.6) * (0.75 + 0.6 * r)
+                else:
+                    score = 100.0 * (0.6 + 0.9 * r)
             elif sb in SPEED_BOARDS:
                 base = anchor if anchor else 50.0               # about 180 km/h
-                score = max(20.0, base * (0.7 + 0.8 * r) if anchor else 35.0 + 45.0 * r)   # m/s
+                score = min(102.0, max(20.0, base * (0.7 + 0.8 * r) if anchor else 35.0 + 45.0 * r))   # m/s, capped at ~367 km/h
             else:
                 base = anchor if anchor else 20000.0
                 score = base * (0.05 + 3.0 * r * r)             # long tail of lower scores, a few above
+            car, cls, cpi = self._fake_car(nm, score if sb in SPEED_BOARDS else None, ev_cars)
             out.append({"xuid": 0x9100000000000 + (hash_int(nm) % 0xFFFFFF), "tag": nm[:15], "sb": sb, "st": st,
-                        "track": track, "car": 100 + hash_int(nm, "car") % 500, "cls": hash_int(nm, "c") % 6,
-                        "cpi": 0.3 + 0.6 * hash_frac(nm, "cpi"), "score": round(score, 3), "clean": r > 0.3,
-                        "stm": False, "tcs": r < 0.5, "abs": True, "t": time.time() - 86400 * (1 + 20 * r)})
+                        "track": track, "car": car, "cls": cls, "cpi": cpi, "score": round(score, 3), "clean": r > 0.3,
+                        "stm": False, "tcs": r < 0.5, "abs": True, "t": time.time() - 86400 * (1 + 20 * r), "fake": True})
         return out
 
-    def rows(self, xuid, sb, st, track, start_at, max_results):
+    def bounty_for(self, track, position=1):
+        """Credits for beating a rival on `track` (the "REWARDS" box): scales with the route length and with how high
+        the rival ranks [guess; the real formula is Turn 10's]."""
+        length = None if track in (-1, 0, 65535) else self.route_length(track)
+        km = (length or 3000.0) / 1000.0
+        return int(round(km * 400 * (1.0 + 1.0 / max(1, position)), -1))
+
+    def _fake_car(self, nm, speed=None, pool=None):
+        """A real car for a fake row (so the page shows its name, not "DLC Car"). For speed boards the car is
+        chosen by performance index so the speed is plausible for its class: roughly
+        km/h = 40 + 320 * PI^1.5 (D ~150-190, A ~230-270, S2 ~300+). The database's own top-speed column is
+        not usable on its own (a '63 Corvette Forza Edition is listed at 362 km/h) [inferred from spot checks]."""
+        cars = pool or self.cars
+        if not cars:
+            return 100 + hash_int(nm, "car") % 500, hash_int(nm, "c") % 6, 0.3 + 0.6 * hash_frac(nm, "cpi")
+        if speed is None:
+            c = cars[hash_int(nm, "car") % len(cars)]
+            return c[0], c[1], c[2]
+        kmh = speed * 3.6
+        target = min(1.0, max(0.0, (kmh - 40.0) / 320.0)) ** (2.0 / 3.0)
+        # also cap by the car's listed top speed: those are unlimited-gearing values, ~10% above real stock
+        # figures (Veyron SS 431 = real, GT86 253 vs ~225), so a trap reading stays under 85% of it [inferred]
+        ok = [c for c in cars if c[3] * 0.85 >= speed] or cars[-8:]
+        near = sorted(ok, key=lambda c: abs(c[2] - target))[:8]
+        c = near[hash_int(nm, "car", round(speed)) % len(near)]
+        return c[0], c[1], c[2]
+
+    def rows(self, xuid, sb, st, track, start_at, max_results, pivot=-1):
         """Sorted best-per-player rows (real + fake) and the requesting player's row."""
-        best = {}
-        for s in self.subs:
-            if s["sb"] == sb and s["st"] == st and (track in (-1, 65535) or s["track"] == track):
-                cur = best.get(s["xuid"])
-                if cur is None or self.better(st, s["score"], cur["score"]):
-                    best[s["xuid"]] = s
-        if (sb, st) == XP_BOARD:
-            for k, v in self.xp.items():
-                cur = best.get(int(k))
-                if cur is None or v > cur["score"]:
-                    best[int(k)] = {"xuid": int(k), "tag": "", "sb": sb, "st": st, "track": track, "car": 0, "cls": 0,
-                                    "cpi": 0.0, "score": v, "clean": True, "stm": False, "tcs": False, "abs": False,
-                                    "t": time.time()}
+        best = self._best_per_player(sb, st, track, pivot=pivot)
         me = best.get(xuid)
         real = list(best.values())
-        fake = self._fake(sb, st, track, me["score"] if me else None, max(0, FAKE_ROWS - len(real)))
+        fake = self._fake(sb, st, track, me["score"] if me else None, max(0, FAKE_ROWS - len(real)), pivot)
         allrows = real + fake
         allrows.sort(key=lambda s: s["score"], reverse=(st not in ASCENDING))
         for i, s in enumerate(allrows):
@@ -131,12 +216,34 @@ class ScoreStore:
         page = allrows[max(0, start_at - 1):max(0, start_at - 1) + max_results]
         return page, mine, len(real), len(fake)
 
-    def rival_for(self, xuid, sb, st, track):
-        rows, mine, _, _ = self.rows(xuid, sb, st, track, 1, 1000)
+    def rival_for(self, xuid, sb, st, track, pivot=-1):
+        """The rival to chase: the row just above the player's best; with no best yet, one near the middle of the board. A real
+        player's row (it has a ghost to race) is preferred over a made-up one: for a newcomer any real ghost on the board, otherwise
+        one within 4 rows above the player's best."""
+        rows, mine, _, _ = self.rows(xuid, sb, st, track, 1, 1000, pivot)
+        if not rows:
+            return None
         if mine is None:
-            return rows[len(rows) // 2] if rows else None
+            mid = len(rows) // 2
+            return self._near_real(rows, mid, xuid, len(rows)) or rows[mid]      # any real ghost on the board beats a made-up rival
         above = [r for r in rows if r["position"] < mine["position"]]
-        return above[-1] if above else None
+        if not above:
+            return None
+        return self._near_real(rows, above[-1]["position"] - 1, xuid, 4, only_above=mine["position"]) or above[-1]
+
+    @staticmethod
+    def _near_real(rows, idx, xuid, radius, only_above=None):
+        """Closest real (non-fake) row with a ghost within `radius` rows of index `idx`, never the player's own row."""
+        best = None
+        for j in range(max(0, idx - radius), min(len(rows), idx + radius + 1)):
+            r = rows[j]
+            if r.get("fake") or r["xuid"] == xuid or not r.get("ghost"):
+                continue
+            if only_above is not None and r["position"] >= only_above:
+                continue
+            if best is None or abs(j - idx) < abs(best[0] - idx):
+                best = (j, r)
+        return best[1] if best else None
 
 
 def hash_int(*parts):
@@ -145,3 +252,11 @@ def hash_int(*parts):
 
 def hash_frac(*parts):
     return hash_int(*parts) / float(1 << 48)
+
+
+def _row(r):
+    """score_submissions row (+ joined tag) -> the dict the rest of the server uses."""
+    return {"xuid": r["xuid"], "tag": r["tag"], "sb": r["sb"], "st": r["st"], "gsid": r["gsid"], "track": r["track"],
+            "car": r["car"], "cls": r["cls"], "cpi": r["cpi"], "score": r["score"], "clean": bool(r["clean"]),
+            "stm": bool(r["stm"]), "tcs": bool(r["tcs"]), "abs": bool(r["abs"]), "t": r["submitted"],
+            "ghost": r["ghost"] if "ghost" in r.keys() else 0}
