@@ -37,6 +37,7 @@ MSG_FINALISE_SESSION_ENTRY = 34   # no payload, both directions
 MSG_FULL_WEATHER = 54             # atmosphere(3f,4i) + precipitation(3f) + 2 x s32
 KEEPALIVE_SECONDS = 1.0
 TIME_SYNC_SECONDS = 30.0
+CLOCK_OFFSET_MAX_MS = 86_400_000    # random start of each world's clock = its starting time of day
 MSG_OBJECT_CREATE = 7
 MSG_OBJECT_UPDATE = 8
 ROUTER_LOBBY = 6          # ILobbyRouter: SessionHostSynced (type 0), GameOptionsSynced (type 1)
@@ -537,22 +538,48 @@ def server_update(router: int, obj_id: int, id_bits: int, seq: int, write_vars=N
     return write
 
 
-def weather_create(seq=1, intensity=0.0, tick=1):
+# Weather model (recovered from a solo session sampled with FH2MP_WEATHER_DUMP; see docs/weather.md):
+#   the atmosphere has 4 severity levels 0, 1/3, 2/3, 1 (clear / mostly sunny / cloudy / rain+storm); the current level ramps toward
+#   the target at 1/165 per second (WEATHER_RAMP_MS per unit); every ~4-5 minutes a new target is chosen. Each level has a preset
+#   index (observed [0, 1, 3|5, 7]). Precipitation follows the atmosphere: none below level ~0.6, full at level 1.
+#   Network form: WeatherSynced (router 10) atm.{Current,Desired}Intensity (float) / {Current,Desired}Tick (net clock ms), the
+#   preset index array, and the same four vars for precipitation; the client interpolates between (Current, CurrentTick) and
+#   (Desired, DesiredTick) on its network clock [guess: not yet verified in game].
+WEATHER_LEVELS = (0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0)
+WEATHER_RAMP_MS = 165000            # time for the atmosphere to move one whole unit of intensity
+WEATHER_RAIN_START = 0.603          # atmosphere level above which it rains (precipitation ramps 0 -> 1 up to level ~0.92)
+WEATHER_WEIGHTS = {1: 0.45, 2: 0.35, 3: 0.20}     # next-level odds (current level excluded, then renormalised)
+WEATHER_HOLD_S = (90.0, 180.0)      # steady time after a transition, before the next change
+
+
+def weather_vars(wx):
+    """All nine WeatherSynced variables from the world's weather state dict."""
     import struct
 
     def f32(x: float) -> int:
         return struct.unpack("<I", struct.pack("<f", x))[0]
 
-    def vars_(w: BitWriter):
+    def write(w: BitWriter):
         for name, kind, value in (
-            ("atm.CurrentIntensity", "f", intensity), ("atm.CurrentTick", "u", tick),
-            ("atm.DesiredIntensity", "f", intensity), ("atm.DesiredTick", "u", tick),
-            ("pre.CurrentIntensity", "f", intensity), ("pre.CurrentTick", "u", tick),
-            ("pre.DesiredIntensity", "f", intensity), ("pre.DesiredTick", "u", tick),
+            ("atm.CurrentIntensity", "f", wx["a_cur"]), ("atm.CurrentTick", "u", wx["a_cur_tick"]),
+            ("atm.DesiredIntensity", "f", wx["a_des"]), ("atm.DesiredTick", "u", wx["a_des_tick"]),
+            ("pre.CurrentIntensity", "f", wx["p_cur"]), ("pre.CurrentTick", "u", wx["p_cur_tick"]),
+            ("pre.DesiredIntensity", "f", wx["p_des"]), ("pre.DesiredTick", "u", wx["p_des_tick"]),
         ):
             w.bits(WEATHER_VARS[name], WEATHER_VAR_ID_BITS)
-            w.bits(f32(value) if kind == "f" else value, 32)
-    return object_message(MSG_OBJECT_CREATE, ROUTER_WEATHER, 0, 0, seq, 1, 0, vars_)
+            w.bits(f32(value) if kind == "f" else value & 0xFFFFFFFF, 32)
+        w.bits(WEATHER_VARS["atm.DesiredPresetIndex"], WEATHER_VAR_ID_BITS)    # SyncedArray<long, 4>: 4 x 32 bits
+        for idx in wx["presets"]:
+            w.bits(idx & 0xFFFFFFFF, 32)
+    return write
+
+
+def weather_create(seq, wx):
+    return object_message(MSG_OBJECT_CREATE, ROUTER_WEATHER, 0, 0, seq, 1, 0, weather_vars(wx))
+
+
+def weather_update(seq, wx):
+    return object_message(MSG_OBJECT_UPDATE, ROUTER_WEATHER, 0, 0, seq, 1, 0, weather_vars(wx))
 
 
 def road_trip_vars(**values):
@@ -742,6 +769,8 @@ class Peer:
 
     def __init__(self, addr):
         self.addr = addr
+        self.wx_seq = 1            # seq of the last message on the server-owned WeatherSynced
+        self.wx_ready = False      # the Weather object has been created on this client
         self.rt_seq = 1            # Road Trip: seq of the last message on the server-owned RoadTripSynced
         self.rt_started = False    # Road Trip: Initialising -> DestinationVote already sent
         self.connected_at = 0.0
@@ -834,12 +863,21 @@ class Server:
         self.rt_seq = 1
         self.server_counter = 1
         self.start = time.monotonic()
+        # Online the client derives the world's time of day from this clock (SetTimeOfDay realtime: FUN_14197af90,
+        # tod_seconds = timescale * (network_ms / 1000) % 86400), so a clock that starts at 0 means every world starts at midnight.
+        # A random start under 24 h gives each world its own time of day; it stays small so the plain comparisons on now_ms() hold.
+        self.clock_offset_ms = int(os.environ.get("FH2MP_CLOCK_OFFSET_MS", random.randrange(CLOCK_OFFSET_MAX_MS)))
+        self.wx = None
+        self.wx_next = 0.0         # monotonic time of the next weather change
+        self.weather_init()
         self.peers = {}
         self.next_owner = 1
         self.pending_race = None   # (deadline, leader Peer)
         self.game_options = None   # (size, payload) latest GameOptionsSynced written by the leader
         self.event = None          # {"people": [Peer], "begun": bool, "start_at": float|None}
-        self.log(f"listening on udp/{port} version={VERSION_STRING} game={GAME_STRING}")
+        self.log(f"listening on udp/{port} version={VERSION_STRING} game={GAME_STRING} "
+                 f"clock offset {self.clock_offset_ms} ms (time of day at start {(48 * (self.clock_offset_ms // 1000)) % 86400 // 3600:02d}:"
+                 f"{(48 * (self.clock_offset_ms // 1000)) % 3600 // 60:02d} if the time scale is 48)")
         if roadtrip:
             gamedb = os.environ.get("FH2MP_GAMEDB")
             if gamedb:
@@ -850,8 +888,66 @@ class Server:
             else:
                 self.log("road trip: FH2MP_GAMEDB (path to the game's gamedbRC.slt) not set; the vote will be empty")
 
+    # ------------------------------------------------------------------ weather
+    def weather_pick_level(self, current):
+        levels = [lv for lv in WEATHER_WEIGHTS if lv != current]
+        return random.choices(levels, [WEATHER_WEIGHTS[lv] for lv in levels])[0]
+
+    def weather_presets(self, level):
+        """Preset index per severity level (observed [0, 1, 3 or 5, 7]); the cloudy one varies between changes."""
+        return [0, 1, random.choice((3, 5)), 7]
+
+    def weather_init(self) -> None:
+        env = os.environ.get("FH2MP_WEATHER_START")
+        level = int(env) if env else self.weather_pick_level(None)
+        now = self.now_ms()
+        rain = 1.0 if level == 3 else 0.0
+        self.wx = {"level": level, "presets": self.weather_presets(level), "a_cur": WEATHER_LEVELS[level], "a_cur_tick": now,
+                   "a_des": WEATHER_LEVELS[level], "a_des_tick": now, "p_cur": rain, "p_cur_tick": now, "p_des": rain,
+                   "p_des_tick": now}
+        self.wx_next = time.monotonic() + self.weather_hold()
+        self.log(f"weather: start level {level} ({WEATHER_LEVELS[level]:.3f}), presets {self.wx['presets']}")
+
+    def weather_hold(self) -> float:
+        scale = float(os.environ.get("FH2MP_WEATHER_SCALE", "1.0"))
+        return random.uniform(*WEATHER_HOLD_S) * scale
+
+    def weather_tick(self, now: float) -> None:
+        if now < self.wx_next or not any(p.connected for p in self.peers.values()):
+            return
+        wx = self.wx
+        t = self.now_ms()
+        # where the atmosphere is right now (it may still be ramping)
+        span = (wx["a_des_tick"] - wx["a_cur_tick"]) & 0xFFFFFFFF
+        done = (t - wx["a_cur_tick"]) & 0xFFFFFFFF
+        cur = wx["a_des"] if span == 0 or done >= span else wx["a_cur"] + (wx["a_des"] - wx["a_cur"]) * done / span
+        level = self.weather_pick_level(wx["level"])
+        target = WEATHER_LEVELS[level]
+        ramp_ms = int(abs(target - cur) * WEATHER_RAMP_MS)
+        a_end = t + ramp_ms
+        # precipitation: only while the atmosphere is above WEATHER_RAIN_START
+        p_now = wx["p_des"] if wx["p_des_tick"] == wx["p_cur_tick"] else wx["p_cur"]
+        if level == 3:
+            p_des = 1.0
+            p_start = t + max(0, int((WEATHER_RAIN_START - cur) * WEATHER_RAMP_MS))
+        else:
+            p_des = 0.0
+            p_start = t
+        p_end = a_end if level == 3 else t + max(1000, int(max(0.0, cur - WEATHER_RAIN_START) * WEATHER_RAMP_MS))
+        if p_des == p_now:
+            p_start = p_end = t
+        wx.update(level=level, presets=self.weather_presets(level), a_cur=cur, a_cur_tick=t, a_des=target, a_des_tick=a_end,
+                  p_cur=p_now, p_cur_tick=p_start, p_des=p_des, p_des_tick=p_end)
+        self.wx_next = now + ramp_ms / 1000.0 + self.weather_hold()
+        self.log(f"weather: change to level {level} ({target:.3f}) from {cur:.3f}, ramp {ramp_ms / 1000:.0f} s, rain {p_now:.2f} -> {p_des:.2f}, "
+                 f"presets {wx['presets']}, next change in {self.wx_next - now:.0f} s")
+        for q in self.peers.values():
+            if q.connected and q.wx_ready:
+                q.wx_seq = (q.wx_seq + 1) % 0xFF
+                self.send(q, [weather_update(q.wx_seq, wx)])
+
     def now_ms(self) -> int:
-        return int((time.monotonic() - self.start) * 1000) & 0xFFFFFFFF
+        return (int((time.monotonic() - self.start) * 1000) + self.clock_offset_ms) & 0xFFFFFFFF
 
     def log(self, msg: str) -> None:
         line = f"{time.strftime('%H:%M:%S')} {self.tag}{msg}"
@@ -1220,7 +1316,8 @@ class Server:
                         replies.append(session_host_create(seq=1, write_vars=lobby_type))
                     else:
                         replies.append(session_host_create(seq=1))
-                    replies.append(weather_create(seq=1))
+                    replies.append(weather_create(peer.wx_seq, self.wx))
+                    peer.wx_ready = True
                     if peer.lobby_type == LOBBY_TYPE_CAR_MEET:
                         replies.append(car_meet_create(seq=1))
                     self.log(f"{addr[1]} -> TimeSync, ConnectionSyncDone, SessionHost + Weather create")
@@ -1832,6 +1929,7 @@ class Server:
                 self.pending_race = None
                 if leader.connected:
                     self.start_event(leader)
+        self.weather_tick(now)
         for peer in list(self.peers.values()):
             if peer.connected and now - peer.last_rx > STALE_SECONDS:
                 self.drop_peer(peer, f"no packets for {STALE_SECONDS:.0f} s")

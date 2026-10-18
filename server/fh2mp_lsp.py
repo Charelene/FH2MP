@@ -421,6 +421,20 @@ def permissions_table(req):
             "featureAreasBanMask": 0, "userFlags": 0}
 
 
+def economy_settings(req):
+    """Credit/XP rates for ForzaEconomyModule. Race credits are route metres * 0.001 * creditPerKm (FUN_14054a110,
+    called from FUN_140614250/140614760 [confirmed]), XP is max(xpPerKm * km, minimumFinishLineXp) (FUN_14054a140), so the
+    all-zero default paid 0 for everything. creditPerKm 1000 matches CreditsPerKm in the race templates
+    (EntityModel/Templates/templates_races.xml) [inferred]; the other values were Turn 10's and are guesses [guess]."""
+    r = xls.default_struct(SC, SC.call_struct("ForzaUserGetEconomySettings_Results"))
+    r["settings"].update({
+        "creditDestinationBonus": 2000, "creditDestinationFalloff": 0, "xpPerKmOffline": 100, "xpPerKmOnline": 100,
+        "creditPerKm": 1000, "minimumFinishLineXp": 100, "tombolaPrizeScale": 1.0, "promoBonusScale": 1.0,
+        "wagerRaceCost": 1000, "enableTokens": False, "enableXboxMusic": False})
+    log("  GetEconomySettings -> non-zero guess values")
+    return r
+
+
 # ---------------------------------------------------------------- gifting (Message Center category 5)
 
 class XlsError(Exception):
@@ -470,6 +484,7 @@ def gift_car(req):
 
 HANDLERS = {
     ("Forza.WebServices.User", "GetPermissionsTable"): ("", permissions_table),
+    ("Forza.WebServices.User", "GetEconomySettings"): ("", economy_settings),
     ("Forza.WebServices.Gifting", "RetrieveCreditsGift"): ("", gift_credits),
     ("Forza.WebServices.Gifting", "RetrieveCarGift"): ("", gift_car),
     ("Forza.WebServices.Scoreboard", "GetRows"): ("", lambda req: sb_rows(req, "ForzaWebServicesScoreboardGetRows_Results")),

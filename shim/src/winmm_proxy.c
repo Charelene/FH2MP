@@ -732,6 +732,44 @@ static int patch_server_port(void)
 }
 
 /*
+ * Online credit difficulty bonus. The post-race "Difficulty and Assists" bonus is base credits * a percentage that
+ * FUN_140f58920 sums from the assist settings (registry values UI/Assists/..., set in code). Online (second argument != 0)
+ * the AI-difficulty term is the Medium entry (0 %) and there is no player-chosen AI difficulty, so Free Roam never earns
+ * the bonus. The AI table is Easy -10 %, Medium 0, Hard +20 %, Pro +30 %, Insane +40 % (entries 0x28 apart from RVA
+ * 0x354f9a0). The instruction at RVA 0xf58a5e is `vaddss xmm0,xmm1,[rip+disp32]` reading the Medium entry (RVA 0x354f9c8);
+ * its displacement is pointed at the Insane entry (RVA 0x354fa40) so online always counts as maximum difficulty.
+ * Disable with env FH2MP_NO_MPDIFF.
+ */
+#define FH2_MPDIFF_INSN_RVA 0xf58a5eu
+static int patch_mp_difficulty(void)
+{
+    static const unsigned char want[] = {0xC5, 0xF2, 0x58, 0x05, 0x62, 0x6F, 0x5F, 0x02};
+    static const unsigned char now[] = {0xC5, 0xF2, 0x58, 0x05, 0xDA, 0x6F, 0x5F, 0x02};
+    unsigned char *img = find_fh2_image();
+    unsigned char *at;
+    DWORD old;
+
+    if (!img) {
+        return 0;
+    }
+    at = img + FH2_MPDIFF_INSN_RVA;
+    if (memcmp(at, now, sizeof now) == 0) {
+        return 1;
+    }
+    if (memcmp(at, want, sizeof want) != 0 || !VirtualProtect(at, sizeof want, PAGE_EXECUTE_READWRITE, &old)) {
+        log_begin();
+        log_raw("mpdiff: unexpected bytes in the assists bonus code, not patched\n");
+        return 0;
+    }
+    memcpy(at, now, sizeof now);
+    VirtualProtect(at, sizeof want, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), at, sizeof now);
+    log_begin();
+    log_raw("mpdiff: online races use the maximum (Insane, +40%) AI difficulty bonus\n");
+    return 1;
+}
+
+/*
  * "Connected to Xbox Live" menu gates. Live-only menu actions (Show Gamercard in a Car Meet's player actions, and the other
  * Live-gated entries) test the byte at CLobby+0xf0 (CLobby = TBasicSingleton at RVA 0x34d6348):
  *     cmp byte [rax+0xf0], 0 ; jne <allowed>      else: popup "NO NETWORK ACCESS ... not connected to Xbox Live"
@@ -1571,6 +1609,87 @@ static void maybe_run_connect_probe(unsigned char *img)
  * Watches the game's option singleton. Logs the FreeRoam direct-IP slot and related flags as they
  * change; if the singleton is up and the slot is still empty, fills it from our argument.
  */
+/*
+ * Weather/time-of-day sampler (env FH2MP_WEATHER_DUMP=1), for recovering the game's weather pattern from a solo session.
+ * The world object is *(*(img+0x34aba60 + 0x48) + 0x98); +0x480 is the time-of-day manager (float seconds at +0x10, time
+ * scale float at +0x18) and +0x488 the weather state that the game's own server-side code (FUN_1406f5520/5710/5910) packs into
+ * FullWeather / NewAtmosphericData / NewPrecipitationData. A line "weather: tod=<s> scale=<f> | off=word ..." is logged when
+ * any sampled word changed, and every 15 s regardless. Words are hex; read the floats offline.
+ */
+#define FH2_WORLD_ROOT_RVA 0x34aba60u
+static int rd_ok(const void *p, size_t n)
+{
+    return p && (ULONG_PTR)p > 0x10000 && !IsBadReadPtr(p, n);
+}
+
+static void weather_sample(unsigned char *img)
+{
+    static const struct { unsigned lo, hi; } rng[] = {
+        {0x08, 0x30}, {0x58, 0x68}, {0xa0, 0xc0}, {0x110, 0x120}, {0x1a0, 0x1d0}};
+    static unsigned prev[256];
+    static unsigned long last_beat;
+    unsigned char *root, *mgr, *world, *tod, *w;
+    unsigned cur[256];
+    unsigned n = 0, i, k, changed = 0;
+    float f_tod = 0.0f, f_scale = 0.0f;
+    unsigned u_tod, u_scale;
+
+    if (!rd_ok(img + FH2_WORLD_ROOT_RVA, 8)) {
+        return;
+    }
+    root = *(unsigned char **)(img + FH2_WORLD_ROOT_RVA);
+    if (!rd_ok(root + 0x48, 8) || !(mgr = *(unsigned char **)(root + 0x48)) || !rd_ok(mgr + 0x98, 8)) {
+        return;
+    }
+    world = *(unsigned char **)(mgr + 0x98);
+    if (!rd_ok(world + 0x488, 8)) {
+        return;
+    }
+    tod = *(unsigned char **)(world + 0x480);
+    w = *(unsigned char **)(world + 0x488);
+    if (!rd_ok(w, 0x1d0)) {
+        return;
+    }
+    if (rd_ok(tod, 0x20)) {
+        f_tod = *(float *)(tod + 0x10);
+        f_scale = *(float *)(tod + 0x18);
+    }
+    for (k = 0; k < sizeof rng / sizeof rng[0]; k++) {
+        for (i = rng[k].lo; i < rng[k].hi; i += 4) {
+            cur[n++] = *(unsigned *)(w + i);
+        }
+    }
+    for (i = 0; i < n; i++) {
+        if (cur[i] != prev[i]) {
+            changed = 1;
+        }
+    }
+    if (!changed && GetTickCount() - last_beat < 15000) {
+        return;
+    }
+    last_beat = GetTickCount();
+    log_begin();
+    memcpy(&u_tod, &f_tod, 4);
+    memcpy(&u_scale, &f_scale, 4);
+    log_raw("weather: tod=");
+    log_hex(u_tod, 8);
+    log_raw(" scale=");
+    log_hex(u_scale, 8);
+    log_raw(" |");
+    n = 0;
+    for (k = 0; k < sizeof rng / sizeof rng[0]; k++) {
+        for (i = rng[k].lo; i < rng[k].hi; i += 4) {
+            log_raw(" ");
+            log_hex(i, 3);
+            log_raw("=");
+            log_hex(cur[n], 8);
+            prev[n] = cur[n];
+            n++;
+        }
+    }
+    log_raw("\n");
+}
+
 static DWORD WINAPI option_monitor(LPVOID unused)
 {
     unsigned char *img = NULL;
@@ -1585,8 +1704,11 @@ static DWORD WINAPI option_monitor(LPVOID unused)
     int tick;
     unsigned char last[FH2_OPT_IP_SLOT_SIZE + 4];
     int first = 1;
+    int weather_dump;
+    WCHAR wd_env[4];
 
     (void)unused;
+    weather_dump = GetEnvironmentVariableW(L"FH2MP_WEATHER_DUMP", wd_env, 4) > 0;
     have_want = arg_value_ascii(L"NetSessionDirectIpFreeRoam=", want, sizeof want);
     have_want_rt = arg_value_ascii(L"NetSessionDirectIpRoadTrip=", want_rt, sizeof want_rt);
     have_single_events = has_arg_prefix(L"NetSessionEnableSinglePlayerFreeRoamEvents");
@@ -1717,6 +1839,9 @@ static DWORD WINAPI option_monitor(LPVOID unused)
             opts[FH2_OPT_SINGLE_PLAYER_EVENTS] = 1;
             log_begin();
             log_raw("monitor: single-player events enabled from argument\n");
+        }
+        if (weather_dump) {
+            weather_sample(img);
         }
         Sleep(1000);
     }
@@ -2408,6 +2533,12 @@ static DWORD WINAPI late_init(LPVOID unused)
             wchar_t lg_env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_LIVEGATE", lg_env, 8) == 0) {
                 patch_live_gates();
+            }
+        }
+        {
+            wchar_t md_env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_MPDIFF", md_env, 8) == 0) {
+                patch_mp_difficulty();
             }
         }
     }
