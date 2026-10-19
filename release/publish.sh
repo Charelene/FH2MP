@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Publishes a release: checks, commits everything that is not ignored, pushes, stores the signing key as a GitHub secret, tags, and lets the
+# workflow (.github/workflows/release.yml) build Windows + Linux, sign the manifest and create the GitHub release (pre-release if the tag has a '-').
+#   release/publish.sh v1.0.0-rc1
+# Asks once before anything leaves this machine. Needs: gh (logged in), the signing key at ~/.config/fh2mp-release/signing.key.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+tag=${1:?usage: release/publish.sh v1.0.0-rc1}
+ver=${tag#v}
+key=${FH2MP_RELEASE_KEY_FILE:-$HOME/.config/fh2mp-release/signing.key}
+
+shim=$(tr -d '[:space:]' < shim/VERSION)
+app=$(python3 -c "import re;print(re.search(r'\"(.+)\"',open('launcher/fh2mp_launcher/version.py').read())[1])")
+[ "$ver" = "$shim" ] && [ "$ver" = "$app" ] || { echo "version mismatch: tag $ver, shim $shim, launcher $app"; exit 1; }
+[ -f "release/notes/$tag.md" ] || echo "note: no release/notes/$tag.md, GitHub will generate the notes"
+[ -f "$key" ] || { echo "signing key not found: $key"; exit 1; }
+gh auth status >/dev/null 2>&1 || { echo "gh is not logged in"; exit 1; }
+git rev-parse "$tag" >/dev/null 2>&1 && { echo "tag $tag already exists"; exit 1; }
+
+echo "== personal data scan"
+git add -A
+hits=$( (git diff --cached --name-only | grep -v '^assets/' | xargs -r grep -l -I -E "$(whoami)|/home/$(whoami)|\.local/share/Steam/steamapps/compatdata/[0-9]" 2>/dev/null || true) | wc -l)
+if [ "$hits" != 0 ]; then
+  echo "personal paths/names found in $hits file(s), fix first:"
+  git diff --cached --name-only | grep -v '^assets/' | xargs -r grep -l -I -E "$(whoami)|/home/$(whoami)|\.local/share/Steam/steamapps/compatdata/[0-9]" 2>/dev/null || true
+  git reset -q
+  exit 1
+fi
+echo "clean ($(git diff --cached --name-only | wc -l) files)"
+
+echo "== tests"
+FH2MP_NO_KEYRING=1 launcher/.venv/bin/python launcher/tests/test_core.py 2>&1 | tail -2
+
+echo; git status --short | head -40; echo "($(git diff --cached --name-only | wc -l) files staged)"
+read -r -p "Commit, push to origin, set RELEASE_SIGNING_KEY and tag $tag? [y/N] " yn
+[ "$yn" = y ] || { git reset -q; echo aborted; exit 1; }
+
+git commit -q -m "Release $tag" -m "Accountless launcher (Qt), signed auto-updates, server accounts and ops API, prod/dev stacks, shim release build."
+git push origin HEAD
+gh secret set RELEASE_SIGNING_KEY < "$key"
+git tag -a "$tag" -m "FH2MP $tag"
+git push origin "$tag"
+echo "Pushed. Watching the build (Ctrl+C is safe, it keeps running on GitHub):"
+sleep 8
+gh run watch "$(gh run list --workflow release.yml --limit 1 --json databaseId -q '.[0].databaseId')" || true
+gh release view "$tag" --web 2>/dev/null || true

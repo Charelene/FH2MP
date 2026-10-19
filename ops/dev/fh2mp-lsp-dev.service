@@ -1,0 +1,20 @@
+[Unit]
+Description=FH2MP LSP, DEV stack (tcp/5180, database fh2mp_dev)
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+User=fh2mpdev
+EnvironmentFile=/etc/fh2mp/dev.env
+ExecStart=/usr/bin/python3 -I /opt/fh2mp-dev/lsp/fh2mp_lsp.py 5180
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+StandardOutput=append:/var/log/fh2mp-dev/lsp.log
+StandardError=append:/var/log/fh2mp-dev/lsp.log
+ReadWritePaths=/var/log/fh2mp-dev
+
+[Install]
+WantedBy=multi-user.target

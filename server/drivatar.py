@@ -117,6 +117,20 @@ class DrivatarStore:
     def count(self):
         return self.db.one("SELECT COUNT(*) FROM drivatars")[0]
 
+    def bot_name(self, xuid):
+        """Name of a shipped Drivatar bot, '' if the id is not one."""
+        if not hasattr(self, "_tpl_names"):
+            self._tpl_names = {t.get("Xuid"): t["GamerTag"] for t in self.templates}
+        return self._tpl_names.get(xuid, "")
+
+    def tag_for_xuid(self, xuid):
+        """Name of a bot or a stored player Drivatar, '' for an unknown id: the profile service shows these names in lobbies."""
+        name = self.bot_name(xuid)
+        if name:
+            return name
+        r = self.db.one("SELECT gamertag FROM drivatars WHERE xuid=?", (xuid,))
+        return r["gamertag"] if r else ""
+
     def gamertags(self):
         return [r[0] for r in self.db.query("SELECT gamertag FROM drivatars ORDER BY seq")]
 

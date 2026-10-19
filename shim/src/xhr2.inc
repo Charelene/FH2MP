@@ -9,7 +9,8 @@
  * "offline" (HttpProtocol2::OnRequestComplete finished with error 0x80500010), so no packet ever
  * leaves the machine. We repoint the game's CoCreateInstance import so that this CLSID yields the
  * object below, which sends the request over WinHTTP to our own server (fh2mp-lsp.txt =
- * "host:port", default 127.0.0.1:5080, plain HTTP). The original host is passed in X-FH2MP-Host.
+ * "host:port" for plain HTTP, default 127.0.0.1:5080, or "https://host[:port]" for TLS, default port 443).
+ * The original host is passed in X-FH2MP-Host, the launcher's session token in X-FH2MP-Token.
  * Disable with env FH2MP_NO_XHR.
  */
 
@@ -54,6 +55,7 @@ static struct {
 static co_create_fn g_real_cocreate;
 static wchar_t g_lsp_host[128] = L"127.0.0.1";
 static unsigned g_lsp_port = 5080;
+static int g_lsp_secure;
 static int g_lsp_cfg_loaded;
 static volatile LONG g_xhr_seq;
 
@@ -132,28 +134,40 @@ static void xhr_load_cfg(void)
     }
     CloseHandle(f);
     raw[got] = '\0';
-    n = 0;
-    while (raw[n] && raw[n] != '\r' && raw[n] != '\n' && raw[n] != ' ') {
-        if (raw[n] == ':') {
-            colon = n;
+    {
+        const char *r = raw;
+        if (r[0] == 'h' && r[1] == 't' && r[2] == 't' && r[3] == 'p') {
+            if (r[4] == 's' && r[5] == ':' && r[6] == '/' && r[7] == '/') {
+                g_lsp_secure = 1;
+                g_lsp_port = 443;
+                r += 8;
+            } else if (r[4] == ':' && r[5] == '/' && r[6] == '/') {
+                g_lsp_port = 80;
+                r += 7;
+            }
         }
-        n++;
-    }
-    raw[n] = '\0';
-    if (n == 0) {
-        return;
-    }
-    for (i = 0; i < (colon >= 0 ? colon : n) && i < 120; i++) {
-        g_lsp_host[i] = (wchar_t)(unsigned char)raw[i];
-    }
-    g_lsp_host[i] = 0;
-    if (colon >= 0) {
-        unsigned v = 0;
-        for (i = colon + 1; i < n; i++) {
-            v = v * 10 + (unsigned)(raw[i] - '0');
+        n = 0;
+        while (r[n] && r[n] != '\r' && r[n] != '\n' && r[n] != ' ' && r[n] != '/') {
+            if (r[n] == ':') {
+                colon = n;
+            }
+            n++;
         }
-        if (v) {
-            g_lsp_port = v;
+        if (n == 0) {
+            return;
+        }
+        for (i = 0; i < (colon >= 0 ? colon : n) && i < 120; i++) {
+            g_lsp_host[i] = (wchar_t)(unsigned char)r[i];
+        }
+        g_lsp_host[i] = 0;
+        if (colon >= 0) {
+            unsigned v = 0;
+            for (i = colon + 1; i < n; i++) {
+                v = v * 10 + (unsigned)(r[i] - '0');
+            }
+            if (v) {
+                g_lsp_port = v;
+            }
         }
     }
 }
@@ -288,6 +302,7 @@ static HRESULT STDMETHODCALLTYPE st_read(void *self, void *buf, ULONG cb, ULONG 
     if (got) {
         *got = n;
     }
+#ifdef FH2MP_DEBUG_BUILD
     {
         static volatile LONG reads;
         if (InterlockedIncrement(&reads) <= 400) { /* who reads the response, how much, when (debugging aid) */
@@ -305,6 +320,7 @@ static HRESULT STDMETHODCALLTYPE st_read(void *self, void *buf, ULONG cb, ULONG 
             log_raw("\n");
         }
     }
+#endif
     return n == cb ? S_OK : S_FALSE;
 }
 
@@ -470,7 +486,17 @@ static void xhr_dump_request(xhr_obj *x, const wchar_t *path)
     int i, k = 0;
     DWORD v = x->seq;
     char line[512];
+    WCHAR gate[4];
 
+    /* Research aid (it writes one file per request, with the game's headers and bodies): debug builds only, and then env FH2MP_XHR_DUMP=1. */
+#ifdef FH2MP_DEBUG_BUILD
+    if (!GetEnvironmentVariableW(L"FH2MP_XHR_DUMP", gate, 4)) {
+        return;
+    }
+#else
+    (void)gate;
+    return;
+#endif
     /* fh2mp-lsp-<seq>.req : first the headers as text, then a blank line, then the raw body */
     lstrcpyW(name, g_dir);
     lstrcatW(name, L"\\fh2mp-lsp-");
@@ -591,7 +617,7 @@ static DWORD WINAPI xhr_thread(LPVOID param)
         hr = HRESULT_FROM_WIN32(GetLastError());
         goto fail;
     }
-    req = g_wh.openreq(con, x->method, path, NULL, NULL, NULL, 0);
+    req = g_wh.openreq(con, x->method, path, NULL, NULL, NULL, g_lsp_secure ? WINHTTP_FLAG_SECURE : 0);
     if (!req) {
         hr = HRESULT_FROM_WIN32(GetLastError());
         goto fail;
@@ -608,6 +634,17 @@ static DWORD WINAPI xhr_thread(LPVOID param)
     lstrcpyW(hdrline, L"X-FH2MP-Host: ");
     lstrcatW(hdrline, orig_host);
     g_wh.addhdr(req, hdrline, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+    if (g_token[0]) { /* the session the launcher signed in; the server takes the player's identity from it, not from a header the game wrote */
+        int k;
+        lstrcpyW(hdrline, L"X-FH2MP-Token: ");
+        k = lstrlenW(hdrline);
+        for (i = 0; g_token[i] && i < 90; i++) {
+            hdrline[k + i] = (WCHAR)(unsigned char)g_token[i];
+        }
+        hdrline[k + i] = 0;
+        g_wh.addhdr(req, hdrline, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+    }
+    g_wh.addhdr(req, L"X-FH2MP-Shim: " FH2MP_WSTR(FH2MP_SHIM_VERSION), (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
 
     if (!g_wh.send(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, x->body, x->nbody, x->nbody, 0) || !g_wh.recv(req, NULL)) {
         hr = HRESULT_FROM_WIN32(GetLastError());

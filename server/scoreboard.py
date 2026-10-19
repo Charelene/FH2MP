@@ -143,6 +143,28 @@ class ScoreStore:
     def best_of(self, xuid, sb, st, track, pivot=-1):
         return self._best_per_player(sb, st, track, xuid, pivot).get(xuid)
 
+    def top(self, sb, st, track=-1, pivot=-1, limit=25):
+        """Real players only (no synthesized rivals), best first, each row with its `position`. For the website's public boards."""
+        rows = sorted(self._best_per_player(sb, st, track, pivot=pivot).values(),
+                      key=lambda r: (r["score"] if st in ASCENDING else -r["score"], r["t"]))
+        for i, r in enumerate(rows):
+            r["position"] = i + 1
+        return rows[:max(0, limit)]
+
+    FAKE_BASE = 0x9100000000000
+
+    @classmethod
+    def fake_xuid(cls, name):
+        return cls.FAKE_BASE + (hash_int(name) % 0xFFFFFF)
+
+    def fake_name(self, xuid):
+        """The racing-driver name behind a fake rival's id ('' if the id is not one): the profile service needs it, the game shows what it says."""
+        if xuid < self.FAKE_BASE or xuid > self.FAKE_BASE + 0xFFFFFF:
+            return ""
+        if not hasattr(self, "_fake_names"):
+            self._fake_names = {self.fake_xuid(n): n[:15] for n in self.names}
+        return self._fake_names.get(xuid, "")
+
     def _fake(self, sb, st, track, anchor, n, pivot=-1):
         """Deterministic fake rivals around `anchor` (the player's best, or a default scale)."""
         out = []
@@ -171,7 +193,7 @@ class ScoreStore:
                 base = anchor if anchor else 20000.0
                 score = base * (0.05 + 3.0 * r * r)             # long tail of lower scores, a few above
             car, cls, cpi = self._fake_car(nm, score if sb in SPEED_BOARDS else None, ev_cars)
-            out.append({"xuid": 0x9100000000000 + (hash_int(nm) % 0xFFFFFF), "tag": nm[:15], "sb": sb, "st": st,
+            out.append({"xuid": self.fake_xuid(nm), "tag": nm[:15], "sb": sb, "st": st,
                         "track": track, "car": car, "cls": cls, "cpi": cpi, "score": round(score, 3), "clean": r > 0.3,
                         "stm": False, "tcs": r < 0.5, "abs": True, "t": time.time() - 86400 * (1 + 20 * r), "fake": True})
         return out

@@ -67,11 +67,23 @@ static const char FH2_ROADTRIP_NEW[] =
 #define FH2_RVA_NET_MANAGER_PTR 0x36e2960u /* DAT_1436e2960: pointer to the network manager */
 
 static unsigned char *find_fh2_image(void);
+#ifdef FH2MP_DEBUG_BUILD
 static void trace_phase_reset(const char *why);
 static int trace_count(void);
 static void arm_trace_file(void);
+#endif
 
 static wchar_t g_dir[MAX_PATH];
+
+#ifndef FH2MP_SHIM_VERSION
+#define FH2MP_SHIM_VERSION "0.0.0-dev"
+#endif
+#define FH2MP_WSTR2(x) L##x
+#define FH2MP_WSTR(x) FH2MP_WSTR2(x)
+/* The launcher finds out which shim is installed by reading this marker out of the DLL (it cannot run it). */
+const char fh2mp_shim_marker[] __attribute__((used)) = "FH2MP-SHIM-VERSION:" FH2MP_SHIM_VERSION ":END";
+/* Session token of the player signed in through the launcher (see session_load); sent to the stand-in services as X-FH2MP-Token. */
+static char g_token[96];
 static HANDLE g_log = INVALID_HANDLE_VALUE;
 static wchar_t g_args[MAX_ARGS][MAX_ARG_CHARS];
 static wchar_t *g_argv[MAX_ARGS + 1];
@@ -121,6 +133,37 @@ static void log_unlock(void)
 }
 
 /* log_begin() takes the lock; a string ending in '\n' releases it, so each line is atomic */
+#ifndef FH2MP_DEBUG_BUILD
+static char g_line[600];
+static int g_ll;
+
+static int line_has(const char *l, int n, const char *pat)
+{
+    int i, k;
+    for (i = 0; i < n; i++) {
+        for (k = 0; pat[k] && i + k < n && l[i + k] == pat[k]; k++) {
+        }
+        if (!pat[k]) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int line_wanted(const char *l, int n)
+{
+    static const char *const keep[] = {"attached", "session:", "identity:", "late:", "not patched", "NOT ", "unexpected", "fail", "error", "could not",
+                                       "refus", "crash", 0};
+    int i;
+    for (i = 0; keep[i]; i++) {
+        if (line_has(l, n, keep[i])) {
+            return 1;
+        }
+    }
+    return 0;
+}
+#endif
+
 static void log_raw(const char *s)
 {
     DWORD written;
@@ -132,6 +175,27 @@ static void log_raw(const char *s)
     while (s[n]) {
         n++;
     }
+#ifndef FH2MP_DEBUG_BUILD
+    /* Release builds keep the log short: lines are assembled here and only the ones that matter to a player are written
+     * (start-up summary, anything that failed). The debug build logs everything. */
+    {
+        DWORD i;
+        for (i = 0; i < n; i++) {
+            if (g_ll < (int)sizeof g_line - 1) {
+                g_line[g_ll++] = s[i];
+            }
+        }
+        if (n > 0 && s[n - 1] == '\n') {
+            g_line[g_ll] = 0;
+            if (line_wanted(g_line, g_ll)) {
+                WriteFile(g_log, g_line, (DWORD)g_ll, &written, NULL);
+            }
+            g_ll = 0;
+            log_unlock();
+        }
+        return;
+    }
+#endif
     WriteFile(g_log, s, n, &written, NULL);
     if (n > 0 && s[n - 1] == '\n') {
         log_unlock();
@@ -1578,6 +1642,7 @@ static void make_std_string(unsigned char *s, const char *text)
     *(unsigned long long *)(s + 0x18) = 15; /* capacity, SSO */
 }
 
+#ifdef FH2MP_DEBUG_BUILD
 /* Reads "host[:port]" from fh2mp-connect.txt once; renames it to .done after use. */
 static void maybe_run_connect_probe(unsigned char *img)
 {
@@ -1681,9 +1746,12 @@ static void maybe_run_connect_probe(unsigned char *img)
     log_begin();
     log_raw("probe: begin-join returned\n");
 }
+#endif
 
 #include "xhr2.inc"
+#ifdef FH2MP_DEBUG_BUILD
 #include "dbg.inc"
+#endif
 
 /*
  * Watches the game's option singleton. Logs the FreeRoam direct-IP slot and related flags as they
@@ -1788,7 +1856,12 @@ static DWORD WINAPI option_monitor(LPVOID unused)
     WCHAR wd_env[4];
 
     (void)unused;
+#ifdef FH2MP_DEBUG_BUILD
     weather_dump = GetEnvironmentVariableW(L"FH2MP_WEATHER_DUMP", wd_env, 4) > 0;
+#else
+    (void)wd_env;
+    weather_dump = 0;
+#endif
     have_want = arg_value_ascii(L"NetSessionDirectIpFreeRoam=", want, sizeof want);
     have_want_rt = arg_value_ascii(L"NetSessionDirectIpRoadTrip=", want_rt, sizeof want_rt);
     have_single_events = has_arg_prefix(L"NetSessionEnableSinglePlayerFreeRoamEvents");
@@ -1847,6 +1920,7 @@ static DWORD WINAPI option_monitor(LPVOID unused)
                 log_raw("\n");
             }
         }
+#ifdef FH2MP_DEBUG_BUILD
         /* on-demand trace arming must work even before the game reads its options */
         {
             wchar_t apath[MAX_PATH];
@@ -1860,13 +1934,16 @@ static DWORD WINAPI option_monitor(LPVOID unused)
                 arm_trace_file();
             }
         }
+#endif
         if (!(img[FH2_OPTIONS_INIT_FLAG_RVA] & 1)) {
             Sleep(500);
             continue;
         }
+#ifdef FH2MP_DEBUG_BUILD
         if (tick >= 30) {
             maybe_run_connect_probe(img);
         }
+#endif
         for (i = 0; i < FH2_OPT_IP_SLOT_SIZE; i++) {
             cur[i] = opts[FH2_OPT_DIRECTIP_FREEROAM + i];
         }
@@ -1928,6 +2005,7 @@ static DWORD WINAPI option_monitor(LPVOID unused)
     return 0;
 }
 
+#ifdef FH2MP_DEBUG_BUILD
 /*
  * One-shot trace breakpoints. fh2mp-trace.txt (next to this DLL) lists "<rva-hex> <label>"; each
  * address gets an int3 that logs the first time it executes, then restores the original byte.
@@ -2474,6 +2552,7 @@ static void install_trace(void)
     log_begin();
     log_raw("trace: ready (breakpoints arm when fh2mp-connect.txt is used)\n");
 }
+#endif
 
 #include "winmm_forward.inc"
 
@@ -2634,11 +2713,94 @@ static DWORD WINAPI late_init(LPVOID unused)
             }
         }
     }
+#ifdef FH2MP_DEBUG_BUILD
     install_trace();
     dbg_start();
+#endif
     /* Always run: it re-applies the Winsock patch and serves on-demand trace arming even when
      * no NetSessionDirectIp argument is given (its option patching is gated on the argument). */
     return option_monitor(NULL);
+}
+
+/*
+ * Session handed over by the launcher: fh2mp-session.txt next to the log, "key=value" lines:
+ *   xuid=<hex>      the Xbox user id the server assigned to the account (replaces the random per-install id)
+ *   token=fh2.xxxx  the session token (the server derives the player's identity from it)
+ * Env FH2MP_TOKEN / FH2MP_XUID override the file (tests, rigs). The file is not deleted here (Azimuth may start the game in a second
+ * process that loads this DLL again); the launcher removes it when the game exits. Returns 1 when an xuid was given.
+ */
+static int session_load(void)
+{
+    WCHAR path[MAX_PATH], env[100];
+    char buf[512];
+    DWORD got = 0, i, n;
+    HANDLE f;
+    int have_xuid = 0;
+
+    if (GetEnvironmentVariableW(L"FH2MP_TOKEN", env, 100) && env[0]) {
+        for (n = 0; env[n] && n < sizeof g_token - 1; n++) {
+            g_token[n] = (char)env[n];
+        }
+        g_token[n] = 0;
+    }
+    lstrcpyW(path, g_dir);
+    lstrcatW(path, L"\\fh2mp-session.txt");
+    f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f != INVALID_HANDLE_VALUE) {
+        if (ReadFile(f, buf, sizeof buf - 1, &got, NULL)) {
+            buf[got] = 0;
+            for (i = 0; i < got;) {
+                char *line = buf + i;
+                char *eq = NULL;
+                char *p = line;
+                while (*p && *p != '\n') {
+                    if (*p == '=' && !eq) {
+                        eq = p;
+                    }
+                    p++;
+                }
+                i = (DWORD)(p - buf) + (*p ? 1 : 0);
+                if (!*p) {
+                    i = got;
+                }
+                *p = 0;
+                if (p > line && p[-1] == '\r') {
+                    p[-1] = 0;
+                }
+                if (!eq) {
+                    continue;
+                }
+                *eq++ = 0;
+                if (line[0] == 'x' && line[1] == 'u' && line[2] == 'i' && line[3] == 'd' && line[4] == 0) {
+                    unsigned long long v = 0;
+                    while (*eq) {
+                        char c = *eq++;
+                        if (c >= '0' && c <= '9') {
+                            v = v * 16 + (unsigned)(c - '0');
+                        } else if ((c | 0x20) >= 'a' && (c | 0x20) <= 'f') {
+                            v = v * 16 + (unsigned)((c | 0x20) - 'a' + 10);
+                        }
+                    }
+                    if (v) {
+                        g_xuid = v;
+                        have_xuid = 1;
+                    }
+                } else if (line[0] == 't' && line[1] == 'o' && line[2] == 'k' && line[3] == 'e' && line[4] == 'n' && line[5] == 0 &&
+                           !g_token[0]) {
+                    for (n = 0; eq[n] && n < sizeof g_token - 1; n++) {
+                        g_token[n] = eq[n];
+                    }
+                    g_token[n] = 0;
+                }
+            }
+        }
+        CloseHandle(f);
+    }
+    log_begin();
+    log_raw("session: ");
+    log_raw(g_token[0] ? "token present" : "no token");
+    log_raw(have_xuid ? ", xuid from the launcher\n" : "\n");
+    return have_xuid;
 }
 
 static int identity_load(void)
@@ -2765,10 +2927,19 @@ static void init(HINSTANCE self)
     }
     lstrcpyW(path, g_dir);
     lstrcatW(path, L"\\fh2mp.log");
+    {   /* keep the log from growing for ever: past 8 MB the old one becomes fh2mp.log.1 */
+        WIN32_FILE_ATTRIBUTE_DATA fa;
+        if (GetFileAttributesExW(path, GetFileExInfoStandard, &fa) && fa.nFileSizeHigh == 0 && fa.nFileSizeLow > (8u << 20)) {
+            WCHAR old[MAX_PATH];
+            lstrcpyW(old, path);
+            lstrcatW(old, L".1");
+            MoveFileExW(path, old, MOVEFILE_REPLACE_EXISTING);
+        }
+    }
     g_log = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                         OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     log_begin();
-    log_raw("--- fh2mp winmm shim attached, tid=");
+    log_raw("--- fh2mp winmm shim " FH2MP_SHIM_VERSION " attached, tid=");
     log_dec(GetCurrentThreadId());
     log_raw("\n");
 
@@ -2783,7 +2954,9 @@ static void init(HINSTANCE self)
     }
     {
         wchar_t tmp[8];
-        identity_load();
+        if (!session_load()) {
+            identity_load();
+        }
         if (GetEnvironmentVariableW(L"FH2MP_NO_IDENTITY", tmp, 8) == 0) {
             patch_identity();
         }

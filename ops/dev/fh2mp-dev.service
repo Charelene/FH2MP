@@ -1,0 +1,18 @@
+[Unit]
+Description=FH2MP game server, DEV stack (udp/5100, control 127.0.0.1:5190)
+After=network.target
+
+[Service]
+User=fh2mpdev
+EnvironmentFile=/etc/fh2mp/dev.env
+WorkingDirectory=/opt/fh2mp-dev/server
+ExecStart=/usr/bin/python3 -I /opt/fh2mp-dev/server/fh2mp_server.py 5100 /var/log/fh2mp-dev/server.log
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/log/fh2mp-dev
+
+[Install]
+WantedBy=multi-user.target

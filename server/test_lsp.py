@@ -58,6 +58,13 @@ class LspTests(unittest.TestCase):
     def setUp(self):
         L.CTX.xuid = 0x0009000000000042
 
+    def test_bots_show_their_names_not_player_numbers(self):
+        for nm in L.SB.names[:20]:
+            tag = L.SOCIAL.profile(L.SB.fake_xuid(nm))["Gamertag"]
+            self.assertEqual(tag, nm[:15])
+            self.assertFalse(tag.startswith("Player"), tag)
+        self.assertTrue(L.SOCIAL.profile(0x9000000ABCDE)["Gamertag"].startswith("Player"))          # an unknown id still gets a fallback
+
     def test_every_handler_runs_with_default_parameters(self):
         failures = []
         for (cls, method) in sorted(L.HANDLERS):

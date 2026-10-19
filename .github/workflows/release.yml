@@ -1,0 +1,96 @@
+name: release
+
+# Push a tag like v1.0.0 (it must equal shim/VERSION and launcher/fh2mp_launcher/version.py) to build everything and publish a GitHub release:
+# the shim, the launcher for Windows (installer + portable zip) and Linux (.deb + AppImage), and the signed manifest the launcher updates from.
+# Secrets: RELEASE_SIGNING_KEY = base64 Ed25519 seed from release/keygen.py (its public half is in launcher/fh2mp_launcher/constants.py).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: versions agree with the tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          shim=$(tr -d '[:space:]' < shim/VERSION)
+          app=$(python3 -c "import re;print(re.search(r'\"(.+)\"',open('launcher/fh2mp_launcher/version.py').read())[1])")
+          echo "tag=$tag shim=$shim launcher=$app"
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then [ "$tag" = "$shim" ] && [ "$tag" = "$app" ]; fi
+
+  shim:
+    needs: check
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - run: release/build_shim_zip.sh
+      - uses: actions/upload-artifact@v4
+        with: { name: shim, path: dist/*.zip }
+
+  launcher-windows:
+    needs: check
+    runs-on: windows-2022
+    defaults: { run: { working-directory: launcher } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[build]"
+      - run: pyinstaller --noconfirm --clean --distpath dist packaging/fh2mp.spec
+      - run: dist\fh2mp-launcher\fh2mp-launcher.exe --selftest
+      - name: installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $v = (Select-String -Path fh2mp_launcher/version.py -Pattern '"(.+)"').Matches[0].Groups[1].Value
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" packaging\fh2mp.iss
+          Compress-Archive -Path dist\fh2mp-launcher\* -DestinationPath "dist\FH2MP-Launcher-$v-windows-x64-portable.zip"
+      - uses: actions/upload-artifact@v4
+        with: { name: windows, path: "launcher/dist/*.exe\nlauncher/dist/*.zip" }
+
+  launcher-linux:
+    needs: check
+    runs-on: ubuntu-22.04
+    defaults: { run: { working-directory: launcher } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: sudo apt-get update && sudo apt-get install -y libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0 libegl1 fuse
+      - run: pip install -e ".[build]"
+      - run: pyinstaller --noconfirm --clean --distpath dist packaging/fh2mp.spec
+      - run: QT_QPA_PLATFORM=offscreen dist/fh2mp-launcher/fh2mp-launcher --selftest
+      - run: packaging/build_deb.sh
+      - run: |
+          curl -sL -o /usr/local/bin/appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x /usr/local/bin/appimagetool
+          packaging/build_appimage.sh
+      - uses: actions/upload-artifact@v4
+        with: { name: linux, path: "launcher/dist/*.deb\nlauncher/dist/*.AppImage" }
+
+  publish:
+    needs: [shim, launcher-windows, launcher-linux]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install cryptography
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - name: sign the manifest
+        env: { FH2MP_RELEASE_KEY: "${{ secrets.RELEASE_SIGNING_KEY }}" }
+        run: python3 -I release/make_manifest.py --tag "$GITHUB_REF_NAME" --dist dist
+      - name: release
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          pre=""; case "$GITHUB_REF_NAME" in *-*) pre="--prerelease";; esac
+          notes="--generate-notes"; [ -f "release/notes/$GITHUB_REF_NAME.md" ] && notes="--notes-file release/notes/$GITHUB_REF_NAME.md"
+          gh release create "$GITHUB_REF_NAME" $pre --title "FH2MP $GITHUB_REF_NAME" $notes dist/*

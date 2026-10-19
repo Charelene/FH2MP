@@ -41,11 +41,14 @@ import notifstore  # noqa: E402
 import clubs  # noqa: E402
 import social  # noqa: E402
 import xbl  # noqa: E402
+import auth  # noqa: E402
+import launcher_api  # noqa: E402
+import ops_api  # noqa: E402
 
 SEQ = 0
 SC = None
 STATE = {}
-CTX = threading.local()   # per-request: xuid (from X-UserId)
+CTX = threading.local()   # per-request: xuid (from the session token; X-UserId only for legacy clients), authed, tag
 DRV = None                # drivatar.DrivatarStore
 CARS = None               # cardb.CarDb (the user's own game database)
 SB = None                 # scoreboard.ScoreStore
@@ -54,6 +57,9 @@ UGC = None                # ugc.UgcStore (paint jobs, tunes, layer groups)
 NOTIF = None              # notifstore.NotificationStore
 CLUBS = None              # clubs.ClubStore
 SOCIAL = None             # social.SocialStore
+AUTH = None               # auth.AuthService (accountless identity, server/auth.py)
+LAUNCHER = None           # launcher_api.Ctx
+OPS = ops_api.OpsConfig() # operator API access (token + allowed addresses), see ops_api.py; replaced from the environment in setup_auth
 LEVELS = {}               # xuid -> currentCareerLevel as sent at Logon
 TAGS = {}                 # xuid -> gamertag, learned at Logon
 
@@ -92,6 +98,8 @@ def frame(payload=b"", result=0, error=0, text=b""):
 
 def logon(req):
     lg = req["loginData"]
+    if getattr(CTX, "authed", False):
+        lg["xuid"], lg["gamerTag"] = CTX.xuid, CTX.tag          # the account decides who this is, not what the client claims
     TAGS[lg["xuid"]] = lg["gamerTag"]
     LEVELS[lg["xuid"]] = lg["currentCareerLevel"]
     with DB.tx() as c:
@@ -743,9 +751,13 @@ def _heavy(f, tmpl):
 
 def content_upload(req):
     xuid, _ = _me()
-    got = UGC.blob_write(req["contentId"], req["payloadOffset"], bytes(req["uploadData"]))
-    log(f"  Content.UploadContent id={req['contentId']} @{req['payloadOffset']} +{len(req['uploadData'])} of {req['payloadTotalSize']}: "
-        f"{'have %d' % got if got is not None else 'unknown id'}")
+    data = bytes(req["uploadData"])
+    try:
+        got = UGC.blob_write(req["contentId"], req["payloadOffset"], data, owner=xuid)
+    except ugc.LimitError as e:
+        raise XlsError(str(e))
+    log(f"  Content.UploadContent id={req['contentId']} @{req['payloadOffset']} +{len(data)} of {req['payloadTotalSize']}: "
+        f"{'have %d' % got if got is not None else 'unknown id (or not yours)'}")
     if got is None:
         raise XlsError(f"no such content {req['contentId']}")
     return {"payloadUploadedSize": got}
@@ -762,7 +774,10 @@ def content_download(req):
 
 def large_file_create(req):
     xuid, _ = _me()
-    bid = UGC.blob_create(xuid, req["userFileName"], req["payloadSize"])
+    try:
+        bid = UGC.blob_create(xuid, req["userFileName"], req["payloadSize"])
+    except ugc.LimitError as e:
+        raise XlsError(str(e))
     log(f"  LargeFileUpload.Create name={req['userFileName']!r} size={req['payloadSize']} -> content id {bid}")
     return {"contentFileId": bid}
 
@@ -775,8 +790,12 @@ def profile_update_livery(body):
     if up is None:
         log(f"  UpdateLivery: unparsable body ({len(body)}B)")
         return b""
-    bid = UGC.blob_create(xuid, up["name"], len(body))
-    UGC.blob_write(bid, 0, body)
+    try:
+        bid = UGC.blob_create(xuid, up["name"], len(body))
+        UGC.blob_write(bid, 0, body, owner=xuid)
+    except ugc.LimitError as e:
+        log(f"  UpdateLivery refused: {e}")
+        return b""
     log(f"  UpdateLivery {up['name']!r} car={up['car_id']} layers={up['layers']} container={len(up['container'])}B "
         f"({len(body)}B on the wire) -> kept as blob #{bid}")
     return b""
@@ -789,10 +808,13 @@ def livery_thumbs(preview):
     """(big, small) design thumbnails from the Storefront preview (an 816x459 PNG): the client saves both with a downloaded design and
     crashes in LiveryAsyncSaveTask without them / with the wrong size (2026-10-18)."""
     try:
-        w, h = struct.unpack(">II", preview[16:24])
         if preview[:4] != b"\x89PNG":
             return b"", b""
-        big = preview if (w, h) == BIG_THUMB else pngtool.downscale(preview, *BIG_THUMB)
+        w, h = pngtool.decode(preview)[:2]                  # dimensions are enforced inside the decoder
+        if (w, h) == BIG_THUMB:
+            big = preview
+        else:
+            big = pngtool.downscale(preview, *BIG_THUMB)
         return big, pngtool.downscale(preview, *SMALL_THUMB)
     except (ValueError, struct.error, Exception) as e:      # noqa: BLE001 - never fail a share over a thumbnail
         log(f"  thumbnail generation failed: {e!r}")
@@ -892,13 +914,15 @@ def _create_file(kind, header, versioned_id, car_id, file_name, preview, meta=No
     xuid, _ = _me()
     blob = UGC.blob_by_name(xuid, file_name) if file_name else None
     v = UGC.versioned_get(versioned_id) if versioned_id else None
+    if v is not None and v["creator"] != xuid:
+        log(f"  {kind} share refused: versioned item {versioned_id} belongs to {v['creator']}, not to {xuid}")
+        raise XlsError(f"versioned item {versioned_id} is not yours")
     car_id = car_id or (v["car_id"] if v else None)         # a tune's listing carries make/model/class only; its car is on the versioned item
     if kind == "livery" and v is not None:
         if blob and not v["data"]:
-            UGC.versioned_set_data(versioned_id, blob[1])
+            UGC.versioned_set_data(versioned_id, blob[1], creator=xuid)
         if header["Quantity"]:
-            with DB.tx() as c:
-                c.execute("UPDATE ugc_versioned SET layers=? WHERE id=?", (header["Quantity"], versioned_id))
+            UGC.versioned_set_layers(versioned_id, header["Quantity"], xuid)
     m = {}
     if car_id:
         r = DB.one("SELECT make_id, model_id, class_id FROM game.v_cars WHERE id=?", (car_id,))
@@ -909,7 +933,7 @@ def _create_file(kind, header, versioned_id, car_id, file_name, preview, meta=No
     if kind == "livery" and v is not None and bytes(preview)[:4] == b"\x89PNG":
         big, small = livery_thumbs(bytes(preview))
         if big:
-            UGC.versioned_set_thumbs(versioned_id, big, small)
+            UGC.versioned_set_thumbs(versioned_id, big, small, creator=xuid)
     fid = UGC.file_create(kind, xuid, header["Title"], header["Description"], header["Type"], versioned_id, header["PayloadSize"],
                           bytes(preview), blob[0] if blob else None, car_id, kw1=header["KeywordOne"], kw2=header["KeywordTwo"], **m)
     log(f"  {kind} shared: file #{fid} {header['Title']!r} type={header['Type']} versioned={versioned_id} "
@@ -1972,6 +1996,10 @@ def gsds_qos_servers():
 
 def xbl_xuid(headers):
     """The caller's Xbox user id: the shim's XSAPI token is "XBL3.0 x=fh2mp;<decimal xuid>" (shim/src/winmm_proxy.c)."""
+    if getattr(CTX, "authed", False):
+        return str(CTX.xuid)                                    # from the session token, never from a header the client wrote
+    if AUTH is not None and AUTH.mode == "required":
+        return None
     m = re.search(r"x=fh2mp;(\d+)", headers.get("Authorization", ""))
     return m.group(1) if m else None
 
@@ -1997,16 +2025,75 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
+    def client_ip(self):
+        """The caller's address. Behind the local reverse proxy (nginx sets X-Real-IP) that is the header; otherwise the socket peer."""
+        peer = self.client_address[0]
+        if peer in ("127.0.0.1", "::1"):
+            real = self.headers.get("X-Real-IP")
+            if real:
+                return auth.norm_ip(real)
+        return auth.norm_ip(peer)
+
+    def _reply_json(self, status, obj, ctype="application/json", extra=()):
+        b = obj if isinstance(obj, bytes) else json.dumps(obj).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(b)))
+        for k, v in extra:
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(b)
+
+    def _v1(self, body):
+        status, obj, ctype = launcher_api.handle(LAUNCHER, self.command, self.path, self.headers, body, self.client_ip())
+        self._reply_json(status, obj, ctype, [("Cache-Control", "no-store")] if ctype == "application/json" else [("Cache-Control", "max-age=60")])
+
+    def _ops(self, body, proxied):
+        status, obj = ops_api.handle(OPS, sys.modules[__name__], self.command, self.path, self.headers, body, self.client_address[0], proxied)
+        self._reply_json(status, obj, extra=[("Cache-Control", "no-store")])
+
+    def _identify(self):
+        """Sets CTX.xuid / CTX.authed / CTX.tag from the session token. False (after answering) when the request must not go on."""
+        CTX.authed, CTX.tag = False, ""
+        token = self.headers.get("X-FH2MP-Token", "")
+        if AUTH is not None and AUTH.mode != "off":
+            if token:
+                try:
+                    acct = AUTH.authenticate(token, self.client_ip())
+                except auth.AuthError as e:
+                    self._reply_json(e.status, {"error": e.code, "message": e.message})
+                    return False
+                CTX.xuid, CTX.tag, CTX.authed = acct.xuid, acct.gamertag, True
+                announce_auth(acct.xuid, self.client_ip())
+                return True
+            if AUTH.mode == "required":
+                self._reply_json(401, {"error": "login_required", "message": "start the game from the FH2MP launcher"})
+                return False
+        try:
+            CTX.xuid = int(self.headers.get("X-UserId", "0"), 0)
+        except ValueError:
+            CTX.xuid = 0
+        return True
+
     def _handle(self):
         global SEQ
         SEQ += 1
         n = int(self.headers.get("Content-Length") or 0)
+        if (self.path.startswith("/v1/") and n > launcher_api.MAX_BODY) or (self.path.startswith("/ops/") and n > 65536) \
+                or n > ugc.MAX_REQUEST_BODY or n < 0:
+            self.close_connection = True
+            return self._reply_json(413, {"error": "too_large"})
         body = self.rfile.read(n) if n else b""
-        if self.path.startswith(("/admin/", "/api/")) and self.client_address[0] not in ("127.0.0.1", "::1"):
-            self.send_response(403)                       # operator and game-server endpoints are loopback only
+        proxied = "X-Real-IP" in self.headers or "X-Forwarded-For" in self.headers
+        if self.path.startswith("/ops/"):
+            return self._ops(body, proxied)
+        if self.path.startswith(("/admin/", "/api/")) and (self.client_address[0] not in ("127.0.0.1", "::1") or proxied):
+            self.send_response(403)                       # operator and game-server endpoints are loopback only (and never through the proxy)
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
+        if self.path.startswith("/v1/"):
+            return self._v1(body)
         if self.command == "GET" and self.path.startswith("/gamerpic/"):          # public: the client downloads pictures from here
             return self._gamerpic()
         if self.path.startswith("/admin/"):
@@ -2016,10 +2103,8 @@ class Handler(BaseHTTPRequestHandler):
         host = self.headers.get("X-FH2MP-Host", "")
         cls = self.headers.get("X-ClassName", "")
         method = self.headers.get("X-Method", "")
-        try:
-            CTX.xuid = int(self.headers.get("X-UserId", "0"), 0)
-        except ValueError:
-            CTX.xuid = 0
+        if not self._identify():
+            return
         social.touch(CTX.xuid or int(xbl_xuid(self.headers) or 0))
         log(f"#{SEQ} {self.command} {host}{self.path} {cls} {method} body={len(body)} user={CTX.xuid:#x}")
         out = b""
@@ -2065,12 +2150,16 @@ class Handler(BaseHTTPRequestHandler):
             log("  achievements -> 404")
         elif host == "sessiondirectory.xboxlive.com" and xbl.parse_path(self.path) is not None:
             # MPSD session document (PUT create/update, GET read, DELETE); see server/xbl.py
-            if self.command == "DELETE":
-                st, doc = xbl.delete_session(self.path), None
-                out, status = b"", 204
+            caller = xbl_xuid(self.headers)
+            if caller is None and AUTH is not None and AUTH.mode == "required" and self.command != "GET":
+                st, doc = 401, None                     # session writes need a signed-in caller
+                out, status = b"{}", 401
+            elif self.command == "DELETE":
+                st, doc = xbl.delete_session(self.path, caller), None
+                out, status = b"", st
             else:
-                st, doc = (xbl.put_session(self.path, body, xbl_xuid(self.headers)) if self.command in ("PUT", "POST")
-                           else xbl.get_session(self.path, xbl_xuid(self.headers)))
+                st, doc = (xbl.put_session(self.path, body, caller) if self.command in ("PUT", "POST")
+                           else xbl.get_session(self.path, caller))
                 status = st
                 out = json.dumps(doc).encode() if doc is not None else b"{}"
             ctype = "application/json"
@@ -2083,12 +2172,15 @@ class Handler(BaseHTTPRequestHandler):
                     for m in doc.get("members", {}).values())
             log(f"  MPSD {self.command} session -> {status} ({len(out)} bytes, {xbl.count()} session(s)){who}")
         elif host == "momatch.xboxlive.com" and xbl.parse_momatch(self.path) is not None:
-            if self.command == "DELETE":
-                status, doc = xbl.delete_ticket(self.path), None
+            caller = xbl_xuid(self.headers)
+            if caller is None and AUTH is not None and AUTH.mode == "required":
+                status, doc = 401, None                 # matchmaking needs a signed-in caller
+            elif self.command == "DELETE":
+                status, doc = xbl.delete_ticket(self.path, caller), None
             elif self.command == "POST":
-                status, doc = xbl.create_ticket(self.path, body, xbl_xuid(self.headers))
+                status, doc = xbl.create_ticket(self.path, body, caller)
             else:
-                status, doc = xbl.get_ticket(self.path)
+                status, doc = xbl.get_ticket(self.path, caller)
             out = json.dumps(doc).encode() if doc is not None else b""
             ctype = "application/json"
             log(f"  MOMATCH {self.command} -> {status} {out.decode()[:300]}")
@@ -2208,6 +2300,7 @@ def setup(dsn=None):
     SOCIAL = social.SocialStore(DB)
     global UGC
     UGC = ugc.UgcStore(DB)
+    setup_auth()
     fixed = UGC.repair_liveries()
     if fixed:
         log(f"user content: repaired {fixed} livery row(s) stored with the old upload prefix")
@@ -2221,16 +2314,87 @@ def setup(dsn=None):
     global DRV
     shipped = [json.loads(r["record"]) for r in DB.query("SELECT record FROM game.drivatar_shipped ORDER BY idx")]
     DRV = drivatar.DrivatarStore(SC, shipped, DB)
+    SOCIAL.bot_name, SOCIAL.name_lookup = DRV.bot_name, DRV.tag_for_xuid       # bots show their racing-driver names in lobbies, not Player#
     log(f"drivatar store: {len(DRV.templates)} shipped templates, {DRV.count()} stored players")
     global SB
     SB = scoreboard.ScoreStore(DB, [t["GamerTag"] for t in DRV.templates] + DRV.gamertags(), cars=CARS.fake_pool(), route_length=CARS.route_length, event_info=event_info,
                           event_cars=event_cars)
     log(f"scoreboards: {SB.count()} stored submissions")
+    SOCIAL.bot_name = lambda x: SB.fake_name(x) or DRV.bot_name(x)          # the rivals' ids resolve to their racing-driver names, not Player#
     global RIV
     RIV = rivals.RivalCatalog(CARS, None, DB)
     log(f"rival event texts refreshed: {RIV.refresh_texts()}")
     log(f"rival events: {len(RIV.events())} this rotation (month {RIV.serial()[0]}, re-roll {RIV.serial()[1]})")
     log(f"schema loaded from the database: {SC.count()} struct descriptors")
+
+
+def online_count():
+    now = time.time()
+    return sum(1 for t in list(social.LAST_POLL.values()) if now - t < social.ONLINE_SECONDS)
+
+
+_AUTH_ANNOUNCED = {}
+
+
+def announce_auth(xuid, ip):
+    """Tell the game server (UDP, loopback) that this xuid is signed in from this address, so it accepts that player's OpenConnection.
+    Repeated at most every 20 s per player; the game server forgets an entry after a few minutes without news."""
+    now = time.monotonic()
+    key = (xuid, ip)
+    if now - _AUTH_ANNOUNCED.get(key, -1e9) < 20:
+        return
+    _AUTH_ANNOUNCED[key] = now
+    if len(_AUTH_ANNOUNCED) > 20000:
+        _AUTH_ANNOUNCED.clear()
+    xbl.announce_auth(xuid, ip)
+
+
+def on_login(xuid, ip):
+    """A fresh sign-in (launcher login / sign-up): lifts an earlier ban or kick on the game server, then announces the address."""
+    xbl.announce_allow(xuid)
+    _AUTH_ANNOUNCED.pop((xuid, ip), None)
+    announce_auth(xuid, ip)
+
+
+def on_revoke(xuid):
+    """A ban or kick: sessions and tickets go, and the game server ends the player's live UDP connections."""
+    for key in [k for k in _AUTH_ANNOUNCED if k[0] == xuid]:
+        del _AUTH_ANNOUNCED[key]
+    xbl.drop_player(xuid)
+    xbl.announce_revoke(xuid)
+
+
+def setup_auth():
+    """Identity service and the launcher API. FH2MP_ENV (prod|dev|test) names the realm that signatures are bound to and is checked
+    against the database name, so a dev server can never be pointed at the production database by accident."""
+    global AUTH, LAUNCHER
+    env = os.environ.get("FH2MP_ENV", "prod")
+    dbname = DB.one("SELECT current_database()")[0]
+    if (env == "prod" and dbname != "fh2mp") or (env == "dev" and dbname == "fh2mp"):
+        sys.exit(f"refusing to start: FH2MP_ENV={env} but the database is {dbname!r}")
+    AUTH = auth.AuthService(DB, env=env, mode=os.environ.get("FH2MP_AUTH", "optional"),
+                            registration=os.environ.get("FH2MP_REGISTRATION", "open"),
+                            token_ip=os.environ.get("FH2MP_TOKEN_IP", "exact"))
+
+    def changed(xuid):
+        r = DB.one("SELECT gamertag FROM accounts WHERE xuid=?", (xuid,))
+        if r:
+            TAGS[xuid] = r["gamertag"]
+
+    AUTH.on_change = changed
+    AUTH.on_revoke = on_revoke
+    for r in DB.query("SELECT xuid, gamertag FROM accounts"):
+        TAGS[r["xuid"]] = r["gamertag"]
+    host = os.environ.get("FH2MP_PUBLIC_HOST", "127.0.0.1")
+    LAUNCHER = launcher_api.Ctx(
+        AUTH, SOCIAL, launcher_api.LauncherConfig(), online_count, log=log, on_login=on_login,
+        lsp_public={"url": os.environ.get("FH2MP_LSP_URL", f"http://{host}:{os.environ.get('FH2MP_LSP_PUBLIC_PORT', '5080')}")},
+        game_public={"host": host, "port": int(os.environ.get("FH2MP_GAME_PORT", "5000"))})
+    global OPS
+    OPS = ops_api.OpsConfig.from_env()
+    ops_api.load_saved(sys.modules[__name__])
+    log(f"ops api: {'enabled' if OPS.token else 'disabled (FH2MP_OPS_TOKEN unset)'}, allowed from {', '.join(str(n) for n in OPS.allow)}")
+    log(f"auth: env={env} mode={AUTH.mode} registration={AUTH.registration} accounts={AUTH.stats()['accounts']}")
 
 
 def main():

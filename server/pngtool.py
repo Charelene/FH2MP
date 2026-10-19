@@ -10,31 +10,48 @@ _SIG = b"\x89PNG\r\n\x1a\n"
 _CHANNELS = {0: 1, 2: 3, 4: 2, 6: 4}
 
 
+MAX_DIM = 1024        # default size limit of decode(): the biggest picture the server handles is the 816x459 design preview
+
+
 def _chunks(png):
     p = 8
-    while p + 8 <= len(png):
+    while p + 12 <= len(png):
         n, t = struct.unpack(">I4s", png[p:p + 8])
+        if p + 12 + n > len(png):
+            raise ValueError("truncated PNG chunk")
         yield t, png[p + 8:p + 8 + n]
         p += 12 + n
 
 
-def decode(png):
-    """-> (width, height, channels, rows) with rows as a list of bytearrays (unfiltered)."""
+def decode(png, max_dim=MAX_DIM):
+    """-> (width, height, channels, rows) with rows as a list of bytearrays (unfiltered).
+    The header is the first chunk and the only one, and its dimensions are checked here, before anything is allocated."""
     if png[:8] != _SIG:
         raise ValueError("not a PNG")
     idat, w = [], None
-    for t, d in _chunks(png):
+    for i, (t, d) in enumerate(_chunks(png)):
         if t == b"IHDR":
+            if i != 0 or w is not None or len(d) != 13:
+                raise ValueError("bad or repeated PNG header")
             w, h, depth, ctype, _, _, interlace = struct.unpack(">IIBBBBB", d)
             if depth != 8 or interlace != 0 or ctype not in _CHANNELS:
                 raise ValueError(f"unsupported PNG (depth {depth}, colour type {ctype}, interlace {interlace})")
+            if not (1 <= w <= max_dim and 1 <= h <= max_dim):
+                raise ValueError(f"PNG dimensions {w}x{h} are outside 1..{max_dim}")
         elif t == b"IDAT":
+            if w is None:
+                raise ValueError("no IHDR")
             idat.append(d)
     if w is None:
         raise ValueError("no IHDR")
     ch = _CHANNELS[ctype]
     stride = w * ch
-    raw = zlib.decompress(b"".join(idat))
+    # bounded inflate: the data of a w x h image is exactly this long, so a small file cannot expand into gigabytes
+    want = h * (stride + 1)
+    d = zlib.decompressobj()
+    raw = d.decompress(b"".join(idat), want + 1)
+    if len(raw) < want or d.unconsumed_tail:
+        raise ValueError("PNG data has the wrong size")
     rows, prev = [], bytearray(stride)
     p = 0
     for _ in range(h):

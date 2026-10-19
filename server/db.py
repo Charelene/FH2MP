@@ -15,6 +15,7 @@ PostgreSQL (`?` -> `%s`, INSERT OR IGNORE -> ON CONFLICT DO NOTHING). `cursor.la
 Schema changes are numbered entries in MIGRATIONS, applied in order and recorded in `schema_version`.
 """
 import os
+import queue
 import re
 import threading
 import time
@@ -326,6 +327,57 @@ MIGRATIONS = [
         gamerpic_at   DOUBLE PRECISION
     );
     """,
+    # 6: accountless identity (server/auth.py): Ed25519 device keys, server-assigned xuids, session tokens (hashed), audit trail, invites
+    """
+CREATE TABLE accounts (
+    xuid         BIGINT PRIMARY KEY,
+    pubkey       BYTEA  NOT NULL UNIQUE,              -- Ed25519, 32 bytes
+    gamertag     TEXT   NOT NULL,
+    gamertag_key TEXT   NOT NULL UNIQUE,              -- folded form, for uniqueness
+    created      DOUBLE PRECISION NOT NULL,
+    created_ip   TEXT   NOT NULL DEFAULT '',
+    last_login   DOUBLE PRECISION NOT NULL DEFAULT 0,
+    tag_changed  DOUBLE PRECISION NOT NULL DEFAULT 0,
+    banned_at    DOUBLE PRECISION,
+    ban_reason   TEXT   NOT NULL DEFAULT ''
+);
+CREATE INDEX accounts_created ON accounts (created);
+
+CREATE TABLE auth_sessions (
+    token_hash   BYTEA PRIMARY KEY,                   -- SHA-256 of the token; the token itself is never stored
+    xuid         BIGINT NOT NULL REFERENCES accounts (xuid) ON DELETE CASCADE,
+    ip           TEXT   NOT NULL,
+    client       TEXT   NOT NULL DEFAULT '',
+    created      DOUBLE PRECISION NOT NULL,
+    last_used    DOUBLE PRECISION NOT NULL,
+    expires      DOUBLE PRECISION NOT NULL,
+    hard_expires DOUBLE PRECISION NOT NULL,
+    revoked      BIGINT NOT NULL DEFAULT 0
+);
+CREATE INDEX auth_sessions_xuid ON auth_sessions (xuid);
+
+CREATE TABLE auth_nonces (
+    nonce   BYTEA PRIMARY KEY,
+    expires DOUBLE PRECISION NOT NULL
+);
+
+CREATE TABLE auth_events (
+    id     BIGSERIAL PRIMARY KEY,
+    at     DOUBLE PRECISION NOT NULL,
+    kind   TEXT NOT NULL,
+    ip     TEXT NOT NULL DEFAULT '',
+    xuid   BIGINT,
+    detail TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX auth_events_at ON auth_events (at);
+
+CREATE TABLE invites (
+    code_hash BYTEA PRIMARY KEY,
+    uses_left BIGINT NOT NULL DEFAULT 1,
+    note      TEXT   NOT NULL DEFAULT '',
+    created   DOUBLE PRECISION NOT NULL
+)
+    """,
 ]
 
 ADVISORY_LOCK = 7240001          # serialises write transactions (see tx)
@@ -432,14 +484,19 @@ class Database:
     def __init__(self, dsn=None):
         self.dsn = dsn or os.environ.get("FH2MP_PG_DSN") or "dbname=fh2mp"
         self.path = re.sub(r"password=\S+", "password=***", self.dsn)       # for log lines
-        self._local = threading.local()
-        self._all = []                      # every thread's connection, so close() can close them all
+        self._local = threading.local()     # .tx_conn: the connection of the transaction this thread is inside
+        self._all = []                      # every pooled connection, so close() can close them all
+        self._idle = queue.LifoQueue()
+        self._made = 0
+        self._made_lock = threading.Lock()
+        self.pool_size = int(os.environ.get("FH2MP_PG_POOL", "10"))
         self._migrate()
         self.serial_tables = {r[0] for r in self.query(
             "SELECT table_name FROM information_schema.columns WHERE table_schema='public' AND column_name='id' "
             "AND (is_identity='YES' OR column_default LIKE 'nextval%')")}
 
-    # ---- connections (one per thread)
+    # ---- connections: a small pool shared by all threads. The server runs one thread per HTTP connection and the game opens a new HTTP
+    # connection per request, so one PostgreSQL connection per thread (as before) leaked until max_connections (60 on the VPS) ran out.
     def _connect(self):
         conn = psycopg.connect(self.dsn, autocommit=True, row_factory=_row_factory, cursor_factory=psycopg.ClientCursor)
         _float_numeric(conn)
@@ -447,13 +504,48 @@ class Database:
         conn.execute("SET TIME ZONE 'UTC'")
         return conn
 
+    @contextmanager
+    def _use(self):
+        """The connection for one call: this thread's transaction connection when it is inside tx(), otherwise one borrowed from the pool
+        (waiting up to 30 s for a free one)."""
+        tc = getattr(self._local, "tx_conn", None)
+        if tc is not None:
+            yield tc
+            return
+        c = None
+        try:
+            c = self._idle.get_nowait()
+        except queue.Empty:
+            with self._made_lock:
+                room = self._made < self.pool_size
+                if room:
+                    self._made += 1
+            if room:
+                try:
+                    c = self._connect()
+                except BaseException:
+                    with self._made_lock:
+                        self._made -= 1
+                    raise
+                with self._made_lock:
+                    self._all = [x for x in self._all if not x.closed] + [c]
+            else:
+                try:
+                    c = self._idle.get(timeout=30)
+                except queue.Empty:
+                    raise RuntimeError("no database connection became free within 30 s") from None
+        try:
+            yield c
+        finally:
+            if c.closed:
+                with self._made_lock:
+                    self._made -= 1
+            else:
+                self._idle.put(c)
+
     @property
     def conn(self):
-        c = getattr(self._local, "conn", None)
-        if c is None or c.closed:
-            c = self._local.conn = self._connect()
-            self._all = [x for x in self._all if not x.closed] + [c]
-        return c
+        raise AttributeError("use Database.query / one / execute / tx: connections are pooled")
 
     def _exec(self, conn, sql, args=()):
         text = _translate(sql, bool(args))
@@ -471,21 +563,27 @@ class Database:
     def _run(self, sql, args, fetch):
         for attempt in (0, 1):
             try:
-                cur = self._exec(self.conn, sql, args)
-                return cur.fetchall() if fetch == "all" else cur.fetchone()
+                with self._use() as conn:
+                    cur = self._exec(conn, sql, args)
+                    return cur.fetchall() if fetch == "all" else cur.fetchone()
             except psycopg.OperationalError:
-                if attempt or not self.conn.closed:
-                    raise
-                self._local.conn = None            # the server went away between requests: reconnect once
+                if attempt or getattr(self._local, "tx_conn", None) is not None:
+                    raise                          # (inside a transaction a lost connection cannot be retried)
+                # the connection went away between requests (it is dropped by _use): try once with another one
 
     @contextmanager
     def tx(self):
         """A write transaction (COMMIT, or ROLLBACK if the body raises). Takes the advisory lock first, so writers never interleave.
         Yields an object with execute(sql, args) like the old SQLite connection."""
-        conn = self.conn
-        with conn.transaction():
-            conn.execute("SELECT pg_advisory_xact_lock(%s)", (ADVISORY_LOCK,))
-            yield _Tx(self, conn)
+        with self._use() as conn:
+            outer = getattr(self._local, "tx_conn", None)
+            self._local.tx_conn = conn
+            try:
+                with conn.transaction():
+                    conn.execute("SELECT pg_advisory_xact_lock(%s)", (ADVISORY_LOCK,))
+                    yield _Tx(self, conn)
+            finally:
+                self._local.tx_conn = outer
 
     def query(self, sql, args=()):
         return self._run(sql, args, "all")
@@ -495,18 +593,20 @@ class Database:
 
     def execute(self, sql, args=()):
         """One statement outside a transaction (reads, mostly); returns a cursor with fetchone / fetchall / iteration."""
-        return self._exec(self.conn, sql, args)
+        with self._use() as conn:
+            return self._exec(conn, sql, args)
 
     def close(self):
         for c in self._all:
             if not c.closed:
                 c.close()
         self._all = []
+        self._idle = queue.LifoQueue()
+        self._made = 0
 
     # ---- schema
     def _migrate(self):
-        conn = self.conn
-        with conn.transaction():
+        with self._use() as conn, conn.transaction():
             conn.execute("SELECT pg_advisory_xact_lock(%s)", (ADVISORY_LOCK + 1,))
             conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version BIGINT NOT NULL)")
             row = conn.execute("SELECT version FROM schema_version").fetchone()

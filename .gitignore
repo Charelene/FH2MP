@@ -43,3 +43,12 @@ ops/fh2mp-backup*
 ops/fh2mp-restore
 ops/fh2mp-archive-wal
 ops/fh2mp-lsp.service
+
+# launcher / release build output and local environments
+/dist/
+/launcher/dist/
+/launcher/build/
+/launcher/.venv/
+/launcher/*.spec.bak
+*.AppImage
+*.deb

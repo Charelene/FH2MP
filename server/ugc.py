@@ -17,36 +17,64 @@ import time
 import zlib
 
 
+MAX_REQUEST_BODY = 16 << 20       # largest HTTP body the LSP reads from a game client
+MAX_BLOB_SIZE = 8 << 20           # one uploaded blob (a livery container, a tune, a vinyl group), declared total size
+MAX_CHUNK = MAX_BLOB_SIZE         # one upload chunk
+MAX_LIVERY_RAW = 16 << 20         # a livery's inflated container
+MAX_BLOBS_PER_OWNER = 400
+MAX_BYTES_PER_OWNER = 256 << 20   # declared sizes of one account's blobs, together
+
+
+class LimitError(ValueError):
+    """An upload that breaks a size, offset or quota limit."""
+
+
 MAGIC = b"\x89FZ"        # prefix of a packed value: MAGIC + codec byte (0 = stored, 1 = LZMA) + payload; rows without it are legacy raw bytes
 
 
+MAX_UNPACKED = 32 << 20  # largest value unpack() will expand (twice the biggest legitimate blob: an inflated livery container)
+
+
 def pack(b):
-    """Compresses a stored blob as hard as it goes (LZMA, preset 9 extreme); keeps the raw bytes when that does not help."""
+    """Compresses a stored blob as hard as it goes (LZMA, preset 9 extreme); keeps the raw bytes when that does not help.
+    Always encodes: bytes that already start with MAGIC are client data, not our storage format, and get wrapped like any other."""
     if not b:
         return b
     b = bytes(b)
-    if b[:3] == MAGIC:
-        return b
     c = lzma.compress(b, format=lzma.FORMAT_ALONE, preset=9 | lzma.PRESET_EXTREME)
     return MAGIC + b"\x01" + c if len(c) + 4 < len(b) else MAGIC + b"\x00" + b
 
 
 def unpack(b):
+    """Inverse of pack (rows without MAGIC are legacy raw bytes). The expansion is capped at MAX_UNPACKED."""
     if not b:
         return b"" if b is None else bytes(b)
     b = bytes(b)
     if b[:3] != MAGIC:
         return b
-    return lzma.decompress(b[4:]) if b[3] == 1 else b[4:]
+    if b[3] != 1:
+        return b[4:]
+    d = lzma.LZMADecompressor(format=lzma.FORMAT_ALONE)
+    try:
+        out = d.decompress(b[4:], MAX_UNPACKED + 1)
+    except lzma.LZMAError as e:
+        raise LimitError(f"stored value is corrupt: {e}")
+    if len(out) > MAX_UNPACKED:
+        raise LimitError("stored value expands beyond the limit")
+    return out
 
 
 def livery_chunk(blob):
     """Checks a livery blob in the game's compression-stream form (IOSys::CCompressionStream, zlib mode, recovered from the exe):
-    one chunk = u32 LE compressed size + u32 LE raw size + that many zlib bytes. Returns the inflated 'vlrc' container or None."""
+    one chunk = u32 LE compressed size + u32 LE raw size + that many zlib bytes. Returns the inflated 'vlrc' container or None.
+    The inflate never produces more than the declared raw size (itself capped), so a small upload cannot expand into gigabytes."""
     try:
         comp, raw = struct.unpack("<II", blob[:8])
-        out = zlib.decompress(blob[8:8 + comp])
-        return out if len(out) == raw and len(blob) == 8 + comp else None
+        if len(blob) != 8 + comp or raw > MAX_LIVERY_RAW:
+            return None
+        d = zlib.decompressobj()
+        out = d.decompress(blob[8:], raw + 1)
+        return out if len(out) == raw and not d.unconsumed_tail and d.eof else None
     except (struct.error, zlib.error):
         return None
 
@@ -90,22 +118,36 @@ class UgcStore:
 
     # ---------------------------------------------------------------- large blobs (Content / LargeFileUpload)
     def blob_create(self, owner, name, total):
+        total = int(total)
+        if not 0 <= total <= MAX_BLOB_SIZE:
+            raise LimitError(f"a blob may be at most {MAX_BLOB_SIZE} bytes")
         with self.db.tx() as c:
+            q = c.execute("SELECT COUNT(*) AS n, COALESCE(SUM(total_size), 0) AS b FROM ugc_blobs WHERE owner=?", (owner,)).fetchone()
+            if q["n"] >= MAX_BLOBS_PER_OWNER or q["b"] + total > MAX_BYTES_PER_OWNER:
+                raise LimitError("upload quota of this account reached")
             return c.execute("INSERT INTO ugc_blobs (owner, user_file_name, total_size, received, data, created) VALUES (?,?,?,0,?,?)",
-                             (owner, name or "", int(total), b"", time.time())).lastrowid
+                             (owner, name or "", total, b"", time.time())).lastrowid
 
-    def blob_write(self, blob_id, offset, data):
-        """Writes a chunk at `offset`; returns the number of bytes received so far (None for an unknown id)."""
+    def blob_write(self, blob_id, offset, data, owner):
+        """Writes a chunk at `offset` into a blob of `owner`; returns the number of bytes received so far (None for an unknown id or
+        somebody else's blob). The chunk, its offset and the end of the write are checked against the declared total size BEFORE
+        any buffer is allocated."""
+        offset = int(offset)
+        if offset < 0 or len(data) > MAX_CHUNK:
+            raise LimitError("bad upload chunk")
         with self.db.tx() as c:
-            r = c.execute("SELECT data FROM ugc_blobs WHERE id=?", (blob_id,)).fetchone()
+            r = c.execute("SELECT data, total_size FROM ugc_blobs WHERE id=? AND owner=?", (blob_id, owner)).fetchone()
             if r is None:
                 return None
+            if offset + len(data) > min(int(r["total_size"]), MAX_BLOB_SIZE):
+                raise LimitError("upload chunk beyond the declared size")
             buf = bytearray(unpack(r["data"]))
             if offset > len(buf):
                 buf.extend(b"\0" * (offset - len(buf)))
             buf[offset:offset + len(data)] = data
-            c.execute("UPDATE ugc_blobs SET data=?, received=? WHERE id=?", (pack(bytes(buf)), len(buf), blob_id))
-            return len(buf)
+            n = c.execute("UPDATE ugc_blobs SET data=?, received=? WHERE id=? AND owner=?",
+                          (pack(bytes(buf)), len(buf), blob_id, owner)).rowcount
+            return len(buf) if n else None
 
     def blob_read(self, blob_id, offset, size):
         """(chunk, is_last, total) or None."""
@@ -137,13 +179,23 @@ class UgcStore:
             d[k] = unpack(d[k])
         return d
 
-    def versioned_set_data(self, vid, data):
+    def versioned_set_data(self, vid, data, creator=None):
+        """`creator` (when given) is part of the WHERE clause: only the item's creator can change it. Returns the rows changed."""
         with self.db.tx() as c:
-            c.execute("UPDATE ugc_versioned SET data=? WHERE id=?", (pack(data), vid))
+            if creator is None:
+                return c.execute("UPDATE ugc_versioned SET data=? WHERE id=?", (pack(data), vid)).rowcount
+            return c.execute("UPDATE ugc_versioned SET data=? WHERE id=? AND creator=?", (pack(data), vid, creator)).rowcount
 
-    def versioned_set_thumbs(self, vid, big, small):
+    def versioned_set_thumbs(self, vid, big, small, creator=None):
         with self.db.tx() as c:
-            c.execute("UPDATE ugc_versioned SET thumb=?, thumb_small=? WHERE id=?", (pack(big), pack(small), vid))
+            if creator is None:
+                return c.execute("UPDATE ugc_versioned SET thumb=?, thumb_small=? WHERE id=?", (pack(big), pack(small), vid)).rowcount
+            return c.execute("UPDATE ugc_versioned SET thumb=?, thumb_small=? WHERE id=? AND creator=?",
+                             (pack(big), pack(small), vid, creator)).rowcount
+
+    def versioned_set_layers(self, vid, layers, creator):
+        with self.db.tx() as c:
+            return c.execute("UPDATE ugc_versioned SET layers=? WHERE id=? AND creator=?", (layers, vid, creator)).rowcount
 
     def versioned_ref(self, vid, delta):
         with self.db.tx() as c:

@@ -48,6 +48,8 @@ def identicon(xuid, size=160):
 class SocialStore:
     def __init__(self, db):
         self.db = db
+        self.bot_name = None          # xuid -> name of a shipped Drivatar bot (wins over any players row: a bot is never a player), set by the LSP
+        self.name_lookup = None       # xuid -> gamertag for other ids without a players row (stored player Drivatars), set by the LSP
 
     # ---------------------------------------------------------------- friends
     def friends(self, xuid):
@@ -73,7 +75,8 @@ class SocialStore:
         """Everything XSAPI's profile settings can ask for, as a dict of strings (the wire values)."""
         p = self.db.one("SELECT display_name, gamerscore, tier, gamerpic_at FROM player_profiles WHERE xuid=?", (xuid,))
         pl = self.db.one("SELECT gamertag FROM players WHERE xuid=?", (xuid,))
-        tag = (pl["gamertag"] if pl else "") or f"Player{xuid % 100000}"
+        tag = ((self.bot_name(xuid) if self.bot_name else "") or (pl["gamertag"] if pl else "")
+               or (self.name_lookup(xuid) if self.name_lookup else "") or f"Player{xuid % 100000}")
         name = (p["display_name"] if p else "") or tag
         return {"Gamertag": tag, "GameDisplayName": name, "AppDisplayName": name, "Gamerscore": str(p["gamerscore"] if p else 0),
                 "AccountTier": p["tier"] if p else "Gold", "RealName": "", "Bio": "", "Location": "", "TenureLevel": "0",
