@@ -984,10 +984,14 @@ class Server:
     def remember_and_relay(self, peer: Peer, mtype, router, oid, tid, seq, size, payload) -> None:
         id_bits, type_bits = ROUTER_BITS[router]
         if peer.owner_id:
-            payload, n_x = rewrite_xuid(payload, size, XUID_PATTERN + peer.owner_id)
-            if n_x:
-                self.log(f"{peer.addr[1]} router {router} object {oid}: user id rewritten "
-                         f"x{n_x} -> {XUID_PATTERN + peer.owner_id:#x} for other clients")
+            # Every client's objects carried the same local user id (XUID_PATTERN, Azimuth's default), so they were made unique per
+            # client by adding the relay owner id. Clients now have their own xuid; use it, so the id other players resolve names and
+            # pictures from (XSAPI profile lookups) is the real one. A client whose xuid IS the pattern needs no rewrite.
+            new_id = peer.xuid or XUID_PATTERN + peer.owner_id
+            if new_id != XUID_PATTERN:
+                payload, n_x = rewrite_xuid(payload, size, new_id)
+                if n_x:
+                    self.log(f"{peer.addr[1]} router {router} object {oid}: user id rewritten x{n_x} -> {new_id:#x} for other clients")
         # Relay objects are applied strictly in sequence order, and the server also injects
         # its own updates (e.g. Console.SessionEntryFinalised), so the server owns the numbering.
         n = peer.relay_next.get((router, oid), 0)

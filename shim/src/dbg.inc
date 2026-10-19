@@ -6,7 +6,7 @@
  *
  *   rd <addr> <len>              hex dump (addr = expression, or a bare RVA)
  *   wr <addr> <hexbytes>         write memory
- *   bp <addr> [name=N] [log=e1,e2] [mem=expr:len]... [bt[=N]] [ret] [once|count=N] [cond=a==b|a!=b] [off]
+ *   bp <addr> [name=N] [log=e1,e2] [mem=expr:len]... [bt[=N]] [ret] [once|count=N] [cond=a==b|a!=b] [wat=expr] [off]
  *   bl | bd <id|all> | be <id>   list / delete / enable breakpoints
  *   watch <addr> <1|2|4|8> [w|rw] [name=N] [bt[=N]]   hardware watchpoint ("who writes this?")
  *   wl | wd <id|all>             list / delete watchpoints
@@ -572,6 +572,8 @@ static void dbg_crash_report(EXCEPTION_POINTERS *ep)
 
 /* ------------------------------------------------------------------ breakpoints */
 
+static void dbg_arm_watch4(unsigned long long addr, const char *name, int rw);
+
 typedef struct {
     int used, enabled, armed, is_ret, owner;
     unsigned char *addr;
@@ -585,6 +587,8 @@ typedef struct {
     int memlen[3];
     int nmem;
     char cond[96];
+    char wat[80];
+    int watrw;
     DWORD ret_tid;
 } dbg_bp;
 
@@ -729,6 +733,12 @@ static void dbg_bp_hit(int idx, EXCEPTION_POINTERS *ep)
                 }
                 ln = q + 1;
             }
+        }
+    }
+    if (b->wat[0]) { /* wat=expr: arm a 4-byte page-guard write watch on the address the expression gives at this hit */
+        unsigned long long wa = 0;
+        if (dbg_eval(b->wat, c, &wa) && !(wa & 3)) {
+            dbg_arm_watch4(wa, b->name, b->watrw);
         }
     }
     if (b->want_ret && c->Rsp > 0x10000 && !IsBadReadPtr((const void *)(ULONG_PTR)c->Rsp, 8)) {
@@ -910,6 +920,24 @@ static void dbg_pg_arm_page(unsigned long long addr)
     if (VirtualQuery((const void *)(ULONG_PTR)addr, &mbi, sizeof mbi) && !(mbi.Protect & PAGE_GUARD) &&
         mbi.State == MEM_COMMIT) {
         VirtualProtect((void *)(ULONG_PTR)(addr & ~0xFFFull), 1, mbi.Protect | PAGE_GUARD, &old);
+    }
+}
+
+static void dbg_arm_watch4(unsigned long long addr, const char *name, int rw)
+{
+    int ws;
+    for (ws = 4; ws < DBG_MAX_WATCH && g_dw[ws].used; ws++) {
+    }
+    if (ws < DBG_MAX_WATCH) {
+        g_dw[ws].pg = 1;
+        g_dw[ws].used = 1;
+        g_dw[ws].addr = addr;
+        g_dw[ws].len = 4;
+        g_dw[ws].rw = rw;
+        g_dw[ws].bt = 10;
+        g_dw[ws].hits = 0;
+        lstrcpynA(g_dw[ws].name, name, 32);
+        dbg_pg_arm_page(addr);
     }
 }
 
@@ -1281,6 +1309,11 @@ static void dbg_cmd(char *line, sb_t *o)
                 }
                 lstrcpynA(b->mem[b->nmem], t + 4, 80);
                 b->memlen[b->nmem++] = len;
+            } else if (!d_strncmp(t, "wat=", 4)) {
+                lstrcpynA(b->wat, t + 4, 80);
+            } else if (!d_strncmp(t, "watr=", 5)) {      /* like wat=, but reads trigger too */
+                lstrcpynA(b->wat, t + 5, 80);
+                b->watrw = 1;
             } else if (!d_strncmp(t, "bt", 2)) {
                 b->bt = t[2] == '=' ? d_atol(t + 3) : 8;
             } else if (!lstrcmpA(t, "ret")) {

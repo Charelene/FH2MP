@@ -1,12 +1,11 @@
-"""Tests for the SQLite storage layer: python3 -I -m unittest server/test_db.py (from the repo root) or run directly.
+"""Tests for the PostgreSQL storage layer: FH2MP_PG_DSN=... python3 -I server/test_db.py (needs psycopg 3).
 
+The DSN must point at a scratch database: every test drops and recreates the `public` schema (the `game` catalog schema is left alone).
 No game files needed: the Drivatar templates here are tiny stand-ins.
 """
-import json
 import math
 import os
 import sys
-import tempfile
 import threading
 import unittest
 
@@ -17,36 +16,35 @@ import notifstore  # noqa: E402
 import scoreboard  # noqa: E402
 
 
-def dump(path, obj):
-    with open(path, "w") as f:
-        json.dump(obj, f)
-
-
 def sub(score, sb=4, st=1, track=7, car=1):
     return {"scoreboardType": sb, "gameScoreboardId": 1, "trackId": track, "carId": car, "carClassId": 2,
             "carPerformanceIndex": 0.5, "score": scoreboard.dbl_to_u64(score), "isClean": True, "usedSTM": False,
             "usedTCS": False, "usedABS": True}
 
 
+def fresh_db():
+    import psycopg
+    with psycopg.connect(os.environ["FH2MP_PG_DSN"], autocommit=True) as c:
+        c.execute("DROP SCHEMA IF EXISTS public CASCADE")
+        c.execute("CREATE SCHEMA public")
+    return db.open_db()
+
+
 class Base(unittest.TestCase):
     def setUp(self):
-        self.dir = tempfile.TemporaryDirectory()
-        self.db = db.open_db(self.dir.name)
+        self.db = fresh_db()
 
     def tearDown(self):
         self.db.close()
-        self.dir.cleanup()
 
 
 class SchemaTests(Base):
     def test_migrations_are_idempotent(self):
-        v = self.db.one("PRAGMA user_version")[0]
+        v = self.db.one("SELECT version FROM schema_version")[0]
         self.assertEqual(v, len(db.MIGRATIONS))
-        self.db.close()
-        again = db.Database(os.path.join(self.dir.name, "fh2mp.sqlite"))
-        self.assertEqual(again.one("PRAGMA user_version")[0], v)
+        again = db.Database()
+        self.assertEqual(again.one("SELECT version FROM schema_version")[0], v)
         again.close()
-        self.db = db.open_db(self.dir.name)
 
     def test_failed_tx_rolls_back(self):
         with self.assertRaises(RuntimeError):
@@ -186,38 +184,6 @@ class DrivatarTests(Base):
         self.assertEqual(len(out), 4)
         self.assertFalse({1, 2} & {r["Xuid"] for r in out})
         self.assertEqual(len(self.d.pool(100)), 5 + len(self.d.templates))
-
-
-class LegacyImportTests(unittest.TestCase):
-    def test_import_once_and_rename(self):
-        with tempfile.TemporaryDirectory() as dd:
-            sub1 = {"xuid": 9, "tag": "Old", "sb": 4, "st": 1, "gsid": 1, "track": 7, "car": 1, "cls": 2, "cpi": 0.5,
-                    "score": 61.5, "clean": True, "stm": False, "tcs": False, "abs": True, "t": 1.0}
-            dump(os.path.join(dd, "scores.json"), {"subs": [sub1], "xp": {"9": 500.0}})
-            rec = template(2, 100, "Old")
-            rec.update({"Xuid": 9, "_locked": True})
-            dump(os.path.join(dd, "drivatars.json"), {"players": {"9": rec}})
-            dump(os.path.join(dd, "notifications.json"), {"next_id": 5000, "items": [
-                {"id": 4000, "type": 512, "message": "m", "sra": "", "sent": 1, "read": True},
-                {"id": 4001, "type": 34050, "message": "", "sra": "", "sent": 1, "read": False, "claimed": True,
-                 "xuid": 9, "params": {"GiftId": 4001}, "carId": 291}]})
-            d = db.open_db(dd)
-            self.assertEqual(scoreboard.ScoreStore(d, []).best_of(9, 4, 1, 7)["score"], 61.5)
-            self.assertEqual(scoreboard.ScoreStore(d, []).xp_of(9), 500.0)
-            store = drivatar.DrivatarStore.__new__(drivatar.DrivatarStore)
-            store.db, store.car_override, store.templates = d, {}, []
-            self.assertTrue(store.for_player(9, "Old")["_locked"])
-            n = notifstore.NotificationStore(d)
-            vis = {x["id"]: x for x in n.visible(9)}
-            self.assertTrue(vis[4000]["read"])           # read broadcast: read for the players we know
-            self.assertTrue(vis[4001]["claimed"])
-            self.assertGreaterEqual(n.add("new", "", 512)["id"], 5000)   # never below the old counter
-            self.assertFalse(os.path.exists(os.path.join(dd, "scores.json")))
-            self.assertTrue(os.path.exists(os.path.join(dd, "scores.json.migrated")))
-            d.close()
-            d2 = db.open_db(dd)                           # second start: nothing to import, nothing changes
-            self.assertEqual(scoreboard.ScoreStore(d2, []).count(), 1)
-            d2.close()
 
 
 if __name__ == "__main__":

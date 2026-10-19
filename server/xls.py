@@ -14,22 +14,41 @@ FIXED = {0: ">B", 1: ">H", 2: ">h", 3: ">i", 4: ">I", 5: ">q", 6: ">Q", 0x13: ">
 
 
 class Schema:
-    def __init__(self, exe_path):
-        self.exe = S.Exe(exe_path)
-        self.thunks = S.scan_thunks(self.exe)
+    """The Xls struct schemas. `source` is an S.TableSource / S.ExeSource, a db.Database (the server's normal source: schema `game`), or a path: the
+    exported bundle (.sqlite) or the exe itself (used by the exporter and for checks)."""
+
+    def __init__(self, source):
+        if isinstance(source, str):
+            if source.endswith(".sqlite"):
+                import sqlite3
+                source = S.TableSource(sqlite3.connect(f"file:{source}?mode=ro", uri=True))
+            else:
+                source = S.ExeSource(S.Exe(source))
+        elif hasattr(source, "query"):
+            source = S.TableSource(source)
+        self.src = source
 
     def call_struct(self, entry_name):
         """Root field list of e.g. 'ForzaUserLogon_Results' (a single wrapper field holding the data)."""
-        for ev in S.find_entry_by_name(self.exe, entry_name):
-            f = S.Field(self.exe, ev)
+        for ev in self.src.find(entry_name):
+            f = self.src.field(ev)
             if f.type == 0xC:
-                fl = S.fields_of(self.exe, self.thunks, f.nested)
+                fl = self.src.fields(f.nested)
                 if fl is not None:
                     return fl
         raise KeyError(entry_name)
 
     def sub(self, f):
-        return S.fields_of(self.exe, self.thunks, f.nested)
+        return self.src.fields(f.nested)
+
+    def fields(self, desc):
+        return self.src.fields(desc)
+
+    def field(self, va):
+        return self.src.field(va)
+
+    def count(self):
+        return self.src.count()
 
 
 class Reader:
@@ -62,7 +81,7 @@ def _read_value(sc, rd, f):
         return read_struct(sc, rd, sc.sub(f))
     if t == 0xE:
         n = struct.unpack(">I", rd.take(4))[0]
-        el = S.Field(sc.exe, f.elem)
+        el = sc.field(f.elem)
         return [_read_value(sc, rd, el) for _ in range(n)]
     raise ValueError(f"unsupported type {t:#x} for {f.name}")
 
@@ -93,7 +112,7 @@ def _write_value(sc, out, f, v):
     elif t == 0xC:
         write_struct(sc, out, sc.sub(f), v)
     elif t == 0xE:
-        el = S.Field(sc.exe, f.elem)
+        el = sc.field(f.elem)
         if f.size and el.size and len(v) > f.size // el.size:
             raise ValueError(f"{f.name}: {len(v)} elements exceeds the client's capacity {f.size // el.size}")
         out += struct.pack(">I", len(v))

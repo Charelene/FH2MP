@@ -67,7 +67,7 @@ class NotificationStore:
                 return 0        # not theirs (or gone): ignore, the client may retry stale ids
             return c.execute(f"INSERT INTO notification_receipts (notification_id, xuid, {column}) VALUES (?,?,?) "
                              f"ON CONFLICT(notification_id, xuid) DO UPDATE SET {column}=excluded.{column} "
-                             f"WHERE {column} IS NULL", (nid, xuid, now)).rowcount
+                             f"WHERE notification_receipts.{column} IS NULL", (nid, xuid, now)).rowcount
 
     # ---- admin (not per player)
     def all(self):

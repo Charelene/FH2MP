@@ -5,7 +5,7 @@ GetBestScore / GetRival / GetRowsAnthem. Boards are keyed (scoreboardType, score
 is a big-endian IEEE double carried as a u64 on the wire. Direction (lower is better for times, higher
 for everything else) is a guess by scoreType, see ASCENDING. Real rows are topped up with deterministic
 fake rivals (drawn from the Drivatar names) so a board is never empty; they are marked in the log only.
-Persistence: score_submissions / player_xp tables (db.py); best-per-player is a query, not a cached table.
+Persistence: score_submissions / player_xp tables (db.py, PostgreSQL); best-per-player is a query, not a cached table.
 """
 import db
 import hashlib
@@ -50,7 +50,7 @@ class ScoreStore:
     # ---- writes
     def submit(self, xuid, tag, score_type, d):
         """Stores one submission and returns it as a row dict, or None if the score is not a finite number
-        (SQLite turns NaN into NULL, and a NaN/inf time must never reach a public board anyway)."""
+        (a NaN/inf time must never reach a public board)."""
         score = u64_to_dbl(d["score"])
         if not math.isfinite(score):
             return None
@@ -73,7 +73,8 @@ class ScoreStore:
             r = c.execute("SELECT id FROM score_submissions WHERE score_id=?", (bytes(score_id),)).fetchone()
             if r is None:
                 return None
-            c.execute("INSERT OR REPLACE INTO score_ghosts (submission_id, data, uploaded) VALUES (?,?,?)",
+            c.execute("INSERT INTO score_ghosts (submission_id, data, uploaded) VALUES (?,?,?) ON CONFLICT (submission_id) "
+                      "DO UPDATE SET data=excluded.data, uploaded=excluded.uploaded",
                       (r["id"], bytes(data), time.time()))
             return r["id"]
 
@@ -94,7 +95,7 @@ class ScoreStore:
         with self.db.tx() as c:
             db.touch_player(c, xuid, "", time.time())
             return c.execute("INSERT INTO player_xp (xuid, xp, updated) VALUES (?,?,?) ON CONFLICT(xuid) "
-                             "DO UPDATE SET xp = xp + excluded.xp, updated = excluded.updated RETURNING xp",
+                             "DO UPDATE SET xp = player_xp.xp + excluded.xp, updated = excluded.updated RETURNING xp",
                              (xuid, xp, time.time())).fetchone()[0]
 
     def xp_of(self, xuid):
@@ -127,7 +128,7 @@ class ScoreStore:
                "CASE WHEN g.submission_id IS NULL THEN 0 ELSE s.id END AS ghost, ROW_NUMBER() OVER "
                f"(PARTITION BY s.xuid ORDER BY s.score {'ASC' if asc else 'DESC'}, s.id) AS rn "
                "FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid "
-               f"LEFT JOIN score_ghosts g ON g.submission_id = s.id WHERE {where}) WHERE rn = 1")
+               f"LEFT JOIN score_ghosts g ON g.submission_id = s.id WHERE {where}) ranked WHERE rn = 1")
         best = {r["xuid"]: _row(r) for r in self.db.query(sql, args)}
         if (sb, st) == XP_BOARD:
             q = "SELECT x.xuid, x.xp, COALESCE(p.gamertag, '') AS tag FROM player_xp x LEFT JOIN players p ON p.xuid = x.xuid"

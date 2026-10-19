@@ -36,3 +36,10 @@ node_modules/
 
 # LSP stand-in runtime state
 /server/data/
+.venv-pg/
+
+# server ops: database backup / restore tooling (local only)
+ops/fh2mp-backup*
+ops/fh2mp-restore
+ops/fh2mp-archive-wal
+ops/fh2mp-lsp.service

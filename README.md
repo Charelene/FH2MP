@@ -74,12 +74,13 @@ never empty; the Friends filter shows only you for now.
 |-------|--------------|
 | **Azimuth** (third party, not included) | Runs the Xbox One build of FH2 on a PC and stubs every online call as offline. |
 | **`shim/`** | A small in-process `winmm.dll` proxy. Re-enables real sockets, gives each install its own identity, lets the game's matchmaking and online Car Meet run, completes the QoS, secure-address and token steps, passes launch options, and patches a few gates (for example the Rivals "race this event" check). `shim/fh2dbg.py` is a live debugger client for it. |
-| **`server/`** | Python, standard library only. `fh2mp_server.py` speaks the game's NetV2 UDP protocol (lobbies, worlds, relay). `fh2mp_lsp.py` stands in for the HTTP cloud services (Message Center, Drivatars, Rivals, scoreboards, permissions, economy), `xbl.py` for the Xbox Live session, matchmaking and game-server services. |
+| **`server/`** | Python. `fh2mp_server.py` speaks the game's NetV2 UDP protocol (lobbies, worlds, relay; standard library only). `fh2mp_lsp.py` stands in for the HTTP cloud services (Message Center, Drivatars, Rivals, scoreboards, user content, permissions, economy), `xbl.py` for the Xbox Live session, matchmaking and game-server services. The LSP needs `psycopg` 3. |
 
-State lives in SQLite (WAL) under `server/data/`, which is git-ignored. The server also builds a local "game catalog"
-database from your own install (game tables, English strings, route data) so it can answer questions like "which cars
-fit this event" in SQL; it is never committed or shipped. Because of that, the HTTP stand-in runs on the player's PC,
-while the game server can live on a small VPS.
+Everything server-side runs centrally on one VPS. State lives in PostgreSQL: scores, ghosts, Drivatars, notifications, Rivals events
+and user-made paint jobs in `public`, and a "game catalog" (game tables, English strings, route geometry, the web-service schemas,
+the shipped Drivatars) in the schema `game`. The catalog is built once from your own install with `tools/export_gamedata.py` and
+loaded with `tools/load_gamedata_pg.py`; the running server never touches game files, and the catalog is never committed or shipped.
+Backups (WAL archiving for point-in-time recovery, hourly/daily/weekly dumps) and restore are in `docs/ops.md`.
 
 The protocol was recovered from the client itself, not from captured Microsoft traffic. No Microsoft or Xbox Live
 service is contacted, ever. There was nothing left to sniff.
@@ -91,7 +92,7 @@ service is contacted, ever. There was nothing left to sniff.
 - Optional: **FH2 Extra Options 0.2.88**. Put its `Azimuth/winmm.dll`, ini and PNG in an `fh2extra` folder next to `azimuth.exe`; the shim chain-loads it.
 - `shim/build.sh` (needs `x86_64-w64-mingw32-gcc`) builds `shim/build/winmm.dll`. Place it next to `azimuth.exe` and launch with `WINEDLLOVERRIDES=winmm=n,b`.
 - Linux with Wine/Proton (tested on Proton-CachyOS 11). Windows should work in principle, untested.
-- `python3` for the server.
+- `python3` for the servers; the LSP additionally needs PostgreSQL 16 and `psycopg` 3 (see `docs/ops.md`).
 
 ## AI disclosure
 

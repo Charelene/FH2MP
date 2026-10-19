@@ -11,8 +11,11 @@ Response: 12-byte header (Result u32, ErrorCode u32, DataLength u32; all big end
           "<Call>_Results" struct. Result 0 = OK; 2 = error (ErrorCode | 0x80510000), DataLength bytes
           of message text follow the header. Schemas come from the user's own exe (server/xls_schema.py).
 
-Usage: python3 -I server/fh2mp_lsp.py [port] <path-to-forza_durango_release_final.exe>
-       (the exe path can also be given in the FH2MP_EXE environment variable)
+Usage: python3 -I server/fh2mp_lsp.py [port]
+       State and game catalog (cars, tracks, strings, schemas, shipped Drivatars) live in PostgreSQL: FH2MP_PG_DSN (libpq conninfo,
+       default `dbname=fh2mp`); the catalog is loaded once with tools/export_gamedata.py + tools/load_gamedata_pg.py from an install:
+       the server itself never reads game files. Also: FH2MP_LSP_BIND (listen address, default 127.0.0.1), FH2MP_PUBLIC_HOST /
+       FH2MP_GAME_PORT (the game server address handed to clients).
 """
 import json
 import os
@@ -20,6 +23,7 @@ import re
 import struct
 import sys
 import time
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -28,10 +32,14 @@ import xls  # noqa: E402
 import drivatar  # noqa: E402
 import scoreboard  # noqa: E402
 import rivals  # noqa: E402
-import catalog  # noqa: E402
+import ugc  # noqa: E402
+import pngtool  # noqa: E402
+import xls_schema as S  # noqa: E402
 import cardb  # noqa: E402
 import db  # noqa: E402
 import notifstore  # noqa: E402
+import clubs  # noqa: E402
+import social  # noqa: E402
 import xbl  # noqa: E402
 
 SEQ = 0
@@ -41,8 +49,11 @@ CTX = threading.local()   # per-request: xuid (from X-UserId)
 DRV = None                # drivatar.DrivatarStore
 CARS = None               # cardb.CarDb (the user's own game database)
 SB = None                 # scoreboard.ScoreStore
-DB = None                 # db.Database (SQLite, server/data/fh2mp.sqlite)
+DB = None                 # db.Database (PostgreSQL)
+UGC = None                # ugc.UgcStore (paint jobs, tunes, layer groups)
 NOTIF = None              # notifstore.NotificationStore
+CLUBS = None              # clubs.ClubStore
+SOCIAL = None             # social.SocialStore
 LEVELS = {}               # xuid -> currentCareerLevel as sent at Logon
 TAGS = {}                 # xuid -> gamertag, learned at Logon
 
@@ -96,7 +107,8 @@ def logon(req):
         "defaultTimeoutMs": 30000,
         "defaultContentTimeoutMs": 40000,
         "defaultInGameTimeoutMs": 30000,
-        "userData": {**r["userData"], "qwXuid": lg["xuid"], "wzGamerTag": lg["gamerTag"]},
+        "userData": {**_owner(r["userData"], lg["xuid"]), "wzGamerTag": lg["gamerTag"],
+                     "acceptsClubInvites": CLUBS.accepts_invites(lg["xuid"])},
         # The client's permission table comes from here (it never calls GetPermissionsTable in practice); an empty
         # table makes every feature gate read "locked" (rival races, gift cars: "cannot connect to Xbox Live").
         # Capacity of the array is 256 x 16 bytes.
@@ -112,7 +124,6 @@ def logon(req):
 
 # ---------------------------------------------------------------- notifications (Message Center)
 
-DATA_DIR = os.environ.get("FH2MP_DATA_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")   # runtime state, git-ignored
 POLL_SECONDS = 5
 MSG_TYPE = 0x200    # notificationType carrying MessageNotificationParameters (to be confirmed in game)
 filetime = notifstore.filetime
@@ -174,7 +185,7 @@ KINDS = {
 
 def notif_fields(ntype):
     s = NOTIF_STRUCTS.get(ntype, STRUCT_FALLBACK)
-    return xls.S.fields_of(SC.exe, SC.thunks, s) if isinstance(s, int) else SC.call_struct(s)
+    return SC.fields(s) if isinstance(s, int) else SC.call_struct(s)
 
 
 def add_notification(message, sra="", ntype=None, params=None, xuid=0, car_id=None, gift_id=False):
@@ -432,7 +443,47 @@ def sb_rival(req):
     return res
 
 
+def _club_board_row(rank, club_id, xp, tmpl):
+    """A GetRows row of a club board: the club's leader as the user, the club's XP as the score, the club in clubData."""
+    r = _clone(tmpl)
+    club = CLUBS.club(club_id)
+    leader = CLUBS.leader(club_id)
+    r["user"] = _owner(tmpl["user"], leader) if leader else r["user"]
+    r.update({"position": rank, "rank": rank, "score": scoreboard.dbl_to_u64(xp), "submittedTime": scoreboard.iso(time.time())})
+    r["clubData"].update({"clubId": club_id, "clubTag": club["tag"][:9], "clubName": club["name"][:49],
+                          "memberCount": CLUBS.member_count(club_id), "clubPrivacy": club["privacy"]})
+    return r
+
+
+def club_board_rows(req, results):
+    """The club leaderboards ("CLUB LEADERBOARDS / CLUB LEVEL"): GetRows with isClubBoard, one row per club by XP. view 0 = all clubs,
+    1 = my club, 2 = friends' clubs (none) [view numbers as seen on the player boards]."""
+    xuid, _ = _me()
+    mine_id = CLUBS.member_info(xuid)[0]
+    ladder = [(i + 1, cid, xp) for i, (cid, xp) in enumerate(CLUBS.ladder())]
+    res = xls.default_struct(SC, SC.call_struct(results))
+    tmpl = res["userRow"]
+    if req["view"] == 1:
+        page = [x for x in ladder if x[1] == mine_id]
+    elif req["view"] == 2:
+        page = []
+    else:
+        page = ladder
+    start = max(1, req["startAt"])
+    page = page[start - 1:start - 1 + max(1, min(200, req["maxResults"]))]
+    res["rows"] = [_club_board_row(*x, tmpl) for x in page]
+    mine = next((x for x in ladder if x[1] == mine_id), None)
+    if mine:
+        res["userRow"] = _club_board_row(*mine, tmpl)
+    res["available"] = len(page) if req["view"] != 0 else len(ladder)
+    log(f"  GetRows[club board] board=({req['scoreboardType']},{req['scoreType']}) view={req['view']}: {len(res['rows'])} clubs, "
+        f"mine={'#%d' % mine[0] if mine else '-'}")
+    return res
+
+
 def sb_rows(req, results="ForzaWebServicesScoreboardGetRowsAnthem_Results"):
+    if req.get("isClubBoard") and "clubData" in _elem_template(results, "rows"):
+        return club_board_rows(req, results)
     xuid, _ = _me()
     page, mine, nreal, nfake = SB.rows(xuid, req["scoreboardType"], req["scoreType"], req["trackId"],
                                       max(1, req["startAt"]), min(200, max(0, req["maxResults"])), req["pivotId"])
@@ -611,7 +662,1107 @@ def gift_car(req):
     return res
 
 
+
+# ---------------------------------------------------------------- user content: paint jobs, tunes (server/ugc.py)
+
+_TEMPLATES = {}
+
+
+def _elem_template(result_struct, field):
+    """A default element of an array field of a result struct (every field present, ready to fill)."""
+    key = (result_struct, field)
+    if key not in _TEMPLATES:
+        f = next(x for x in SC.call_struct(result_struct) if x.name == field)
+        el = SC.field(f.elem)
+        _TEMPLATES[key] = xls.default_struct(SC, SC.fields(el.nested))
+    return _clone(_TEMPLATES[key])
+
+
+def _clone(v):
+    if isinstance(v, dict):
+        return {k: _clone(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_clone(x) for x in v]
+    return v
+
+
+def _owner(tmpl, xuid):
+    """The UserInfo struct of a player (creator of a design, club member, ...), with the club tag shown in front of the gamertag."""
+    o = _clone(tmpl)
+    club_id, club_tag, role = CLUBS.member_info(xuid) if CLUBS else (0, "", 0)
+    o.update({"qwXuid": xuid, "wzGamerTag": (TAGS.get(xuid) or _tag_from_db(xuid))[:31],
+              "currentCareerLevel": LEVELS.get(xuid, 1), "clubId": club_id, "clubTag": club_tag[:9], "roleInClub": clubs.wire_role(role)})
+    return o
+
+
+def _tag_from_db(xuid):
+    r = DB.one("SELECT gamertag FROM players WHERE xuid=?", (xuid,))
+    return r["gamertag"] if r else ""
+
+
+def _stamp(t):
+    return scoreboard.iso(t)
+
+
+KEYWORDS = ("Racing", "Rally", "Drift", "Retro", "Classic", "Anime", "Sponsored", "Clean", "Camo", "Flames",
+            "Stripes", "Cartoon", "Movie", "Game", "Sports", "Original", "Tribute", "Police", "Tuner", "Art")
+TUNE_KEYWORDS = ("Road Racing", "Street", "Drift", "Drag", "Rally", "Off-Road", "Grip", "Top Speed", "Balanced", "Stable",
+                 "Loose", "Wet Weather", "Beginner", "Expert", "Stock Plus", "Clean Racing")
+KEYWORDS_BY_FILE_TYPE = {0: TUNE_KEYWORDS}      # the client asks per file type (0..4): 0 = tune and 2 = livery [both confirmed from Create calls];
+                                                # 1, 3 and 4 (other content kinds, vinyl groups among them) keep the generic list for now
+FILE_KIND = {}          # the client's file type number -> kind, learned from Create calls
+
+
+def ugc_keywords(req):
+    words = KEYWORDS_BY_FILE_TYPE.get(req["fileType"], KEYWORDS)
+    return {"keywords": [{"Keyword": k, "KeywordId": i + 1, "Bucket": 0 if i < 10 else 1} for i, k in enumerate(words)][:req["maxKeywordResults"]]}
+
+
+def _ordinal(f):
+    """The `Ordinal` of a storefront item is the car id: the client's MakeName / ModelName / Year bindings read it (u16 at +0x64298
+    of the item, FUN_140c48f70 / FUN_140c49150) and show "DLC Car" when it is 0 or unknown."""
+    return (f.get("car_id") or 0) & 0xFFFF
+
+
+def _light(f, tmpl):
+    r = _clone(tmpl)
+    r.update({"Id": f["id"], "PopularityRating": min(f["likes"], 5), "Creator": _owner(tmpl["Creator"], f["owner"]),
+              "IsCreatorFollowed": False, "SubmissionTime": _stamp(f["created"]), "Ordinal": _ordinal(f), "MethodObtained": 0})
+    return r
+
+
+def _heavy(f, tmpl):
+    r = _clone(tmpl)
+    r.update({"Id": f["id"], "Type": f["type"], "Title": f["title"], "Description": f["description"],
+              "SubmissionTime": _stamp(f["created"]), "Owner": _owner(tmpl["Owner"], f["owner"]),
+              "PayloadSize": f["payload_size"], "PreviewPayload": bytes(f["preview"] or b"")[:409600], "Ordinal": _ordinal(f),
+              "IsUnderReview": False, "VersionedContentId": f["versioned_id"] or 0,
+              "PopularityRating": min(f["likes"], 5), "IsCreatorFollowed": False})
+    return r
+
+
+def content_upload(req):
+    xuid, _ = _me()
+    got = UGC.blob_write(req["contentId"], req["payloadOffset"], bytes(req["uploadData"]))
+    log(f"  Content.UploadContent id={req['contentId']} @{req['payloadOffset']} +{len(req['uploadData'])} of {req['payloadTotalSize']}: "
+        f"{'have %d' % got if got is not None else 'unknown id'}")
+    if got is None:
+        raise XlsError(f"no such content {req['contentId']}")
+    return {"payloadUploadedSize": got}
+
+
+def content_download(req):
+    r = UGC.blob_read(req["contentId"], req["payloadOffset"], req["requestedSize"])
+    if r is None:
+        raise XlsError(f"no such content {req['contentId']}")
+    chunk, last, total = r
+    log(f"  Content.DownloadContent id={req['contentId']} @{req['payloadOffset']} +{len(chunk)}/{total} last={last}")
+    return {"isLastBuffer": last, "downloadData": chunk, "totalSize": total}
+
+
+def large_file_create(req):
+    xuid, _ = _me()
+    bid = UGC.blob_create(xuid, req["userFileName"], req["payloadSize"])
+    log(f"  LargeFileUpload.Create name={req['userFileName']!r} size={req['payloadSize']} -> content id {bid}")
+    return {"contentFileId": bid}
+
+
+def profile_update_livery(body):
+    """OnlineProfile.UpdateLivery: the real upload of a design (layout in ugc.parse_livery_upload). It is kept under (owner, name) until
+    CreateVersionedLivery names it."""
+    xuid, _ = _me()
+    up = ugc.parse_livery_upload(body)
+    if up is None:
+        log(f"  UpdateLivery: unparsable body ({len(body)}B)")
+        return b""
+    bid = UGC.blob_create(xuid, up["name"], len(body))
+    UGC.blob_write(bid, 0, body)
+    log(f"  UpdateLivery {up['name']!r} car={up['car_id']} layers={up['layers']} container={len(up['container'])}B "
+        f"({len(body)}B on the wire) -> kept as blob #{bid}")
+    return b""
+
+
+BIG_THUMB, SMALL_THUMB = (816, 459), (192, 108)       # design thumbnails as the game writes them (RGBA PNG)
+
+
+def livery_thumbs(preview):
+    """(big, small) design thumbnails from the Storefront preview (an 816x459 PNG): the client saves both with a downloaded design and
+    crashes in LiveryAsyncSaveTask without them / with the wrong size (2026-10-18)."""
+    try:
+        w, h = struct.unpack(">II", preview[16:24])
+        if preview[:4] != b"\x89PNG":
+            return b"", b""
+        big = preview if (w, h) == BIG_THUMB else pngtool.downscale(preview, *BIG_THUMB)
+        return big, pngtool.downscale(preview, *SMALL_THUMB)
+    except (ValueError, struct.error, Exception) as e:      # noqa: BLE001 - never fail a share over a thumbnail
+        log(f"  thumbnail generation failed: {e!r}")
+        return b"", b""
+
+
+def cv_create_livery(req):
+    xuid, _ = _me()
+    vid = UGC.versioned_create("livery", xuid, req["name"], req["carId"], bytes(req["LiveryThumbnail"]))
+    blob = UGC.blob_by_name(xuid, req["name"])
+    note = "no matching UpdateLivery upload"
+    if blob:
+        up = ugc.parse_livery_upload(blob[1])
+        if up and up["container"]:
+            UGC.versioned_set_data(vid, up["payload"])
+            with DB.tx() as c:
+                c.execute("UPDATE ugc_versioned SET layers=?, car_id=COALESCE(NULLIF(car_id, 0), ?) WHERE id=?", (up["layers"], up["car_id"], vid))
+            note = f"data {len(up['payload'])}B (inflates to {len(up['container'])}B), {up['layers']} layers"
+    log(f"  CreateVersionedLivery {req['name']!r} car={req['carId']} thumb={len(req['LiveryThumbnail'])}B -> versioned {vid} ({note})")
+    return {"versionedLiveryId": vid}
+
+
+def cv_create_layergroup(req):
+    xuid, _ = _me()
+    vid = UGC.versioned_create("layergroup", xuid, req["name"], None, bytes(req["thumbnail"]))
+    log(f"  CreateVersionedLayerGroup {req['name']!r} thumb={len(req['thumbnail'])}B -> versioned {vid}")
+    return {"versionedLayerGroupId": vid}
+
+
+def cv_create_tune(req):
+    xuid, _ = _me()
+    vid = UGC.versioned_create("tune", xuid, req["name"], req["carId"])
+    log(f"  CreateVersionedTune {req['name']!r} car={req['carId']} -> versioned {vid}")
+    return {"versionedTuneId": vid}
+
+
+def cv_create_tune_structs(req):
+    xuid, _ = _me()
+    vid = UGC.versioned_create("tune", xuid, "", req["carId"], parts=req["installedParts"], tuning=req["tuning"])
+    log(f"  CreateVersionedTuneFromStructs car={req['carId']} -> versioned {vid}")
+    return {"versionedTuneId": vid}
+
+
+def cv_get_livery(req):
+    v = UGC.versioned_get(req["versionedLiveryId"])
+    if v is None or v["kind"] != "livery":
+        raise XlsError(f"no such livery {req['versionedLiveryId']}")
+    res = xls.default_struct(SC, SC.call_struct("ForzaContentVersioningRetrieveVersionedLiveryById_Results"))
+    d = res["versionedLiveryData"]
+    data = ugc.strip_livery_prefix(bytes(v["data"] or b""))        # the client's own compression-stream blob, served as uploaded
+    d.update({"profileId": 0, "carId": v["car_id"] or 0, "numberOfLayers": v["layers"], "creatorXuid": v["creator"],
+              "data": data, "liveryThumbnail": bytes(v["thumb"] or b""),
+              "liveryThumbnailSmall": bytes(v["thumb_small"] or b"")})
+    if not d["liveryThumbnail"]:        # a design shared before thumbnails were generated: derive them from its storefront preview now
+        f = DB.one("SELECT id FROM ugc_files WHERE versioned_id=? AND removed=0 ORDER BY id DESC LIMIT 1", (v["id"],))
+        pv = (UGC.file_get(f["id"]) or {}).get("preview", b"") if f else b""
+        big, small = livery_thumbs(pv) if pv else (b"", b"")
+        if big:
+            UGC.versioned_set_thumbs(v["id"], big, small)
+            d["liveryThumbnail"], d["liveryThumbnailSmall"] = big, small
+    log(f"  RetrieveVersionedLivery {v['id']}: {len(d['data'])}B data, {d['numberOfLayers']} layers, thumb {len(d['liveryThumbnail'])}B")
+    return res
+
+
+def cv_get_layergroup(req):
+    v = UGC.versioned_get(req["versionedLayerGroupId"])
+    if v is None or v["kind"] != "layergroup":
+        raise XlsError(f"no such layer group {req['versionedLayerGroupId']}")
+    res = xls.default_struct(SC, SC.call_struct("ForzaContentVersioningRetrieveVersionedLayerGroupById_Results"))
+    res["versionedLayerGroupData"].update({"name": v["name"], "numberOfLayers": v["layers"], "creatorXuid": v["creator"],
+                                           "data": bytes(v["data"] or b""), "thumbnailData": bytes(v["thumb"] or b"")})
+    return res
+
+
+def cv_get_tune(req):
+    v = UGC.versioned_get(req["versionedTuneId"])
+    if v is None or v["kind"] != "tune":
+        raise XlsError(f"no such tune {req['versionedTuneId']}")
+    res = xls.default_struct(SC, SC.call_struct("ForzaContentVersioningRetrieveVersionedTuneById_Results"))
+    d = res["versionedTuneData"]
+    d.update({"CarId": v["car_id"] or 0, "CreatorName": TAGS.get(v["creator"]) or _tag_from_db(v["creator"]), "CreatorXuid": v["creator"]})
+    if v["parts"]:
+        d["InstalledParts"] = json.loads(v["parts"])
+    if v["tuning"]:
+        d["Tuning"] = json.loads(v["tuning"])
+    return res
+
+
+def _cv_ref(field, delta):
+    def h(req):
+        UGC.versioned_ref(req[field], delta)
+        return None
+    return h
+
+
+def _create_file(kind, header, versioned_id, car_id, file_name, preview, meta=None):
+    xuid, _ = _me()
+    blob = UGC.blob_by_name(xuid, file_name) if file_name else None
+    v = UGC.versioned_get(versioned_id) if versioned_id else None
+    car_id = car_id or (v["car_id"] if v else None)         # a tune's listing carries make/model/class only; its car is on the versioned item
+    if kind == "livery" and v is not None:
+        if blob and not v["data"]:
+            UGC.versioned_set_data(versioned_id, blob[1])
+        if header["Quantity"]:
+            with DB.tx() as c:
+                c.execute("UPDATE ugc_versioned SET layers=? WHERE id=?", (header["Quantity"], versioned_id))
+    m = {}
+    if car_id:
+        r = DB.one("SELECT make_id, model_id, class_id FROM game.v_cars WHERE id=?", (car_id,))
+        if r:
+            m = {"make_id": r["make_id"], "model_id": r["model_id"], "class_id": r["class_id"]}
+    m.update(meta or {})
+    FILE_KIND[header["Type"]] = kind
+    if kind == "livery" and v is not None and bytes(preview)[:4] == b"\x89PNG":
+        big, small = livery_thumbs(bytes(preview))
+        if big:
+            UGC.versioned_set_thumbs(versioned_id, big, small)
+    fid = UGC.file_create(kind, xuid, header["Title"], header["Description"], header["Type"], versioned_id, header["PayloadSize"],
+                          bytes(preview), blob[0] if blob else None, car_id, kw1=header["KeywordOne"], kw2=header["KeywordTwo"], **m)
+    log(f"  {kind} shared: file #{fid} {header['Title']!r} type={header['Type']} versioned={versioned_id} "
+        f"payload={header['PayloadSize']} blob={'#%d' % blob[0] if blob else None} preview={len(preview)}B")
+    return fid
+
+
+def store_livery_create(req):
+    d = req["liveryDescription"]
+    fid = _create_file("livery", req["fileHeader"], d["base"]["VersionedLiveryId"], d["carId"], req["fileName"], req["previewData"])
+    return {"contentFileId": fid}
+
+
+def store_tuning_create(req):
+    d = req["tuningDescription"]["base"]
+    meta = {"make_id": d["MakeId"], "model_id": d["ModelId"], "class_id": d["ClassId"], "env": d["EnvironmentId"],
+            "track": d["TrackId"], "pi": d["PerformanceIndex"]}
+    fid = _create_file("tune", req["fileHeader"], d["VersionedTuneId"], None, req["fileName"], req["previewData"], meta)
+    return {"contentFileId": fid}
+
+
+def _search_files(kind, results_struct, label, req):
+    p = req["searchParameters"]
+    files = UGC.search(kind, p["MakeId"], p["ModelId"], p["ClassId"], p["KeywordOneId"], p["KeywordTwoId"], p["EnvironmentId"],
+                       p["TrackId"], p["NumberOfLayers"], p["GamerTag"], p["ManualSearchKeywords"], min(max(req["maxFiles"], 0), 100) or 50)
+    tmpl = _elem_template(results_struct, "searchResults")
+    log(f"  {label} make={p['MakeId']} model={p['ModelId']} class={p['ClassId']} kw={p['KeywordOneId']}/{p['KeywordTwoId']} "
+        f"env={p['EnvironmentId']} track={p['TrackId']} tag={p['GamerTag']!r} text={p['ManualSearchKeywords']!r}: {len(files)} found")
+    return {"searchResults": [_light(f, tmpl) for f in files]}
+
+
+def store_search_liveries(req):
+    return _search_files("livery", "ForzaStorefrontSearchLiveryFiles_Results", "SearchLiveryFiles", req)
+
+
+def store_search_tunes(req):
+    return _search_files("tune", "ForzaStorefrontSearchTuningFiles_Results", "SearchTuningFiles", req)
+
+
+def store_heavy(req):
+    ids = req["fileIds"][:max(0, req["fileCount"])] if req["fileCount"] else req["fileIds"]
+    files = UGC.files(ids)
+    tmpl = _elem_template("ForzaStorefrontGetFileHeavyWeightData_Results", "fileData")
+    for f in files:
+        UGC.bump(f["id"], "downloads")
+    log(f"  GetFileHeavyWeightData {list(ids)}: {len(files)} found")
+    return {"fileData": [_heavy(f, tmpl) for f in files]}
+
+
+def store_my_files(req):
+    xuid, _ = _me()
+    files = UGC.mine(xuid, req["fileType"], min(max(req["maxFiles"], 0), 500) or 100)
+    tmpl = _elem_template("ForzaStorefrontGetMyFileList_Results", "files")
+    out = []
+    for f in files:
+        r = _clone(tmpl)
+        r.update({"Id": f["id"], "Title": f["title"], "Description": f["description"], "SubmissionTime": _stamp(f["created"]),
+                  "IsUnderReview": False, "VersionedContentId": f["versioned_id"] or 0, "PopularityRating": min(f["likes"], 5),
+                  "Ordinal": _ordinal(f),
+                  "DownloadCount": f["downloads"], "LikeCount": f["likes"], "UseCount": f["uses"]})
+        out.append(r)
+    log(f"  GetMyFileList type={req['fileType']}: {len(out)} files")
+    return {"files": out}
+
+
+def store_if_shared(req):
+    r = DB.one("SELECT id FROM ugc_files WHERE versioned_id=? AND removed=0 ORDER BY id DESC LIMIT 1", (req["versionedItemId"],))
+    res = xls.default_struct(SC, SC.call_struct("ForzaStorefrontGetFileDataIfShared_Results"))
+    if r:
+        f = UGC.file_get(r["id"])
+        tmpl = xls.default_struct(SC, SC.call_struct("ForzaStorefrontGetFileDataIfShared_Results"))["storefrontData"]
+        res["found"] = True
+        res["storefrontData"] = _light(f, tmpl)
+    return res
+
+
+def _bump_handler(column, field="fileId"):
+    def h(req):
+        UGC.bump(req[field], column)
+        return None
+    return h
+
+
+def store_batch_views(req):
+    for i in req["fileIds"][:max(0, req["fileCount"])]:
+        UGC.bump(i, "views")
+    return None
+
+
+def store_remove(req):
+    xuid, _ = _me()
+    log(f"  RemoveFile #{req['fileId']}: {'removed' if UGC.remove(req['fileId'], xuid) else 'not yours / unknown'}")
+    return None
+
+
+def store_retitle(req):
+    xuid, _ = _me()
+    UGC.retitle(req["fileId"], xuid, title=req["newTitle"])
+    return None
+
+
+def store_redescribe(req):
+    xuid, _ = _me()
+    UGC.retitle(req["fileId"], xuid, description=req["newDescription"])
+    return None
+
+
+def store_featured_liveries(req):
+    files, seen = [], set()
+    for f in UGC.search("livery", limit=200):
+        if f["car_id"] not in seen:
+            seen.add(f["car_id"])
+            files.append(f)
+        if len(files) >= max(1, req["numCars"]):
+            break
+    tmpl = _elem_template("ForzaStorefrontGetFeaturedLiveriesForRandomCars_Results", "liveryData")
+    return {"liveryData": [_heavy(UGC.file_get(f["id"]), tmpl) for f in files]}      # file_get unpacks the preview
+
+
+def store_drivatar_liveries(req):
+    rows = DB.query("SELECT id, versioned_id FROM ugc_files WHERE kind='livery' AND car_id=? AND removed=0 AND versioned_id IS NOT NULL "
+                    "ORDER BY likes DESC, id DESC LIMIT ?", (req["carId"], max(1, req["maxContentResults"])))
+    return {"drivatarLiveries": [{"Id": r["id"], "VersionedContentId": r["versioned_id"]} for r in rows]}
+
+
+def store_curated(req):
+    """Storefront.GetCuratedContent (the "Recommended Designs" page): community files of the asked type for the player's car."""
+    p = req["curationParameters"]
+    files = UGC.curated(p["ContentType"], p["CarId"], min(max(req["maxContentResults"], 1), 100))
+    tmpl = _elem_template("ForzaStorefrontGetCuratedContent_Results", "curatedContent")
+    log(f"  GetCuratedContent type={p['ContentType']} car={p['CarId']} track={p['TrackId']} pi={p['PiTargetValue']}: {len(files)} found")
+    return {"curatedContent": [_light(f, tmpl) for f in files]}
+
+
+def store_curated_data(req):
+    f = UGC.file_get(req["contentId"])
+    if f is None:
+        raise XlsError(f"no such content {req['contentId']}")
+    v = UGC.versioned_get(f["versioned_id"]) if f["versioned_id"] else None
+    res = xls.default_struct(SC, SC.call_struct("ForzaStorefrontGetCuratedContentData_Results"))
+    res["contentData"].update({"Id": f["id"], "PreviewPayload": bytes(f["preview"] or b"")[:409600],
+                               "Payload": bytes((v or {}).get("data") or b"")[:1048576]})
+    log(f"  GetCuratedContentData #{f['id']}: payload {len(res['contentData']['Payload'])}B, preview {len(res['contentData']['PreviewPayload'])}B")
+    return res
+
+
+def store_noop(req):
+    return None
+
+
+# ---------------------------------------------------------------- Car Clubs (server/clubs.py)
+
+def _club_errors(fn):
+    """A ClubError becomes the Xls error result the client maps to one of its club messages."""
+    def wrapped(req):
+        try:
+            return fn(req)
+        except clubs.ClubError as e:
+            log(f"  club: {e.text} (error code {e.code:#x})")
+            raise XlsError(e.text, e.code)
+    wrapped.__name__ = fn.__name__
+    return wrapped
+
+
+def _keyword(tmpl, kid):
+    k = clubs.KEYWORD_BY_ID.get(kid)
+    t = _clone(tmpl)
+    if k:
+        t.update(k)
+    return t
+
+
+def _club_struct(tmpl, club):
+    """A club description in any of the result shapes (details, full info, search rows); fields a shape lacks are skipped."""
+    cid = club["id"]
+    out = _clone(tmpl)
+    user = lambda x: _owner(tmpl["clubLeader"], x)
+    values = {
+        "clubId": cid, "clubTag": club["tag"][:9], "clubName": club["name"][:49], "clubDescription": club["description"][:400],
+        "isOpenForMembership": club["privacy"] == clubs.PRIVACY_OPEN, "creationDate": _stamp(club["created"]),
+        "carCount": 0, "memberCount": CLUBS.member_count(cid), "clubLeader": user(CLUBS.leader(cid)) if CLUBS.leader(cid) else tmpl["clubLeader"],
+        "clubChampion": user(CLUBS.champion(cid)) if CLUBS.champion(cid) else tmpl["clubChampion"],
+        "clubPrivacy": club["privacy"], "clubXP": CLUBS.xp(cid), "clubXPRank": CLUBS.xp_rank(cid),
+    }
+    for k, v in values.items():
+        if k in out:
+            out[k] = v
+    for field, col in (("regionKeyword", "region"), ("attitudeKeyword", "attitude"), ("interestKeyword", "interest")):
+        if field in out:
+            out[field] = _keyword(tmpl[field], club[col])
+    return out
+
+
+def _club_list(result_struct, list_field, rows, total_field="totalClubs"):
+    el = _elem_template(result_struct, list_field)
+    out = {list_field: [_club_struct(el, r) for r in rows]}
+    if any(f.name == total_field for f in SC.call_struct(result_struct)):
+        out[total_field] = CLUBS.total()
+    return out
+
+
+@_club_errors
+def club_details(req):
+    club = CLUBS.club(req["clubId"])
+    if not club:
+        raise clubs.ClubError("club not found", clubs.CODES["not_found"])
+    res = xls.default_struct(SC, SC.call_struct("ForzaCarClubGetClubDetails_Results"))
+    res["clubDetails"] = _club_struct(res["clubDetails"], club)
+    return res
+
+
+@_club_errors
+def club_full_info(req):
+    club = CLUBS.club(req["clubId"])
+    if not club:
+        raise clubs.ClubError("club not found", clubs.CODES["not_found"])
+    res = xls.default_struct(SC, SC.call_struct("ForzaCarClubGetClubFullInfo_Results"))
+    res["clubDetails"] = _club_struct(res["clubDetails"], club)
+    leader_tmpl = _elem_template("ForzaCarClubGetClubFullInfo_Results", "leaders")
+    res["leaders"] = [_owner(leader_tmpl, x) for x in CLUBS.leaders(club["id"], max(1, req["maxLeaders"]))]
+    return res
+
+
+def club_keywords(req):
+    return {"keywords": clubs.keyword_list()[:max(1, req["maxKeywordResults"])]}
+
+
+def club_recommended(req):
+    rows = CLUBS.recommended(getattr(CTX, "xuid", 0), req["maxResults"])
+    log(f"  GetRecommendedClubs: {len(rows)}")
+    return _club_list("ForzaCarClubGetRecommendedClubs_Results", "clubDetailsList", rows)
+
+
+def club_friends(req):
+    return _club_list("ForzaCarClubGetFriendsClubs_Results", "friendsClubDetailsList", [])      # no friends list yet
+
+
+def club_search(req):
+    p = req["clubSearchParams"]
+    rows = CLUBS.search(p["Privacy"], _kw(p["RegionKeywordId"]), _kw(p["AttitudeKeywordId"]), _kw(p["InterestKeywordId"]), p["Activity"],
+                        limit=req["maxResults"])
+    log(f"  SearchForClubs privacy={p['Privacy']} region={p['RegionKeywordId']} attitude={p['AttitudeKeywordId']} "
+        f"interest={p['InterestKeywordId']} activity={p['Activity']} friends={p['FriendsOnly']}: {len(rows)}")
+    return _club_list("ForzaCarClubSearchForClubs_Results", "clubDetailsList", rows)
+
+
+def club_search_name(req):
+    rows = CLUBS.search(name=req["clubName"], limit=req["maxResults"])
+    log(f"  SearchForClubsByName {req['clubName']!r}: {len(rows)}")
+    return _club_list("ForzaCarClubSearchForClubsByName_Results", "clubDetailsList", rows)
+
+
+@_club_errors
+def club_search_tag(req):
+    club = CLUBS.by_tag(req["clubTag"])
+    if not club:
+        raise clubs.ClubError("club not found", clubs.CODES["not_found"])
+    res = xls.default_struct(SC, SC.call_struct("ForzaCarClubSearchForClubByTag_Results"))
+    res["clubDetails"] = _club_struct(res["clubDetails"], club)
+    return res
+
+
+def club_status(req):
+    club_id, _, _ = CLUBS.member_info(req["xuid"])
+    return {"clubStatus": {"acceptsClubInvites": CLUBS.accepts_invites(req["xuid"]), "clubId": club_id}}
+
+
+def club_members(req):
+    club = CLUBS.club(req["clubId"])
+    el = _elem_template("ClubGetClubMembers_Results", "clubMembers")
+    rows = CLUBS.members(req["clubId"], max(1, req["maxMembers"])) if club else []
+    out = []
+    for r in rows:
+        m = _clone(el)
+        m["user"] = _owner(el["user"], r["xuid"])
+        m["recentClubStatusChange"] = time.time() - r["status_changed"] < 86400
+        out.append(m)
+    return {"clubMembers": out, "totalMembers": CLUBS.member_count(req["clubId"]) if club else 0}
+
+
+def _tag(xuid):
+    return (TAGS.get(xuid) or _tag_from_db(xuid))[:31]
+
+
+def _club_notify(xuid, ntype, params):
+    return add_notification("", "", ntype, params, xuid)
+
+
+def _notify_leaders(club, ntype, params, exclude=()):
+    for x in CLUBS.leaders(club["id"], 50):
+        if x not in exclude:
+            _club_notify(x, ntype, params)
+
+
+def _kw(v):
+    """The client sends 255 for "no keyword"."""
+    return 0 if v >= 255 else v
+
+
+@_club_errors
+def club_create(req):
+    xuid, _ = _me()
+    cid = CLUBS.create(xuid, req["clubTag"], req["clubName"], req["clubDescription"], req["privacy"], _kw(req["regionKeywordId"]),
+                       _kw(req["attitudeKeywordId"]), _kw(req["interestKeywordId"]))
+    log(f"  club created: #{cid} [{req['clubTag']}] {req['clubName']!r} by {xuid:#x} privacy={req['privacy']} "
+        f"keywords={req['regionKeywordId']}/{req['attitudeKeywordId']}/{req['interestKeywordId']}")
+    return {"clubId": cid}
+
+
+@_club_errors
+def club_change_details(req):
+    xuid, _ = _me()
+    CLUBS.change_details(xuid, req["newClubName"], req["newClubDescription"], req["privacyLevel"], _kw(req["regionKeyword"]),
+                         _kw(req["attitudeKeyword"]), _kw(req["interestKeyword"]))
+    return None
+
+
+def _clear_requests(club, xuid):
+    """The player is in: their "club request" notices (0x700) in the leaders' Message Center are used up."""
+    for leader in CLUBS.leaders(club["id"], 50):
+        for n in NOTIF.visible(leader):
+            if n["type"] == 0x700 and n["params"].get("requestorXuid") == xuid:
+                NOTIF.delete(n["id"])
+
+
+def _joined(club, xuid, left=()):
+    """Notices for a join: the leaders hear about the new member; members of a disbanded old club are told they were removed."""
+    _clear_requests(club, xuid)
+    _notify_leaders(club, 0x707, {"newMemberXuid": xuid, "newMemberGamertag": _tag(xuid), "clubName": club["name"][:49],
+                                  "clubTag": club["tag"][:9]}, exclude=(xuid,))
+
+
+@_club_errors
+def club_request_join(req):
+    xuid, _ = _me()
+    club, approved = CLUBS.request_join(xuid, club_id=req["clubId"])
+    return _after_request(club, xuid, approved)
+
+
+@_club_errors
+def club_request_join_name(req):
+    xuid, _ = _me()
+    club, approved = CLUBS.request_join(xuid, tag=req["clubTag"])
+    return _after_request(club, xuid, approved)
+
+
+def _after_request(club, xuid, approved):
+    if approved:
+        _joined(club, xuid)
+    else:
+        _notify_leaders(club, 0x700, {"requestorXuid": xuid, "requestorGamertag": _tag(xuid), "clubId": club["id"]})
+    log(f"  {xuid:#x} asked to join [{club['tag']}]: {'joined' if approved else 'request queued'}")
+    return {"requestApproved": approved}
+
+
+@_club_errors
+def club_approve(req):
+    xuid, _ = _me()
+    club = CLUBS.approve(xuid, req["approvedUser"])
+    _club_notify(req["approvedUser"], 0x705, {"clubName": club["name"][:49], "clubTag": club["tag"][:9]})
+    _joined(club, req["approvedUser"])
+    return None
+
+
+def _invite(club, iid, sponsor, invitee):
+    n = _club_notify(invitee, 0x701, {"sponsorXuid": sponsor, "clubId": club["id"], "clubName": club["name"][:49],
+                                       "clubTag": club["tag"][:9], "sponsorGamertag": _tag(sponsor)})
+    log(f"  club invite #{iid} [{club['tag']}] {sponsor:#x} -> {invitee:#x} (notification {n['id']})")
+
+
+@_club_errors
+def club_invite(req):
+    xuid, _ = _me()
+    club, iid = CLUBS.invite(xuid, req["userToInvite"])
+    _invite(club, iid, xuid, req["userToInvite"])
+    return None
+
+
+@_club_errors
+def club_invite_name(req):
+    xuid, _ = _me()
+    r = DB.one("SELECT xuid FROM players WHERE lower(gamertag)=lower(?)", (req["usernameToInvite"],))
+    if not r:
+        raise clubs.ClubError("no such player", clubs.CODES["not_found"])
+    club, iid = CLUBS.invite(xuid, r["xuid"])
+    _invite(club, iid, xuid, r["xuid"])
+    return None
+
+
+@_club_errors
+def club_accept_invite(req):
+    xuid, _ = _me()
+    club = CLUBS.accept_invite(xuid, req["clubId"], req["invitationId"])
+    for n in NOTIF.visible(xuid):                      # the invitation notices for this club are used up
+        if n["type"] == 0x701 and n["params"].get("clubId") == club["id"]:
+            NOTIF.delete(n["id"])
+    _joined(club, xuid)
+    return None
+
+
+@_club_errors
+def club_change_role(req):
+    xuid, _ = _me()
+    target, new_role = req["userToChange"], clubs.power_role(req["newRole"])
+    if not new_role:
+        raise XlsError("unknown role", clubs.CODES["unknown"])
+    club, old = CLUBS.change_role(xuid, target, new_role)
+    base = {"clubName": club["name"][:49], "clubTag": club["tag"][:9]}
+    if new_role > old:
+        _club_notify(target, 0x708, {"newRole": clubs.wire_role(new_role), "newPromotedXuid": target,
+                                     "newPromotedGamertag": _tag(target), **base})
+    elif new_role < old:
+        _club_notify(target, 0x704, base)
+    log(f"  club role: {target:#x} {old} -> {new_role} by {xuid:#x}")
+    return None
+
+
+@_club_errors
+def club_remove(req):
+    xuid, _ = _me()
+    target = req["userToRemove"]
+    club, kind, others = CLUBS.remove(xuid, target)
+    base = {"clubName": club["name"][:49], "clubTag": club["tag"][:9]}
+    if kind == "kicked":
+        _club_notify(target, 0x703, {"kickedXuid": target, "kickedGamertag": _tag(target), **base})
+    elif kind == "quit":
+        _notify_leaders(club, 0x706, {"exMemberXuid": target, "exMemberGamertag": _tag(target), **base})
+    else:
+        for x in others:
+            _club_notify(x, 0x703, {"kickedXuid": x, "kickedGamertag": _tag(x), **base})      # the club was disbanded
+    log(f"  club remove: {target:#x} {kind} by {xuid:#x} from [{club['tag']}]")
+    return None
+
+
+@_club_errors
+def club_recommend_removal(req):
+    xuid, _ = _me()
+    club = CLUBS.recommend_removal(xuid, req["userToRemove"])
+    _notify_leaders(club, 0x702, {"recommendingRemovalXuid": xuid, "recommendingRemovalGamertag": _tag(xuid),
+                                  "recommendedForRemovalXuid": req["userToRemove"],
+                                  "recommendedForRemovalGamertag": _tag(req["userToRemove"]), "clubId": club["id"]})
+    return None
+
+
+@_club_errors
+def club_post_notice(req):
+    xuid, _ = _me()
+    club, role = CLUBS.membership(xuid)
+    if not club or role < clubs.ROLE_CO_LEADER:
+        raise clubs.ClubError("insufficient privileges", clubs.CODES["no_privilege"])
+    params = {"senderXuid": xuid, "senderClubRole": clubs.wire_role(role), "senderGamertag": _tag(xuid), "noticeBoardMessage": req["noticeBoardMessage"][:561]}
+    ids = [_club_notify(r["xuid"], 0x709, params)["id"] for r in CLUBS.members(club["id"], 1000)]
+    nid = CLUBS.post_notice(xuid, req["noticeBoardMessage"], ids)
+    log(f"  club notice #{nid} by {xuid:#x} to {len(ids)} members")
+    return {"notificationId": nid}
+
+
+@_club_errors
+def club_delete_notice(req):
+    xuid, _ = _me()
+    for nid in CLUBS.delete_notice(xuid, req["notificationId"]):
+        NOTIF.delete(nid)
+    return None
+
+
+def club_history(req):
+    el = _elem_template("ClubGetClubHistory_Results", "userClubHistory")
+    out = []
+    for r in CLUBS.history(req["userXuid"], req["maxEntries"]):
+        h = _clone(el)
+        h.update({"clubName": r["club_name"][:49], "date": _stamp(r["created"]), "user": _owner(el["user"], req["userXuid"]),
+                  "role": clubs.wire_role(r["role"]), "action": r["action"]})
+        out.append(h)
+    return {"userClubHistory": out}
+
+
+def club_users_to_invite(req):
+    el = _elem_template("ClubGetUsersToInvite_Results", "candidatesForInvite")
+    out = []
+    for r in CLUBS.users_to_invite(getattr(CTX, "xuid", 0), req["maxResults"]):
+        c = _clone(el)
+        c.update({"user": _owner(el["user"], r["xuid"]), "acceptsClubInvites": bool(r["accepts"]), "hasEverLoggedIn": True, "clubName": ""})
+        out.append(c)
+    return {"candidatesForInvite": out}
+
+
+def club_users_to_join(req):
+    el = _elem_template("ClubGetUsersToJoin_Results", "usersInClubs")
+    out = []
+    for r in CLUBS.users_to_join(getattr(CTX, "xuid", 0), req["maxResults"]):
+        c = _clone(el)
+        c.update({"user": _owner(el["user"], r["xuid"]), "clubMemberCount": r["members"], "clubName": r["name"][:49],
+                  "clubIsOpenForMembership": r["privacy"] == clubs.PRIVACY_OPEN})
+        out.append(c)
+    return {"usersInClubs": out}
+
+
+def club_accept_invites_pref(req):
+    xuid, _ = _me()
+    CLUBS.set_accepts_invites(xuid, req["acceptingClubInvites"])
+    return None
+
+
+def club_ladder(req):
+    """Scoreboard.GetLadderRows (Club Overview > View Club Ladder): the club's MEMBERS ranked by the XP they earned in it, the caller's
+    own row and the reward tiers. (The club-vs-club board is GetRows with isClubBoard.)"""
+    res = xls.default_struct(SC, SC.call_struct("ForzaWebServicesScoreboardGetLadderRows_Results"))
+    row_t = _elem_template("ForzaWebServicesScoreboardGetLadderRows_Results", "rows")
+    tier_t = _elem_template("ForzaWebServicesScoreboardGetLadderRows_Results", "ladderTiers")
+    xuid, _ = _me()
+    ladder = CLUBS.member_ladder(req["clubId"])
+    club_xp = sum(xp for _, xp in ladder)
+
+    def row(rank, member, xp):
+        r = _clone(row_t)
+        r.update({"rank": rank, "user": _owner(row_t["user"], member), "score": scoreboard.dbl_to_u64(xp),
+                  "topTierCount": sum(1 for th, _ in clubs.ClubStore.TIERS if club_xp >= th)})
+        return r
+    start = max(1, req["startAt"])
+    res["rows"] = [row(i + 1, m, xp) for i, (m, xp) in enumerate(ladder)][start - 1:start - 1 + max(1, req["maxResults"])]
+    res["ladderTiers"] = [dict(_clone(tier_t), xpThreshold=float(th), creditRewardAmount=cr, tierNumber=i + 1)
+                          for i, (th, cr) in enumerate(clubs.ClubStore.TIERS)][:max(0, req["maxTiers"])]
+    mine = next(((i + 1, m, xp) for i, (m, xp) in enumerate(ladder) if m == xuid), None)
+    if mine:
+        res["userRow"] = row(*mine)
+    res["available"] = len(ladder)
+    log(f"  GetLadderRows club={req['clubId']} start={req['startAt']} max={req['maxResults']}: {len(res['rows'])} of {len(ladder)} members, "
+        f"club XP {club_xp:.0f}, you={'#%d' % mine[0] if mine else '-'}")
+    return res
+
+
+def user_get_user_data(req):
+    """Xls.WebServices.User.GetUserData: the client calls it after every club change and takes its own club tag / role from the answer
+    (an empty default made the tag vanish right after creating a club)."""
+    xuid, tag = _me()
+    res = xls.default_struct(SC, SC.call_struct("UserGetUserData_Results"))
+    u = _owner(res["userData"], xuid)
+    u.update({"wzGamerTag": tag[:31], "acceptsClubInvites": CLUBS.accepts_invites(xuid)})
+    res["userData"] = u
+    return res
+
+
+def _car_info(car_id):
+    """Catalog facts of a car for the shared-car structs (names, make / body / region ids, DLC content id)."""
+    return DB.one("SELECT c.makeid, c.familymodelid, c.familybodyid, c.cartypeid, c.regionid, c.countryid, c.familyspecialid, "
+                  "c.engineplacementid, c.contentid, c.year, v.make, v.name FROM game.data_car c JOIN game.v_cars v ON v.id = c.id WHERE c.id=?",
+                  (car_id,))
+
+
+def _shared_notify(club, action, car, xuid, targets):
+    info = _car_info(car["model_id"])
+    params = {"sharedCarAction": action, "playerXuid": xuid, "playerGamertag": _tag(xuid), "MakeName": (info["make"] if info else "")[:61],
+              "ModelName": (info["name"] if info else "")[:161], "perfIndex": json.loads(car["car"]).get("perfIndex", 0.0),
+              "Year": info["year"] if info else 0}
+    for t in targets:
+        if t != xuid:
+            _club_notify(t, 0x8301, params)
+
+
+@_club_errors
+def shared_upload_textures(req):
+    xuid, _ = _me()
+    tid = CLUBS.textures_create(xuid, req["liveryTexture"], req["LiveryThumbnail"])
+    log(f"  SharedCar.UploadCarTextures -> #{tid} (livery {len(req['liveryTexture'])}B, thumbnail {len(req['LiveryThumbnail'])}B)")
+    return {"texturesId": tid}
+
+
+@_club_errors
+def shared_create(req):
+    xuid, _ = _me()
+    d = dict(req["completeCarData"])
+    guid, profile, model_id = d.pop("gameCarId"), d.pop("ProfileId"), d["modelId"]
+    cid, version, club = CLUBS.share_car(xuid, guid, profile, model_id, d, req["texturesId"], req["liveryDetails"], req["tuning"],
+                                         req["overWriteExisting"])
+    car = CLUBS.shared_car(cid)
+    _shared_notify(club, 0, car, xuid, [r["xuid"] for r in CLUBS.members(club["id"], 1000)] if version == 1 else [])
+    log(f"  SharedCar.Create car {model_id} by {xuid:#x} -> shared car #{cid} v{version} in [{club['tag']}] "
+        f"(overwrite={req['overWriteExisting']}, livery {len(req['liveryDetails'])}B, tuning {len(req['tuning'])}B)")
+    return {"carId": cid}
+
+
+def shared_club_cars(req):
+    xuid, _ = _me()
+    el = _elem_template("ForzaSharedCarGetClubCars_Results", "carData")
+    out = []
+    for r in CLUBS.club_cars(xuid, req["maxResults"]):
+        car = json.loads(r["car"])
+        info = _car_info(r["model_id"])
+        c = _clone(el)
+        c.update({"owner": _owner(el["owner"], r["owner"]), "sharedDate": _stamp(r["shared"]), "lastUsedDate": _stamp(r["last_used"]),
+                  "sharedCarId": r["id"], "modelId": r["model_id"], "raceCount": r["race_count"], "version": r["version"],
+                  "performanceIndex": car.get("perfIndex", 0.0), "simulationPeakPower": car.get("simPeakPower", 0.0),
+                  "simulationPeakTorque": car.get("simPeakTorque", 0.0), "curbWeight": car.get("curbWeight", 0.0),
+                  "weightDistribution": car.get("weightDistribution", 0.0), "isStock": car.get("isStock", False)})
+        for k in ("classId", "driveTypeId", "engineConfigId", "cylinderId", "aspirationTypeId", "displacementId", "speedRating",
+                  "accelerationRating", "launchRating", "brakingRating", "handlingRating"):
+            c[k] = car.get(k, c[k])
+        if info:
+            c.update({"year": info["year"], "makeId": info["makeid"], "modelFamilyId": info["familymodelid"], "bodyFamilyId": info["familybodyid"],
+                      "carTypeId": info["cartypeid"], "regionId": info["regionid"], "countryId": info["countryid"],
+                      "familySpecialId": info["familyspecialid"], "enginePlacementId": info["engineplacementid"],
+                      "contentId": info["contentid"], "makeName": info["make"][:61], "modelName": info["name"][:161]})
+        out.append(c)
+    log(f"  SharedCar.GetClubCars by {xuid:#x}: {len(out)} cars")
+    return {"carData": out}
+
+
+def shared_details(req):
+    el = _elem_template("ForzaSharedCarGetCarDetails_Results", "carData")
+    out = []
+    for cid in req["carIds"][:max(0, req["carCount"])]:
+        r = CLUBS.shared_car(cid)
+        if not r:
+            continue
+        car = json.loads(r["car"])
+        c = _clone(el)
+        c.update({"sharedCarId": cid, "thumbnail": CLUBS.textures(r["textures_id"])[1][:230400],
+                  "manufacturerColorIndex": car.get("manufacturerColorIndex", 0), "carColorRGB": car.get("carColorRGB", 0),
+                  "isMetallic": car.get("isMetallic", False), "specialColorIndex": car.get("specialColorIndex", 0)})
+        out.append(c)
+    return {"carData": out}
+
+
+def shared_download(req):
+    r = CLUBS.shared_car(req["carId"])
+    if not r:
+        raise XlsError(f"no such shared car {req['carId']}")
+    log(f"  SharedCar.Download #{req['carId']} v{r['version']} (asked v{req['version']}): livery {len(r['livery'])}B, tuning {len(r['tuning'])}B")
+    return {"liveryDetails": r["livery"][:req["maxLiveryLength"] or None], "tuningDetails": r["tuning"][:req["maxTuningLength"] or None]}
+
+
+@_club_errors
+def shared_remove(req):
+    xuid, _ = _me()
+    log(f"  SharedCar.Remove #{req['carId']} by {xuid:#x}: {'removed' if CLUBS.remove_car(xuid, req['carId']) else 'unknown car'}")
+    return None
+
+
+def shared_race(req):
+    xuid, _ = _me()
+    r = CLUBS.shared_car(req["carId"])
+    if r:
+        CLUBS.count_race(req["carId"])
+        if r["owner"] != xuid:
+            club, _ = CLUBS.membership(r["owner"])
+            if club:
+                _shared_notify(club, 1, r, xuid, [r["owner"]])           # someone raced the owner's shared car [action 1 = used: guess]
+    return None
+
+
+def _also_xls_club():
+    """The `Club*` calls arrive with class Xls.WebServices.Club (seen in game 2026-10-19); keep the Forza name too."""
+    for (cls, method), v in list(HANDLERS.items()):
+        if cls == "Forza.WebServices.Club":
+            HANDLERS[("Xls.WebServices.Club", method)] = v
+
+
+# ---------------------------------------------------------------- friends, profiles, gamerpics (server/social.py)
+
+def _pic_url(xuid, version):
+    host = os.environ.get("FH2MP_PUBLIC_HOST", "127.0.0.1")
+    return f"http://{host}:{os.environ.get('FH2MP_LSP_PUBLIC_PORT', '5080')}/gamerpic/{xuid}.png?v={version}"
+
+
+def _xuid_of(segment, headers):
+    """`xuid(123)` or `me` in an XSAPI path -> int."""
+    m = re.fullmatch(r"xuid\((\d+)\)", segment)
+    if m:
+        return int(m.group(1))
+    return int(xbl_xuid(headers) or 0)
+
+
+def xbl_social(host, command, path, body, headers):
+    """XSAPI profile / social / presence / peoplehub calls -> (status, JSON object) or None when the path is not one of ours."""
+    from urllib.parse import parse_qs, urlparse
+    u = urlparse(path)
+    q = parse_qs(u.query)
+    segs = [x for x in u.path.split("/") if x]
+    settings = [x for v in q.get("settings", []) for x in v.split(",") if x]
+
+    def users(xuids, wanted):
+        return [social.profile_user(SOCIAL, x, wanted, _pic_url) for x in xuids]
+
+    if host == "profile.xboxlive.com":
+        if command == "POST" and segs == ["users", "batch", "profile", "settings"]:
+            j = json.loads(body or b"{}")
+            ids = [int(x) for x in j.get("userIds", [])]
+            log(f"  profile settings for {len(ids)} user(s): {','.join(str(i)[-5:] for i in ids)}")
+            return 200, {"profileUsers": users(ids, j.get("settings", []))}
+        if command == "GET" and len(segs) == 4 and segs[0] == "users" and segs[2:] == ["profile", "settings"]:
+            return 200, {"profileUsers": users([_xuid_of(segs[1], headers)], settings)}
+        if command == "GET" and len(segs) == 6 and segs[0] == "users" and segs[2:4] == ["profile", "settings"] and segs[4] == "people":
+            me = _xuid_of(segs[1], headers)
+            log(f"  profile settings of the social group {segs[5]!r} of {me:#x}: {len(SOCIAL.friends(me))} friends")
+            return 200, {"profileUsers": users(SOCIAL.friends(me), settings)}
+    elif host == "social.xboxlive.com" and command == "GET" and len(segs) == 3 and segs[0] == "users":
+        me = _xuid_of(segs[1], headers)
+        if segs[2] == "people":
+            log(f"  social people of {me:#x}: {len(SOCIAL.friends(me))}")
+            return 200, social.people(SOCIAL, me)
+        if segs[2] == "summary":
+            return 200, social.summary(SOCIAL, me)
+    elif host == "peoplehub.xboxlive.com" and command == "GET" and segs[:1] == ["users"] and segs[2:3] == ["people"]:
+        me = _xuid_of(segs[1], headers)
+        out = []
+        for f in SOCIAL.friends(me):
+            prof = SOCIAL.profile(f)
+            out.append({"xuid": str(f), "isFavorite": False, "isFollowingCaller": True, "isFollowedByCaller": True, "displayName": prof["GameDisplayName"],
+                        "realName": "", "displayPicRaw": _pic_url(f, prof["_pic_version"]), "gamertag": prof["Gamertag"],
+                        "gamerScore": prof["Gamerscore"], "presenceState": "Online" if social.online(f) else "Offline"})
+        log(f"  peoplehub people of {me:#x}: {len(out)}")
+        return 200, {"people": out}
+    elif host == "userpresence.xboxlive.com":
+        if command == "POST" and segs == ["users", "batch"]:
+            ids = [int(x) for x in json.loads(body or b"{}").get("users", [])]
+            log(f"  presence of {len(ids)} user(s)")
+            return 200, [social.presence(x) for x in ids]
+        if command == "GET" and len(segs) == 3 and segs[0] == "users" and segs[2] == "presence":
+            return 200, social.presence(_xuid_of(segs[1], headers))
+    return None
+
+
+def _player_ref(v):
+    return int(v, 0) if isinstance(v, str) else int(v)
+
+
+def social_api(method, path, body):
+    """Admin / launcher API for friends and gamerpics (loopback only for now; a launcher needs per-player authentication first).
+
+    GET    /api/players                       known players with their friend count
+    GET    /api/friends/<xuid>                a player's friends
+    POST   /api/friends                       {"a": xuid, "b": xuid}  make two players friends
+    DELETE /api/friends                       {"a": xuid, "b": xuid}
+    PUT    /api/players/<xuid>/gamerpic       body: a PNG (<= 1 MB); DELETE removes it (the identicon is used again)
+    GET    /api/players/<xuid>/gamerpic       the picture
+    POST   /api/players/<xuid>                {"displayName": "...", "gamerscore": n, "tier": "Gold"}
+    """
+    parts = [p for p in path.split("?")[0].split("/") if p]
+    try:
+        if parts[:2] == ["api", "players"] and len(parts) == 2 and method == "GET":
+            return 200, {"players": [{"xuid": r["xuid"], "gamertag": r["gamertag"], "level": r["career_level"], "friends": r["friends"],
+                                      "hasGamerpic": bool(r["has_gamerpic"])} for r in SOCIAL.players()]}, None
+        if parts[:2] == ["api", "friends"]:
+            if len(parts) == 3 and method == "GET":
+                return 200, {"friends": [{"xuid": f, "gamertag": _tag_from_db(f)} for f in SOCIAL.friends(_player_ref(parts[2]))]}, None
+            if len(parts) == 2 and method in ("POST", "DELETE"):
+                d = json.loads(body or b"{}")
+                a, b = _player_ref(d["a"]), _player_ref(d["b"])
+                if method == "POST":
+                    SOCIAL.add_friend(a, b)
+                    return 201, {"friends": [a, b]}, None
+                return 200, {"removed": SOCIAL.remove_friend(a, b)}, None
+        if parts[:2] == ["api", "players"] and len(parts) >= 3:
+            xuid = _player_ref(parts[2])
+            if len(parts) == 4 and parts[3] == "gamerpic":
+                if method == "PUT":
+                    SOCIAL.set_gamerpic(xuid, body)
+                    return 200, {"updated": xuid, "bytes": len(body)}, None
+                if method == "DELETE":
+                    SOCIAL.clear_gamerpic(xuid)
+                    return 200, {"cleared": xuid}, None
+                if method == "GET":
+                    return 200, None, SOCIAL.gamerpic(xuid)
+            if len(parts) == 3 and method == "POST":
+                d = json.loads(body or b"{}")
+                SOCIAL.set_profile(xuid, d.get("displayName"), d.get("gamerscore"), d.get("tier"))
+                return 200, {"updated": xuid}, None
+    except (ValueError, KeyError, TypeError) as e:
+        return 400, {"error": str(e)}, None
+    return None
+
+
+RAW_HANDLERS = {}        # (class, method) -> fn(body) for calls the exe has no descriptor for; returns the response payload bytes
+RAW_HANDLERS[("Forza.WebServices.OnlineProfile", "UpdateLivery")] = lambda body: profile_update_livery(body)
+
+
 HANDLERS = {
+    ("Xls.WebServices.Content", "UploadContent"): ("", content_upload),
+    ("Xls.WebServices.Content", "DownloadContent"): ("", content_download),
+    ("Forza.WebServices.LargeFileUpload", "Create"): ("", large_file_create),
+    ("Forza.WebServices.ContentVersioning", "CreateVersionedLivery"): ("", cv_create_livery),
+    ("Forza.WebServices.ContentVersioning", "CreateVersionedLayerGroup"): ("", cv_create_layergroup),
+    ("Forza.WebServices.ContentVersioning", "CreateVersionedTune"): ("", cv_create_tune),
+    ("Forza.WebServices.ContentVersioning", "CreateVersionedTuneFromStructs"): ("", cv_create_tune_structs),
+    ("Forza.WebServices.ContentVersioning", "RetrieveVersionedLiveryById"): ("", cv_get_livery),
+    ("Forza.WebServices.ContentVersioning", "RetrieveVersionedLayerGroupById"): ("", cv_get_layergroup),
+    ("Forza.WebServices.ContentVersioning", "RetrieveVersionedTuneById"): ("", cv_get_tune),
+    ("Forza.WebServices.ContentVersioning", "AddReferenceToVersionedLivery"): ("", _cv_ref("versionedLiveryId", 1)),
+    ("Forza.WebServices.ContentVersioning", "RemoveReferenceToVersionedLivery"): ("", _cv_ref("versionedLiveryId", -1)),
+    ("Forza.WebServices.ContentVersioning", "AddReferenceToVersionedLayerGroup"): ("", _cv_ref("versionedLayerGroupId", 1)),
+    ("Forza.WebServices.ContentVersioning", "RemoveReferenceToVersionedLayerGroup"): ("", _cv_ref("versionedLayerGroupId", -1)),
+    ("Forza.WebServices.ContentVersioning", "AddReferenceToVersionedTune"): ("", _cv_ref("versionedTuneId", 1)),
+    ("Forza.WebServices.ContentVersioning", "RemoveReferenceToVersionedTune"): ("", _cv_ref("versionedTuneId", -1)),
+    ("Forza.WebServices.StorefrontLivery", "Create"): ("", store_livery_create),
+    ("Forza.WebServices.StorefrontTuning", "Create"): ("", store_tuning_create),
+    ("Forza.WebServices.Storefront", "SearchLiveryFiles"): ("", store_search_liveries),
+    ("Forza.WebServices.Storefront", "SearchTuningFiles"): ("", store_search_tunes),
+    ("Forza.WebServices.Storefront", "GetFileHeavyWeightData"): ("", store_heavy),
+    ("Forza.WebServices.Storefront", "GetMyFileList"): ("", store_my_files),
+    ("Forza.WebServices.Storefront", "GetFileDataIfShared"): ("", store_if_shared),
+    ("Forza.WebServices.Storefront", "SynchronizeSharedFiles"): ("", store_noop),
+    ("Forza.WebServices.Storefront", "IncrementLikes"): ("", _bump_handler("likes")),
+    ("Forza.WebServices.Storefront", "IncrementUsage"): ("", _bump_handler("uses")),
+    ("Forza.WebServices.Storefront", "IncrementViews"): ("", _bump_handler("views")),
+    ("Forza.WebServices.Storefront", "BatchIncrementViews"): ("", store_batch_views),
+    ("Forza.WebServices.Storefront", "RemoveFile"): ("", store_remove),
+    ("Forza.WebServices.Storefront", "ChangeFileTitle"): ("", store_retitle),
+    ("Forza.WebServices.Storefront", "ChangeFileDescription"): ("", store_redescribe),
+    ("Forza.WebServices.Storefront", "GetFileKeywords"): ("", ugc_keywords),
+    ("Forza.WebServices.Storefront", "GetFeaturedLiveriesForRandomCars"): ("", store_featured_liveries),
+    ("Forza.WebServices.Storefront", "GetLiveriesForDrivatar"): ("", store_drivatar_liveries),
+    ("Forza.WebServices.Storefront", "GetCuratedContent"): ("", store_curated),
+    ("Forza.WebServices.Storefront", "GetCuratedContentData"): ("", store_curated_data),
+    ("Forza.WebServices.Storefront", "ReportContent"): ("", store_noop),
+    ("Forza.WebServices.Storefront", "ToggleFollowedCreator"): ("", store_noop),
+    ("Forza.WebServices.CarClub", "GetClubDetails"): ("", club_details),
+    ("Forza.WebServices.CarClub", "GetClubFullInfo"): ("", club_full_info),
+    ("Forza.WebServices.CarClub", "GetClubKeywords"): ("", club_keywords),
+    ("Forza.WebServices.CarClub", "GetFriendsClubs"): ("", club_friends),
+    ("Forza.WebServices.CarClub", "GetRecommendedClubs"): ("", club_recommended),
+    ("Forza.WebServices.CarClub", "SearchForClubByTag"): ("", club_search_tag),
+    ("Forza.WebServices.CarClub", "SearchForClubs"): ("", club_search),
+    ("Forza.WebServices.CarClub", "SearchForClubsByName"): ("", club_search_name),
+    ("Forza.WebServices.Club", "CreateClub"): ("", club_create),
+    ("Forza.WebServices.Club", "ChangeClubDetails"): ("", club_change_details),
+    ("Forza.WebServices.Club", "GetClubMembers"): ("", club_members),
+    ("Forza.WebServices.Club", "GetClubStatus"): ("", club_status),
+    ("Forza.WebServices.Club", "ChangeMemberRole"): ("", club_change_role),
+    ("Forza.WebServices.Club", "InviteToClub"): ("", club_invite),
+    ("Forza.WebServices.Club", "InviteToClubByName"): ("", club_invite_name),
+    ("Forza.WebServices.Club", "AcceptClubInvite"): ("", club_accept_invite),
+    ("Forza.WebServices.Club", "RequestJoiningClub"): ("", club_request_join),
+    ("Forza.WebServices.Club", "RequestJoiningClubByName"): ("", club_request_join_name),
+    ("Forza.WebServices.Club", "ApproveRequestToJoin"): ("", club_approve),
+    ("Forza.WebServices.Club", "RemoveFromClub"): ("", club_remove),
+    ("Forza.WebServices.Club", "RecommendMemberForRemoval"): ("", club_recommend_removal),
+    ("Forza.WebServices.Club", "CreateNoticeBoardNotification"): ("", club_post_notice),
+    ("Forza.WebServices.Club", "DeleteNoticeBoardNotification"): ("", club_delete_notice),
+    ("Forza.WebServices.Club", "GetClubHistory"): ("", club_history),
+    ("Forza.WebServices.Club", "GetUsersToInvite"): ("", club_users_to_invite),
+    ("Forza.WebServices.Club", "GetUsersToJoin"): ("", club_users_to_join),
+    ("Forza.WebServices.User", "AcceptClubInvites"): ("", club_accept_invites_pref),
+    ("Xls.WebServices.User", "AcceptClubInvites"): ("", club_accept_invites_pref),
+    ("Forza.WebServices.SharedCar", "GetClubCars"): ("", shared_club_cars),
+    ("Forza.WebServices.SharedCar", "UploadCarTextures"): ("", shared_upload_textures),
+    ("Forza.WebServices.SharedCar", "Create"): ("", shared_create),
+    ("Forza.WebServices.SharedCar", "GetCarDetails"): ("", shared_details),
+    ("Forza.WebServices.SharedCar", "DownloadSharedCar"): ("", shared_download),
+    ("Forza.WebServices.SharedCar", "RemoveSharedCar"): ("", shared_remove),
+    ("Forza.WebServices.SharedCar", "IncrementRaceCount"): ("", shared_race),
+    ("Forza.WebServices.Scoreboard", "GetLadderRows"): ("", club_ladder),
+    ("Xls.WebServices.User", "GetUserData"): ("", user_get_user_data),
+    ("Forza.WebServices.User", "GetUserData"): ("", user_get_user_data),
     ("Forza.WebServices.User", "GetPermissionsTable"): ("", permissions_table),
     ("Forza.WebServices.User", "GetEconomySettings"): ("", economy_settings),
     ("Forza.WebServices.Gifting", "RetrieveCreditsGift"): ("", gift_credits),
@@ -645,8 +1796,13 @@ FAIL_UNTIL_IMPLEMENTED = {
 }
 
 
+_also_xls_club()
+
+
 def handle_xls(cls, method, body):
     key = (cls.split(",")[0].strip(), method)
+    if key in RAW_HANDLERS:
+        return frame(RAW_HANDLERS[key](body) or b"")
     if key in FAIL_UNTIL_IMPLEMENTED and key not in HANDLERS:
         log("  not implemented -> error result (client keeps its local data)")
         return frame(result=2, error=0x0001, text=b"fh2mp: not implemented")
@@ -846,6 +2002,13 @@ class Handler(BaseHTTPRequestHandler):
         SEQ += 1
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n) if n else b""
+        if self.path.startswith(("/admin/", "/api/")) and self.client_address[0] not in ("127.0.0.1", "::1"):
+            self.send_response(403)                       # operator and game-server endpoints are loopback only
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if self.command == "GET" and self.path.startswith("/gamerpic/"):          # public: the client downloads pictures from here
+            return self._gamerpic()
         if self.path.startswith("/admin/"):
             return self._admin()
         if self.path.startswith("/api/"):
@@ -857,7 +2020,8 @@ class Handler(BaseHTTPRequestHandler):
             CTX.xuid = int(self.headers.get("X-UserId", "0"), 0)
         except ValueError:
             CTX.xuid = 0
-        log(f"#{SEQ} {self.command} {host}{self.path} {cls} {method} body={len(body)}")
+        social.touch(CTX.xuid or int(xbl_xuid(self.headers) or 0))
+        log(f"#{SEQ} {self.command} {host}{self.path} {cls} {method} body={len(body)} user={CTX.xuid:#x}")
         out = b""
         if host.endswith("forzamotorsport.net") and cls:
             try:
@@ -879,6 +2043,21 @@ class Handler(BaseHTTPRequestHandler):
         elif host == "gameserverms.xboxlive.com" and self.path.rstrip("/").endswith("/clusters"):
             out, ctype = gsms_cluster(), "application/json"
             log(f"  GSMS cluster -> {out.decode()}")
+        elif host == "client-strings.xboxlive.com" and self.path.rstrip("/").endswith("/system/strings/validate"):
+            # XSAPI StringService.VerifyString (club names, noticeboard posts...): {"stringsToVerify": [...]} ->
+            # {"verifyStringResult": [{"resultCode": 0, "offendingString": ""}, ...]}, one entry per string; 0 = fine
+            # (keys from Microsoft.Xbox.Services.dll [inferred layout])
+            try:
+                n = len(json.loads(body or b"{}").get("stringsToVerify", [])) or 1
+            except (ValueError, AttributeError):
+                n = 1
+            out = json.dumps({"verifyStringResult": [{"resultCode": 0, "offendingString": ""} for _ in range(n)]}).encode()
+            ctype = "application/json"
+            log(f"  strings/validate: {n} string(s) accepted")
+        elif host in ("profile.xboxlive.com", "social.xboxlive.com", "peoplehub.xboxlive.com", "userpresence.xboxlive.com") \
+                and (res := xbl_social(host, self.command, self.path, body, self.headers)) is not None:
+            status, obj = res
+            out, ctype = json.dumps(obj).encode(), "application/json"
         elif host == "achievements.xboxlive.com":
             # The game polls GetAchievementsForTitleIdAsync every frame it is set; a 200 with no usable list makes the
             # embedded XSAPI complete with a NULL result and the game dereferences it (docs/matchmaking.md). Fail it.
@@ -928,7 +2107,29 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(out)
 
+    def _gamerpic(self):
+        m = re.match(r"/gamerpic/(\d+)\.png", self.path)
+        png = SOCIAL.gamerpic(int(m.group(1))) if m else None
+        self.send_response(200 if png else 404)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Cache-Control", "max-age=60")
+        self.send_header("Content-Length", str(len(png or b"")))
+        self.end_headers()
+        self.wfile.write(png or b"")
+        if png:
+            log(f"  gamerpic {m.group(1)[-5:]} served ({len(png)}B)")
+
     def _api(self, body):
+        r = social_api(self.command, self.path, body)
+        if r is not None:
+            status, obj, raw = r
+            b = raw if raw is not None else json.dumps(obj, indent=1).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "image/png" if raw is not None else "application/json")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+            return
         try:
             status, obj = api(self.command, self.path, body)
         except ApiError as e:
@@ -992,40 +2193,52 @@ class Handler(BaseHTTPRequestHandler):
     do_GET = do_POST = do_PUT = do_DELETE = _handle
 
 
-def main():
-    global SC
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 5080
-    exe = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("FH2MP_EXE")
-    if not exe or not os.path.exists(exe):
-        sys.exit("usage: fh2mp_lsp.py [port] <path-to-forza_durango_release_final.exe>  (or set FH2MP_EXE)")
-    SC = xls.Schema(exe)
-    global CARS, DB, NOTIF
-    DB = db.open_db(DATA_DIR)
-    mount = os.path.dirname(os.path.abspath(exe))
-    cat = catalog.ensure(mount, os.path.join(DATA_DIR, "gamedata.sqlite"), log=log)     # derived game catalog (git-ignored, local)
-    DB.attach("game", cat)                                                              # state and game data joinable as game.<table>
-    CARS = cardb.CarDb(exe, catalog=cat)
-    log(f"game catalog: {cat} (attached as `game`)")
+def setup(dsn=None):
+    """Connects to PostgreSQL and builds every store (module globals). Used by main() and by the tests."""
+    global SC, CARS, DB, NOTIF
+    DB = db.open_db(dsn)
+    if not DB.one("SELECT 1 FROM information_schema.schemata WHERE schema_name='game'"):
+        sys.exit("the game catalog is not loaded: build the bundle with tools/export_gamedata.py and load it with tools/load_gamedata_pg.py")
+    SC = xls.Schema(DB)
+    CARS = cardb.CarDb(DB)
+    log(f"database {DB.path}: game catalog schema `game` present")
     NOTIF = notifstore.NotificationStore(DB)
-    log(f"database {DB.path}: {NOTIF.count()} notifications")
+    global CLUBS, SOCIAL
+    CLUBS = clubs.ClubStore(DB)
+    SOCIAL = social.SocialStore(DB)
+    global UGC
+    UGC = ugc.UgcStore(DB)
+    fixed = UGC.repair_liveries()
+    if fixed:
+        log(f"user content: repaired {fixed} livery row(s) stored with the old upload prefix")
+    b0, b1 = UGC.recompress()
+    log(f"user content: {UGC.count()} files, {UGC.stored_bytes()} bytes stored" + (f" (recompressed {b0} -> {b1})" if b0 else ""))
+    log(f"{NOTIF.count()} notifications")
     for r in DB.query("SELECT xuid, gamertag, career_level FROM players WHERE gamertag <> ''"):
         TAGS.setdefault(r["xuid"], r["gamertag"])           # identities survive a restart
         if r["career_level"]:
             LEVELS.setdefault(r["xuid"], r["career_level"])
     global DRV
-    DRV = drivatar.DrivatarStore(SC, os.path.join(os.path.dirname(exe), "media", "drivatarglobalcache", "DefaultCache.bin"), DB)
+    shipped = [json.loads(r["record"]) for r in DB.query("SELECT record FROM game.drivatar_shipped ORDER BY idx")]
+    DRV = drivatar.DrivatarStore(SC, shipped, DB)
     log(f"drivatar store: {len(DRV.templates)} shipped templates, {DRV.count()} stored players")
     global SB
     SB = scoreboard.ScoreStore(DB, [t["GamerTag"] for t in DRV.templates] + DRV.gamertags(), cars=CARS.fake_pool(), route_length=CARS.route_length, event_info=event_info,
                           event_cars=event_cars)
     log(f"scoreboards: {SB.count()} stored submissions")
     global RIV
-    RIV = rivals.RivalCatalog(CARS, mount, DB)
+    RIV = rivals.RivalCatalog(CARS, None, DB)
     log(f"rival event texts refreshed: {RIV.refresh_texts()}")
     log(f"rival events: {len(RIV.events())} this rotation (month {RIV.serial()[0]}, re-roll {RIV.serial()[1]})")
-    log(f"schema loaded from {exe}: {len(SC.thunks)} struct descriptors")
-    srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    log(f"fh2mp LSP listening on 127.0.0.1:{port}")
+    log(f"schema loaded from the database: {SC.count()} struct descriptors")
+
+
+def main():
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 5080
+    setup()
+    bind = os.environ.get("FH2MP_LSP_BIND", "127.0.0.1")
+    srv = ThreadingHTTPServer((bind, port), Handler)
+    log(f"fh2mp LSP listening on {bind}:{port}")
     srv.serve_forever()
 
 

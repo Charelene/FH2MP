@@ -70,7 +70,7 @@ def read_native(sc, fields, buf, base):
             out[f.name] = read_native(sc, sc.sub(f), buf, a)
         elif t == 0xE:
             n = struct.unpack_from("<I", buf, base + f.count_off)[0]
-            el = S.Field(sc.exe, f.elem)
+            el = sc.field(f.elem)
             items = []
             for i in range(n):
                 ea = a + i * el.size
@@ -84,23 +84,33 @@ def read_native(sc, fields, buf, base):
     return out
 
 
+def shipped_from_cache(sc, path):
+    """The 125 Drivatars the game ships (media/drivatarglobalcache/DefaultCache.bin), as wire-ready dicts with generated gamertags.
+    Only the exporter calls this: the server reads the result from the table `drivatar_shipped` of the catalog."""
+    arr = sc.call_struct("ForzaWebServicesDrivatarGetDrivatarsForCache_Results")[0]
+    rec_fields = sc.sub(sc.field(arr.elem))
+    out = []
+    with open(path, "rb") as f:
+        d = f.read()
+    ver, n = struct.unpack_from("<II", d, 0)
+    for i in range(n):
+        b = 8 + i * REC_STRIDE
+        if b + REC_SIZE > len(d):
+            break
+        out.append(read_native(sc, rec_fields, d, b))
+    for i, t in enumerate(out):
+        t["GamerTag"] = generated_tag(i)
+    return out
+
+
 class DrivatarStore:
-    def __init__(self, sc, default_cache_path, db):
+    def __init__(self, sc, templates, db):
+        """`templates`: the shipped Drivatars (list of dicts, see shipped_from_cache / the `drivatar_shipped` table)."""
         self.sc = sc
         self.db = db
         arr = sc.call_struct("ForzaWebServicesDrivatarGetDrivatarsForCache_Results")[0]
-        self.rec_fields = sc.sub(S.Field(sc.exe, arr.elem))
-        self.templates = []
-        if default_cache_path and os.path.exists(default_cache_path):
-            d = open(default_cache_path, "rb").read()
-            ver, n = struct.unpack_from("<II", d, 0)
-            for i in range(n):
-                b = 8 + i * REC_STRIDE
-                if b + REC_SIZE > len(d):
-                    break
-                self.templates.append(read_native(sc, self.rec_fields, d, b))
-            for i, t in enumerate(self.templates):
-                t["GamerTag"] = generated_tag(i)
+        self.rec_fields = sc.sub(sc.field(arr.elem))
+        self.templates = list(templates)
         self.car_override = {}
 
     # ---- persistence (table `drivatars`: wire-shaped record as JSON plus the columns we select on)
@@ -108,7 +118,7 @@ class DrivatarStore:
         return self.db.one("SELECT COUNT(*) FROM drivatars")[0]
 
     def gamertags(self):
-        return [r[0] for r in self.db.query("SELECT gamertag FROM drivatars ORDER BY rowid")]
+        return [r[0] for r in self.db.query("SELECT gamertag FROM drivatars ORDER BY seq")]
 
     @staticmethod
     def _rec(row):
@@ -237,11 +247,11 @@ class DrivatarStore:
         """Real players' Drivatars first (whatever their skill: there are few of them), then the shipped
         ones of the requested `skill`, nearest car-value bucket first."""
         skip = set(exclude_xuids)
-        where, args = ["xuid <> ?", "xuid NOT IN (SELECT value FROM json_each(?))"], [exclude_xuid or 0, json.dumps(sorted(skip))]
+        where, args = ["xuid <> ?", "xuid <> ALL(?::bigint[])"], [exclude_xuid or 0, sorted(skip)]
         if not any_skill_players and skill is not None:
             where.append("skill = ?")
             args.append(skill)
-        rows = self.db.query(f"SELECT record, locked FROM drivatars WHERE {' AND '.join(where)} ORDER BY rowid LIMIT ?",
+        rows = self.db.query(f"SELECT record, locked FROM drivatars WHERE {' AND '.join(where)} ORDER BY seq LIMIT ?",
                              args + [max(0, limit)])
         players = [self._rec(r) for r in rows]
         tpl = [t for t in self.templates if skill is None or t["UserSkillLevel"] == skill]

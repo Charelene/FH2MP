@@ -17,7 +17,12 @@ How the schema is laid out (FH2 1.0.0.64, recovered from Xls::BinaryReader, FUN_
     "YYYY-MM-DDTHH:MM:SS[.fff]Z"), 0x11 bool (u8), 0x12 GUID (u32,u16,u16,8 raw), 0x14 blob (u32 len + bytes).
 
 Usage: python3 -I server/xls_schema.py <exe> <StructOrCallName> [...]   e.g. ForzaUserLogon_Results
+
+The server does not need the exe at run time: `export_tables` copies the descriptors into the tables xls_struct / xls_field /
+xls_name of the game catalog bundle (tools/export_gamedata.py; tools/load_gamedata_pg.py loads it into PostgreSQL), and `TableSource`
+serves the same interface from them.
 """
+import re
 import struct
 import sys
 
@@ -102,6 +107,106 @@ class Field:
         self.elem = exe.u64(va + 0x50)
         self.flags = exe.u32(va + 0x58)
         self.count_off = exe.u64(va + 0x38)  # offset of the element-count field (arrays), 0x7fffffff if none
+
+
+class ExeSource:
+    """Schema straight from the exe: field(va), fields(desc), find(name), count()."""
+
+    def __init__(self, exe):
+        self.exe = exe
+        self.thunks = scan_thunks(exe)
+
+    def field(self, va):
+        return Field(self.exe, va)
+
+    def fields(self, desc):
+        return fields_of(self.exe, self.thunks, desc)
+
+    def find(self, name):
+        return find_entry_by_name(self.exe, name)
+
+    def count(self):
+        return len(self.thunks)
+
+
+class _Row(Field):
+    """A Field loaded from the database instead of the exe."""
+
+    def __init__(self, r):
+        self.va, self.type, self.name, self.offset, self.size = r["va"], r["type"], r["name"], r["offset"], r["size"]
+        self.nested, self.elem, self.flags, self.count_off = r["nested"], r["elem"], r["flags"], r["count_off"]
+
+
+class TableSource:
+    """Same interface as ExeSource, read from the tables written by export_tables. `db` is anything with query(sql) -> rows
+    (db.Database: the `game` schema) or an sqlite3 connection (the exported bundle)."""
+
+    def __init__(self, db):
+        rows = db.query if hasattr(db, "query") else (lambda sql: db.execute(sql).fetchall())
+        self._fields = {}
+        for r in rows('SELECT va, type, name, "offset", size, nested, elem, flags, count_off FROM xls_field'):
+            self._fields[r[0]] = _Row(dict(zip(("va", "type", "name", "offset", "size", "nested", "elem", "flags", "count_off"), r)))
+        self._structs = {d: (e, c) for d, e, c in rows("SELECT desc_va, entries, count FROM xls_struct")}
+        self._names = {}
+        for n, va in rows("SELECT name, va FROM xls_name ORDER BY seq"):
+            self._names.setdefault(n, []).append(va)
+
+    def field(self, va):
+        return self._fields[va]
+
+    def fields(self, desc):
+        if desc not in self._structs:
+            return None
+        ent, cnt = self._structs[desc]
+        return [self._fields[ent + 0x60 * i] for i in range(cnt)]
+
+    def find(self, name):
+        return list(self._names.get(name, []))
+
+    def count(self):
+        return len(self._structs)
+
+
+def export_tables(exe, conn):
+    """Writes every struct descriptor, field entry and call name of the exe into `conn` (tables xls_struct, xls_field, xls_name).
+    Returns (structs, fields, names)."""
+    src = ExeSource(exe)
+    conn.executescript("""
+        DROP TABLE IF EXISTS xls_struct; DROP TABLE IF EXISTS xls_field; DROP TABLE IF EXISTS xls_name;
+        CREATE TABLE xls_struct (desc_va INTEGER PRIMARY KEY, entries INTEGER NOT NULL, count INTEGER NOT NULL);
+        CREATE TABLE xls_field (va INTEGER PRIMARY KEY, type INTEGER NOT NULL, name TEXT NOT NULL, "offset" INTEGER NOT NULL,
+                                size INTEGER NOT NULL, nested INTEGER NOT NULL, elem INTEGER NOT NULL, flags INTEGER NOT NULL,
+                                count_off INTEGER NOT NULL);
+        CREATE TABLE xls_name (seq INTEGER PRIMARY KEY, name TEXT NOT NULL, va INTEGER NOT NULL);
+        CREATE INDEX ix_xls_name ON xls_name(name);
+    """)
+    seen = {}
+
+    def add(va):
+        if va in seen or not va:
+            return
+        f = Field(exe, va)
+        seen[va] = f
+        if f.type == 0xC and f.nested in src.thunks:
+            for g in src.fields(f.nested):
+                add(g.va)
+        if f.type == 0xE and f.elem:
+            add(f.elem)
+
+    for desc, (ent, cnt) in src.thunks.items():
+        for i in range(cnt):
+            add(ent + 0x60 * i)
+    calls = sorted({m.decode() for m in re.findall(rb"(?<=\0)([A-Za-z0-9_]*(?:Parameters|Results))(?=\0)", exe.d)})
+    names = []
+    for n in calls:
+        for va in src.find(n):
+            add(va)
+            names.append((n, va))
+    conn.executemany("INSERT INTO xls_struct VALUES (?,?,?)", [(d, e, c) for d, (e, c) in src.thunks.items()])
+    conn.executemany("INSERT INTO xls_field VALUES (?,?,?,?,?,?,?,?,?)",
+                     [(f.va, f.type, f.name, f.offset, f.size, f.nested, f.elem, f.flags, f.count_off) for f in seen.values()])
+    conn.executemany("INSERT INTO xls_name (name, va) VALUES (?,?)", names)
+    return len(src.thunks), len(seen), len(names)
 
 
 def fields_of(exe, thunks, desc):
