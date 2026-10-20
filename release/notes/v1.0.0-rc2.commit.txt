@@ -1,0 +1,48 @@
+Release v1.0.0-rc2: Windows join fix, launcher diagnostics, Free Roam fixes
+
+Shim
+- Bind the game's UDP socket before its first receive. The game never calls
+  bind() and relied on the receive doing it, which Linux and Wine allow and
+  Windows rejects with WSAEINVAL (10022); the game then dropped the socket and
+  no packet ever left the PC, so every Windows player sat on "searching".
+- Find a place for the XSAPI response patch when the 32 MB window after the
+  module is full (VirtualAlloc near the module, then int3 padding inside it).
+  Without it the game read empty Xbox-services answers and kept Social,
+  Clubs, Rivals and the online tiles locked on some PCs.
+- Debug-only Winsock tracer (FH2MP_DEBUG_BUILD): socket creation, setsockopt,
+  getaddrinfo and the first sends and receives with their error codes.
+- The release log keeps the "bindfix" and "xsbody" lines.
+
+Launcher
+- Show why a connection failed ("certificate has expired", "timed out", ...)
+  and log every failed call to launcher.log (no secrets).
+- IPv4-only HTTPS; one retry without the system proxy when the proxy fails;
+  retry with the bundled root certificates (certifi) when the Windows store
+  rejects the server certificate; say so when the clock is off, and who issued
+  the certificate the PC was actually shown.
+- Registration: when the reply never arrives, ask the server whether the key
+  can sign in before discarding it, so an account that was created is not
+  orphaned.
+- FH2 Extra Options 0.2.98 is the only supported build; the launcher installs
+  it from the signed release when it is missing (setting, on by default).
+- Linux: take the newest Proton, make a prefix when none holds the game, never
+  fall back to the distro Wine.
+
+Server
+- Free Roam circuit races end when every participant's final score
+  (MsgScoreKeyframe) has arrived, or 30 s after the first one. The lap count of
+  a Free Roam event is not decoded, so nothing ended them and the clients sat
+  on the results screen. Road Trip events and tag modes keep their own rules.
+- King from a Free Roam map icon: read the mode off the leader's GameOptions
+  (header bits compared with Road Trip events of known mode); Infection is told
+  apart by the first hit (the It car stays It). Road Trip is unchanged.
+- A client that was already sent the lobby's GameOptions and then asks for
+  ownership of it (a second player picking an event) gets that state with the
+  next sequence number instead of an empty grant numbered 0.
+
+Tests and docs
+- server/test_race_end.py and server/test_freeroam_tag_grant.py; publish.sh
+  runs the server tests and takes the commit message from
+  release/notes/<tag>.commit.txt.
+- README updated; release notes for v1.0.0-rc2; version bumped to 1.0.0-rc2
+  in shim/VERSION and launcher/fh2mp_launcher/version.py.

@@ -17,6 +17,7 @@ DEFAULTS = {
     "gamertag": "",                 # last known, for display before the server answers
     "xuid": 0,
     "extra_args": "",
+    "extra_options": True,          # put FH2 Extra Options (GPL-3.0, RokkuDayo) next to the shim when the player has no copy
     # developer options (the dev launcher's panel; harmless elsewhere)
     "pin_shim": False,              # never replace the installed shim automatically (local / debug builds)
     "extra_env": "",                # KEY=VALUE lines added to the game's environment (FH2MP_NET_TRAFFIC=1, FH2MP_XUID=..., ...)

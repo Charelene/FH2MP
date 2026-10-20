@@ -270,6 +270,12 @@ class SettingsDialog(QDialog):
         row.addWidget(self.azdir, 1)
         row.addWidget(b)
         lay.addLayout(row)
+        self.extra_opts = QCheckBox("Install FH2 Extra Options if it is missing (by RokkuDayo, GPL-3.0)")
+        self.extra_opts.setToolTip("The Social, Clubs, Rivals and Marketplace menus and several game fixes come from this free mod. "
+                                   "It is copied unchanged into the fh2extra folder of your Azimuth folder, with its licence and source. "
+                                   "Your own copy is never replaced.")
+        self.extra_opts.setChecked(s["extra_options"])
+        lay.addWidget(self.extra_opts)
 
         if sys.platform != "win32":
             lay.addWidget(hrule())
@@ -409,6 +415,7 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "Azimuth folder", "azimuth.exe isn't in that folder.")
             return
         s["azimuth_dir"] = d
+        s["extra_options"] = self.extra_opts.isChecked()
         if paths.is_dev():                          # players cannot change the channel or the server
             s["channel"] = self.channel.currentData()
             s["check_updates"] = self.check_updates.isChecked()

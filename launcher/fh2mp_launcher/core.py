@@ -4,7 +4,7 @@ import platform
 
 from . import azimuth, keystore, launch, paths, shim, updater
 from .api import Api, ApiError
-from .constants import BUILTIN_AZIMUTH_BUILDS, DEFAULT_WEBSITE
+from .constants import BUILTIN_AZIMUTH_BUILDS, DEFAULT_WEBSITE, EXTRA_OPTIONS_VERSION
 from .identity import Identity
 from .settings import Settings
 from .version import __version__
@@ -34,7 +34,10 @@ FRIENDLY = {
 
 def friendly(e):
     if isinstance(e, ApiError):
-        return FRIENDLY.get(e.code) or e.message or str(e)
+        text = FRIENDLY.get(e.code) or e.message or str(e)
+        if e.code == "unreachable" and e.detail:
+            text += f" ({e.detail[:300]})"          # the reason, so a screenshot is enough to tell what is wrong on that computer
+        return text
     return str(e)
 
 
@@ -97,7 +100,19 @@ class Launcher:
     def sign_up(self, gamertag, invite="", progress=None, cancelled=lambda: False):
         if not self.identity:
             raise PlayBlocked("no key yet")
-        acct = self.api().register(self.identity, gamertag, invite, progress, cancelled)
+        try:
+            acct = self.api().register(self.identity, gamertag, invite, progress, cancelled)
+        except ApiError as e:
+            # The answer may simply not have arrived (the request went through), or an earlier try already made the account: the key is
+            # the account, so ask the server whether this key can sign in before treating it as a failure.
+            if not e.uncertain and e.code != "key_exists":
+                raise
+            try:
+                acct = self.sign_in()
+            except ApiError as e2:
+                # only "no account for this key" proves the registration did not happen; any other failure leaves the key worth keeping
+                e.uncertain = e2.code != "unknown_account"
+                raise e from None
         self.settings["gamertag"], self.settings["xuid"] = acct["gamertag"], acct["xuid"]
         self.settings.save()
         return acct
@@ -178,6 +193,7 @@ class Launcher:
         expect = e.get("dllSha256")
         did = shim.install(self.settings["azimuth_dir"], data, expect)
         self.carry_over_mod()
+        did += self.ensure_extra_options(progress, cancelled)
         return did
 
     # ---- play
@@ -195,6 +211,10 @@ class Launcher:
         kind, _v = self.shim_state()
         if kind != "ours":
             raise PlayBlocked("Shim not installed.", "no_shim")
+        try:
+            self.ensure_extra_options()          # only when the player has no copy; never blocks playing
+        except Exception:  # noqa: BLE001
+            pass
         self.ensure_game()
         if require_game and not azimuth.has_game_configured(s["azimuth_dir"]):
             raise PlayBlocked("Couldn't find your Forza Horizon 2 files.", "no_game")
@@ -244,8 +264,12 @@ class Launcher:
 
     # ---- FH2 Extra Options (optional third-party mod, imported from the player's own copy)
     def extra_state(self):
+        """-> (the supported FH2 Extra Options 0.2.98 is in place, version, Azimuth version it targets)."""
         d = self.settings["azimuth_dir"]
-        return shim.extra_options_installed(d) if d and os.path.isdir(d) else (False, "", "")
+        if not d or not os.path.isdir(d) or not shim.extra_options_supported(d):
+            return False, "", ""
+        _i, _v, a = shim.extra_options_installed(d)
+        return True, EXTRA_OPTIONS_VERSION, a
 
     def extra_sources(self):
         d = self.settings["azimuth_dir"]
@@ -261,6 +285,25 @@ class Launcher:
                     self.import_extra(found[0]["path"])
         except Exception:  # noqa: BLE001 - never blocks the install
             pass
+
+    def ensure_extra_options(self, progress=None, cancelled=lambda: False):
+        """The shim's menus (Social, Clubs, Rivals, Marketplace) and several game fixes come from FH2 Extra Options. When it is not in the
+        Azimuth folder (and not found in another of the player's folders), install the author's unchanged release from our signed assets.
+        Only 0.2.98 is supported (the shim is built against it): another version in the folder is moved aside and replaced.
+        Does nothing when 0.2.98 is there, when the player turned this off in Settings, or when the release carries no copy. -> list of things done."""
+        d = self.settings["azimuth_dir"]
+        if not self.settings["extra_options"] or not d or not os.path.isdir(d) or self.extra_state()[0]:
+            return []
+        self.carry_over_mod()
+        if self.extra_state()[0]:
+            return ["imported your FH2 Extra Options"]
+        if not self.manifest:
+            self.check_updates()
+        e = (self.manifest or {}).get("extraOptions")
+        if not e:
+            return []
+        path = updater.Updater(channel=self.settings["channel"]).download(self.manifest["tag"], e, progress, cancelled)
+        return shim.install_bundled_extra(d, path, e.get("dllSha256"), e.get("version", ""))
 
     def import_extra(self, source):
         d = self.settings["azimuth_dir"]

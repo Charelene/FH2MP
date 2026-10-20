@@ -31,6 +31,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
       - run: release/build_shim_zip.sh
+      - run: python3 -I release/fetch_extra_options.py --dist dist     # FH2 Extra Options (GPL-3.0, RokkuDayo), unchanged, with licence + source
       - uses: actions/upload-artifact@v4
         with: { name: shim, path: dist/*.zip }
 

@@ -83,6 +83,13 @@ static wchar_t g_dir[MAX_PATH];
 /* The launcher finds out which shim is installed by reading this marker out of the DLL (it cannot run it). */
 const char fh2mp_shim_marker[] __attribute__((used)) = "FH2MP-SHIM-VERSION:" FH2MP_SHIM_VERSION ":END";
 /* Session token of the player signed in through the launcher (see session_load); sent to the stand-in services as X-FH2MP-Token. */
+/*
+ * Pages are made writable for a patch and then simply left that way. Restoring the old protection (read-only code) raced with Azimuth,
+ * which applies its own game patches on other threads at the same moment when no other winmm proxy delays the game: whichever side
+ * restored first made the other one's write fault (0xc0000005 inside memcpy). An extra writable page is harmless; the crash is not.
+ */
+#define patch_done(addr, len, old) ((void)(addr), (void)(len), (void)(old))
+
 static char g_token[96];
 static HANDLE g_log = INVALID_HANDLE_VALUE;
 static wchar_t g_args[MAX_ARGS][MAX_ARG_CHARS];
@@ -153,7 +160,7 @@ static int line_has(const char *l, int n, const char *pat)
 static int line_wanted(const char *l, int n)
 {
     static const char *const keep[] = {"attached", "session:", "identity:", "late:", "not patched", "NOT ", "unexpected", "fail", "error", "could not",
-                                       "refus", "crash", 0};
+                                       "refus", "crash", "xsbody", "bindfix", 0};
     int i;
     for (i = 0; keep[i]; i++) {
         if (line_has(l, n, keep[i])) {
@@ -360,6 +367,461 @@ static const ws2_slot g_ws2_slots[] = {
 };
 static int g_ws2_patched;
 
+/*
+ * Implicit bind. The game never calls bind(): its UDP socket (AF_INET6, IPV6_V6ONLY cleared by the game) gets a WSARecvFrom posted at
+ * once and relies on that call binding the socket to an ephemeral port, which Linux (and so Wine) does. Windows rejects a receive on an
+ * unbound socket with WSAEINVAL (10022); the game then drops the socket, the later send fails with WSAENOTSOCK and no packet ever leaves
+ * ("Unable to join session", found with the debug tracer on 2026-10-19). So before a receive, a socket that has no local address yet is
+ * bound to the wildcard address and port 0, which is what the implicit bind would have done. The game's WSARecvFrom and recvfrom slots
+ * point at the wrappers below in every build.
+ */
+typedef UINT_PTR fh_sock;
+typedef int(WINAPI *fh_f_wsarecvfrom)(fh_sock, void *, DWORD, DWORD *, DWORD *, void *, int *, void *, void *);
+typedef int(WINAPI *fh_f_recvfrom)(fh_sock, char *, int, int, void *, int *);
+typedef int(WINAPI *fh_f_bind)(fh_sock, const void *, int);
+typedef int(WINAPI *fh_f_getsockname)(fh_sock, void *, int *);
+static fh_f_wsarecvfrom g_r_wsarecvfrom;
+static fh_f_recvfrom g_r_recvfrom;
+static fh_f_bind g_r_bind;
+static fh_f_getsockname g_r_getsockname;
+
+static void fh_ensure_bound(fh_sock s)
+{
+    unsigned char name[28];
+    int nl = 28, i;
+    DWORD err;
+
+    if (s == (fh_sock)~(UINT_PTR)0) {
+        return;
+    }
+    if (!g_r_bind || !g_r_getsockname) {
+        HMODULE ws2 = GetModuleHandleW(L"ws2_32.dll");
+
+        if (!ws2) {
+            return;
+        }
+        g_r_getsockname = (fh_f_getsockname)(void *)GetProcAddress(ws2, (LPCSTR)(ULONG_PTR)6);
+        g_r_bind = (fh_f_bind)(void *)GetProcAddress(ws2, (LPCSTR)(ULONG_PTR)2);
+        if (!g_r_bind || !g_r_getsockname) {
+            return;
+        }
+    }
+    if (g_r_getsockname(s, name, &nl) == 0) {
+        return; /* already has a local address */
+    }
+    err = GetLastError();
+    if (err != 10022) { /* WSAEINVAL = not bound; anything else (not a socket, ...) is the game's business */
+        SetLastError(err);
+        return;
+    }
+#ifdef FH2MP_DEBUG_BUILD
+    {
+        wchar_t p[MAX_PATH];
+
+        lstrcpyW(p, g_dir);
+        lstrcatW(p, L"\\fh2mp-nobindfix.txt"); /* A/B switch for the tracer: the file turns the fix off */
+        if (GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES) {
+            SetLastError(err);
+            return;
+        }
+    }
+#endif
+    for (i = 0; i < 28; i++) {
+        name[i] = 0;
+    }
+    name[0] = 23; /* AF_INET6, :: port 0 (the game's socket is dual-stack) */
+    if (g_r_bind(s, name, 28) != 0) {
+        unsigned char sa4[16] = {2, 0}; /* not an IPv6 socket after all: 0.0.0.0:0 */
+
+        g_r_bind(s, sa4, 16);
+    }
+    nl = 28;
+    log_begin();
+    log_raw("bindfix: receive on an unbound socket 0x");
+    log_hex(s, 4);
+    if (g_r_getsockname(s, name, &nl) == 0) {
+        log_raw(": bound to port ");
+        log_dec(((unsigned)name[2] << 8) | name[3]);
+    } else {
+        log_raw(": bind failed, error ");
+        log_dec(GetLastError());
+    }
+    log_raw("\n");
+    SetLastError(err);
+}
+
+#ifdef FH2MP_DEBUG_BUILD
+/*
+ * Winsock tracer (debug builds only). The game's WS2_32 slots are pointed at these wrappers, which log the calls that decide whether the
+ * UDP connection can work on this platform and then call the real function. Logged: WSASocketW (family, type, and the socket's IPV6_V6ONLY
+ * value right after creation), setsockopt, getaddrinfo, WSAStartup, and the first calls plus every failure of the send and receive
+ * functions, with the destination address. (It showed that the game sets IPV6_V6ONLY=0 itself, and that its first WSARecvFrom fails with
+ * 10022 on Windows: see fh_ensure_bound above.)
+ */
+typedef int(WINAPI *fh_f_startup)(WORD, void *);
+typedef fh_sock(WINAPI *fh_f_socketw)(int, int, int, void *, unsigned, DWORD);
+typedef int(WINAPI *fh_f_setsockopt)(fh_sock, int, int, const char *, int);
+typedef int(WINAPI *fh_f_getsockopt)(fh_sock, int, int, char *, int *);
+typedef int(WINAPI *fh_f_wsasendto)(fh_sock, void *, DWORD, DWORD *, DWORD, const void *, int, void *, void *);
+typedef int(WINAPI *fh_f_sendto)(fh_sock, const char *, int, int, const void *, int);
+typedef int(WINAPI *fh_f_getaddrinfo)(const char *, const char *, const void *, void **);
+
+static fh_f_startup g_r_startup;
+static fh_f_socketw g_r_socketw;
+static fh_f_setsockopt g_r_setsockopt;
+static fh_f_wsasendto g_r_wsasendto;
+static fh_f_sendto g_r_sendto;
+static fh_f_getaddrinfo g_r_getaddrinfo;
+static volatile LONG g_n_sock, g_n_sockopt, g_n_gai, g_n_send, g_n_sendfail, g_n_recv, g_n_recvfail, g_n_start;
+
+static void fh_log_sa(const void *p, int len)
+{
+    const unsigned char *a = (const unsigned char *)p;
+    unsigned fam;
+    int i;
+
+    if (!a || len < 4) {
+        log_raw("(none)");
+        return;
+    }
+    fam = (unsigned)a[0] | ((unsigned)a[1] << 8);
+    if (fam == 2 && len >= 8) {
+        log_raw("inet ");
+        for (i = 0; i < 4; i++) {
+            log_dec(a[4 + i]);
+            if (i < 3) {
+                log_raw(".");
+            }
+        }
+    } else if (fam == 23 && len >= 24) {
+        int mapped = 1;
+        for (i = 8; i < 18; i++) {
+            if (a[i]) {
+                mapped = 0;
+            }
+        }
+        mapped = mapped && a[18] == 0xff && a[19] == 0xff;
+        log_raw("inet6 ");
+        if (mapped) {
+            log_raw("::ffff:");
+            for (i = 0; i < 4; i++) {
+                log_dec(a[20 + i]);
+                if (i < 3) {
+                    log_raw(".");
+                }
+            }
+        } else {
+            for (i = 0; i < 16; i++) {
+                log_hex(a[8 + i], 2);
+                if (i & 1 && i < 15) {
+                    log_raw(":");
+                }
+            }
+        }
+    } else {
+        log_raw("family ");
+        log_dec(fam);
+        return;
+    }
+    log_raw(" port ");
+    log_dec(((unsigned)a[2] << 8) | a[3]);
+}
+
+static void fh_log_int(int v)
+{
+    if (v < 0) {
+        log_raw("-");
+        log_dec((unsigned long)(-(long)v));
+    } else {
+        log_dec((unsigned long)v);
+    }
+}
+
+static void fh_log_str(const char *s)
+{
+    char buf[72];
+    int i;
+
+    if (!s) {
+        log_raw("(null)");
+        return;
+    }
+    for (i = 0; i < 70 && s[i]; i++) {
+        buf[i] = s[i];
+    }
+    buf[i] = 0;
+    log_raw(buf);
+}
+
+static int fh_v6only_of(fh_sock s)
+{
+    HMODULE ws2 = GetModuleHandleW(L"ws2_32.dll");
+    fh_f_getsockopt gso = ws2 ? (fh_f_getsockopt)GetProcAddress(ws2, (LPCSTR)(ULONG_PTR)7) : NULL;
+    int v = 0, len = 4;
+
+    if (gso && gso(s, 41 /* IPPROTO_IPV6 */, 27 /* IPV6_V6ONLY */, (char *)&v, &len) != 0) {
+        v = -2;
+    }
+    return v;
+}
+
+static int WINAPI fh_startup(WORD ver, void *data)
+{
+    int r = g_r_startup(ver, data);
+    DWORD err = GetLastError();
+
+    if (InterlockedIncrement(&g_n_start) <= 10) {
+        log_begin();
+        log_raw("ws: WSAStartup version 0x");
+        log_hex(ver, 4);
+        log_raw(" -> ");
+        log_dec((unsigned long)r);
+        log_raw("\n");
+    }
+    SetLastError(err);
+    return r;
+}
+
+static fh_sock WINAPI fh_socketw(int af, int type, int proto, void *info, unsigned group, DWORD flags)
+{
+    fh_sock s = g_r_socketw(af, type, proto, info, group, flags);
+    DWORD err = GetLastError();
+
+    if (InterlockedIncrement(&g_n_sock) <= 40) {
+        int v6 = -3;
+
+        if (s != (fh_sock)~(UINT_PTR)0 && af == 23) {
+            v6 = fh_v6only_of(s);
+        }
+        log_begin();
+        log_raw("ws: WSASocketW af=");
+        log_dec((unsigned long)af);
+        log_raw(" type=");
+        log_dec((unsigned long)type);
+        log_raw(" proto=");
+        log_dec((unsigned long)proto);
+        log_raw(" flags=0x");
+        log_hex(flags, 4);
+        if (s == (fh_sock)~(UINT_PTR)0) {
+            log_raw(" -> INVALID_SOCKET err ");
+            log_dec(err);
+        } else {
+            log_raw(" -> socket 0x");
+            log_hex(s, 4);
+            if (af == 23) {
+                log_raw(" IPV6_V6ONLY=");
+                fh_log_int(v6); /* 0 or 1; -2 = could not be read */
+            }
+        }
+        log_raw("\n");
+    }
+    SetLastError(err);
+    return s;
+}
+
+static int WINAPI fh_setsockopt(fh_sock s, int level, int opt, const char *val, int len)
+{
+    int r = g_r_setsockopt(s, level, opt, val, len);
+    DWORD err = GetLastError();
+
+    if (InterlockedIncrement(&g_n_sockopt) <= 60) {
+        log_begin();
+        log_raw("ws: setsockopt s=0x");
+        log_hex(s, 4);
+        log_raw(" level=");
+        log_dec((unsigned long)level);
+        log_raw(" opt=");
+        log_dec((unsigned long)opt);
+        log_raw(" val=");
+        log_dec(val && len >= 4 ? *(const unsigned *)val : 0xffffffffu);
+        log_raw(" len=");
+        log_dec((unsigned long)len);
+        log_raw(" -> ");
+        log_dec((unsigned long)r);
+        if (r) {
+            log_raw(" err ");
+            log_dec(err);
+        }
+        log_raw("\n");
+    }
+    SetLastError(err);
+    return r;
+}
+
+static int WINAPI fh_getaddrinfo(const char *node, const char *service, const void *hints, void **res)
+{
+    int r = g_r_getaddrinfo(node, service, hints, res);
+    DWORD err = GetLastError();
+
+    if (InterlockedIncrement(&g_n_gai) <= 40) {
+        log_begin();
+        log_raw("ws: getaddrinfo node=");
+        fh_log_str(node);
+        log_raw(" service=");
+        fh_log_str(service);
+        log_raw(" -> ");
+        log_dec((unsigned long)r);
+        if (r == 0 && res && *res) {
+            const unsigned char *ai = (const unsigned char *)*res;
+
+            log_raw(" first: family ");
+            log_dec(*(const unsigned *)(ai + 4));
+            log_raw(" ");
+            fh_log_sa(*(void *const *)(ai + 32), (int)*(const SIZE_T *)(ai + 16));
+        }
+        log_raw("\n");
+    }
+    SetLastError(err);
+    return r;
+}
+
+static int WINAPI fh_wsasendto(fh_sock s, void *bufs, DWORD cnt, DWORD *sent, DWORD flags, const void *to, int tolen, void *ov, void *cr)
+{
+    int r = g_r_wsasendto(s, bufs, cnt, sent, flags, to, tolen, ov, cr);
+    DWORD err = GetLastError();
+    LONG n = InterlockedIncrement(&g_n_send);
+
+    if (n <= 25 || (r && InterlockedIncrement(&g_n_sendfail) <= 80)) {
+        log_begin();
+        log_raw("ws: WSASendTo s=0x");
+        log_hex(s, 4);
+        log_raw(" bufs=");
+        log_dec(cnt);
+        log_raw(" len=");
+        log_dec(bufs && cnt ? *(const ULONG *)bufs : 0);
+        log_raw(" to ");
+        fh_log_sa(to, tolen);
+        log_raw(" -> ");
+        log_dec((unsigned long)r);
+        if (r) {
+            log_raw(" err ");
+            log_dec(err);
+        }
+        log_raw("\n");
+    }
+    SetLastError(err);
+    return r;
+}
+
+static int WINAPI fh_sendto(fh_sock s, const char *buf, int len, int flags, const void *to, int tolen)
+{
+    int r = g_r_sendto(s, buf, len, flags, to, tolen);
+    DWORD err = GetLastError();
+    LONG n = InterlockedIncrement(&g_n_send);
+
+    if (n <= 25 || (r < 0 && InterlockedIncrement(&g_n_sendfail) <= 80)) {
+        log_begin();
+        log_raw("ws: sendto s=0x");
+        log_hex(s, 4);
+        log_raw(" len=");
+        log_dec((unsigned long)len);
+        log_raw(" to ");
+        fh_log_sa(to, tolen);
+        log_raw(" -> ");
+        log_dec((unsigned long)r);
+        if (r < 0) {
+            log_raw(" err ");
+            log_dec(err);
+        }
+        log_raw("\n");
+    }
+    SetLastError(err);
+    return r;
+}
+
+static int WINAPI fh_wsarecvfrom(fh_sock s, void *bufs, DWORD cnt, DWORD *got, DWORD *flags, void *from, int *fromlen, void *ov, void *cr)
+{
+    int r;
+    DWORD err;
+    LONG n = InterlockedIncrement(&g_n_recv);
+
+    fh_ensure_bound(s);
+    r = g_r_wsarecvfrom(s, bufs, cnt, got, flags, from, fromlen, ov, cr);
+    err = GetLastError();
+
+    if (n <= 12 || (r && err != 997 && InterlockedIncrement(&g_n_recvfail) <= 80)) {
+        log_begin();
+        log_raw("ws: WSARecvFrom s=0x");
+        log_hex(s, 4);
+        log_raw(" overlapped=");
+        log_dec(ov ? 1 : 0);
+        log_raw(" -> ");
+        log_dec((unsigned long)r);
+        if (r) {
+            log_raw(" err ");
+            log_dec(err);
+        }
+        log_raw("\n");
+    }
+    SetLastError(err);
+    return r;
+}
+
+static int WINAPI fh_recvfrom(fh_sock s, char *buf, int len, int flags, void *from, int *fromlen)
+{
+    int r;
+    DWORD err;
+    LONG n = InterlockedIncrement(&g_n_recv);
+
+    fh_ensure_bound(s);
+    r = g_r_recvfrom(s, buf, len, flags, from, fromlen);
+    err = GetLastError();
+
+    if (n <= 12 || (r < 0 && err != 10035 && InterlockedIncrement(&g_n_recvfail) <= 80)) {
+        log_begin();
+        log_raw("ws: recvfrom s=0x");
+        log_hex(s, 4);
+        log_raw(" -> ");
+        log_dec((unsigned long)r);
+        if (r < 0) {
+            log_raw(" err ");
+            log_dec(err);
+        }
+        log_raw("\n");
+    }
+    SetLastError(err);
+    return r;
+}
+
+/* which wrapper stands in for IAT slot i (g_ws2_slots order); the real function is remembered for the wrapper to call */
+static void *ws2_target(unsigned i, void *real)
+{
+    switch (i) {
+    case 0: g_r_recvfrom = (fh_f_recvfrom)real; return (void *)fh_recvfrom;
+    case 2: g_r_sendto = (fh_f_sendto)real; return (void *)fh_sendto;
+    case 3: g_r_setsockopt = (fh_f_setsockopt)real; return (void *)fh_setsockopt;
+    case 5: g_r_startup = (fh_f_startup)real; return (void *)fh_startup;
+    case 10: g_r_wsarecvfrom = (fh_f_wsarecvfrom)real; return (void *)fh_wsarecvfrom;
+    case 12: g_r_wsasendto = (fh_f_wsasendto)real; return (void *)fh_wsasendto;
+    case 14: g_r_socketw = (fh_f_socketw)real; return (void *)fh_socketw;
+    case 15: g_r_getaddrinfo = (fh_f_getaddrinfo)real; return (void *)fh_getaddrinfo;
+    default: return real;
+    }
+}
+#else
+/* release build: only the two receive slots are wrapped (implicit bind, see fh_ensure_bound) */
+static int WINAPI fh_wsarecvfrom(fh_sock s, void *bufs, DWORD cnt, DWORD *got, DWORD *flags, void *from, int *fromlen, void *ov, void *cr)
+{
+    fh_ensure_bound(s);
+    return g_r_wsarecvfrom(s, bufs, cnt, got, flags, from, fromlen, ov, cr);
+}
+
+static int WINAPI fh_recvfrom(fh_sock s, char *buf, int len, int flags, void *from, int *fromlen)
+{
+    fh_ensure_bound(s);
+    return g_r_recvfrom(s, buf, len, flags, from, fromlen);
+}
+
+static void *ws2_target(unsigned i, void *real)
+{
+    switch (i) {
+    case 0: g_r_recvfrom = (fh_f_recvfrom)real; return (void *)fh_recvfrom;
+    case 10: g_r_wsarecvfrom = (fh_f_wsarecvfrom)real; return (void *)fh_wsarecvfrom;
+    default: return real;
+    }
+}
+#endif
+
 static void module_name_of(void *addr, char *out, int cap)
 {
     HMODULE m = NULL;
@@ -408,13 +870,17 @@ static void patch_game_winsock(unsigned char *img)
                            : GetProcAddress(ws2, (LPCSTR)(ULONG_PTR)g_ws2_slots[i].ordinal);
         char oldmod[40];
         DWORD oldprot;
+        void *want = (void *)real;
 
         if (!real) {
             continue;
         }
+#ifdef FH2MP_DEBUG_BUILD
+#endif
+        want = ws2_target(i, (void *)real);
         module_name_of(*slot, oldmod, sizeof oldmod);
-        if (*slot == (void *)real) {
-            continue; /* already the real function */
+        if (*slot == want) {
+            continue; /* already the real function (or its tracer) */
         }
         if (!VirtualProtect(slot, 8, PAGE_READWRITE, &oldprot)) {
             continue;
@@ -431,8 +897,8 @@ static void patch_game_winsock(unsigned char *img)
         log_raw(": ");
         log_raw(oldmod);
         log_raw(" -> ws2_32\n");
-        *slot = (void *)real;
-        VirtualProtect(slot, 8, oldprot, &oldprot);
+        *slot = want;
+        patch_done(slot, 8, oldprot);
         changed++;
     }
     g_ws2_patched = 1;
@@ -470,7 +936,7 @@ static int patch_traffic_local_mode(void)
         return 0;
     }
     fn[3] = 0x01;
-    VirtualProtect(fn + 3, 1, old, &old);
+    patch_done(fn + 3, 1, old);
     FlushInstructionCache(GetCurrentProcess(), fn, 5);
     log_begin();
     log_raw("traffic: networked-mode switch patched; traffic stays local\n");
@@ -516,7 +982,7 @@ static int patch_traffic_module_offline(void)
         fn[0] = 0xE9;
         mem_copy(fn + 1, &rel32, 4);
     }
-    VirtualProtect(fn, 5, old, &old);
+    patch_done(fn, 5, old);
     FlushInstructionCache(GetCurrentProcess(), fn, 5);
     log_begin();
     log_raw("traffic: module go-online redirected to go-offline; single-player traffic stays active\n");
@@ -559,7 +1025,7 @@ static int patch_matchmaking_allowed(void)
         return 0;
     }
     mem_copy(at, nop6, 6);
-    VirtualProtect(at, 6, old, &old);
+    patch_done(at, 6, old);
     FlushInstructionCache(GetCurrentProcess(), at, 6);
     log_begin();
     log_raw("mmallow: IsMatchMakingAllowed no longer requires the CLobby flag at +0xf0\n");
@@ -612,12 +1078,12 @@ static int patch_qos_assume_success(void)
     }
     a[3] = 0x90;
     a[4] = 0x90;
-    VirtualProtect(a + 3, 2, old, &old);
+    patch_done(a + 3, 2, old);
     if (!VirtualProtect(b + 6, 1, PAGE_EXECUTE_READWRITE, &old)) {
         return 0;
     }
     b[6] = 0x01;
-    VirtualProtect(b + 6, 1, old, &old);
+    patch_done(b + 6, 1, old);
     FlushInstructionCache(GetCurrentProcess(), a, 8);
     FlushInstructionCache(GetCurrentProcess(), b, 7);
     log_begin();
@@ -789,7 +1255,7 @@ static int patch_server_port(void)
     for (i = 0; i < 4; i++) {
         at[i] = (unsigned char)env[i];
     }
-    VirtualProtect(at, 4, old, &old);
+    patch_done(at, 4, old);
     log_begin();
     log_raw("serverport: the game connects to the port from FH2MP_SERVER_PORT\n");
     return 1;
@@ -826,7 +1292,7 @@ static int patch_mp_difficulty(void)
         return 0;
     }
     memcpy(at, now, sizeof now);
-    VirtualProtect(at, sizeof want, old, &old);
+    patch_done(at, sizeof want, old);
     FlushInstructionCache(GetCurrentProcess(), at, sizeof now);
     log_begin();
     log_raw("mpdiff: online races use the maximum (Insane, +40%) AI difficulty bonus\n");
@@ -864,7 +1330,7 @@ static int patch_traffic_request_ownership(void)
     }
     at[0] = 0x90;
     at[1] = 0x90;
-    VirtualProtect(at, 2, old, &old);
+    patch_done(at, 2, old);
     FlushInstructionCache(GetCurrentProcess(), at, 2);
     log_begin();
     log_raw("trafficown: a collision with a traffic car always requests its ownership\n");
@@ -917,7 +1383,7 @@ static int patch_live_gates(void)
         jne[0] = 0xE9;
         mem_copy(jne + 1, &rel, 4);
         jne[5] = 0x90;
-        VirtualProtect(jne, 6, old, &old);
+        patch_done(jne, 6, old);
         FlushInstructionCache(GetCurrentProcess(), jne, 6);
         done++;
     }
@@ -963,7 +1429,7 @@ static int patch_rival_gate(void)
         return 0;
     }
     at[7] = 0xEB;
-    VirtualProtect(at + 7, 1, old, &old);
+    patch_done(at + 7, 1, old);
     FlushInstructionCache(GetCurrentProcess(), at + 7, 1);
     log_begin();
     log_raw("rivalgate: Rivals events no longer require the connected-to-Live byte\n");
@@ -1007,7 +1473,7 @@ static int patch_online_meet(void)
     }
     at[2] = 0x90;
     at[3] = 0x90;
-    VirtualProtect(at + 2, 2, old, &old);
+    patch_done(at + 2, 2, old);
     FlushInstructionCache(GetCurrentProcess(), at, 4);
     log_begin();
     log_raw("onlinemeet: the Car Meet counts as online once connected (online entries available)\n");
@@ -1125,7 +1591,7 @@ static void xs_write_jump(unsigned char *fn, void *target)
     }
     VirtualProtect(fn, 12, PAGE_EXECUTE_READWRITE, &old);
     mem_copy(fn, j, 12);
-    VirtualProtect(fn, 12, old, &old);
+    patch_done(fn, 12, old);
     FlushInstructionCache(GetCurrentProcess(), fn, 12);
 }
 
@@ -1363,7 +1829,7 @@ static int patch_sts_auth(void)
     fn[1] = 0x25;
     fn[2] = fn[3] = fn[4] = fn[5] = 0;
     mem_copy(fn + 6, &dest, 8);
-    VirtualProtect(fn, 14, old, &old);
+    patch_done(fn, 14, old);
     FlushInstructionCache(GetCurrentProcess(), fn, 14);
     log_begin();
     log_raw("sts: GetAuthToken replaced; LSP requests no longer wait for an Xbox token\n");
@@ -1410,7 +1876,7 @@ static int install_cmdline_hook(void)
         return 0;
     }
     mem_copy(target, stub, sizeof stub);
-    VirtualProtect(target, sizeof stub, old, &old);
+    patch_done(target, sizeof stub, old);
     FlushInstructionCache(GetCurrentProcess(), target, sizeof stub);
     log_begin();
     log_raw("hook: GetCmdArguments patched, argc=");
@@ -1562,7 +2028,7 @@ static int redirect_group(const char *name, unsigned lea_rva, unsigned str_rva, 
             return 0;
         }
         mem_copy(lea + 3, &d32, 4);
-        VirtualProtect(lea, 8, old, &old);
+        patch_done(lea, 8, old);
         FlushInstructionCache(GetCurrentProcess(), lea, 8);
     }
     log_begin();
@@ -2890,7 +3356,7 @@ static int patch_identity(void)
                 DWORD old;
                 if (VirtualProtect(p + j + 2, 8, PAGE_EXECUTE_READWRITE, &old)) {
                     mem_copy(p + j + 2, &g_xuid, 8);
-                    VirtualProtect(p + j + 2, 8, old, &old);
+                    patch_done(p + j + 2, 8, old);
                     FlushInstructionCache(GetCurrentProcess(), p + j, 10);
                     hits++;
                 }

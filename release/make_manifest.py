@@ -66,6 +66,20 @@ def main():
             sys.exit("the shim in the zip is a debug build (live debugger / tracer): rebuild with shim/build.sh (no argument)")
     shim = {"version": ver, **entry(shim_zip), "dllSha256": hashlib.sha256(dll).hexdigest()}
 
+    extra = None                                      # FH2 Extra Options (GPL-3.0), packed by fetch_extra_options.py; optional
+    for fn in sorted(os.listdir(a.dist)):
+        mm = re.fullmatch(r"fh2-extra-options-([0-9][0-9.]*)\.zip", fn)
+        if mm:
+            with zipfile.ZipFile(os.path.join(a.dist, fn)) as z:
+                need = {"winmm.dll", "FH2_ExtraOptions.ini", "LICENSE.txt", "NOTICE.txt"}
+                if not need <= set(z.namelist()):
+                    sys.exit(f"{fn} is missing {sorted(need - set(z.namelist()))}")
+                if not any(n.startswith("source/") for n in z.namelist()):
+                    sys.exit(f"{fn} carries no source: the GPL requires it with the binary")
+                edll = z.read("winmm.dll")
+            extra = {"version": mm.group(1), "author": "RokkuDayo", "license": "GPL-3.0", **entry(os.path.join(a.dist, fn)),
+                     "dllSha256": hashlib.sha256(edll).hexdigest()}
+
     assets = {}
     for key, pattern in LAUNCHER_ASSETS.items():
         p = os.path.join(a.dist, pattern.format(v=ver))
@@ -73,6 +87,8 @@ def main():
             assets[key] = entry(p)
     m = {"schema": 1, "tag": a.tag, "version": ver, "minLauncher": a.min_launcher, "notes": a.notes,
          "shim": shim, "launcher": {"version": ver, "assets": assets}}
+    if extra:
+        m["extraOptions"] = extra
     raw = (json.dumps(m, indent=1, sort_keys=True) + "\n").encode()
     with open(os.path.join(a.dist, "manifest.json"), "wb") as f:
         f.write(raw)

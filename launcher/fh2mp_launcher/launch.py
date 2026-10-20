@@ -24,7 +24,11 @@ def find_proton():
     for r in roots:
         found += glob.glob(os.path.join(os.path.expanduser(r), "*", "proton"))
     found = [f for f in found if os.access(f, os.X_OK) or os.path.isfile(f)]
-    return sorted(found)[-1] if found else ""
+    # highest version number in the folder name wins ("Proton 11" over "Proton 9"); no number (Experimental) ranks above all
+    def rank(f):
+        nums = [int(n) for n in re.findall(r"\d+", os.path.basename(os.path.dirname(f)))]
+        return (not nums, nums, f)
+    return max(found, key=rank) if found else ""
 
 
 def steam_roots():
@@ -70,21 +74,25 @@ def build_command(settings, folder, extra_args=(), skip_launcher=True):
             raise LaunchError("Set the launch command in Settings, or pick Proton/Wine.")
         argv = [a.replace("{exe}", exe).replace("{dir}", folder) for a in shlex.split(tpl)]
         return argv, {"WINEDLLOVERRIDES": "winmm=n,b"}, folder
-    proton = settings["proton"] or find_proton()
-    prefix = os.path.expanduser(settings["prefix"]) if settings["prefix"] else detect_prefix(folder)
-    if mode in ("auto", "proton") and proton and prefix:
+    proton = os.path.expanduser(settings["proton"]) if settings["proton"] else find_proton()
+    if mode in ("auto", "proton") and proton:
+        # Never fall back to the system Wine just because no Steam prefix was found: distro Wine is often too old for Azimuth
+        # ("Your graphics card or driver is not supported", CreateDXGIFactory2). Proton makes its own prefix on first run.
+        prefix = os.path.expanduser(settings["prefix"]) if settings["prefix"] else detect_prefix(folder) or os.path.join(paths.config_dir(), "prefix")
+        os.makedirs(prefix, exist_ok=True)
         roots = steam_roots()
         env = {"STEAM_COMPAT_DATA_PATH": prefix, "STEAM_COMPAT_CLIENT_INSTALL_PATH": roots[0] if roots else os.path.expanduser("~/.local/share/Steam"),
                "WINEDLLOVERRIDES": "winmm=n,b"}
         return [proton, "run", exe, *args], env, folder
+    if mode == "proton":
+        raise LaunchError("Proton not found. In Settings, set the path to the `proton` script (for example a Proton 11 or GE-Proton folder).")
     if mode in ("auto", "wine") and shutil.which("wine"):
         env = {"WINEDLLOVERRIDES": "winmm=n,b"}
-        if prefix or settings["prefix"]:
-            env["WINEPREFIX"] = prefix or os.path.expanduser(settings["prefix"])
+        if settings["prefix"]:
+            env["WINEPREFIX"] = os.path.expanduser(settings["prefix"])
         return [shutil.which("wine"), exe, *args], env, folder
-    raise LaunchError("Could not work out how to run Azimuth on this system" + ("" if proton else " (no Proton found)")
-                      + (": the game files are not in any Steam Proton prefix I can find" if proton and not prefix else "")
-                      + ". In Settings, choose the Proton script and its prefix, or enter a custom launch command.")
+    raise LaunchError("Could not work out how to run Azimuth on this system (no Proton found)"
+                      ". In Settings, choose the Proton script, or enter a custom launch command.")
 
 
 def start(settings, folder, extra_args=(), skip_launcher=True):

@@ -1,7 +1,7 @@
 # FH2MP: Forza Horizon 2 online, back from the dead (sort of)
 
-> **v1.0.0, first public release.** It works, and it is still young: expect crashes, desyncs and rough edges. See the progress table for what
-> is and is not there.
+> **v1.0.0-rc2, a pre-release.** It works, and it is still young: expect crashes, desyncs and rough edges. See the progress table for what
+> is and is not there, and the [rc2 release notes](release/notes/v1.0.0-rc2.md) for what changed since rc1.
 
 Microsoft switched off Forza Horizon 2's online services on 2023-08-22. FH2MP brings them back: the **real game
 client**, speaking the **game's own network protocol**, to a **replacement server** written from scratch.
@@ -61,10 +61,10 @@ mostly with one, plus a two-client check of the Rivals ghost and notification lo
 
 | Feature | Progress | State |
 |---------|----------|-------|
-| **Online Free Roam** | `█████████░` 90% | Join, Players list, name tags, live car relay. No reliability layer yet. |
+| **Online Free Roam** | `█████████░` 90% | Join (the Windows join bug is fixed in rc2), Players list, name tags, live car relay. No reliability layer yet. |
 | **Matchmaking** (the game's own flow) | `███████░░░` 70% | Per-client identity, many lobbies of every type at once, full lobbies (12) roll over. A startup race sometimes ends in "config server error" (relaunch). |
 | **Car Meets** | `██████░░░░` 60% | Meet, see each other's cars, invite to Online Free Roam. Missing: Showdown races, Road Trip invites (untested), shared Drivatar crowd. |
-| **Online events** | `███████░░░` 70% | A sprint runs end to end, including the 30 s last-finisher timer. Missing: circuit end detection, events started by the second player (softlock), results flow. |
+| **Online events** | `███████░░░` 70% | A sprint runs end to end, including the 30 s last-finisher timer. rc2: circuit races now end when every player's final score has arrived or 30 s after the first, and a second player who is not the leader gets a valid reply when they pick an event (both new, not yet confirmed in game on the live server). Missing: the results flow. |
 | **Online Road Trip** | `█████░░░░░` 50% | Vote, car select, group drive, race, King, Infection and XP championship screens work. Moving on through all four events of a destination is not done. |
 | **Event scoreboard and progress** | `██████░░░░` 60% | Lap times, progress and positions are relayed. Position order only checked on one-lap events. |
 | **Car-to-car collisions** | `█████░░░░░` 50% | Hits are relayed and look right; slow pushing still gives small periodic bumps. |
@@ -92,7 +92,9 @@ Not done: DLC rival pages, the Road Trip rival tab (unchecked). Leaderboards are
 never empty; the Friends filter shows only you for now.
 
 **King and Infection in more detail.** Both are Road Trip events (they need two players, so the destination vote is drawn again when a second
-player joins). The client decides what a collision does from the event's own rules and reports it; the server is the referee. At the start
+player joins, as long as nobody has voted yet). Since rc2 King also starts from a Free Roam map icon: the server is never told the event type
+there, so it reads it from the leader's event options and tells Infection from King by the first hit (new; checked against logged payloads
+and tests, not yet against the live server). The client decides what a collision does from the event's own rules and reports it; the server is the referee. At the start
 it picks the crown holder (King, one per six players) or patient zero (Infection) at random, applies each reported hit once, sends everybody
 the new crown or infection state, ends the event on the time limit (Infection also when everybody is infected) and picks a new holder if
 the current one leaves. The game's own HUD does the rest: crown name tag, scoreboard and results. Both modes were seen working with two
@@ -141,9 +143,9 @@ service is contacted, ever. There was nothing left to sniff.
 
 - A **legitimately owned copy** of Forza Horizon 2, Xbox One build **1.0.0.64**. No game files are in this repo.
 - **Azimuth 0.9.10**. The shim checks its hooks against byte signatures from that build and skips anything that does not match; the launcher tells you if your build is not the tested one.
-- Optional: **FH2 Extra Options 0.2.88**. Put its `Azimuth/winmm.dll`, ini and PNG in an `fh2extra` folder next to `azimuth.exe`; the shim chain-loads it.
+- **FH2 Extra Options 0.2.98** is the only supported build. The launcher installs it if it is missing (Settings, off switch included); or put its `Azimuth/winmm.dll`, ini and PNG in an `fh2extra` folder next to `azimuth.exe` yourself. The shim chain-loads it.
 - To build by hand: `shim/build.sh` (needs `x86_64-w64-mingw32-gcc`) builds `shim/build/winmm.dll`; the launcher does the placing and the Wine override for you. Launcher sources are in `launcher/` (PySide6), release tooling in `release/`.
-- Linux with Wine/Proton (tested on Proton-CachyOS 11). Windows should work in principle, untested.
+- Linux with Wine/Proton (tested on Proton-CachyOS 11), and Windows 11 (tested on one PC; rc2 fixes the join bug that kept Windows players on "searching").
 - `python3` for the servers; the LSP additionally needs PostgreSQL 16 and `psycopg` 3 (see `docs/ops.md`).
 
 ## AI disclosure

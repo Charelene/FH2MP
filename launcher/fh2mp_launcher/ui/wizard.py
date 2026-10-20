@@ -258,13 +258,15 @@ class Wizard(QDialog):
 
         def work(job):
             if new:
-                if not self.existing_key:
+                if not self.existing_key and not lc.has_identity():       # (a key kept after an unclear failure is reused on retry)
                     lc.create_identity()
                 try:
                     return lc.sign_up(tag, invite, progress=lambda n: job.progress(n), cancelled=lambda: job.cancelled)
-                except BaseException:
-                    if not self.existing_key:
-                        lc.forget_identity()              # do not keep a key that has no account behind it
+                except BaseException as e:
+                    # Do not keep a key that has no account behind it, but only when that is certain: if the request was sent and its
+                    # answer never arrived, the account may exist and this key is the only way into it.
+                    if not self.existing_key and not getattr(e, "uncertain", False):
+                        lc.forget_identity()
                     raise
             lc.restore_identity(code)
             try:

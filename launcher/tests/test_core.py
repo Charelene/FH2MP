@@ -214,6 +214,12 @@ class AzimuthTests(unittest.TestCase):
 class ExtraOptionsTests(unittest.TestCase):
     INI = b"; Forza Horizon 2 Extra Options\n; Release v0.2.88\n; Compatible with Azimuth 0.9.10\n[Global]\nEnabled=1\n"
 
+    def setUp(self):
+        self._saved = set(shim.SUPPORTED_EXTRA_SHA256)
+        for b in (b"MZ-mod-dll", b"MZ-new-dll", b"MZ-bundled-mod", b"MZ-other"):          # stand-ins for the one supported build
+            shim.SUPPORTED_EXTRA_SHA256.add(hashlib.sha256(b).hexdigest())
+        self.addCleanup(lambda: (shim.SUPPORTED_EXTRA_SHA256.clear(), shim.SUPPORTED_EXTRA_SHA256.update(self._saved)))
+
     def make_mod(self, d, nested=True):
         base = os.path.join(d, "fh2extra") if nested else d
         os.makedirs(base, exist_ok=True)
@@ -245,6 +251,67 @@ class ExtraOptionsTests(unittest.TestCase):
                 self.assertEqual(f.read(), b"MZ-new-dll")
             with open(os.path.join(new, "fh2extra", "FH2_ExtraOptions.ini"), "rb") as f:
                 self.assertIn(b"Mine=1", f.read())
+
+    def make_package(self, d, dll=b"MZ-bundled-mod", source=True):
+        import zipfile
+        zp = os.path.join(d, "fh2-extra-options-0.2.98.zip")
+        with zipfile.ZipFile(zp, "w") as zf:
+            zf.writestr("winmm.dll", dll)
+            zf.writestr("FH2_ExtraOptions.ini", self.INI)
+            zf.writestr("LICENSE.txt", b"GNU GENERAL PUBLIC LICENSE Version 3")
+            zf.writestr("NOTICE.txt", b"by RokkuDayo")
+            if source:
+                zf.writestr("source/ForzaHorizon2_ExtraOptions-1ff0535f.zip", b"PK-src")
+        return zp, hashlib.sha256(dll).hexdigest()
+
+    def test_bundled_install_only_when_missing_and_keeps_licence_and_source(self):
+        with tempfile.TemporaryDirectory() as pkg, tempfile.TemporaryDirectory() as az:
+            zp, sha = self.make_package(pkg)
+            did = shim.install_bundled_extra(az, zp, sha)
+            self.assertIn("RokkuDayo", did[0])
+            base = os.path.join(az, "fh2extra")
+            for n in ("winmm.dll", "FH2_ExtraOptions.ini", "LICENSE.txt", "NOTICE.txt", os.path.join("source", "ForzaHorizon2_ExtraOptions-1ff0535f.zip")):
+                self.assertTrue(os.path.isfile(os.path.join(base, n)), n)
+            self.assertEqual(shim.extra_options_installed(az), (True, "0.2.88", "0.9.10"))
+            # a second call (the supported mod is there now) changes nothing, even with another supported DLL in the package
+            os.makedirs(os.path.join(pkg, "second"))
+            zp2, sha2 = self.make_package(os.path.join(pkg, "second"), dll=b"MZ-other")
+            self.assertEqual(shim.install_bundled_extra(az, zp2, sha2), [])
+            with open(os.path.join(base, "winmm.dll"), "rb") as f:
+                self.assertEqual(f.read(), b"MZ-bundled-mod")
+            # another version (not the supported build): kept aside, the supported one goes in, settings stay
+            with open(os.path.join(base, "winmm.dll"), "wb") as f:
+                f.write(b"MZ-0.2.88-old")
+            with open(os.path.join(base, "FH2_ExtraOptions.ini"), "ab") as f:
+                f.write(b"Mine=1\n")
+            did = shim.install_bundled_extra(az, zp, sha)
+            self.assertIn("aside", did[0])
+            with open(os.path.join(base, "winmm.dll"), "rb") as f:
+                self.assertEqual(f.read(), b"MZ-bundled-mod")
+            with open(os.path.join(base, "winmm.dll.unsupported-1"), "rb") as f:
+                self.assertEqual(f.read(), b"MZ-0.2.88-old")
+            with open(os.path.join(base, "FH2_ExtraOptions.ini"), "rb") as f:
+                self.assertIn(b"Mine=1", f.read())
+
+    def test_only_the_supported_build_is_imported(self):
+        with tempfile.TemporaryDirectory() as old, tempfile.TemporaryDirectory() as new:
+            base = self.make_mod(old)
+            with open(os.path.join(base, "winmm.dll"), "wb") as f:
+                f.write(b"MZ-some-older-release")
+            self.assertIsNone(shim.inspect_extra_source(base))
+            with self.assertRaises(shim.ShimError):
+                shim.import_extra_options(new, old)
+            self.assertFalse(shim.extra_options_supported(new))
+
+    def test_bundled_install_checks_the_signed_hash_and_what_it_is(self):
+        with tempfile.TemporaryDirectory() as pkg, tempfile.TemporaryDirectory() as az:
+            zp, _sha = self.make_package(pkg)
+            with self.assertRaises(shim.ShimError):
+                shim.install_bundled_extra(az, zp, "0" * 64)                      # not what the manifest signed
+            self.assertFalse(os.path.exists(os.path.join(az, "fh2extra", "winmm.dll")))
+            ours, osha = self.make_package(pkg, dll=b"MZ FH2MP-SHIM-VERSION:1.0.0:END")
+            with self.assertRaises(shim.ShimError):
+                shim.install_bundled_extra(az, ours, osha)                        # our own shim is not the mod
 
     def test_refuses_what_is_not_the_mod(self):
         with tempfile.TemporaryDirectory() as d:

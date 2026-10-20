@@ -1020,13 +1020,95 @@ static void xs_response_store_stub(void *slot, void *resp)
     g_xs_store_orig(slot, resp);
 }
 
+/* Last resort that allocates nothing: a run of int3 padding between functions inside the module's own code, which is always
+ * within rel32 reach and needs no new executable memory (works where VirtualAlloc of RWX pages is refused or the address space
+ * around the module is full). Returns NULL when there is no run of `n` bytes. */
+static unsigned char *find_code_padding(unsigned char *img, unsigned n)
+{
+    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)img;
+    const IMAGE_NT_HEADERS64 *nt = (const IMAGE_NT_HEADERS64 *)(img + dos->e_lfanew);
+    const IMAGE_SECTION_HEADER *sec = IMAGE_FIRST_SECTION(nt);
+    unsigned s, i, run;
+
+    for (s = 0; s < nt->FileHeader.NumberOfSections; s++) {
+        unsigned char *c;
+        unsigned size;
+        if (!(sec[s].Characteristics & IMAGE_SCN_MEM_EXECUTE)) {
+            continue;
+        }
+        c = img + sec[s].VirtualAddress;
+        size = sec[s].Misc.VirtualSize;
+        for (i = 0, run = 0; i < size; i++) {
+            run = c[i] == 0xCC ? run + 1 : 0;
+            if (run >= n) {
+                return c + i + 1 - n; /* this module's gaps between functions are 8-16 bytes of int3, about 6000 of them are 12+ */
+            }
+        }
+    }
+    return NULL;
+}
+
+/* Commits one page of executable memory within +-2 GB of `anchor` (so a rel32 call reaches it), nearest free region first, upward
+ * and downward alternately. A fixed window after the module is not enough: on some Windows address-space layouts every 64 KB
+ * slot there is taken, which left the XSAPI bodies unpatched and parked the matchmaker (reported 2026-10-19). */
+static unsigned char *alloc_near(unsigned char *anchor)
+{
+    SYSTEM_INFO si;
+    ULONG_PTR lo, hi, up, down;
+    int step;
+
+    GetSystemInfo(&si);
+    lo = (ULONG_PTR)anchor > 0x7FF00000u ? (ULONG_PTR)anchor - 0x7FF00000u : 0;
+    if (lo < (ULONG_PTR)si.lpMinimumApplicationAddress) {
+        lo = (ULONG_PTR)si.lpMinimumApplicationAddress;
+    }
+    hi = (ULONG_PTR)anchor + 0x7FF00000u;
+    if (hi > (ULONG_PTR)si.lpMaximumApplicationAddress) {
+        hi = (ULONG_PTR)si.lpMaximumApplicationAddress;
+    }
+    up = down = (ULONG_PTR)anchor;
+    for (step = 0; step < 200000 && (up < hi || down > lo); step++) {
+        MEMORY_BASIC_INFORMATION mbi;
+        unsigned char *p;
+
+        if (up < hi) {
+            if (!VirtualQuery((void *)up, &mbi, sizeof mbi)) {
+                up = hi;
+            } else {
+                ULONG_PTR base = (ULONG_PTR)mbi.BaseAddress, end = base + mbi.RegionSize;
+                ULONG_PTR cand = (base + 0xFFFFu) & ~(ULONG_PTR)0xFFFFu;
+                if (mbi.State == MEM_FREE && cand + 0x1000 <= end && cand + 0x1000 <= hi && cand >= lo &&
+                    (p = (unsigned char *)VirtualAlloc((void *)cand, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE))) {
+                    return p;
+                }
+                up = end > up ? end : up + 0x1000;
+            }
+        }
+        if (down > lo) {
+            if (!VirtualQuery((void *)(down - 1), &mbi, sizeof mbi)) {
+                down = lo;
+            } else {
+                ULONG_PTR base = (ULONG_PTR)mbi.BaseAddress, end = base + mbi.RegionSize;
+                ULONG_PTR cand = (end - 0x1000) & ~(ULONG_PTR)0xFFFFu;
+                if (mbi.State == MEM_FREE && cand >= base && cand >= lo && cand + 0x1000 <= hi &&
+                    (p = (unsigned char *)VirtualAlloc((void *)cand, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE))) {
+                    return p;
+                }
+                down = base < down ? base : down - 0x1000;
+            }
+        }
+    }
+    return NULL;
+}
+
 /* 0: module not there yet (retry), 1: patched, 2: unusable (do not retry) */
 static int patch_xsapi_body(void)
 {
     unsigned char *img = find_xsapi_image();
     unsigned char *code, *site = NULL, *ctor_site = NULL, *cave = NULL;
     unsigned i;
-    DWORD old;
+    DWORD old, err = 0;
+    int in_module = 0;
     long long rel;
     int rel32;
     unsigned char jmp[12] = {0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xE0};
@@ -1053,7 +1135,7 @@ static int patch_xsapi_body(void)
         log_raw("xsbody: call sites or WindowsCreateString not found, not patched\n");
         return 2;
     }
-    for (i = 0; i < 512; i++) { /* a code cave within +-2 GB of the call so a rel32 call reaches it */
+    for (i = 0; i < 512; i++) { /* the usual place: a code cave just after the module (rel32 call reach) */
         cave = (unsigned char *)VirtualAlloc(img + 0x600000u + (SIZE_T)i * 0x10000u, 0x1000, MEM_COMMIT | MEM_RESERVE,
                                               PAGE_EXECUTE_READWRITE);
         if (cave) {
@@ -1061,15 +1143,35 @@ static int patch_xsapi_body(void)
         }
     }
     if (!cave) {
+        err = GetLastError();
+        cave = alloc_near(site);
+    }
+    if (!cave) {
+        cave = find_code_padding(img, 12);
+        in_module = cave != NULL;
+    }
+    if (!cave) {
         log_begin();
-        log_raw("xsbody: no code cave near the XSAPI module, not patched\n");
+        log_raw("xsbody: no code cave near the XSAPI module, not patched (VirtualAlloc error ");
+        log_dec(err);
+        log_raw(", module ");
+        log_hex((unsigned long long)(ULONG_PTR)img, 16);
+        log_raw(")\n");
         return 2;
     }
     t = (ULONGLONG)(ULONG_PTR)xs_response_store_stub;
     for (i = 0; i < 8; i++) {
         jmp[2 + i] = (unsigned char)(t >> (8 * i));
     }
+    if (in_module && !VirtualProtect(cave, 12, PAGE_EXECUTE_READWRITE, &old)) {
+        log_begin();
+        log_raw("xsbody: could not make the module padding writable, not patched\n");
+        return 2;
+    }
     mem_copy(cave, jmp, 12);
+    if (in_module) {
+        FlushInstructionCache(GetCurrentProcess(), cave, 12);
+    }
     rel = (long long)(cave - (site + 5));
     rel32 = (int)rel;
     if ((long long)rel32 != rel) {
@@ -1083,6 +1185,7 @@ static int patch_xsapi_body(void)
     VirtualProtect(site, 5, old, &old);
     FlushInstructionCache(GetCurrentProcess(), site, 5);
     log_begin();
-    log_raw("xsbody: XSAPI response bodies are now filled from the HTTP stream\n");
+    log_raw(in_module ? "xsbody: XSAPI response bodies are now filled from the HTTP stream (module padding)\n"
+                      : "xsbody: XSAPI response bodies are now filled from the HTTP stream\n");
     return 1;
 }

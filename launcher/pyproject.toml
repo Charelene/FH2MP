@@ -3,7 +3,7 @@ name = "fh2mp-launcher"
 dynamic = ["version"]
 description = "Launcher for the FH2MP Forza Horizon 2 online revival"
 requires-python = ">=3.10"
-dependencies = ["PySide6-Essentials>=6.6", "cryptography>=42", "keyring>=24"]
+dependencies = ["PySide6-Essentials>=6.6", "cryptography>=42", "keyring>=24", "certifi>=2024.1.1"]
 
 [project.optional-dependencies]
 build = ["pyinstaller>=6.6", "pillow"]

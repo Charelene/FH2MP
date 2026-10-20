@@ -26,3 +26,7 @@ SHIM_DLL = "winmm.dll"
 SESSION_FILE = "fh2mp-session.txt"
 LSP_FILE = "fh2mp-lsp.txt"
 EXTRA_OPTIONS_DIR = "fh2extra"
+# FH2 Extra Options: 0.2.98 is the only supported build, identified by its DLL (its ini still says v0.2.88). Keep identical to
+# release/fetch_extra_options.py (DLL_SHA256).
+EXTRA_OPTIONS_VERSION = "0.2.98"
+EXTRA_OPTIONS_DLL_SHA256 = "d372b3a331c93cbbbf984d9a3b5df63836fdfb2aee26a10660c838c4806ff3d5"

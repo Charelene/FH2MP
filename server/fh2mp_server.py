@@ -432,7 +432,7 @@ def transfer_update_message(router, obj_id, id_bits, seq, size, payload):
     return write
 
 
-def grant_ownership(router, obj_id, id_bits, seq=0):
+def grant_ownership(router, obj_id, id_bits, seq=0, size=0, payload=0):
     """FUN_1417ab720 / FUN_1417b1e70: the client resolves its transfer object by key
     (A=1,B=0,id), then applies a sequenced message: seq:8, size:14 and size payload bits."""
     def write(w: BitWriter):
@@ -442,7 +442,10 @@ def grant_ownership(router, obj_id, id_bits, seq=0):
         w.bits(0, 1)
         w.bits(obj_id, id_bits)
         w.bits(seq, 8)
-        w.bits(0, 14)
+        w.bits(size, 14)
+        if size:
+            w.value |= payload << w.pos
+            w.pos += size
     return write
 
 
@@ -496,6 +499,24 @@ RACE_MODE_KING, RACE_MODE_INFECTION = 25, 26   # RaceModes.id
 TAG_MODES = {RACE_MODE_KING: {"name": "King", "seconds": 240.0, "per_it": 6},
              RACE_MODE_INFECTION: {"name": "Infection", "seconds": 240.0, "per_it": 0}}
 TAG_ASSIGN_REPEATS = (0.0, 0.4, 1.2, 3.0)      # seconds after the first send: the datagrams are unreliable, so repeat them
+
+# Free roam events are chosen on the map, so the server is never told their mode (MsgRequestRace has no payload). The leader's GameOptions say
+# it. Found by lining up payloads whose Road Trip event, and so mode, is known (prod logs 2026-10-19/20): bits 0-7 are the event type (0 street
+# race and tag modes, 3 laps, 4 point to point); a tag mode also sets bits 10-12 and has a long (~700 bit) tag section, where a street race
+# leaves bits 10-12 clear. Only King has been seen: the Free Roam payloads at 00:17 and 01:56 have the Road Trip King's header. Infection is
+# told apart from the first hit (tag_collision): an It car that stays It.
+GAME_OPTIONS_TAG_MIN_BITS = 600
+GAME_OPTIONS_TAG_BITS = 0b111 << 10
+
+
+def game_options_tag_mode(game_options):
+    """RACE_MODE_KING when the lobby's GameOptions (size, payload) look like a tag event, else None."""
+    if not game_options:
+        return None
+    size, payload = game_options
+    if size < GAME_OPTIONS_TAG_MIN_BITS or payload & 0xFF or payload & GAME_OPTIONS_TAG_BITS != GAME_OPTIONS_TAG_BITS:
+        return None
+    return RACE_MODE_KING
 
 
 def read_car_key(r):
@@ -1080,6 +1101,20 @@ class Server:
 
     GAME_OPTIONS_TRANSFER_ID = 0   # transfer-object id of the lobby's GameOptions (router 6, type 1)
 
+    def ownership_grant(self, peer: Peer, router: int, tid: int, oid: int, id_bits: int):
+        """The reply to a client's RequestOwnership. A client that was already sent the lobby's GameOptions (send_game_options, numbered
+        from 0) takes the object over from that state: a grant numbered 0 with no state looks stale to it, and on prod (2026-10-20) a
+        second player who asked for ownership of GameOptions that the first leader had written never wrote or requested anything again
+        (the old, working cases had no stored GameOptions). That player now gets the current state with the next sequence number, the
+        same content as the update it already accepted. Everybody else is answered exactly as before."""
+        if router == ROUTER_LOBBY and tid == TYPE_GAME_OPTIONS and self.game_options and peer.gopts_seq > 0:
+            size, payload = self.game_options
+            seq = peer.gopts_seq
+            peer.gopts_seq = (peer.gopts_seq + 1) % 0xFF
+            self.log(f"{peer.addr[1]} ownership grant carries the lobby's GameOptions ({size} bits, seq {seq})")
+            return grant_ownership(router, oid, id_bits, seq, size, payload)
+        return grant_ownership(router, oid, id_bits)
+
     def send_game_options(self, q: Peer) -> None:
         """Forwards the leader's GameOptions to a client under the same transfer-object key the leader wrote
         it with (A=1,B=0,id 0). That object already exists in every client's lobby (CGameOptions); the update
@@ -1255,6 +1290,12 @@ class Server:
         if (old_a == TAG_BUCKET_IT) == (old_b == TAG_BUCKET_IT) or max(new_a, new_b) > TAG_BUCKET_IT:
             self.log(f"tag: ignored collision {old_a}->{new_a} / {old_b}->{new_b}")
             return
+        if tag.get("guessed"):               # a Free Roam event whose mode was only guessed: the first real hit tells King from Infection
+            tag["guessed"] = False
+            it_after = new_a if old_a == TAG_BUCKET_IT else new_b
+            if it_after == TAG_BUCKET_IT:    # the It car stayed It (Infection); in King it hands the crown over
+                tag["mode"] = TAG_MODES[RACE_MODE_INFECTION]
+                self.log("tag: the It car stayed It: this is Infection, not King")
         buckets[a], buckets[b] = new_a, new_b
         self.log(f"tag: owner {a.owner_id} {old_a}->{new_a}, owner {b.owner_id} {old_b}->{new_b} (reported by {peer.owner_id})")
         self.tag_send("collision")
@@ -1322,10 +1363,18 @@ class Server:
                       "numlaps": self.rt_numlaps(self.rt_race()) if self.roadtrip and self.rt_winner is not None
                       and self.rt_gamedb else None}
         mode = self.rt_race_mode(self.rt_race()) if self.roadtrip and self.rt_winner is not None and self.rt_gamedb else None
+        guessed = False
+        if mode is None and not self.roadtrip and self.game_options:      # free roam: read the mode off the leader's GameOptions
+            size, payload = self.game_options
+            mode = game_options_tag_mode(self.game_options)
+            guessed = mode is not None
+            self.log(f"event options: {size} bits, header {payload & 0xFFFFFFFFFF:010x}: "
+                     f"{'tag mode (King assumed until the first hit shows otherwise)' if guessed else 'not a tag mode'}")
         if mode in TAG_MODES:
-            self.event["tag"] = {"mode": TAG_MODES[mode], "buckets": {}, "assigned": False, "assign_at": None, "repeats": []}
+            self.event["tag"] = {"mode": TAG_MODES[mode], "buckets": {}, "assigned": False, "assign_at": None, "repeats": [],
+                                 "guessed": guessed}
             self.event["numlaps"] = None
-            self.log(f"tag: event {self.rt_race()} is {TAG_MODES[mode]['name']}")
+            self.log(f"tag: event {self.rt_race() if not guessed else '(free roam)'} is {TAG_MODES[mode]['name']}")
         for q in people:
             self.set_console_bool(q, CONSOLE_VAR_PARTICIPATING_IN_RACE, 1, "participant selected")
         self.set_session_host_bool(SH_RACE_PARTICIPANTS_SELECTED, 1, "participants selected")
@@ -1373,6 +1422,17 @@ class Server:
             return
         ev["finished"][peer] = time.monotonic()
         self.log(f"{peer.addr[1]} finished in {total_t:.3f} s ({len(ev['finished'])}/{len(ev['people'])} finished)")
+
+    def note_score_keyframe(self, peer: Peer) -> None:
+        """MsgScoreKeyframe is a player's final score: seen once per player at the end of a 3-lap circuit race on prod (the first finisher,
+        and again for the player whose race was ended by "race ends in"), never after laps 1 and 2. A circuit event's lap count is not
+        decoded (see note_lap_score), so for free roam events this is what tells the server that player is done; without it InRace stayed 1
+        and every client sat on the results screen for good. Road Trip events keep their lap-table logic (numlaps)."""
+        ev = self.event
+        if not ev or not ev.get("racing") or ev.get("numlaps") or ev.get("tag") or peer not in ev["people"] or peer in ev["finished"]:
+            return
+        ev["finished"][peer] = time.monotonic()
+        self.log(f"{peer.addr[1]} final score keyframe: done ({len(ev['finished'])}/{len(ev['people'])} finished)")
 
     def check_race_end(self, now: float) -> None:
         ev = self.event
@@ -1608,7 +1668,7 @@ class Server:
                 oid = r.bits(id_bits)
                 self.log(f"{addr[1]} RequestOwnership router={router} type={tid} key={a}{b} id={oid} "
                          f"-> grant")
-                replies.append(grant_ownership(router, oid, id_bits))
+                replies.append(self.ownership_grant(peer, router, tid, oid, id_bits))
             elif mtype == MSG_REQUEST_RACE:
                 self.log(f"{addr[1]} MsgRequestRace (owner {peer.owner_id}) -> RaceReady=1")
                 self.set_session_host_bool(SH_RACE_READY, 1, "race requested")
@@ -1798,6 +1858,8 @@ class Server:
                     self.send(q, [msg], fast=True)
                 if mtype == MSG_LAP_SCORE:
                     self.note_lap_score(peer, lap, blobs)
+                elif mtype == MSG_SCORE_KEYFRAME:
+                    self.note_score_keyframe(peer)
             elif mtype == MSG_CAR_PREDICTION_FULL:
                 a, b = r.bits(1), r.bits(1)
                 cid = r.bits(CAR_KEY_ID_BITS)

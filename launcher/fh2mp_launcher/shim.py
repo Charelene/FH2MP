@@ -5,7 +5,7 @@ import re
 import shutil
 
 from . import paths
-from .constants import EXTRA_OPTIONS_DIR, LSP_FILE, SESSION_FILE, SHIM_DLL
+from .constants import EXTRA_OPTIONS_DIR, EXTRA_OPTIONS_DLL_SHA256, EXTRA_OPTIONS_VERSION, LSP_FILE, SESSION_FILE, SHIM_DLL
 
 MARKER = re.compile(rb"FH2MP-SHIM-VERSION:([0-9A-Za-z.+-]{1,32}):END")
 EXTRA_FILES_PREFIX = "FH2_ExtraOptions."
@@ -141,6 +141,22 @@ def extra_options_installed(folder):
         return True, "", ""
 
 
+SUPPORTED_EXTRA_SHA256 = {EXTRA_OPTIONS_DLL_SHA256}      # the only build FH2MP works with (tests may add their own)
+
+
+def is_supported_extra(dll_bytes):
+    return hashlib.sha256(dll_bytes).hexdigest() in SUPPORTED_EXTRA_SHA256
+
+
+def extra_options_supported(folder):
+    """-> True when the fh2extra folder holds exactly the supported FH2 Extra Options build (0.2.98)."""
+    try:
+        with open(os.path.join(folder, EXTRA_OPTIONS_DIR, SHIM_DLL), "rb") as f:
+            return is_supported_extra(f.read())
+    except OSError:
+        return False
+
+
 def _slurp(path):
     with open(path, "rb") as f:
         return f.read()
@@ -170,6 +186,8 @@ def _source_files(source):
                     take(n, lambda n=n: z.read(n))
     if SHIM_DLL not in found or EXTRA_INI not in found or MARKER.search(found[SHIM_DLL]):
         return {}                                                   # not the mod (or it is our own shim)
+    if not is_supported_extra(found[SHIM_DLL]):
+        return {}                                                   # another version: only 0.2.98 is supported
     return found
 
 
@@ -187,7 +205,7 @@ def import_extra_options(folder, source):
     """Copies the mod into <folder>\\fh2extra. Settings already there (ini, dat) are kept; the mod's DLL is replaced. Returns what was done."""
     files = _source_files(source)
     if not files:
-        raise ShimError("That isn't FH2 Extra Options for Azimuth 0.9.10 or newer (no winmm.dll and FH2_ExtraOptions.ini in it).")
+        raise ShimError(f"That isn't FH2 Extra Options {EXTRA_OPTIONS_VERSION} (the only supported version).")
     dest = os.path.join(folder, EXTRA_OPTIONS_DIR)
     os.makedirs(dest, exist_ok=True)
     did = []
@@ -222,3 +240,46 @@ def find_extra_sources(azimuth_folders=()):
             out.append(info)
     out.sort(key=lambda i: [int(x) for x in re.findall(r"\d+", i["version"])] or [0], reverse=True)
     return out
+
+
+BUNDLED_EXTRA_FILES = ("winmm.dll", EXTRA_INI, "LICENSE.txt", "NOTICE.txt")
+
+
+def install_bundled_extra(folder, zip_path, expect_dll_sha256=None, version=""):
+    """Installs the Extra Options package from our release (fh2-extra-options-<ver>.zip) into the fh2extra folder of the Azimuth folder, but only when the mod is
+    not there yet. The mod's DLL is checked against the signed manifest. Settings that exist are kept. -> list of things done."""
+    if extra_options_supported(folder):
+        return []
+    with _zipfile.ZipFile(zip_path) as z:
+        names = set(z.namelist())
+        if not set(BUNDLED_EXTRA_FILES) <= names:
+            raise ShimError("the Extra Options package is not what was expected")
+        files = {n: z.read(n) for n in BUNDLED_EXTRA_FILES}
+        sources = {n: z.read(n) for n in names if re.fullmatch(r"source/[A-Za-z0-9._-]+\.zip", n) and z.getinfo(n).file_size < 20 * 1024 * 1024}
+    dll = files["winmm.dll"]
+    if expect_dll_sha256 and hashlib.sha256(dll).hexdigest() != expect_dll_sha256.lower():
+        raise ShimError("the Extra Options DLL does not match the signed checksum")
+    if MARKER.search(dll) or dll[:2] != b"MZ" or not is_supported_extra(dll):
+        raise ShimError(f"that is not FH2 Extra Options {EXTRA_OPTIONS_VERSION}")
+    dest = os.path.join(folder, EXTRA_OPTIONS_DIR)
+    os.makedirs(os.path.join(dest, "source"), exist_ok=True)
+    did = []
+    old_dll = os.path.join(dest, SHIM_DLL)
+    if os.path.isfile(old_dll):                      # another version: only the supported one works with the shim; keep theirs aside
+        n = 1
+        while os.path.exists(f"{old_dll}.unsupported-{n}"):
+            n += 1
+        try:
+            os.replace(old_dll, f"{old_dll}.unsupported-{n}")
+        except OSError as e:
+            raise ShimError(f"could not replace the old FH2 Extra Options: {e.strerror or e}. Is the game still running?") from None
+        did.append(f"moved your previous FH2 Extra Options aside (winmm.dll.unsupported-{n})")
+    for name in BUNDLED_EXTRA_FILES:
+        target = os.path.join(dest, name)
+        if name in (EXTRA_INI,) and os.path.exists(target):
+            continue
+        paths.atomic_write(target, files[name], 0o755 if name == SHIM_DLL else 0o644)
+    for name, data in sources.items():
+        paths.atomic_write(os.path.join(dest, name), data, 0o644)
+    v = version or _ini_info(files[EXTRA_INI].decode("utf-8", "replace"))[0]      # the ini of 0.2.98 still says v0.2.88
+    return did + [f"installed FH2 Extra Options {v} (RokkuDayo, GPL-3.0)"]
