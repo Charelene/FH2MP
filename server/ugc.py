@@ -164,6 +164,7 @@ class UgcStore:
 
     # ---------------------------------------------------------------- versioned items
     def versioned_create(self, kind, owner, name="", car_id=None, thumb=b"", layers=0, parts=None, tuning=None, data=None):
+        layers = max(0, int(layers or 0))
         with self.db.tx() as c:
             return c.execute("INSERT INTO ugc_versioned (kind, car_id, name, creator, layers, data, thumb, thumb_small, parts, tuning, refs, created) "
                              "VALUES (?,?,?,?,?,?,?,?,?,?,1,?)",
@@ -194,6 +195,7 @@ class UgcStore:
                              (pack(big), pack(small), vid, creator)).rowcount
 
     def versioned_set_layers(self, vid, layers, creator):
+        layers = max(0, int(layers))            # the client sends -1 for "unknown"; a stored count is never negative (it feeds the layer filter)
         with self.db.tx() as c:
             return c.execute("UPDATE ugc_versioned SET layers=? WHERE id=? AND creator=?", (layers, vid, creator)).rowcount
 

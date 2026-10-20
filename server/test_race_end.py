@@ -66,7 +66,7 @@ class FreeRoamRaceEnd(unittest.TestCase):
         w.note_score_keyframe(a)
         self.assertEqual(w.event["finished"], {})
         w, (a, b) = world({"numlaps": None, "tag": {"mode": S.TAG_MODES[S.RACE_MODE_KING]}})
-        w.note_score_keyframe(a)
+        w.note_score_keyframe(a)                       # a keyframe right after GO is not the end of a King / Infection event
         self.assertEqual(w.event["finished"], {})
 
     def test_not_racing_or_not_a_participant_is_ignored(self):

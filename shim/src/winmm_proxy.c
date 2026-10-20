@@ -1395,6 +1395,221 @@ static int patch_live_gates(void)
 }
 
 /*
+ * Home page "Online Road Trip" tile (PART_Button_HorizonOnline). The pause-menu tile setup (FUN_140ddac80) copies the
+ * connected-to-Live byte (CLobby+0xf0, 0 under Azimuth) into page+0x537 and, when it is 0, forces the Home tile (and Game Party /
+ * Join Friend) to state 0, which shows it greyed with a padlock:
+ *     140ddb494  cmp [rbx+0x537], r13b      44 38 AB 37 05 00 00
+ *     140ddb49b  jnz 140ddb4c9              75 2C
+ * The jnz becomes jmp, i.e. the tile gets the "connected" handling. The byte itself stays 0: setting page+0x537 for the whole
+ * function also changed the Social tab and broke LB/RB tab navigation. Disable with env FH2MP_NO_HOMETILE.
+ */
+static int patch_home_tile(void)
+{
+    static const unsigned char want[9] = {0x44, 0x38, 0xAB, 0x37, 0x05, 0x00, 0x00, 0x75, 0x2C};
+    unsigned char *img = find_fh2_image();
+    unsigned char *p;
+    DWORD old;
+    int i;
+
+    if (!img) {
+        return 0;
+    }
+    p = img + 0xddb494u;
+    if (p[7] == 0xEB && p[8] == 0x2C) {
+        return 1;                 /* already patched */
+    }
+    for (i = 0; i < 9; i++) {
+        if (p[i] != want[i]) {
+            log_begin();
+            log_raw("hometile: unexpected bytes at the Home tile test, not patched\n");
+            return 0;
+        }
+    }
+    if (!VirtualProtect(p + 7, 1, PAGE_EXECUTE_READWRITE, &old)) {
+        return 0;
+    }
+    p[7] = 0xEB;
+    patch_done(p + 7, 1, old);
+    FlushInstructionCache(GetCurrentProcess(), p + 7, 1);
+    log_begin();
+    log_raw("hometile: the Home page Online Road Trip tile is no longer forced off without the connected-to-Live byte\n");
+    return 1;
+}
+
+/*
+ * "Finding session" that never ends after a disconnect. The matchmaker's session-validation handler (FUN_1417b0720) runs when a ticket
+ * is Found (matchmaking state 2 or 6) and, before it joins the session, compares the offered session's name with the client's
+ * current session (DAT_1436e2958+0x30) and ignores the offer when they are equal:
+ *     1417b07be  test eax, eax        85 C0      (eax = _wcsicmp result)
+ *     1417b07c0  jnz  1417b07c6       75 04      different -> bl = 1 (go on and join)
+ *     1417b07c2  xor  bl, bl          32 DB      same -> bl = 0 (return, no join)
+ * After a drop the client still remembers the old session, and the server hands the same lobby out again (a restart or a quick
+ * rejoin gives the same session name), so the offer was always dropped: the ticket was Found, nothing else happened (no ticket
+ * delete, no join call FUN_141799f90). The jnz becomes jmp, so the offer is always followed. The handler only runs while a
+ * match is being looked for, never for an established session. Found on dev 2026-10-20 (breakpoints + live patch, both rigs then
+ * joined). Disable with env FH2MP_NO_SAMESESSION.
+ */
+static int patch_same_session(void)
+{
+    static const unsigned char want[10] = {0x85, 0xC0, 0x75, 0x04, 0x32, 0xDB, 0xEB, 0x02, 0xB3, 0x01};
+    unsigned char *img = find_fh2_image();
+    unsigned char *p;
+    DWORD old;
+    int i;
+
+    if (!img) {
+        return 0;
+    }
+    p = img + 0x17b07beu;
+    if (p[2] == 0xEB && p[3] == 0x04) {
+        return 1;                 /* already patched */
+    }
+    for (i = 0; i < 10; i++) {
+        if (p[i] != want[i]) {
+            log_begin();
+            log_raw("samesession: unexpected bytes in the session validation handler, not patched\n");
+            return 0;
+        }
+    }
+    if (!VirtualProtect(p + 2, 1, PAGE_EXECUTE_READWRITE, &old)) {
+        return 0;
+    }
+    p[2] = 0xEB;
+    patch_done(p + 2, 1, old);
+    FlushInstructionCache(GetCurrentProcess(), p + 2, 1);
+    log_begin();
+    log_raw("samesession: a found session with the same name as the remembered one is joined instead of ignored\n");
+    return 1;
+}
+
+/*
+ * "Azimuth stopped: CreatePlacementTexture2D requires GPU-write/CPU-map/unknown placement semantics" (game+0x10c897b): Azimuth ends the whole
+ * game when the game places a texture whose description its CreatePlacementTexture2D does not support (azimuth.exe 0.9.10, FUN_14012f990).
+ * Supported: a GPU-written texture (usage default, no CPU access, misc 0/0x20000/0x40000, 1 mip, 1 slice, bind 0x28, 0x48 or 0xa8), or a
+ * shader-resource-only texture (bind 8, no CPU access, 1 sample, 1-15 mips, up to 0x800 slices, usage default or immutable). Anything else stops
+ * the game. The game reaches that function from one call site in its wrapper FUN_1410c88e0:
+ *     1410c8974  call qword ptr [r10+0x200]        41 FF 92 00 02 00 00   (followed by a nop)
+ * We replace it by "call [rip+slot]" (FF 15 disp32) into placement_hook, which has the same arguments: a supported description goes to Azimuth
+ * unchanged, an unsupported one is logged and created as an ordinary texture (vtable slot 5, CreateTexture2D) instead of ending the game. The
+ * ordinary texture does not alias the game's memory at the placement address, so such a texture may look wrong, but the game keeps running.
+ * Env FH2MP_NO_PLACEMENTFIX disables it; FH2MP_PLACEMENT_FORCE=1 treats every depth-stencil placement texture as unsupported (to test the path).
+ */
+typedef long (*placement_fn)(void *dev, const unsigned *desc, unsigned tile, unsigned pitch, void *va, void **out);
+typedef long (*create2d_fn)(void *dev, const unsigned *desc, const void *init, void **out);
+static int g_place_force;
+static volatile LONG g_place_logged;
+
+static int placement_supported(const unsigned *d)
+{
+    /* d: width, height, mips, slices, format, samples, quality, usage, bind, cpu access, misc */
+    if (d[7] == 0 && d[9] == 0 && (d[10] == 0 || ((d[10] - 0x20000u) & 0xfffdffffu) == 0) && d[2] == 1 && d[3] == 1 &&
+        (d[8] == 0x28 || d[8] == 0x48 || d[8] == 0xa8)) {
+        return 1;
+    }
+    return !(d[8] != 8 || d[9] != 0 || d[5] != 1 || d[2] == 0 || d[2] > 15 || d[3] > 0x800 || d[3] == 0 || d[7] > 1);
+}
+
+static long placement_hook(void *dev, const unsigned *desc, unsigned tile, unsigned pitch, void *va, void **out)
+{
+    void **vt = *(void ***)dev;
+    unsigned copy[11];
+    long hr;
+    LONG n;
+    int i;
+
+    if (!(g_place_force && (desc[8] & 0x40)) && placement_supported(desc)) {
+        return ((placement_fn)vt[0x200 / 8])(dev, desc, tile, pitch, va, out);
+    }
+    mem_copy(copy, desc, sizeof copy);
+    copy[10] &= 0xffffu;                 /* keep the standard D3D11 misc flags; the Xbox ones are what Azimuth's CreateTexture2D refuses */
+    hr = ((create2d_fn)vt[5])(dev, copy, 0, out);
+    n = InterlockedIncrement(&g_place_logged);
+    if (n <= 40) {
+        log_begin();
+        log_raw("placement: Azimuth would stop the game for this texture, created it as an ordinary texture instead:");
+        for (i = 0; i < 11; i++) {
+            log_raw(" ");
+            log_hex(desc[i], 1 + (desc[i] > 0xf) + (desc[i] > 0xff) + (desc[i] > 0xfff) + (desc[i] > 0xffff) + (desc[i] > 0xfffff) +
+                             (desc[i] > 0xffffff) + (desc[i] > 0xfffffff));
+        }
+        log_raw(" (w h mips slices format samples quality usage bind cpu misc), hr=0x");
+        log_hex((unsigned long long)(unsigned long)hr, 8);
+        log_raw(" #");
+        log_dec((unsigned long)n);
+        log_raw("\n");
+    }
+    return hr;
+}
+
+static int patch_placement_fallback(void)
+{
+    static const unsigned char want[11] = {0x49, 0x8b, 0xd6, 0x41, 0xff, 0x92, 0x00, 0x02, 0x00, 0x00, 0x90};
+    unsigned char *img = find_fh2_image();
+    unsigned char *site, *probe, *slot = NULL, *lo, *hi;
+    long long disp;
+    wchar_t env[8];
+    DWORD old;
+    int i;
+
+    if (!img) {
+        return 0;
+    }
+    site = img + 0x10c8971u;              /* mov rdx,r14 ; call [r10+0x200] ; nop */
+    for (i = 0; i < 11; i++) {
+        if (site[i] != want[i]) {
+            if (site[3] == 0xff && site[4] == 0x15) {
+                return 1;                 /* already patched */
+            }
+            log_begin();
+            log_raw("placement: unexpected bytes at the CreatePlacementTexture2D call, not patched\n");
+            return 0;
+        }
+    }
+    g_place_force = GetEnvironmentVariableW(L"FH2MP_PLACEMENT_FORCE", env, 8) != 0;
+    lo = site > (unsigned char *)0x70000000 ? site - 0x70000000 : (unsigned char *)0x10000;
+    hi = site + 0x70000000;
+    for (probe = (unsigned char *)((ULONG_PTR)(img + FH2_SIZE_OF_IMAGE + 0xffff) & ~(ULONG_PTR)0xffff); probe < hi; probe += 0x10000) {
+        slot = VirtualAlloc(probe, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        if (slot) {
+            break;
+        }
+    }
+    if (!slot) {
+        for (probe = (unsigned char *)((ULONG_PTR)(img - 0x10000) & ~(ULONG_PTR)0xffff); probe > lo; probe -= 0x10000) {
+            slot = VirtualAlloc(probe, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+            if (slot) {
+                break;
+            }
+        }
+    }
+    if (!slot) {
+        log_begin();
+        log_raw("placement: could not allocate a page near the game image, not patched\n");
+        return 0;
+    }
+    *(void **)slot = (void *)placement_hook;
+    disp = (long long)(slot - (site + 3 + 6));
+    if (disp > 0x7fffffffll || disp < -0x80000000ll || !VirtualProtect(site + 3, 8, PAGE_EXECUTE_READWRITE, &old)) {
+        log_begin();
+        log_raw("placement: slot out of rel32 range, not patched\n");
+        return 0;
+    }
+    site[3] = 0xff;                       /* call qword ptr [rip+disp32] */
+    site[4] = 0x15;
+    {
+        int d32 = (int)disp;
+        mem_copy(site + 5, &d32, 4);
+    }
+    site[9] = 0x90;                       /* the original call was 7 bytes: 41 FF 92 00 02 00 00 */
+    site[10] = 0x90;
+    FlushInstructionCache(GetCurrentProcess(), site, 11);
+    log_begin();
+    log_raw(g_place_force ? "placement: textures Azimuth cannot place are created as ordinary textures (FORCED for depth-stencil, test mode)\n"
+                          : "placement: textures Azimuth cannot place are created as ordinary textures instead of ending the game\n");
+    return 1;
+}
+
+/*
  * Rivals "race this event" gate. Pressing A on a Rivals event (Monthly, Festival Routes, ...) calls FUN_140d7b680, which only
  * starts the race when FUN_140666f40 (RVA 0x666f40) returns true, else it raises FUN_140e68760's "Feature unavailable: cannot connect
  * to Xbox Live" popup. That function begins with the same CLobby+0xf0 test as the Live gates above:
@@ -3158,6 +3373,24 @@ static DWORD WINAPI late_init(LPVOID unused)
             wchar_t lg_env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_LIVEGATE", lg_env, 8) == 0) {
                 patch_live_gates();
+            }
+        }
+        {
+            wchar_t ht_env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_HOMETILE", ht_env, 8) == 0) {
+                patch_home_tile();
+            }
+        }
+        {
+            wchar_t ss_env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_SAMESESSION", ss_env, 8) == 0) {
+                patch_same_session();
+            }
+        }
+        {
+            wchar_t pf_env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_PLACEMENTFIX", pf_env, 8) == 0) {
+                patch_placement_fallback();
             }
         }
         {

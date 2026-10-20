@@ -47,6 +47,85 @@ class TagModeFromGameOptions(unittest.TestCase):
         for name in ("FR_KING", "FR_KING_EARLIER", "RT_KING"):
             self.assertEqual(S.game_options_tag_mode(options(name)), S.RACE_MODE_KING, name)
 
+    def test_infection_header_is_recognised(self):
+        # only the header is known (dev log 2026-10-20, Infection picked in Free Roam: 667 bits, 04600c2000); the rest is made up
+        for size in (667, 731, 826):
+            self.assertEqual(S.game_options_tag_mode((size, 0xABCDEF0000000000 | 0x04600C2000)), S.RACE_MODE_INFECTION, size)
+        self.assertEqual(S.game_options_tag_mode((453, 0x1B600C2000)), S.RACE_MODE_INFECTION)    # dev 20:57: the same event, later in the session
+        self.assertIsNone(S.game_options_tag_mode((300, 0x04600C2000)))              # a short options object is never a tag event
+        for header in (0x04400C0000, 0x04200C0000, 0x1B400C0000, 0x1B200C0000):                                  # the other long headers seen on prod stay "not a tag mode"
+            self.assertIsNone(S.game_options_tag_mode((800, header)))
+
+    def test_short_king_options_are_still_king(self):
+        # dev 2026-10-20: King picked in Free Roam gave 453 bits, header 1b700c1c00 (bits 10-12 set); the old 600-bit minimum missed it
+        self.assertEqual(S.game_options_tag_mode((453, 0x1B700C1C00)), S.RACE_MODE_KING)
+        self.assertIsNone(S.game_options_tag_mode((300, 0x1B700C1C00)))
+
+    def test_readiness_left_over_from_the_last_event_does_not_start_the_grid(self):
+        w, (a, b) = world()
+        for q in (a, b):
+            q.console_vars[S.CONSOLE_VAR_HAS_LOADED_CARS] = 1      # stale: reported for the previous event
+            q.console_vars[S.CONSOLE_VAR_HAS_GRID] = 1
+            q.console_vars[S.CONSOLE_VAR_RENDER_READY] = 1
+        w.game_options = (453, 0x1B700C1C00)
+        w.start_event(b)
+        w.maybe_begin_race()
+        self.assertFalse(w.event["begun"])                           # nobody has loaded yet
+        a.console_vars[S.CONSOLE_VAR_HAS_LOADED_CARS] = 1
+        w.maybe_begin_race()
+        self.assertFalse(w.event["begun"])                           # one of two
+        b.console_vars[S.CONSOLE_VAR_HAS_LOADED_CARS] = 1
+        w.maybe_begin_race()
+        self.assertTrue(w.event["begun"])
+
+    def test_first_it_car_is_drawn_while_the_grid_is_up_and_the_race_end_waits_for_go(self):
+        import time
+        w, (a, b) = world()
+        w.game_options = (453, 0x1B600C2000)
+        w.start_event(a)
+        for q in (a, b):
+            q.console_vars[S.CONSOLE_VAR_HAS_LOADED_CARS] = 1
+        w.maybe_begin_race()
+        tag = w.event["tag"]
+        self.assertIsNotNone(tag["assign_at"])                       # scheduled with the grid, not at GO
+        self.assertFalse(tag["assigned"])
+        tag["assign_at"] = time.monotonic() - 1
+        w.tag_tick(time.monotonic())
+        self.assertTrue(tag["assigned"])
+        self.assertEqual(sorted(tag["buckets"].values()), [0, 1])
+        w.tag_tick(time.monotonic() + 10)                            # no end time before GO: must neither crash nor end the event
+        self.assertFalse(w.event.get("over"))
+        w.go_race()
+        self.assertIsNotNone(tag["end_at"])
+
+    def test_tag_event_ends_when_every_client_has_sent_its_final_keyframe(self):
+        import time
+        w, (a, b) = world()
+        w.game_options = (411, 0x1B700C1C00)
+        w.start_event(a)
+        for q in (a, b):
+            q.console_vars[S.CONSOLE_VAR_HAS_LOADED_CARS] = 1
+        w.maybe_begin_race()
+        w.go_race()
+        w.note_score_keyframe(a)                                     # too early after GO: ignored
+        w.check_race_end(time.monotonic())
+        self.assertFalse(w.event.get("over"))
+        w.event["racing_since"] -= 60                                # the clients' 60 s limit has passed
+        w.note_score_keyframe(a)
+        w.check_race_end(time.monotonic())
+        self.assertFalse(w.event.get("over"))                        # only one of two
+        w.note_score_keyframe(b)
+        w.check_race_end(time.monotonic())
+        self.assertTrue(w.event.get("over"))
+
+    def test_free_roam_infection_start_sets_up_infection_without_guessing(self):
+        w, (a, b) = world()
+        w.game_options = (667, 0x04600C2000)
+        w.start_event(a)
+        tag = w.event["tag"]
+        self.assertEqual(tag["mode"]["name"], "Infection")
+        self.assertFalse(tag["guessed"])
+
     def test_other_events_are_not_tag_modes(self):
         for name in ("RT_STREETRACE", "RT_LAPS", "FR_CIRCUIT", "FR_SPRINT"):
             self.assertIsNone(S.game_options_tag_mode(options(name)), name)

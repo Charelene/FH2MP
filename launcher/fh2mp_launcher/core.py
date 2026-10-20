@@ -41,6 +41,15 @@ def friendly(e):
     return str(e)
 
 
+def game_port_env(game):
+    """The game server's UDP port as the shim wants it: the game has the port 5000 built in, the shim changes it when FH2MP_SERVER_PORT (exactly 4 digits)
+    is set. Without this, a client signed in to another stack (dev) would still talk to production's game server. `game` is the server's {"host", "port"}."""
+    port = (game or {}).get("port") if isinstance(game, dict) else None
+    if isinstance(port, int) and not isinstance(port, bool) and 1000 <= port <= 9999:
+        return {"FH2MP_SERVER_PORT": str(port)}
+    return {}
+
+
 class Launcher:
     def __init__(self, settings=None):
         self.settings = settings or Settings()
@@ -225,6 +234,7 @@ class Launcher:
         lsp = (r.get("lsp") or {}).get("url") or (self.server.get("lsp") or {}).get("url")
         if not lsp:
             raise PlayBlocked("The server sent no address.", "no_lsp")
+        self.game_env = game_port_env(r.get("game") or (self.server or {}).get("game"))
         d = s["azimuth_dir"]
         shim.write_session(d, acct["xuid"], self.token, lsp)
         shim.write_identity(d, acct["xuid"])
@@ -244,7 +254,8 @@ class Launcher:
         """azimuth_window: start Azimuth's own launcher window (its settings) instead of going straight into the game."""
         acct, notes = self.prepare_play(force_unsupported, require_game=not azimuth_window)
         try:
-            self.process = launch.start(self.settings, self.settings["azimuth_dir"], skip_launcher=not azimuth_window)
+            self.process = launch.start(self.settings, self.settings["azimuth_dir"], skip_launcher=not azimuth_window,
+                                        extra_env=getattr(self, "game_env", None))
         except launch.LaunchError:
             launch.cleanup(self.settings["azimuth_dir"])
             raise

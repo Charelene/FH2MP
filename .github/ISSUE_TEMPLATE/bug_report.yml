@@ -1,0 +1,87 @@
+name: Bug report
+description: Something in FH2MP (launcher, shim, online play, leaderboards) does not work
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please check [KNOWN_ISSUES.md](https://github.com/Charelene/FH2MP/blob/main/KNOWN_ISSUES.md) first, and search the open issues.
+        The more of the fields below you fill in, the faster it can be found. Do not post passwords or anything private: the log files below do not contain any.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got instead. A screenshot of any error window helps a lot.
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where in the game
+      options:
+        - Launcher / sign in
+        - Starting the game
+        - Online Free Roam
+        - Online Road Trip
+        - Car Meet / invites
+        - Rivals (Monthly, Showcase, Festival Routes)
+        - PR stunts / Bonus Boards / leaderboards
+        - Car Clubs / Friends / Social
+        - Paint jobs / tunes / storefront
+        - Message Center / Community News
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Sign in with the launcher
+        2. Start the game, open Social
+        3. ...
+  - type: input
+    id: when
+    attributes:
+      label: When it happened (with time zone)
+      description: For disconnects and crashes the exact time lets us find you in the server log. Example, 2026-10-20 14:59 UTC.
+  - type: input
+    id: gamertag
+    attributes:
+      label: Your FH2MP name
+      description: The name shown in the launcher.
+  - type: input
+    id: launcher
+    attributes:
+      label: Launcher version
+      placeholder: "1.0.0-rc2"
+    validations:
+      required: true
+  - type: input
+    id: azimuth
+    attributes:
+      label: Azimuth version
+      placeholder: "0.9.10"
+    validations:
+      required: true
+  - type: input
+    id: extra
+    attributes:
+      label: FH2 Extra Options version (if you use it)
+      placeholder: "0.2.98"
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Windows or Linux (with Wine/Proton version), and your graphics card with driver.
+      placeholder: "Windows 10, RTX 3070, driver 32.0.15.x"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log files
+      description: |
+        Drag the files into this box (zip them if there are several). They are in the `data` folder of your Azimuth folder:
+        `data\logs\azimuth.log` (always), `data\bin\fh2mp.log` (always), and for a crash the newest `.dmp` file in `data\logs` if it is under 25 MB.
+        Settings you changed (graphics, mods) are in `data\azimuth.ini`.

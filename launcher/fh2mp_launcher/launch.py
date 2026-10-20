@@ -95,10 +95,11 @@ def build_command(settings, folder, extra_args=(), skip_launcher=True):
                       ". In Settings, choose the Proton script, or enter a custom launch command.")
 
 
-def start(settings, folder, extra_args=(), skip_launcher=True):
+def start(settings, folder, extra_args=(), skip_launcher=True, extra_env=None):
     argv, env_add, cwd = build_command(settings, folder, extra_args, skip_launcher)
     env = dict(os.environ)
     env.update(env_add)
+    env.update(extra_env or {})          # e.g. FH2MP_SERVER_PORT from the server; the developer's own lines below still win
     for line in (settings["extra_env"] or "").splitlines():            # developer option: KEY=VALUE per line
         k, eq, v = line.strip().partition("=")
         if eq and k and not k.startswith("#") and k != "FH2MP_TOKEN":

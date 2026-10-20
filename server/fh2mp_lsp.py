@@ -804,6 +804,18 @@ def profile_update_livery(body):
 BIG_THUMB, SMALL_THUMB = (816, 459), (192, 108)       # design thumbnails as the game writes them (RGBA PNG)
 
 
+_PLACEHOLDER = {}
+
+
+def _placeholder_thumbs():
+    """(big, small) plain mid-grey RGBA PNGs at the sizes the game writes, built once."""
+    if not _PLACEHOLDER:
+        for key, (w, h) in (("big", BIG_THUMB), ("small", SMALL_THUMB)):
+            row = bytes((128, 128, 128, 255)) * w
+            _PLACEHOLDER[key] = pngtool.encode(w, h, 4, [row] * h)
+    return _PLACEHOLDER["big"], _PLACEHOLDER["small"]
+
+
 def livery_thumbs(preview):
     """(big, small) design thumbnails from the Storefront preview (an 816x459 PNG): the client saves both with a downloaded design and
     crashes in LiveryAsyncSaveTask without them / with the wrong size (2026-10-18)."""
@@ -858,14 +870,71 @@ def cv_create_tune_structs(req):
     return {"versionedTuneId": vid}
 
 
+def _layer_count(n):
+    """numberOfLayers is an unsigned 16-bit field on the wire; a design stored with -1 (count unknown) crashed the encoder, so the
+    client got a server error instead of the design (199 times on 2026-10-20)."""
+    return max(0, min(0xFFFF, int(n or 0)))
+
+
+def _livery_layers(v):
+    """The layer count of a stored design. Shares overwrote it with the client's -1 ("unknown"); the real count is in the UpdateLivery
+    upload the design came from (same owner and name), so it is read from there. 0 only if that upload is gone."""
+    if v["layers"] is not None and v["layers"] >= 0:
+        return _layer_count(v["layers"])
+    blob = UGC.blob_by_name(v["creator"], v["name"]) if v["name"] else None
+    up = ugc.parse_livery_upload(blob[1]) if blob else None
+    return _layer_count(up["layers"] if up else 0)
+
+
+SHIM_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-rc(\d+))?(-debug)?$")
+PLACEMENT_FIX_RC = 3            # first release candidate whose shim turns the unsupported livery texture into an ordinary one (patch_placement_fallback)
+LIVERY_GATE_BYTES = 1100        # a design's inflated container: about 1034 bytes for an empty design, 1.5 KB and up with layers
+
+
+def shim_has_placement_fix(version):
+    """True when the client's shim (X-FH2MP-Shim) carries patch_placement_fallback: from 1.0.0-rc3 on, any later release, and our own debug
+    builds. Without it the game stops ("Azimuth stopped: CreatePlacementTexture2D ...") when a car wearing a layered livery appears."""
+    m = SHIM_RE.match((version or "").strip())
+    if not m:
+        return False
+    major, minor, patch, rc, debug = m.groups()
+    if debug:
+        return True
+    if rc is None:
+        return (int(major), int(minor), int(patch)) >= (1, 0, 0)
+    return (int(major), int(minor), int(patch)) > (1, 0, 0) or int(rc) >= PLACEMENT_FIX_RC
+
+
+def design_has_layers(stored_layers, data):
+    """A design with layers, judged by the stored count and, because the count is unreliable (shares stored -1), by the size of the data
+    (`data` as UGC.versioned_get returns it: already unpacked)."""
+    if stored_layers and stored_layers > 0:
+        return True
+    if not data:
+        return False
+    try:
+        container = ugc.livery_chunk(ugc.strip_livery_prefix(bytes(data)))
+    except Exception:           # noqa: BLE001 - anything unreadable counts as "has layers": hiding it is the safe side
+        return True
+    return container is None or len(container) > LIVERY_GATE_BYTES
+
+
 def cv_get_livery(req):
     v = UGC.versioned_get(req["versionedLiveryId"])
     if v is None or v["kind"] != "livery":
         raise XlsError(f"no such livery {req['versionedLiveryId']}")
+    xuid, _ = _me()
+    if (not os.environ.get("FH2MP_LIVERY_GATE_OFF") and v["creator"] != xuid and not shim_has_placement_fix(getattr(CTX, "shim", ""))
+            and design_has_layers(v["layers"], v["data"])):
+        # A car wearing a layered design makes the game build a 1024x1024 11-mip texture that Azimuth cannot place; clients without the shim
+        # fallback stop (prod 2026-10-20: every wipe lines up with all the other clients fetching a layered design, e.g. 581 with 26 layers).
+        # They get the answer designs with layers=-1 always got (an error): the car shows without the design, nothing crashes.
+        log(f"  RetrieveVersionedLivery {v['id']}: withheld from a client without the texture fix (shim {getattr(CTX, 'shim', '') or 'unknown'})")
+        raise XlsError(f"livery {v['id']} is not available to this client")
     res = xls.default_struct(SC, SC.call_struct("ForzaContentVersioningRetrieveVersionedLiveryById_Results"))
     d = res["versionedLiveryData"]
     data = ugc.strip_livery_prefix(bytes(v["data"] or b""))        # the client's own compression-stream blob, served as uploaded
-    d.update({"profileId": 0, "carId": v["car_id"] or 0, "numberOfLayers": v["layers"], "creatorXuid": v["creator"],
+    d.update({"profileId": 0, "carId": v["car_id"] or 0, "numberOfLayers": _livery_layers(v), "creatorXuid": v["creator"],
               "data": data, "liveryThumbnail": bytes(v["thumb"] or b""),
               "liveryThumbnailSmall": bytes(v["thumb_small"] or b"")})
     if not d["liveryThumbnail"]:        # a design shared before thumbnails were generated: derive them from its storefront preview now
@@ -875,6 +944,11 @@ def cv_get_livery(req):
         if big:
             UGC.versioned_set_thumbs(v["id"], big, small)
             d["liveryThumbnail"], d["liveryThumbnailSmall"] = big, small
+    if not d["liveryThumbnail"] and not os.environ.get("FH2MP_NO_THUMB_PLACEHOLDER"):
+        # A design that was saved but never shared has no thumbnail. Other players' games fetch it when its owner joins and the game
+        # expects the thumbnails to be there (a design with layers and no thumbnail went with a lobby-wide client crash on prod,
+        # 2026-10-20: the owner removed the livery and the crashes stopped). Serve a plain thumbnail of the right size instead of nothing.
+        d["liveryThumbnail"], d["liveryThumbnailSmall"] = _placeholder_thumbs()
     log(f"  RetrieveVersionedLivery {v['id']}: {len(d['data'])}B data, {d['numberOfLayers']} layers, thumb {len(d['liveryThumbnail'])}B")
     return res
 
@@ -884,7 +958,7 @@ def cv_get_layergroup(req):
     if v is None or v["kind"] != "layergroup":
         raise XlsError(f"no such layer group {req['versionedLayerGroupId']}")
     res = xls.default_struct(SC, SC.call_struct("ForzaContentVersioningRetrieveVersionedLayerGroupById_Results"))
-    res["versionedLayerGroupData"].update({"name": v["name"], "numberOfLayers": v["layers"], "creatorXuid": v["creator"],
+    res["versionedLayerGroupData"].update({"name": v["name"], "numberOfLayers": _layer_count(v["layers"]), "creatorXuid": v["creator"],
                                            "data": bytes(v["data"] or b""), "thumbnailData": bytes(v["thumb"] or b"")})
     return res
 
@@ -921,7 +995,7 @@ def _create_file(kind, header, versioned_id, car_id, file_name, preview, meta=No
     if kind == "livery" and v is not None:
         if blob and not v["data"]:
             UGC.versioned_set_data(versioned_id, blob[1], creator=xuid)
-        if header["Quantity"]:
+        if header["Quantity"] and header["Quantity"] > 0:      # the client sends -1 when it does not know; that must not replace a real count
             UGC.versioned_set_layers(versioned_id, header["Quantity"], xuid)
     m = {}
     if car_id:
@@ -1351,11 +1425,8 @@ def club_change_role(req):
     return None
 
 
-@_club_errors
-def club_remove(req):
-    xuid, _ = _me()
-    target = req["userToRemove"]
-    club, kind, others = CLUBS.remove(xuid, target)
+def _club_removed(xuid, target, club, kind, others):
+    """Tell the people concerned about a kick, a quit or a disbanded club, and log it."""
     base = {"clubName": club["name"][:49], "clubTag": club["tag"][:9]}
     if kind == "kicked":
         _club_notify(target, 0x703, {"kickedXuid": target, "kickedGamertag": _tag(target), **base})
@@ -1365,6 +1436,24 @@ def club_remove(req):
         for x in others:
             _club_notify(x, 0x703, {"kickedXuid": x, "kickedGamertag": _tag(x), **base})      # the club was disbanded
     log(f"  club remove: {target:#x} {kind} by {xuid:#x} from [{club['tag']}]")
+
+
+@_club_errors
+def club_remove(req):
+    xuid, _ = _me()
+    target = req["userToRemove"]
+    club, kind, others = CLUBS.remove(xuid, target)
+    _club_removed(xuid, target, club, kind, others)
+    return None
+
+
+@_club_errors
+def club_leave(req):
+    """Xls.WebServices.Club.LeaveClub (no parameters): the player quits their own club; a Leader who leaves disbands it. The game's
+    "Leave club" button calls this, not RemoveFromClub, and it was unanswered ("no schema") until 2026-10-20."""
+    xuid, _ = _me()
+    club, kind, others = CLUBS.remove(xuid, xuid)
+    _club_removed(xuid, xuid, club, kind, others)
     return None
 
 
@@ -1769,6 +1858,7 @@ HANDLERS = {
     ("Forza.WebServices.Club", "RequestJoiningClubByName"): ("", club_request_join_name),
     ("Forza.WebServices.Club", "ApproveRequestToJoin"): ("", club_approve),
     ("Forza.WebServices.Club", "RemoveFromClub"): ("", club_remove),
+    ("Forza.WebServices.Club", "LeaveClub"): ("", club_leave),
     ("Forza.WebServices.Club", "RecommendMemberForRemoval"): ("", club_recommend_removal),
     ("Forza.WebServices.Club", "CreateNoticeBoardNotification"): ("", club_post_notice),
     ("Forza.WebServices.Club", "DeleteNoticeBoardNotification"): ("", club_delete_notice),
@@ -2055,6 +2145,7 @@ class Handler(BaseHTTPRequestHandler):
     def _identify(self):
         """Sets CTX.xuid / CTX.authed / CTX.tag from the session token. False (after answering) when the request must not go on."""
         CTX.authed, CTX.tag = False, ""
+        CTX.shim = self.headers.get("X-FH2MP-Shim", "")          # the client's shim version ("1.0.0-rc2"); empty for clients that do not send it
         token = self.headers.get("X-FH2MP-Token", "")
         if AUTH is not None and AUTH.mode != "off":
             if token:
