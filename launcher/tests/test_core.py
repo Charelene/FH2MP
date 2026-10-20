@@ -438,6 +438,33 @@ class DevModeTests(unittest.TestCase):
         self.assertEqual((seen.get("FH2MP_NET_TRAFFIC"), seen.get("FH2MP_XUID")), ("1", "9000000000000"))
         self.assertNotEqual(seen.get("FH2MP_TOKEN"), "evil")
 
+    def test_game_port_from_the_server_reaches_the_shim(self):
+        from fh2mp_launcher import core, launch
+        from fh2mp_launcher.settings import Settings
+        self.assertEqual(core.game_port_env({"host": "h", "port": 5100}), {"FH2MP_SERVER_PORT": "5100"})
+        for bad in (None, {}, {"port": "5100"}, {"port": 80}, {"port": 65000}, {"port": True}, "5100"):
+            self.assertEqual(core.game_port_env(bad), {}, bad)
+        seen = {}
+
+        class P:
+            pass
+
+        def fake_popen(argv, cwd=None, env=None, **kw):
+            seen.update(env)
+            return P()
+        s = Settings()
+        orig_cmd, orig_popen = launch.build_command, launch.subprocess.Popen
+        launch.build_command = lambda *a, **k: (["x"], {}, ".")
+        launch.subprocess.Popen = fake_popen
+        try:
+            launch.start(s, ".", extra_env={"FH2MP_SERVER_PORT": "5100"})
+            self.assertEqual(seen.get("FH2MP_SERVER_PORT"), "5100")
+            s["extra_env"] = "FH2MP_SERVER_PORT=5200"          # a developer's own setting wins
+            launch.start(s, ".", extra_env={"FH2MP_SERVER_PORT": "5100"})
+            self.assertEqual(seen.get("FH2MP_SERVER_PORT"), "5200")
+        finally:
+            launch.build_command, launch.subprocess.Popen = orig_cmd, orig_popen
+
 
 if __name__ == "__main__":
     unittest.main()

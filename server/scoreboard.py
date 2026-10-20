@@ -21,6 +21,8 @@ CLASS_AVG_KMH = (88, 103, 119, 134, 150, 166)   # km/h; first race data: A-class
 EVENT_BOARDS = {3, 6}   # scoreboardType whose pivotId is the rival event id (Monthly = 3, Showcase = 6) and SubmitScore.gameScoreboardId matches it [C]
 CLASS_PIVOT_BOARDS = {1}   # scoreboardType whose pivotId is the car class (Festival Routes rivals: pivot 0..5 = D..S2) [inferred from GetRival calls]
 SPEED_BOARDS = {9}       # scoreboardType of the speed trap / speed zone boards: score = m/s (32.565 shows as 117.23 km/h)
+GSID_BOARDS = {9}        # scoreboardType with one board per trap/zone: GetRows pivotId == SubmitScore.gameScoreboardId (scoreType 5 traps ids 1-30,
+                         # scoreType 6 zones ids 36-50 in the live data) [C]. Without this every trap and zone shared one board per player.
 
 
 def dbl_to_u64(x):
@@ -35,9 +37,18 @@ def iso(t):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
 
 
+try:
+    from rival_records import RECORDS as WORLD_RECORDS    # (track id, class id) -> record seconds, from tools/make_rival_records.py
+except ImportError:
+    WORLD_RECORDS = {}
+WR_FLOOR = 1.005         # made-up rival times stay at least this far above a world record
+WR_SPREAD = 0.12         # a made-up rival that would have beaten the record lands 0-12% above it instead (not all on the same time)
+
+
 class ScoreStore:
-    def __init__(self, db, names, cars=None, route_length=None, event_info=None, event_cars=None):
+    def __init__(self, db, names, cars=None, route_length=None, event_info=None, event_cars=None, records=None):
         self.db = db
+        self.records = WORLD_RECORDS if records is None else records
         self.route_length = route_length or (lambda track: None)   # track id -> metres or None
         self.event_info = event_info or (lambda event: None)       # rival event id -> {"track","laps","cls"} or None
         self.event_cars = event_cars or (lambda event: None)       # rival event id -> [(car id, class, PI, top m/s)] the event allows
@@ -111,7 +122,7 @@ class ScoreStore:
         xuid. The XP ladder also takes the accumulated XP when that beats a submitted score."""
         asc = st in ASCENDING
         where, args = "s.sb=? AND s.st=?", [sb, st]
-        if sb in EVENT_BOARDS and pivot > 0:           # event boards: one board per event (the client's track field is 0 or the track)
+        if (sb in EVENT_BOARDS or sb in GSID_BOARDS) and pivot > 0:   # one board per event / per trap or zone (the client's track field is 0, the track or 65535)
             where += " AND s.gsid=?"
             args.append(pivot)
         elif track not in (-1, 65535):
@@ -169,6 +180,8 @@ class ScoreStore:
         """Deterministic fake rivals around `anchor` (the player's best, or a default scale)."""
         out = []
         ev_cars = self.event_cars(pivot) if sb in EVENT_BOARDS and pivot > 0 else None   # rivals drive cars the event allows
+        # Festival Route class boards (pivot = class D..S2): no made-up time may beat the world record for that track and class
+        wr = self.records.get((track, pivot)) if (st in ASCENDING and sb in CLASS_PIVOT_BOARDS and 0 <= pivot <= 5) else None
         for i in range(n):
             nm = self.names[(i * 7 + (hash_int(sb, st, track, pivot) % len(self.names))) % len(self.names)]
             r = hash_frac(sb, st, track, pivot, nm, i)
@@ -186,6 +199,8 @@ class ScoreStore:
                     score = length * 1.1 / (CLASS_AVG_KMH[cls_] / 3.6) * (0.75 + 0.6 * r)
                 else:
                     score = 100.0 * (0.6 + 0.9 * r)
+                if wr and score < wr * WR_FLOOR:
+                    score = wr * WR_FLOOR * (1.0 + WR_SPREAD * hash_frac(sb, st, track, pivot, nm, i, "wr"))
             elif sb in SPEED_BOARDS:
                 base = anchor if anchor else 50.0               # about 180 km/h
                 score = min(102.0, max(20.0, base * (0.7 + 0.8 * r) if anchor else 35.0 + 45.0 * r))   # m/s, capped at ~367 km/h

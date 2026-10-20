@@ -20,6 +20,7 @@ CLASS_LETTERS = ("D", "C", "B", "A", "S1", "S2")
 ERAS = ((None, 1969, "Classics"), (1970, 1989, "Retro Icons"), (1990, 1999, "90s Heroes"), (2000, 2009, "2000s Icons"),
         (2010, None, "Modern Machines"))
 MIN_CARS = 4          # a theme must match at least this many cars of the game
+CLASS_ENFORCED = {"body", "make", "era", "drive", "country"}    # themes whose card class (average of the matching cars) is also enforced
 EVENTS_PER_ROTATION = 12
 TODS = (600, 900, 1200, 1500, 1800, 2000, 2300, 300)          # HHMM, as the career data stores it
 WEATHER_WORDS = {"Clear": "clear", "CloudyA": "cloudy", "CloudyB": "overcast", "CloudyFog": "foggy", "ThreateningFog": "misty"}
@@ -110,8 +111,18 @@ class RivalCatalog:
         def add(kind, attrs, title, phrase, cls=None):
             count, avg = self._count(attrs)
             if count >= MIN_CARS or kind == "model" and count >= 1:
-                out.append({"kind": kind, "attrs": attrs, "title": title, "phrase": phrase, "cars": count,
-                            "cls": cls if cls is not None else avg})
+                theme = {"kind": kind, "attrs": attrs, "title": title, "phrase": phrase, "cars": count,
+                         "cls": cls if cls is not None else avg}
+                if kind in CLASS_ENFORCED and cls is None:
+                    # the card shows a class (the average of the matching cars); enforce it too, so the car selector agrees with the card
+                    counts = {c: self._count(dict(attrs, CarClassId=c))[0] for c in range(len(CLASS_LETTERS))}
+                    pick = avg if counts.get(avg, 0) >= MIN_CARS else max(counts, key=counts.get)    # the average class, else the most common one
+                    if counts[pick] >= MIN_CARS:
+                        theme.update(attrs=dict(attrs, CarClassId=pick), cars=counts[pick], cls=pick,
+                                     phrase=f"{phrase}, {CLASS_LETTERS[pick]} class", base_phrase=phrase)
+                    else:
+                        theme["avoid"] = True       # the shown class cannot be enforced: no new events use it; kept so old events still resolve
+                out.append(theme)
         out.append({"kind": "open", "attrs": {}, "title": "Open Class Dash", "phrase": "Any car",
                     "cars": self._count({})[0], "cls": 4})
         for c in range(0, 5):
@@ -218,6 +229,10 @@ class RivalCatalog:
         for t in self.themes():
             if t["kind"] == kind and t["attrs"] == attrs:
                 return t["phrase"]
+        plain = {k: v for k, v in attrs.items() if k != "CarClassId"}          # events stored before the class was enforced
+        for t in self.themes():
+            if t["kind"] == kind and {k: v for k, v in t["attrs"].items() if k != "CarClassId"} == plain:
+                return t.get("base_phrase", t["phrase"])
         return None
 
     def refresh_texts(self):
@@ -268,7 +283,7 @@ class RivalCatalog:
             by_route.setdefault(route, (tid, length))
         tracks = list(by_route.values())
         rng.shuffle(tracks)
-        themes = self.themes()
+        themes = [t for t in self.themes() if not t.get("avoid")]
         kinds = sorted({t["kind"] for t in themes})
         rng.shuffle(kinds)
         events, used = [], set()

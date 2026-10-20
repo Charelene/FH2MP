@@ -12,6 +12,9 @@ not carry proxy headers, so nothing reachable through the public reverse proxy c
     GET    /ops/v1/online                      players who polled the LSP in the last 40 s
     GET    /ops/v1/challenges[?top=3]          this rotation's Monthly Rivals events (+ best real times)
     GET    /ops/v1/leaderboards[?limit=25]     XP ladder and one board per event, real players only
+    GET    /ops/v1/routes                      Festival Routes (regular Rivals) by destination, with how many players have a time per class
+    GET    /ops/v1/routes/<id>[?limit=50]      one route: a board per car class (D .. S2), real players only
+    GET    /ops/v1/recent[?limit=20]           the newest Rivals runs (Festival Routes and Monthly events)
     GET    /ops/v1/players[?q=&limit=&offset=] accounts (gamertag / xuid search), with online and ban state
     POST   /ops/v1/players/<xuid>/ban          {"reason": "..."}   |  /unban  |  /kick (drops the player's sessions)
     GET    /ops/v1/notification-types          \
@@ -42,6 +45,9 @@ import social
 
 STARTED = time.time()
 MONTHLY_BOARD = (3, 1)                  # (scoreboardType, scoreType) of a Monthly Rivals event; the pivot is the event id
+FESTIVAL_BOARD = (1, 1)                 # (scoreboardType, scoreType) of a Festival Route; the track id is the route, the pivot the car class
+DESTINATIONS = ("Castelletto", "Montellino", "Nice", "Saint-Martin", "San Giovanni", "Sisteron")      # the route names start with one
+NOT_ROUTES = ("Showcase", "Road Trip", "Finale", "Arena")
 LINK_KEYS = ("website", "patreon", "discord")
 REGISTRATION_MODES = ("open", "invite", "closed")
 INVITE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"        # no 0/O/1/I/L
@@ -148,6 +154,13 @@ def _route(lsp, method, path, body):
         lsp.announce_rotation()
         lsp.log(f"  ops: rivals re-rolled -> {len(events)} events")
         return 200, challenges(lsp, 0)
+    if what == "routes" and method == "GET":
+        if not rest:
+            return 200, routes(lsp)
+        if len(rest) == 1:
+            return 200, route_boards(lsp, rest[0], _int(q, "limit", 50, 1, 100))
+    if what == "recent" and method == "GET":
+        return 200, recent(lsp, _int(q, "limit", 20, 1, 100))
     if what == "config":
         if method == "GET":
             return 200, get_config(lsp)
@@ -223,6 +236,111 @@ def leaderboards(lsp, limit):
     events = [_event(lsp, e, [_board_row(lsp, r, names) for r in lsp.SB.top(*MONTHLY_BOARD, -1, e["id"], limit)])
               for e in lsp.RIV.events()]
     return {"rotation": _rotation(lsp), "xp": xp, "events": events}
+
+
+def _route_kind(name, closed):
+    low = name.lower()
+    for word, kind in (("cross country", "Cross Country"), ("street race", "Street Race"), ("scramble", "Scramble")):
+        if word in low:
+            return kind
+    return "Circuit" if closed else "Sprint"
+
+
+def route_catalog(lsp):
+    """Festival Routes grouped by destination, from the game catalog: [{"name", "routes": [{"id", "name", "kind", "km", "circuit",
+    "tracks": [track ids]}]}]. The catalog has several track ids for one route (same name); they are one route here, and its id is the
+    lowest. Circuits come first, then by length. Cached: the catalog never changes while the server runs."""
+    cached = getattr(lsp, "_route_catalog", None)
+    if cached is not None:
+        return cached
+    rows = lsp.CARS.db.query("SELECT t.id, v.name, v.length_m, v.closed FROM Tracks t JOIN v_tracks v ON v.id = t.id "
+                             "WHERE t.MediaName = 'Anthem' AND t.Active = 1 AND v.length_m IS NOT NULL AND v.name IS NOT NULL ORDER BY t.id")
+    by_name = {}
+    for r in rows:
+        name = r["name"].strip()
+        dest = next((d for d in DESTINATIONS if name.startswith(d + " ")), None)
+        if dest is None or any(w in name for w in NOT_ROUTES):
+            continue
+        route = by_name.setdefault(name, {"id": r["id"], "name": name[len(dest) + 1:], "kind": _route_kind(name, r["closed"]),
+                                          "km": round(r["length_m"] / 1000.0, 2), "circuit": bool(r["closed"]), "dest": dest, "tracks": []})
+        route["tracks"].append(r["id"])
+    out = []
+    for d in DESTINATIONS:
+        mine = sorted((r for r in by_name.values() if r["dest"] == d), key=lambda r: (not r["circuit"], r["km"], r["name"]))
+        if mine:
+            out.append({"name": d, "routes": [{k: v for k, v in r.items() if k != "dest"} for r in mine]})
+    lsp._route_catalog = out
+    return out
+
+
+def routes(lsp):
+    entries = {}
+    for r in lsp.DB.query("SELECT track, cls, COUNT(DISTINCT xuid) AS n FROM score_submissions WHERE sb = ? AND st = ? GROUP BY track, cls",
+                          FESTIVAL_BOARD):
+        entries.setdefault(r["track"], {})[r["cls"]] = r["n"]
+    dests = []
+    for d in route_catalog(lsp):
+        rs = []
+        for r in d["routes"]:
+            per = {}
+            for t in r["tracks"]:
+                for cls, n in entries.get(t, {}).items():
+                    per[cls] = per.get(cls, 0) + n          # a player on two track ids of one route is counted twice: only a hint for the tabs
+            rs.append({**r, "entries": {rivals.CLASS_LETTERS[c]: n for c, n in sorted(per.items()) if 0 <= c < len(rivals.CLASS_LETTERS)},
+                       "total": sum(per.values())})
+        dests.append({"name": d["name"], "routes": rs})
+    return {"classes": list(rivals.CLASS_LETTERS), "destinations": dests}
+
+
+def route_boards(lsp, route_id, limit):
+    try:
+        route_id = int(route_id)
+    except ValueError:
+        raise OpsError(404, "not_found", "unknown route")
+    found = next(((d["name"], r) for d in route_catalog(lsp) for r in d["routes"] if r["id"] == route_id), None)
+    if found is None:
+        raise OpsError(404, "not_found", "unknown route")
+    dest, route = found
+    names = lsp.RIV.names()["car"]
+    classes = []
+    for cls, letter in enumerate(rivals.CLASS_LETTERS):
+        best = {}
+        for t in route["tracks"]:                       # best time per player over all of the route's track ids
+            for r in lsp.SB.top(*FESTIVAL_BOARD, t, cls, limit):
+                if r["xuid"] not in best or r["score"] < best[r["xuid"]]["score"]:
+                    best[r["xuid"]] = r
+        ranked = sorted(best.values(), key=lambda r: (r["score"], r["t"]))[:limit]
+        for i, r in enumerate(ranked):
+            r["position"] = i + 1
+        classes.append({"class": letter, "rows": [_board_row(lsp, r, names) for r in ranked]})
+    return {"destination": dest, "route": {k: route[k] for k in ("id", "name", "kind", "km", "circuit")}, "classes": classes}
+
+
+def recent(lsp, limit):
+    """The newest Festival Route and Monthly Rivals runs by anyone, newest first (every submission, not only personal bests)."""
+    track_names = {t: f"{d['name']} {r['name']}" for d in route_catalog(lsp) for r in d["routes"] for t in r["tracks"]}
+    events = {e["id"]: e["name"] for e in lsp.RIV.events()}
+    names = lsp.RIV.names()["car"]
+    rows = lsp.DB.query("SELECT s.xuid, s.sb, s.gsid, s.track, s.car, s.cls, s.score, s.clean, s.submitted, COALESCE(p.gamertag, '') AS tag "
+                        "FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid WHERE s.st = ? AND s.sb IN (?, ?) "
+                        "ORDER BY s.submitted DESC, s.id DESC LIMIT ?", (FESTIVAL_BOARD[1], FESTIVAL_BOARD[0], MONTHLY_BOARD[0], limit * 3))
+    out = []
+    for r in rows:
+        if r["sb"] == MONTHLY_BOARD[0]:
+            where, kind = events.get(r["gsid"]), "event"
+        else:
+            where, kind = track_names.get(r["track"]), "route"
+            if where is None:
+                continue                                  # a track that is not a Festival Route (DLC id we do not know)
+        if where is None:
+            continue                                      # a Monthly event of an earlier rotation: nothing to name it by
+        cls = r["cls"]
+        out.append({"gamertag": _gamertag(lsp, r), "xuid": r["xuid"], "kind": kind, "where": where, "score": r["score"],
+                    "car": names.get(r["car"], ""), "class": rivals.CLASS_LETTERS[cls] if 0 <= cls < len(rivals.CLASS_LETTERS) else "",
+                    "clean": bool(r["clean"]), "at": int(r["submitted"])})
+        if len(out) >= limit:
+            break
+    return {"runs": out}
 
 
 def players(lsp, text, limit, offset):

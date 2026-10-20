@@ -74,6 +74,37 @@ class ScoreTests(Base):
         self.assertEqual(mine["tag"], "p10")
         self.assertEqual([r["score"] for r in rows if r["xuid"] in (10, 11)], [70.0, 80.5])
 
+    def test_speed_trap_boards_are_per_trap(self):
+        # board type 9 (speed traps / zones): GetRows pivotId == SubmitScore.gameScoreboardId, trackId is always 65535
+        def trap(gsid, v, st=5):
+            d = sub(v, sb=9, st=st, track=65535)
+            d["gameScoreboardId"] = gsid
+            return d
+        for xuid, gsid, v in ((10, 27, 80.0), (10, 3, 40.0), (10, 3, 45.0), (11, 3, 50.0), (11, 27, 60.0)):
+            self.sc.submit(xuid, "p%d" % xuid, 5, trap(gsid, v))
+        self.assertEqual(self.sc.best_of(10, 9, 5, 65535, 3)["score"], 45.0)       # an improvement on trap 3 counts
+        self.assertEqual(self.sc.best_of(10, 9, 5, 65535, 27)["score"], 80.0)
+        self.assertEqual(self.sc.best_of(11, 9, 5, 65535, 3)["score"], 50.0)
+        self.assertIsNone(self.sc.best_of(10, 9, 5, 65535, 4))                       # never played trap 4
+        rows, mine, nreal, _ = self.sc.rows(10, 9, 5, 65535, 1, 100, 3)
+        self.assertEqual(nreal, 2)
+        self.assertEqual(mine["score"], 45.0)
+        self.sc.submit(10, "p10", 6, trap(40, 30.0, st=6))                             # a zone board is separate from the traps
+        self.assertIsNone(self.sc.best_of(10, 9, 5, 65535, 40))
+        self.assertEqual(self.sc.best_of(10, 9, 6, 65535, 40)["score"], 30.0)
+
+    def test_made_up_rivals_never_beat_a_world_record(self):
+        names = ["A", "B", "C", "D", "E", "F"]
+        wr = {(856, 5): 44.564}                                     # Citadel Circuit, S2
+        self.sc.submit(10, "p10", 1, dict(sub(55.0, sb=1, st=1, track=856), carClassId=5))
+        free = scoreboard.ScoreStore(self.db, names, records={})
+        capped = scoreboard.ScoreStore(self.db, names, records=wr)
+        fast = lambda s: min(r["score"] for r in s.rows(10, 1, 1, 856, 1, 100, 5)[0] if r.get("fake"))
+        self.assertLess(fast(free), 44.564)                         # without records some made-up rival is faster than the record
+        self.assertGreaterEqual(fast(capped), 44.564 * scoreboard.WR_FLOOR - 1e-9)
+        other = scoreboard.ScoreStore(self.db, names, records=wr).rows(10, 1, 1, 857, 1, 100, 5)[0]
+        self.assertTrue(other)                                      # a track without a record still works
+
     def test_non_finite_scores_are_rejected(self):
         for bad in (math.nan, math.inf, -math.inf):
             self.assertIsNone(self.sc.submit(10, "x", 1, sub(bad)))

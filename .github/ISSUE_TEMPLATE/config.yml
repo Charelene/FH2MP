@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Known issues
+    url: https://github.com/Charelene/FH2MP/blob/main/KNOWN_ISSUES.md
+    about: Problems we already know about, with workarounds where there are any.

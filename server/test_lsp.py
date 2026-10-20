@@ -47,6 +47,40 @@ def call(cls, method, params=None):
     return result, None
 
 
+class LayerCountTests(unittest.TestCase):
+    def test_layer_count_always_fits_the_wire_field(self):
+        self.assertEqual([L._layer_count(n) for n in (-1, 0, 7, 65535, 70000, None)], [0, 0, 7, 65535, 65535, 0])
+
+
+    def test_livery_layers_prefers_the_stored_count_and_never_goes_negative(self):
+        class NoBlobs:
+            def blob_by_name(self, owner, name):
+                return None
+        old, L.UGC = L.UGC, NoBlobs()
+        try:
+            self.assertEqual(L._livery_layers({"layers": 18, "creator": 1, "name": "x"}), 18)
+            self.assertEqual(L._livery_layers({"layers": -1, "creator": 1, "name": "x"}), 0)        # unknown and no upload left
+            self.assertEqual(L._livery_layers({"layers": -1, "creator": 1, "name": ""}), 0)
+        finally:
+            L.UGC = old
+
+
+    def test_shim_version_decides_who_may_see_layered_designs(self):
+        f = L.shim_has_placement_fix
+        self.assertEqual([f(v) for v in ("", "junk", "1.0.0-rc1", "1.0.0-rc2")], [False] * 4)
+        self.assertEqual([f(v) for v in ("1.0.0-rc3", "1.0.0-rc10", "1.0.0", "1.0.1", "1.1.0-rc1", "1.0.0-rc2-debug")], [True] * 6)
+
+    def test_layered_designs_are_recognised_even_when_the_stored_count_is_wrong(self):
+        self.assertFalse(L.design_has_layers(0, b""))
+        self.assertTrue(L.design_has_layers(12, b""))
+        self.assertTrue(L.design_has_layers(-1, b"xyz"))              # unreadable: hidden, the safe side
+
+    def test_placeholder_thumbnails_have_the_sizes_the_game_writes(self):
+        big, small = L._placeholder_thumbs()
+        self.assertEqual(L.pngtool.decode(big)[:2], L.BIG_THUMB)
+        self.assertEqual(L.pngtool.decode(small)[:2], L.SMALL_THUMB)
+
+
 class LspTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -253,14 +287,14 @@ class LspTests(unittest.TestCase):
         self.assertEqual(r, 0)
         self.assertIn(0x703, [t for t, _ in notes(D)])
         asx(B)
-        r, _ = call(C, "RemoveFromClub", {"userToRemove": B})                    # quit
+        r, _ = call(C, "LeaveClub")                                              # quit (the Leave Club button; RemoveFromClub on oneself does the same)
         self.assertEqual(r, 0)
         self.assertEqual(L.CLUBS.member_info(B), (0, "", 0))
         self.assertEqual(L.CLUBS.club_cars(A, 5), [])                          # a member's shared cars leave with them
         r, res = call(C, "GetClubHistory", {"userXuid": B, "maxEntries": 10})
         self.assertEqual(len(res["userClubHistory"]), 4)                       # joined, promoted, demoted, quit
         asx(A)
-        r, _ = call(C, "RemoveFromClub", {"userToRemove": A})                    # the leader leaves: the club is disbanded
+        r, _ = call(C, "LeaveClub")                                              # the game's Leave Club button: a leader leaving disbands the club
         self.assertEqual((r, L.CLUBS.club(cid)), (0, None))
         r, res = call(K, "GetRecommendedClubs", {"maxResults": 5})
         self.assertEqual(res["clubDetailsList"], [])
@@ -309,6 +343,16 @@ class LspTests(unittest.TestCase):
         self.assertEqual(real, 1)
         self.assertEqual(mine["position"] > 0, True)
         self.assertAlmostEqual(L.SB.add_xp(x, 10.0) - L.SB.add_xp(x, 0.0), 0.0)
+
+    def test_rival_themes_enforce_the_class_they_show(self):
+        # GitHub #2: "Made in Italy" showed an A class card but allowed every Italian car
+        used = [t for t in L.RIV.themes() if t["kind"] in L.rivals.CLASS_ENFORCED and not t.get("avoid")]
+        self.assertTrue(used)
+        for t in used:
+            self.assertEqual(t["attrs"].get("CarClassId"), t["cls"], t["title"])
+        for e in L.RIV._generate(5, 0):
+            if e["kind"] in L.rivals.CLASS_ENFORCED:
+                self.assertEqual(e["attrs"].get("CarClassId"), e["cls"], e["name"])
 
     def test_rivals_events_are_stored_once(self):
         ev = L.RIV.events()

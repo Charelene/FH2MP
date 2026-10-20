@@ -175,6 +175,74 @@ class AccessTests(unittest.TestCase):
         self.assertEqual(call(self.lsp, "GET", "/ops/v2/overview")[0], 404)
 
 
+def festival(sc, xuid, tag, score, track, cls=3):
+    sc.submit(xuid, tag, 1, {"scoreboardType": 1, "gameScoreboardId": 0, "trackId": track, "carId": 7, "carClassId": cls,
+                             "carPerformanceIndex": 0.5, "score": scoreboard.dbl_to_u64(score), "isClean": True, "usedSTM": False,
+                             "usedTCS": False, "usedABS": True})
+
+
+class RouteTests(unittest.TestCase):
+    def setUp(self):
+        self.lsp = make_lsp()
+        cat = FakeDb()
+        cat.c.executescript("""
+            CREATE TABLE Tracks (id INTEGER, MediaName TEXT, Active INTEGER);
+            CREATE TABLE v_tracks (id INTEGER, name TEXT, length_m REAL, closed INTEGER);
+            INSERT INTO Tracks VALUES (856,'Anthem',1), (560,'Anthem',1), (566,'Anthem',1), (891,'Anthem',1), (578,'Anthem',1), (34,'Sebring',1), (913,'Anthem',1);
+            INSERT INTO v_tracks VALUES (856,'Sisteron Citadel Circuit',1664,1), (560,'Castelletto D''Orcia Circuit',1710,1),
+                (566,'Castelletto D''Orcia Circuit',1710,1), (891,'Sisteron High Speed Sprint',6463,0),
+                (578,'Train in Vain Showcase',5598,0), (34,'Nurburgring',9000,1), (913,'Sisteron Abbey Arena Huge',NULL,0);""")
+        self.lsp.CARS = types.SimpleNamespace(db=cat)
+        now = time.time()
+        for x, tag in ((1, "Alice"), (2, "Bob")):
+            self.lsp.DB.execute("INSERT INTO players VALUES (?,?,?,?,?)", (x, tag, 5, now, now))
+        sc = self.lsp.SB
+        festival(sc, 1, "Alice", 70.5, 856)
+        festival(sc, 2, "Bob", 66.0, 856)
+        festival(sc, 2, "Bob", 80.0, 856)
+        festival(sc, 2, "Bob", 60.0, 856, cls=0)
+        festival(sc, 1, "Alice", 59.0, 560)
+        festival(sc, 2, "Bob", 58.0, 566)                      # the same route under another track id
+        festival(sc, 1, "Alice", 10.0, 34)                     # not a Festival Route we list
+
+    def test_routes_grouped_by_destination(self):
+        st, o = call(self.lsp, "GET", "/ops/v1/routes")
+        self.assertEqual(st, 200)
+        self.assertEqual([d["name"] for d in o["destinations"]], ["Castelletto", "Sisteron"])
+        sis = o["destinations"][1]["routes"]
+        self.assertEqual([(r["name"], r["kind"], r["circuit"]) for r in sis], [("Citadel Circuit", "Circuit", True), ("High Speed Sprint", "Sprint", False)])
+        self.assertEqual(sis[0]["entries"], {"D": 1, "A": 2})
+        cas = o["destinations"][0]["routes"]
+        self.assertEqual((len(cas), cas[0]["id"], cas[0]["tracks"]), (1, 560, [560, 566]))
+
+    def test_route_boards_per_class(self):
+        st, o = call(self.lsp, "GET", "/ops/v1/routes/856")
+        self.assertEqual((st, o["destination"], o["route"]["name"]), (200, "Sisteron", "Citadel Circuit"))
+        self.assertEqual([c["class"] for c in o["classes"]], ["D", "C", "B", "A", "S1", "S2"])
+        a = o["classes"][3]["rows"]
+        self.assertEqual([(r["position"], r["gamertag"], r["score"]) for r in a], [(1, "Bob", 66.0), (2, "Alice", 70.5)])
+        self.assertEqual([r["gamertag"] for r in o["classes"][0]["rows"]], ["Bob"])
+        self.assertEqual(o["classes"][1]["rows"], [])
+
+    def test_route_boards_merge_duplicate_track_ids(self):
+        _, o = call(self.lsp, "GET", "/ops/v1/routes/560")
+        self.assertEqual([(r["gamertag"], r["score"]) for r in o["classes"][3]["rows"]], [("Bob", 58.0), ("Alice", 59.0)])
+
+    def test_unknown_route(self):
+        self.assertEqual(call(self.lsp, "GET", "/ops/v1/routes/34")[0], 404)
+        self.assertEqual(call(self.lsp, "GET", "/ops/v1/routes/abc")[0], 404)
+
+    def test_recent_runs_newest_first(self):
+        submit(self.lsp.SB, 1, "Alice", 77.0)                    # a Monthly event run
+        self.lsp.DB.execute("UPDATE score_submissions SET submitted = id")      # a known order
+        st, o = call(self.lsp, "GET", "/ops/v1/recent?limit=3")
+        self.assertEqual(st, 200)
+        runs = o["runs"]
+        self.assertEqual((runs[0]["kind"], runs[0]["where"], runs[0]["score"]), ("event", "Event 0", 77.0))
+        self.assertEqual((runs[1]["where"], runs[1]["gamertag"], runs[1]["score"]), ("Castelletto D'Orcia Circuit", "Bob", 58.0))
+        self.assertEqual(len(runs), 3)                                # the track-34 run is skipped, not counted
+
+
 class ReadTests(unittest.TestCase):
     def setUp(self):
         self.lsp = make_lsp()

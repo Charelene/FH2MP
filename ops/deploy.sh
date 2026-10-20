@@ -19,8 +19,8 @@ case $env in
 esac
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/lsp" "$tmp/server"
-for m in fh2mp_lsp db xls xls_schema cardb drivatar scoreboard rivals ugc pngtool notifstore xbl clubs social auth launcher_api ops_api; do cp "server/$m.py" "$tmp/lsp/"; done
-cp server/fh2mp_server.py server/traffic.py "$tmp/server/"
+for m in fh2mp_lsp db xls xls_schema cardb drivatar scoreboard rival_records rivals ugc pngtool notifstore xbl clubs social auth launcher_api ops_api; do cp "server/$m.py" "$tmp/lsp/"; done
+cp server/fh2mp_server.py server/traffic.py server/car_policy.py "$tmp/server/"
 ssh -i "$key" "$host" 'rm -rf /tmp/fh2mp-deploy && mkdir /tmp/fh2mp-deploy'
 scp -i "$key" -q -r "$tmp/lsp" "$tmp/server" "$host:/tmp/fh2mp-deploy/"
 ssh -i "$key" "$host" "set -e
