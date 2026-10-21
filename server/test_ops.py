@@ -89,7 +89,7 @@ class FakeAuth:
 
 class FakeLauncherConfig:
     """launcher_api.LauncherConfig without the file: the same overlay rule."""
-    base = {"motd": "", "maintenance": "", "minLauncher": "0.0.0", "links": {"website": "https://x.example", "patreon": "", "discord": ""}}
+    base = {"motd": "", "maintenance": "", "minLauncher": "0.0.0", "minShim": "0.0.0", "links": {"website": "https://x.example", "patreon": "", "discord": ""}}
 
     def __init__(self):
         self.overlay = {}

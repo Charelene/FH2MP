@@ -24,4 +24,9 @@ RUN
 chmod +x "$app/AppRun"
 out=${OUT:-dist/FH2MP-Launcher-${VERSION}-x86_64.AppImage}
 mkdir -p "$(dirname "$out")"
-ARCH=x86_64 "${APPIMAGETOOL:-appimagetool}" --appimage-extract-and-run "$app" "$out"
+out=$(cd "$(dirname "$out")" && pwd)/$(basename "$out")
+# Update information embedded in the AppImage (GitHub releases, zsync): AppImageUpdate and AppImage managers read it to find new versions. With zsyncmake
+# on PATH appimagetool also writes <out>.zsync (into the current directory, hence the cd), which has to be uploaded to the release next to the AppImage.
+cd "$(dirname "$out")"
+ARCH=x86_64 "${APPIMAGETOOL:-appimagetool}" --appimage-extract-and-run \
+  -u "gh-releases-zsync|Charelene|FH2MP|latest|FH2MP-Launcher-*-x86_64.AppImage.zsync" "$app" "$out"

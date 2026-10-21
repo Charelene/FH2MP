@@ -1,0 +1,3 @@
+Release v1.0.0-rc4: require rc4, engine-crash guard, name/picture sync, class fix
+
+Old launchers/shims are refused (minLauncher/minShim); real players only on boards.

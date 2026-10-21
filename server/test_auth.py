@@ -321,6 +321,31 @@ class ApiTests(AuthCase):
         self.assertEqual(obj["links"]["patreon"], "")
         self.assertEqual(obj["game"], {"host": "h", "port": 5000})
 
+    def test_version_at_least(self):
+        f = launcher_api.version_at_least
+        self.assertTrue(all(f(h, "0.0.0") for h in ("", "junk", "1.0.0-rc1")))
+        self.assertEqual([f(h, "1.0.0-rc4") for h in ("", "junk", "1.0.0-rc1", "1.0.0-rc3", "0.9.9")], [False] * 5)
+        self.assertEqual([f(h, "1.0.0-rc4") for h in ("1.0.0-rc4", "1.0.0-rc10", "1.0.0", "1.0.1", "1.1.0-rc1", "1.0.0-rc2-debug")], [True] * 6)
+        self.assertFalse(f("1.0.0-rc9", "1.0.0"))                 # a pre-release is older than its release
+
+    def test_old_launcher_cannot_sign_in(self):
+        a = self.d.register_args(self.svc, "Old Timer")
+        st, _o, _ = self.call("POST", "/v1/auth/register", {"challenge": a["challenge"], "pubkey": a["pubkey_b64"], "gamertag": "Old Timer",
+                                                            "pow": a["pow_counter"], "sig": a["sig_b64"]})
+        self.assertEqual(st, 201)
+        self.ctx.config.overlay = {"minLauncher": "1.0.0-rc4"}
+
+        def login(client):
+            st, ch, _ = self.call("POST", "/v1/auth/challenge")
+            raw = auth.unb64u(ch["challenge"])
+            return self.call("POST", "/v1/auth/login", {"challenge": ch["challenge"], "pubkey": auth.b64u(self.d.pub), "client": client,
+                                                        "sig": auth.b64u(self.d.sign("test", "login", raw, self.d.pub))})[:2]
+        st, obj = login("launcher/1.0.0-rc1 linux")
+        self.assertEqual((st, obj["error"]), (426, "launcher_too_old"))
+        self.assertIn("1.0.0-rc1", obj["message"])
+        self.assertEqual(login("launcher/1.0.0-rc4 windows")[0], 200)
+        self.assertEqual(login("dev_client.py")[0], 200)           # test tools are not launchers
+
     def test_config_file_is_reloaded(self):
         import tempfile
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:

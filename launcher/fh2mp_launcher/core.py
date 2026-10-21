@@ -51,14 +51,18 @@ def game_port_env(game):
 
 
 class Launcher:
-    def __init__(self, settings=None):
+    def __init__(self, settings=None, load_identity=True):
         self.settings = settings or Settings()
-        self.identity = keystore.load()
+        self.identity = None
+        self.identity_loaded = False
+        if load_identity:                # the app passes False and loads it off the UI thread: a locked keyring waits for a password prompt
+            self.load_identity()
         self.server = {}                # last /v1/launcher/config
         self.token = ""
         self.account = None             # dict from the API: xuid, gamertag
         self.process = None
         self.manifest = None
+        self.gamerpic_converter = None      # set by the UI: server PNG bytes -> the PNG the game expects (needs Qt)
 
     # ---- server
     def api(self):
@@ -90,6 +94,10 @@ class Launcher:
         return shim.installed(d) if d and os.path.isdir(d) else ("none", "")
 
     # ---- identity
+    def load_identity(self):
+        self.identity = keystore.load()
+        self.identity_loaded = True
+
     def has_identity(self):
         return self.identity is not None
 
@@ -145,7 +153,12 @@ class Launcher:
     # ---- updates
     def check_updates(self):
         """-> manifest (verified) or raises updater.UpdateError. Remembers it."""
-        self.manifest = updater.Updater(channel=self.settings["channel"]).fetch_manifest()
+        try:
+            self.manifest = updater.Updater(channel=self.settings["channel"]).fetch_manifest()
+        except updater.UpdateError as e:
+            from .api import log_failure
+            log_failure("GET", "update-check", e, str(e))          # so a player's launcher.log says why no update was offered
+            raise
         return self.manifest
 
     def update_status(self):
@@ -161,8 +174,18 @@ class Launcher:
         if self.settings["azimuth_dir"] and not self.shim_pinned(kind, ver):
             out["shim"] = updater.shim_update_needed(kind, ver, m)
         need = max((m.get("minLauncher", "0.0.0"), (self.server or {}).get("minLauncher", "0.0.0")), key=updater.vkey)
-        out["minLauncherOk"] = not updater.newer(need, __version__)
+        out["minLauncherOk"] = updater.at_least(__version__, need)
         return out
+
+    def launcher_outdated(self):
+        """This launcher is older than the server (or the signed release manifest) allows. Needs a refresh_server first."""
+        need = max(((self.manifest or {}).get("minLauncher", "0.0.0"), (self.server or {}).get("minLauncher", "0.0.0")), key=updater.vkey)
+        return not updater.at_least(__version__, need)
+
+    def shim_outdated(self):
+        """The installed shim is older than the server's minShim: it would be refused by the web services. Needs a refresh_server first."""
+        kind, ver = self.shim_state()
+        return kind == "ours" and not updater.at_least(ver, (self.server or {}).get("minShim", "0.0.0"))
 
     def shim_pinned(self, kind=None, ver=None):
         """True when the installed shim must be left alone: pinned in settings, or a debug build (version ends in -debug)."""
@@ -212,6 +235,8 @@ class Launcher:
         if not s["azimuth_dir"]:
             raise PlayBlocked("Choose your Azimuth folder.", "no_azimuth")
         self.refresh_server()
+        if self.launcher_outdated():
+            raise PlayBlocked(f"This launcher ({__version__}) is out of date and can't connect any more. Update it to keep playing.", "launcher_outdated")
         info = self.azimuth_info()
         if not info.found:
             raise PlayBlocked("azimuth.exe not found.", "no_azimuth")
@@ -220,6 +245,8 @@ class Launcher:
         kind, _v = self.shim_state()
         if kind != "ours":
             raise PlayBlocked("Shim not installed.", "no_shim")
+        if self.shim_outdated():
+            raise PlayBlocked("The FH2MP shim is out of date and the server would turn it away.", "shim_outdated")
         try:
             self.ensure_extra_options()          # only when the player has no copy; never blocks playing
         except Exception:  # noqa: BLE001
@@ -244,7 +271,53 @@ class Launcher:
             notes.append("kept your progress: " + adopted)
         if azimuth.set_player_name(d, acct["gamertag"]):
             notes.append(f"set the in-game name to {acct['gamertag']}")
+        from .api import log_note
+        applied = azimuth.read_ini(d).get("launcher", {}).get("player_name") == acct["gamertag"]
+        if not applied:
+            # Azimuth's own default is "Player 1"; the leaderboards show the local name from here (GitHub issue #2)
+            notes.append("could not set the in-game name")
+        try:
+            pic = self.sync_gamerpic()
+        except Exception as e:  # noqa: BLE001 - the picture must never block playing
+            from .api import log_failure
+            log_failure("PLAY", "gamerpic", e, str(e))
+            pic = "picture not updated"
+        log_note(f"PLAY name={acct['gamertag']!r} written={'yes' if applied else 'NO'} gamerpic={pic or 'unchanged'} azimuth_dir={d}")
         return acct, notes
+
+    def sync_gamerpic(self):
+        """Every start: the account's picture from the server goes into the game folder (Azimuth's Gamerpic.png and the Extra Options copy),
+        so the in-game picture is the player's own, not the mod's default one. The server always has one (the picture the player uploaded,
+        else a generated one). `self.gamerpic_converter` (set by the UI) turns it into the 1080x1080 RGB PNG the game expects; without it
+        the server's picture is written as it is. Falls back to the copy kept in the config folder. -> a short note, '' when unchanged."""
+        d = self.settings["azimuth_dir"]
+        mine = os.path.join(paths.config_dir(), "gamerpic.png")
+        png = None
+        try:
+            raw = self.api().gamerpic(self.account["xuid"])
+            png = (self.gamerpic_converter(raw) if self.gamerpic_converter else raw) or None
+        except Exception as e:  # noqa: BLE001 - offline or a server hiccup: use the kept copy
+            from .api import log_failure
+            log_failure("GET", f"/v1/gamerpic/{self.account['xuid']}.png", e, str(e))
+        if png is None and os.path.isfile(mine):
+            with open(mine, "rb") as f:
+                png = f.read()
+        if not png:
+            return "no picture"
+        targets = [os.path.join(d, "Gamerpic.png")]
+        if os.path.isdir(os.path.join(d, "fh2extra")):
+            targets.append(os.path.join(d, "fh2extra", "Gamerpic.png"))
+        same = True
+        for t in targets:
+            try:
+                with open(t, "rb") as f:
+                    same = same and f.read() == png
+            except OSError:
+                same = False
+        if same:
+            return ""
+        azimuth.write_gamerpic(d, png)
+        return f"picture updated ({len(png)} bytes)"
 
     def prepare_session_only(self, force_unsupported=True):
         """Developer: sign in and write the session next to the shim without starting the game (start it yourself: rig, Steam, a debugger)."""

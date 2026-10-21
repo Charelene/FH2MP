@@ -1483,6 +1483,109 @@ static int patch_same_session(void)
 }
 
 /*
+ * "Azimuth stopped: exception 0xc0000005 at game+0x1064408 reading 0x0" when a car appears. FUN_1410643b0 reads an engine's torque curve
+ * (TorqueScale, ZeroThrottleTorqueScale, NumTorqueValues, then one value per RPM entry) from the result of
+ * "SELECT * FROM List_TorqueCurve WHERE TorqueCurveID=<id>"; the callers (FUN_14105d690 for engines, FUN_14105e700 for the electric motor)
+ * pass that result in. With an id that has no row (a part id the game's database does not know) the result is null and the first read,
+ *     141064405  mov rcx,[rsi]      (rsi = pointer to the result)
+ *     141064408  mov rax,[rcx]      <- rcx = 0
+ * crashes the client of everybody who loads that car: seen on prod on 2026-10-20 whenever a player joined one particular lobby, the same
+ * call chain every time (call chain and registers read from three minidumps). An engine the local game does not simulate (another
+ * player's car is driven by prediction) does not need its curve, so the function now returns when the result is null, leaving the output as
+ * it was. Entry of the function, 7 bytes replaced by a jump to a stub near the image (the stub does the check and then runs the replaced
+ * instructions):  48 8B C4 (mov rax,rsp)  48 89 50 10 (mov [rax+0x10],rdx).  Disable with env FH2MP_NO_NULLTORQUE.
+ */
+static volatile unsigned *g_nulltorque_hits;      /* counts the engines the guard skipped (read by the monitor thread, which logs changes) */
+
+static int patch_null_torque_curve(void)
+{
+    static const unsigned char want[10] = {0x48, 0x8b, 0xc4, 0x48, 0x89, 0x50, 0x10, 0x55, 0x41, 0x56};
+    unsigned char *img = find_fh2_image();
+    unsigned char *site, *probe, *stub = NULL, *lo, *hi;
+    long long disp;
+    DWORD old;
+    int i, d32;
+    unsigned char code[32];
+
+    if (!img) {
+        return 0;
+    }
+    site = img + 0x10643b0u;
+    if (site[0] == 0xe9) {
+        return 1;                 /* already patched */
+    }
+    for (i = 0; i < 10; i++) {
+        if (site[i] != want[i]) {
+            log_begin();
+            log_raw("nulltorque: unexpected bytes at the torque curve reader, not patched\n");
+            return 0;
+        }
+    }
+    lo = site > (unsigned char *)0x70000000 ? site - 0x70000000 : (unsigned char *)0x10000;
+    hi = site + 0x70000000;
+    for (probe = (unsigned char *)((ULONG_PTR)(img + FH2_SIZE_OF_IMAGE + 0xffff) & ~(ULONG_PTR)0xffff); probe < hi; probe += 0x10000) {
+        stub = VirtualAlloc(probe, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+        if (stub) {
+            break;
+        }
+    }
+    if (!stub) {
+        for (probe = (unsigned char *)((ULONG_PTR)(img - 0x10000) & ~(ULONG_PTR)0xffff); probe > lo; probe -= 0x10000) {
+            stub = VirtualAlloc(probe, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+            if (stub) {
+                break;
+            }
+        }
+    }
+    if (!stub) {
+        log_begin();
+        log_raw("nulltorque: could not allocate a page near the game image, not patched\n");
+        return 0;
+    }
+    /* stub: test rdx,rdx ; jz hit ; mov rax,[rdx] ; test rax,rax ; jz hit ; <replaced instructions> ; jmp site+7 ; hit: inc [counter] ; ret */
+    code[0] = 0x48; code[1] = 0x85; code[2] = 0xd2;                       /* test rdx,rdx */
+    code[3] = 0x74; code[4] = 0x14;                                       /* jz ret (+20) */
+    code[5] = 0x48; code[6] = 0x8b; code[7] = 0x02;                       /* mov rax,[rdx] */
+    code[8] = 0x48; code[9] = 0x85; code[10] = 0xc0;                      /* test rax,rax */
+    code[11] = 0x74; code[12] = 0x0c;                                     /* jz ret (+12) */
+    code[13] = 0x48; code[14] = 0x8b; code[15] = 0xc4;                    /* mov rax,rsp */
+    code[16] = 0x48; code[17] = 0x89; code[18] = 0x50; code[19] = 0x10;   /* mov [rax+0x10],rdx */
+    code[20] = 0xe9;                                                      /* jmp site+7 */
+    code[25] = 0xff; code[26] = 0x05;                                     /* hit: inc dword ptr [rip+counter] */
+    code[31] = 0xc3;                                                      /* ret */
+    disp = (long long)((site + 7) - (stub + 25));
+    if (disp > 0x7fffffffll || disp < -0x80000000ll) {
+        log_begin();
+        log_raw("nulltorque: stub out of rel32 range, not patched\n");
+        return 0;
+    }
+    d32 = (int)disp;
+    mem_copy(code + 21, &d32, 4);
+    d32 = 64 - (25 + 6);                                                  /* the counter lives at stub+64, the inc instruction ends at stub+31 */
+    mem_copy(code + 27, &d32, 4);
+    mem_copy(stub, code, 32);
+    *(unsigned *)(stub + 64) = 0;
+    g_nulltorque_hits = (volatile unsigned *)(stub + 64);
+    FlushInstructionCache(GetCurrentProcess(), stub, 68);
+    disp = (long long)(stub - (site + 5));
+    if (disp > 0x7fffffffll || disp < -0x80000000ll || !VirtualProtect(site, 7, PAGE_EXECUTE_READWRITE, &old)) {
+        log_begin();
+        log_raw("nulltorque: entry out of rel32 range, not patched\n");
+        return 0;
+    }
+    d32 = (int)disp;
+    site[0] = 0xe9;
+    mem_copy(site + 1, &d32, 4);
+    site[5] = 0x90;
+    site[6] = 0x90;
+    patch_done(site, 7, old);
+    FlushInstructionCache(GetCurrentProcess(), site, 7);
+    log_begin();
+    log_raw("nulltorque: an engine whose torque curve is missing from the game database is skipped instead of crashing the game\n");
+    return 1;
+}
+
+/*
  * "Azimuth stopped: CreatePlacementTexture2D requires GPU-write/CPU-map/unknown placement semantics" (game+0x10c897b): Azimuth ends the whole
  * game when the game places a texture whose description its CreatePlacementTexture2D does not support (azimuth.exe 0.9.10, FUN_14012f990).
  * Supported: a GPU-written texture (usage default, no CPU access, misc 0/0x20000/0x40000, 1 mip, 1 slice, bind 0x28, 0x48 or 0xa8), or a
@@ -2681,6 +2784,19 @@ static DWORD WINAPI option_monitor(LPVOID unused)
         if (weather_dump) {
             weather_sample(img);
         }
+        if (g_nulltorque_hits) {
+            static unsigned nt_seen;
+            unsigned nt_now = *g_nulltorque_hits;
+            if (nt_now != nt_seen) {
+                log_begin();
+                log_raw("nulltorque: skipped ");
+                log_dec(nt_now - nt_seen);
+                log_raw(" engine(s) with no torque curve (");
+                log_dec(nt_now);
+                log_raw(" in all)\n");
+                nt_seen = nt_now;
+            }
+        }
         Sleep(1000);
     }
     return 0;
@@ -3379,6 +3495,12 @@ static DWORD WINAPI late_init(LPVOID unused)
             wchar_t ht_env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_HOMETILE", ht_env, 8) == 0) {
                 patch_home_tile();
+            }
+        }
+        {
+            wchar_t nt_env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_NULLTORQUE", nt_env, 8) == 0) {
+                patch_null_torque_curve();
             }
         }
         {

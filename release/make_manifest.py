@@ -43,7 +43,7 @@ def main():
     ap.add_argument("--tag", required=True)
     ap.add_argument("--dist", required=True)
     ap.add_argument("--key", help="file with the base64 private seed (default: env FH2MP_RELEASE_KEY)")
-    ap.add_argument("--min-launcher", default="1.0.0-rc1")
+    ap.add_argument("--min-launcher", default="1.0.0-rc4")
     ap.add_argument("--notes", default="")
     a = ap.parse_args()
     if not re.fullmatch(r"v[0-9][0-9A-Za-z.+-]*", a.tag):

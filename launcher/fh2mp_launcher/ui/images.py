@@ -29,3 +29,14 @@ def prepare(path):
         return None
     small = big.scaled(256, 256, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
     return png_bytes(small), png_bytes(big, QImage.Format.Format_RGB888)
+
+
+def azimuth_png_from_bytes(raw):
+    """The server's picture (any PNG) -> the 1080x1080 RGB PNG for Azimuth / Extra Options, or None."""
+    img = QImage.fromData(raw)
+    if img.isNull():
+        return None
+    side = min(img.width(), img.height())
+    img = img.copy((img.width() - side) // 2, (img.height() - side) // 2, side, side)
+    big = img.scaled(1080, 1080, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    return png_bytes(big, QImage.Format.Format_RGB888)

@@ -32,16 +32,24 @@ class UpdateError(Exception):
 
 
 def vkey(v):
-    """Sort key for '1.2.3' and '1.2.3-rc1' (a pre-release sorts before the release)."""
+    """Sort key for '1.2.3' and '1.2.3-rc1' (a pre-release sorts before the release, rc10 after rc9)."""
     m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+](.*))?$", v or "")
     if not m:
-        return (0, 0, 0, 0, "")
-    return (int(m[1]), int(m[2]), int(m[3]), 0 if m[4] and "+" not in v else 1, m[4] or "")
+        return (0, 0, 0, 0, 0, "")
+    rc = re.match(r"rc(\d+)", m[4] or "")
+    return (int(m[1]), int(m[2]), int(m[3]), 0 if m[4] and "+" not in v else 1, int(rc[1]) if rc else 0, m[4] or "")
 
 
 def newer(a, b):
     """a is a later version than b"""
     return vkey(a) > vkey(b)
+
+
+def at_least(have, need):
+    """`have` is the same as or later than `need`; nothing is required of an empty or 0.0.0 `need`. Our own debug builds always pass."""
+    if not need or vkey(need)[:3] == (0, 0, 0):
+        return True
+    return (have or "").endswith("-debug") or vkey(have) >= vkey(need)
 
 
 def verify_manifest(raw, sig_b64, pubkey_b64=None):
@@ -61,6 +69,14 @@ def verify_manifest(raw, sig_b64, pubkey_b64=None):
     return m
 
 
+def _bundled_context():
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:  # noqa: BLE001
+        return None
+
+
 class Updater:
     def __init__(self, repo=GITHUB_REPO, channel="stable", pubkey_b64=None, base=None, api="https://api.github.com"):
         base = base or buildcfg.update_base() or "https://github.com"        # a private build may fetch from its bundled signed mirror
@@ -69,13 +85,19 @@ class Updater:
 
     def _get(self, url, limit, timeout=20, accept=None):
         req = urllib.request.Request(url, headers={"User-Agent": f"{USER_AGENT}/{__version__}", **({"Accept": accept} if accept else {})})
-        try:
-            with urllib.request.urlopen(req, timeout=timeout, context=self._ctx) as r:
-                data = r.read(limit + 1)
-        except urllib.error.HTTPError as e:
-            raise UpdateError(f"GitHub answered {e.code} for {url.rsplit('/', 1)[-1]}") from None
-        except (urllib.error.URLError, OSError, ssl.SSLError) as e:
-            raise UpdateError(f"cannot reach GitHub ({getattr(e, 'reason', e)})") from None
+        for attempt in (0, 1):
+            try:
+                with urllib.request.urlopen(req, timeout=timeout, context=self._ctx) as r:
+                    data = r.read(limit + 1)
+                break
+            except urllib.error.HTTPError as e:
+                raise UpdateError(f"GitHub answered {e.code} for {url.rsplit('/', 1)[-1]}") from None
+            except (urllib.error.URLError, OSError, ssl.SSLError) as e:
+                cert_error = isinstance(getattr(e, "reason", e), ssl.SSLCertVerificationError) or isinstance(e, ssl.SSLCertVerificationError)
+                bundled = _bundled_context() if cert_error and attempt == 0 else None
+                if bundled is None:       # the system store was not the problem (or there is nothing else to try)
+                    raise UpdateError(f"cannot reach GitHub ({getattr(e, 'reason', e)})") from None
+                self._ctx = bundled       # the system store does not trust GitHub here (the AppImage's OpenSSL): use the bundled roots, as the API client does
         if len(data) > limit:
             raise UpdateError("the download is larger than expected")
         return data
@@ -164,11 +186,13 @@ def _rm(p):
 # ---- what this launcher installation is, to pick the right file when it needs replacing
 
 def launcher_flavour():
-    """windows-x64-installer | linux-appimage | linux-deb | None (running from source: no self-update)."""
+    """windows-x64-installer | windows-x64-portable | linux-appimage | linux-deb | None (running from source: no self-update)."""
     if not getattr(sys, "frozen", False):
         return None
     if sys.platform == "win32":
-        return "windows-x64-installer"
+        here = os.path.dirname(os.path.abspath(sys.executable))
+        installed = any(n.lower().startswith("unins") and n.lower().endswith(".exe") for n in os.listdir(here))     # Inno Setup leaves its uninstaller next to the program
+        return "windows-x64-installer" if installed else "windows-x64-portable"
     if os.environ.get("APPIMAGE"):
         return "linux-appimage"
     if sys.platform.startswith("linux") and os.path.realpath(sys.executable).startswith(("/usr/", "/opt/")):
@@ -186,6 +210,43 @@ def shim_update_needed(installed_kind, installed_version, manifest):
     return None
 
 
+def _apply_portable_zip(zip_path):
+    """Unpacks the portable zip next to the running copy, then lets a small script copy it over the folder once this process has exited (a running
+    exe cannot be overwritten on Windows) and start the launcher again. Returns "exit"."""
+    import subprocess
+    import tempfile
+    import zipfile
+    here = os.path.dirname(os.path.abspath(sys.executable))
+    exe = os.path.abspath(sys.executable)
+    if any(c in here + exe for c in '%"^&|<>!'):
+        raise UpdateError("this folder name has characters the updater cannot handle: download the new portable zip from the releases page")
+    stage = tempfile.mkdtemp(prefix="fh2mp-update-", dir=os.path.dirname(here) or here)
+    root = os.path.realpath(stage)
+    try:
+        z = zipfile.ZipFile(zip_path)
+    except zipfile.BadZipFile:
+        raise UpdateError("the downloaded portable package is not a valid zip") from None
+    with z:
+        for info in z.infolist():
+            dest = os.path.realpath(os.path.join(stage, info.filename))
+            if dest != root and not dest.startswith(root + os.sep):
+                raise UpdateError("the portable package contains an unsafe path")
+        if not any(os.path.basename(n.filename).lower() == os.path.basename(exe).lower() for n in z.infolist()):
+            raise UpdateError("the portable package does not contain the launcher")
+        z.extractall(stage)
+    script = os.path.join(stage, "apply-update.cmd")
+    with open(script, "w", encoding="ascii", newline="\r\n") as f:
+        f.write("@echo off\r\n"
+                f":wait\r\ntasklist /FI \"PID eq {os.getpid()}\" 2>nul | find \"{os.getpid()}\" >nul\r\n"
+                "if not errorlevel 1 (timeout /t 1 /nobreak >nul & goto wait)\r\n"
+                f"robocopy \"{stage}\" \"{here}\" /E /XF apply-update.cmd /R:5 /W:1 /NFL /NDL /NJH /NJS >nul\r\n"
+                f"start \"\" \"{exe}\"\r\n"
+                f"cd /d \"{os.path.dirname(here) or here}\"\r\n"
+                f"rmdir /S /Q \"{stage}\"\r\n")
+    subprocess.Popen(["cmd", "/c", script], creationflags=0x00000008 | 0x00000200 | 0x08000000, close_fds=True)
+    return "exit"
+
+
 def apply_launcher_update(flavour, path):
     """Installs a downloaded (and already verified) launcher package. Returns "exit" when the launcher must quit now so the installer can
     replace it, "restart" when it was replaced in place, or raises UpdateError."""
@@ -196,6 +257,8 @@ def apply_launcher_update(flavour, path):
             subprocess.Popen([path, "/SILENT", "/SUPPRESSMSGBOXES", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"],
                              creationflags=0x00000008 | 0x00000200)
             return "exit"
+        if flavour == "windows-x64-portable":
+            return _apply_portable_zip(path)
         if flavour == "linux-appimage":
             target = os.environ["APPIMAGE"]
             staged = target + ".new"

@@ -26,6 +26,10 @@ try:
     from car_policy import BLOCKED_CARS, KNOWN_CARS, TOP_SPEED_KMH  # noqa: E402     # tools/make_car_policy.py
 except ImportError:
     BLOCKED_CARS, KNOWN_CARS, TOP_SPEED_KMH = {}, frozenset(), {}
+try:
+    import parts as parts_check  # noqa: E402     # part ids of the game data: tools/make_part_ids.py -> part_ids.py
+except ImportError:
+    parts_check = None
 
 
 def _dlc_cars():
@@ -148,6 +152,7 @@ RACE_FLAGS_CLEAR_SECONDS = 4.0       # after InRace=0, drop RaceReady/Participan
 RACE_LAST_FINISHER_SECONDS = 30.0   # after the first finisher the others get this long (client UI: RACE ENDS IN)
 CAR_PREDICTION_BODY_BITS = 710      # CarPredictionFull body, see the handler
 CAR_POLICY = os.environ.get("FH2MP_CAR_POLICY", "kick")   # a car in BLOCKED_CARS (traffic vehicles, hidden variants): off = ignore, log = report it, kick = withhold it and end the account's connections
+PART_POLICY = os.environ.get("FH2MP_PART_POLICY", "log")     # a car whose part list holds an id that is not in the game data (it crashes the other clients that build its engine): off / log / kick
 UNKNOWN_CAR_POLICY = os.environ.get("FH2MP_UNKNOWN_CAR_POLICY", "log")   # a car id that is in neither the base catalog nor data/dlc_cars.txt (not in the game): off / log / kick
 SPEED_POLICY = os.environ.get("FH2MP_SPEED_POLICY", "log")   # speed check (parked, see docs/anticheat-todo.md): off / log / kick; log only by default
 CAR_CAPTURE = bool(os.environ.get("FH2MP_CAR_CAPTURE"))   # dev only: log every car object message and every speed measurement (ground truth for the checks)
@@ -968,6 +973,8 @@ class Peer:
         self.model_logged = None
         self.car_payload_logs = 0
         self.kick_reason = None    # set by the car policy; acted on in tick()
+        self.parts = None          # the car's 43 part ids as sent at join (parts.find_parts)
+        self.part_notes = 0        # part check log lines written for this client
         self.speed_ref = None      # (monotonic, position) the last speed was measured from
         self.top_kmh = 0.0         # highest measured speed (km/h)
         self.hard_s = 0.0          # seconds the speed has held above the hard cap
@@ -1192,6 +1199,39 @@ class Server:
         if peer.soft_s >= SPEED_SECONDS and "soft" not in peer.speed_flagged:
             peer.speed_flagged.add("soft")
             self.log(f"SPEED (log only): owner {peer.owner_id} xuid {peer.xuid:#x} car {peer.model_id} (stock {stock} km/h) drove {kmh:.0f} km/h for {peer.soft_s:.0f} s (soft limit {soft:.0f})")
+
+    def check_parts(self, peer: Peer, size: int, payload: int):
+        """The car's installed part ids (in the LobbyPlayer object, see parts.py) against the game data. An id the game does not know
+        makes the other clients crash when they build that car's engine (FUN_1410643b0 reads a torque curve that is not there), so a
+        car like that is reported (PART_POLICY=log) or its owner is removed (kick). Returns True when something is wrong."""
+        if parts_check is None or PART_POLICY == "off":
+            return False, False
+        found = parts_check.find_parts(size, payload)
+        if found is None:
+            if peer.part_notes < 3:
+                peer.part_notes += 1
+                self.log(f"{peer.addr[1]} part check: no part list found in the {size}-bit player object (owner {peer.owner_id})")
+            return False, False
+        offset, words = found
+        issues = parts_check.audit_parts(words)
+        peer.parts = words
+        # The car itself: slot 2 (body) holds the CarBody row of the car, id = car id x 1000 (the 354 rows of the catalog table). The car's
+        # object (router 2) only says things like "100.0" (a float), so this is where the car id is actually readable. Same rules as before:
+        # a traffic-only model (BLOCKED_CARS) or an id that is not in the game is withheld / its owner removed by the car policy.
+        hide = False
+        body = words[2]
+        if body != parts_check.NONE and body in parts_check.P.TABLE_IDS["CarBody"]:
+            hide = self.car_model_seen(peer, body // 1000)
+        # a wrong id is only certain when no table has it, or when it sits in the camshaft slot (slot 12: the torque curve comes from there)
+        hard = [i for i in issues if "no such id" in i[2] or i[0] == 12]
+        if issues and peer.part_notes < 6:
+            peer.part_notes += 1
+            self.log(f"PART CHECK{'' if PART_POLICY == 'kick' and hard else ' (log only)'}: owner {peer.owner_id} xuid {peer.xuid:#x}: "
+                     + "; ".join(f"slot {s} {parts_check.P.SLOT_TABLE.get(s, '?')} = {w:#x} ({text})" for s, w, text in issues[:6])
+                     + (" -> ending the connection" if PART_POLICY == "kick" and hard else ""))
+        if hard and PART_POLICY == "kick" and peer.kick_reason is None:
+            peer.kick_reason = "part id " + str(hard[0][1]) + " in slot " + str(hard[0][0])
+        return bool(hard), hide
 
     def kick_for_cars(self) -> None:
         for q in [q for q in self.peers.values() if q.kick_reason]:
@@ -1950,6 +1990,13 @@ class Server:
                 if mtype == MSG_OBJECT_CREATE or size >= 500:
                     self.note("obj", peer.owner_id, f"{'create' if mtype == 7 else 'update'} router={router} id={oid} bits={size}")
                 suppress = False
+                if CAR_CAPTURE and router == 1 and size:        # the LobbyPlayer object: gamertag, car, setup, livery ids (dev only)
+                    self.log(f"{addr[1]} CAPTURE player {'create' if mtype == 7 else 'update'} id={oid} seq={seq} bits={size} "
+                             f"xuid={peer.xuid:#x} hex={payload.to_bytes((size + 7) // 8, 'little').hex()}")
+                if router == 1 and size >= 1500 and parts_check is not None:       # the join-time object, and later updates that carry the whole car
+                    bad_parts, hide_car = self.check_parts(peer, size, payload)
+                    if hide_car or (bad_parts and PART_POLICY == "kick"):
+                        suppress = True
                 if CAR_CAPTURE and router == ROUTER_CAR and size:
                     self.log(f"{addr[1]} CAPTURE car {'create' if mtype == 7 else 'update'} id={oid} seq={seq} bits={size} "
                              f"hex={payload.to_bytes((size + 7) // 8, 'little').hex()}")
