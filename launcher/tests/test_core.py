@@ -229,6 +229,50 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual([updater.at_least(h, "1.0.0-rc4") for h in ("", "1.0.0-rc1", "1.0.0-rc3", "0.9.9")], [False] * 4)
         self.assertEqual([updater.at_least(h, "1.0.0-rc4") for h in ("1.0.0-rc4", "1.0.0-rc10", "1.0.0", "1.0.0-rc2-debug")], [True] * 4)
 
+    def test_certificate_fallback_covers_the_download_and_later_updaters(self):
+        import ssl
+        import urllib.error
+        import urllib.request
+        from unittest import mock
+        bundled = object()
+        seen = []
+
+        class Resp:
+            def __init__(self, body):
+                self.body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self, n=-1):
+                b, self.body = self.body, b""
+                return b
+
+        def fake(req, timeout=None, context=None):
+            seen.append(context)
+            if context is not bundled:
+                raise urllib.error.URLError(ssl.SSLCertVerificationError("unable to get local issuer certificate"))
+            return Resp(b"payload")
+        data = b"payload"
+        entry = {"name": "f.bin", "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+        with mock.patch.object(updater, "_bundled_context", lambda: bundled), mock.patch.object(urllib.request, "urlopen", fake), \
+                mock.patch.object(updater, "_USE_BUNDLED", None), tempfile.TemporaryDirectory() as d:
+            self.assertEqual(updater.Updater(base="https://x.invalid")._get("https://x.invalid/a", 100), b"payload")     # the manifest check
+            n = len(seen)
+            u2 = updater.Updater(base="https://x.invalid")                      # the shim download makes a new Updater
+            with open(u2.download("v1.0.0", entry, dest_dir=d), "rb") as f:
+                self.assertEqual(f.read(), data)
+            self.assertEqual(seen[n:], [bundled])                              # straight to the bundled roots, no failed first attempt
+        with mock.patch.object(updater, "_bundled_context", lambda: bundled), mock.patch.object(urllib.request, "urlopen", fake), \
+                mock.patch.object(updater, "_USE_BUNDLED", None), tempfile.TemporaryDirectory() as d:
+            seen.clear()                                                        # a download with no earlier request retries by itself
+            p = updater.Updater(base="https://x.invalid").download("v1.0.0", dict(entry, name="g.bin"), dest_dir=d)
+            self.assertTrue(os.path.isfile(p))
+            self.assertEqual(len(seen), 2)
+
     def test_download_checks_hash(self):
         import http.server
         import threading

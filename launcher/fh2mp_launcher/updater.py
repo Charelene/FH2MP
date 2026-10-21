@@ -77,27 +77,41 @@ def _bundled_context():
         return None
 
 
+_USE_BUNDLED = None       # the certifi context, once the system store failed and it worked: every later Updater (the shim download makes a new one) starts with it
+
+
+def _is_cert_error(e):
+    return isinstance(getattr(e, "reason", e), ssl.SSLCertVerificationError) or isinstance(e, ssl.SSLCertVerificationError)
+
+
 class Updater:
     def __init__(self, repo=GITHUB_REPO, channel="stable", pubkey_b64=None, base=None, api="https://api.github.com"):
         base = base or buildcfg.update_base() or "https://github.com"        # a private build may fetch from its bundled signed mirror
         self.repo, self.channel, self.pub, self.base, self.api = repo, channel, pubkey_b64, base, api
-        self._ctx = ssl.create_default_context()
+        self._ctx = _USE_BUNDLED or ssl.create_default_context()
+
+    def _open(self, req, timeout):
+        """urlopen with the system certificate store; when that does not trust the server (the AppImage's OpenSSL cannot find the distro's store),
+        once more with the bundled roots, which are then used for everything that follows."""
+        global _USE_BUNDLED
+        try:
+            return urllib.request.urlopen(req, timeout=timeout, context=self._ctx)
+        except (urllib.error.URLError, OSError, ssl.SSLError) as e:
+            bundled = _bundled_context() if _is_cert_error(e) and self._ctx is not _USE_BUNDLED else None
+            if bundled is None:       # the system store was not the problem (or there is nothing else to try)
+                raise
+            self._ctx = _USE_BUNDLED = bundled
+            return urllib.request.urlopen(req, timeout=timeout, context=self._ctx)
 
     def _get(self, url, limit, timeout=20, accept=None):
         req = urllib.request.Request(url, headers={"User-Agent": f"{USER_AGENT}/{__version__}", **({"Accept": accept} if accept else {})})
-        for attempt in (0, 1):
-            try:
-                with urllib.request.urlopen(req, timeout=timeout, context=self._ctx) as r:
-                    data = r.read(limit + 1)
-                break
-            except urllib.error.HTTPError as e:
-                raise UpdateError(f"GitHub answered {e.code} for {url.rsplit('/', 1)[-1]}") from None
-            except (urllib.error.URLError, OSError, ssl.SSLError) as e:
-                cert_error = isinstance(getattr(e, "reason", e), ssl.SSLCertVerificationError) or isinstance(e, ssl.SSLCertVerificationError)
-                bundled = _bundled_context() if cert_error and attempt == 0 else None
-                if bundled is None:       # the system store was not the problem (or there is nothing else to try)
-                    raise UpdateError(f"cannot reach GitHub ({getattr(e, 'reason', e)})") from None
-                self._ctx = bundled       # the system store does not trust GitHub here (the AppImage's OpenSSL): use the bundled roots, as the API client does
+        try:
+            with self._open(req, timeout) as r:
+                data = r.read(limit + 1)
+        except urllib.error.HTTPError as e:
+            raise UpdateError(f"GitHub answered {e.code} for {url.rsplit('/', 1)[-1]}") from None
+        except (urllib.error.URLError, OSError, ssl.SSLError) as e:
+            raise UpdateError(f"cannot reach GitHub ({getattr(e, 'reason', e)})") from None
         if len(data) > limit:
             raise UpdateError("the download is larger than expected")
         return data
@@ -141,7 +155,7 @@ class Updater:
         h, got = hashlib.sha256(), 0
         tmp = dest + ".part"
         try:
-            with urllib.request.urlopen(req, timeout=30, context=self._ctx) as r, open(tmp, "wb") as f:
+            with self._open(req, 30) as r, open(tmp, "wb") as f:
                 while True:
                     chunk = r.read(1 << 16)
                     if not chunk:
