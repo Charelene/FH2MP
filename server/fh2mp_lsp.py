@@ -2146,6 +2146,11 @@ class Handler(BaseHTTPRequestHandler):
         """Sets CTX.xuid / CTX.authed / CTX.tag from the session token. False (after answering) when the request must not go on."""
         CTX.authed, CTX.tag = False, ""
         CTX.shim = self.headers.get("X-FH2MP-Shim", "")          # the client's shim version ("1.0.0-rc2"); empty for clients that do not send it
+        need = LAUNCHER.config.get()["minShim"] if LAUNCHER is not None else "0.0.0"
+        if not launcher_api.version_at_least(CTX.shim, need):
+            log(f"  refused: shim {CTX.shim or '(none)'!r} is older than {need}")
+            self._reply_json(426, {"error": "shim_too_old", "message": f"FH2MP is out of date. Update the launcher and press Play (needs {need})."})
+            return False
         token = self.headers.get("X-FH2MP-Token", "")
         if AUTH is not None and AUTH.mode != "off":
             if token:
@@ -2414,6 +2419,7 @@ def setup(dsn=None):
     SOCIAL.bot_name = lambda x: SB.fake_name(x) or DRV.bot_name(x)          # the rivals' ids resolve to their racing-driver names, not Player#
     global RIV
     RIV = rivals.RivalCatalog(CARS, None, DB)
+    log(f"rival events with the card class enforced: {RIV.enforce_stored_classes()}")
     log(f"rival event texts refreshed: {RIV.refresh_texts()}")
     log(f"rival events: {len(RIV.events())} this rotation (month {RIV.serial()[0]}, re-roll {RIV.serial()[1]})")
     log(f"schema loaded from the database: {SC.count()} struct descriptors")

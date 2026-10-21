@@ -68,6 +68,18 @@ def log_failure(method, path, exc, detail):
         pass
 
 
+def log_note(text):
+    """One informational line in <cache>/launcher.log (what the launcher did before starting the game). Best effort, never raises."""
+    try:
+        f = os.path.join(paths.cache_dir(), "launcher.log")
+        if os.path.exists(f) and os.path.getsize(f) > 200_000:
+            os.replace(f, f + ".1")
+        with open(f, "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {text} launcher={__version__}\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 _USE_BUNDLED = False      # set once the Windows certificate store failed and the bundled roots worked: later calls start with those
 
 

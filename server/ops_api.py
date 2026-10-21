@@ -23,7 +23,7 @@ not carry proxy headers, so nothing reachable through the public reverse proxy c
     DELETE /ops/v1/notifications[/<id>]        /
     POST   /ops/v1/rivals/rotate               re-roll this month's events
     GET    /ops/v1/config                      launcher settings and registration mode
-    PUT    /ops/v1/config                      {"motd", "maintenance", "minLauncher", "links": {...}, "registration": open|invite|closed}
+    PUT    /ops/v1/config                      {"motd", "maintenance", "minLauncher", "minShim", "links": {...}, "registration": open|invite|closed}
     POST   /ops/v1/invites                     {"code"?, "uses", "note"} -> {"code"}   (only a hash is stored, so codes cannot be listed)
     GET    /ops/v1/auth-events[?limit=]        recent sign-ups, logins, bans, rate-limit hits
 
@@ -418,7 +418,7 @@ def _notifications(lsp, method, what, rest, body):
 def get_config(lsp):
     c = lsp.LAUNCHER.config.get()
     return {"env": lsp.AUTH.env, "auth": lsp.AUTH.mode, "registration": lsp.AUTH.registration,
-            "motd": c["motd"], "maintenance": c["maintenance"], "minLauncher": c["minLauncher"], "links": c["links"]}
+            "motd": c["motd"], "maintenance": c["maintenance"], "minLauncher": c["minLauncher"], "minShim": c["minShim"], "links": c["links"]}
 
 
 def _text(d, key, limit):
@@ -431,16 +431,17 @@ def _text(d, key, limit):
 def validate_config(d):
     """-> the settings to keep (unknown keys are errors, so a typo cannot silently do nothing)."""
     out = {}
-    unknown = set(d) - {"motd", "maintenance", "minLauncher", "links", "registration"}
+    unknown = set(d) - {"motd", "maintenance", "minLauncher", "minShim", "links", "registration"}
     if unknown:
         raise OpsError(400, "bad_request", f"unknown setting(s): {', '.join(sorted(unknown))}")
     for key, limit in (("motd", 500), ("maintenance", 300)):
         if key in d:
             out[key] = _text(d, key, limit)
-    if "minLauncher" in d:
-        if not isinstance(d["minLauncher"], str) or not re.fullmatch(r"\d{1,4}\.\d{1,4}\.\d{1,4}", d["minLauncher"]):
-            raise OpsError(400, "bad_request", "minLauncher must look like 1.2.3")
-        out["minLauncher"] = d["minLauncher"]
+    for key in ("minLauncher", "minShim"):
+        if key in d:
+            if not isinstance(d[key], str) or not re.fullmatch(r"\d{1,4}\.\d{1,4}\.\d{1,4}(-rc\d{1,3})?", d[key]):
+                raise OpsError(400, "bad_request", f"{key} must look like 1.2.3 or 1.2.3-rc4")
+            out[key] = d[key]
     if "links" in d:
         if not isinstance(d["links"], dict) or set(d["links"]) - set(LINK_KEYS):
             raise OpsError(400, "bad_request", f"links may only have: {', '.join(LINK_KEYS)}")

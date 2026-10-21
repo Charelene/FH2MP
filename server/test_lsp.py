@@ -70,6 +70,32 @@ class LayerCountTests(unittest.TestCase):
         self.assertEqual([f(v) for v in ("", "junk", "1.0.0-rc1", "1.0.0-rc2")], [False] * 4)
         self.assertEqual([f(v) for v in ("1.0.0-rc3", "1.0.0-rc10", "1.0.0", "1.0.1", "1.1.0-rc1", "1.0.0-rc2-debug")], [True] * 6)
 
+    def test_min_shim_turns_old_clients_away(self):
+        cfg = L.launcher_api.LauncherConfig()
+        self.assertEqual(cfg.get()["minShim"], "0.0.0")
+        old_launcher, old_auth = L.LAUNCHER, L.AUTH
+        L.LAUNCHER, L.AUTH = L.launcher_api.Ctx(None, None, cfg, lambda: 0), None
+        replies = []
+
+        class Req:
+            headers = {}
+            client_ip = lambda self: "127.0.0.1"          # noqa: E731
+            _reply_json = lambda self, status, obj, *a, **k: replies.append((status, obj["error"]))     # noqa: E731
+        try:
+            def ask(shim):
+                replies.clear()
+                r = Req()
+                r.headers = {"X-FH2MP-Shim": shim} if shim else {}
+                return L.Handler._identify(r), list(replies)
+            self.assertEqual(ask(""), (True, []))                          # off by default
+            cfg.overlay = {"minShim": "1.0.0-rc4"}
+            self.assertEqual(ask(""), (False, [(426, "shim_too_old")]))
+            self.assertEqual(ask("1.0.0-rc3"), (False, [(426, "shim_too_old")]))
+            self.assertEqual(ask("1.0.0-rc4"), (True, []))
+            self.assertEqual(ask("1.0.0"), (True, []))
+        finally:
+            L.LAUNCHER, L.AUTH = old_launcher, old_auth
+
     def test_layered_designs_are_recognised_even_when_the_stored_count_is_wrong(self):
         self.assertFalse(L.design_has_layers(0, b""))
         self.assertTrue(L.design_has_layers(12, b""))
@@ -343,6 +369,21 @@ class LspTests(unittest.TestCase):
         self.assertEqual(real, 1)
         self.assertEqual(mine["position"] > 0, True)
         self.assertAlmostEqual(L.SB.add_xp(x, 10.0) - L.SB.add_xp(x, 0.0), 0.0)
+
+    def test_stored_events_get_the_class_they_show_enforced(self):
+        with L.DB.tx() as c:
+            c.execute("DELETE FROM rival_events WHERE id=999001")
+            c.execute("INSERT INTO rival_events (id, month, reroll, idx, track, laps, length, kind, attrs, cls, name, trackname, description, created) "
+                      "VALUES (999001, 999, 0, 0, 849, 1, 2000.0, 'country', ?, 3, 'Made in Italy Cup', 'Nice West Circuit', '', 0)",
+                      (json.dumps({"CountryId": 4}),))
+        try:
+            self.assertEqual(L.RIV.enforce_stored_classes(), 1)
+            row = L.DB.one("SELECT attrs FROM rival_events WHERE id=999001")
+            self.assertEqual(json.loads(row["attrs"]), {"CountryId": 4, "CarClassId": 3})
+            self.assertEqual(L.RIV.enforce_stored_classes(), 0)            # nothing left to do
+        finally:
+            with L.DB.tx() as c:
+                c.execute("DELETE FROM rival_events WHERE id=999001")
 
     def test_rival_themes_enforce_the_class_they_show(self):
         # GitHub #2: "Made in Italy" showed an A class card but allowed every Italian car

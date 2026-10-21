@@ -20,6 +20,7 @@ Errors: {"error": "<code>", "message": "..."} with the HTTP status of auth.AuthE
 """
 import json
 import os
+import re
 import struct
 import time
 from urllib.parse import parse_qs, urlparse
@@ -37,11 +38,32 @@ DEFAULT_CONFIG = {
     "motd": "",
     "links": {"website": "https://forza.scuffed.af", "patreon": "", "discord": ""},
     "minLauncher": "0.0.0",
+    "minShim": "0.0.0",             # oldest shim (X-FH2MP-Shim) the web services answer; older ones are refused with a message
     "latestAzimuth": "0.9.10",
     # builds of azimuth.exe the shim's byte signatures were checked against: {"version", "sha256"}
     "supportedAzimuth": [],
     "maintenance": "",
 }
+
+
+_VER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:-rc(\d+))?(-debug)?$")
+
+
+def version_at_least(have, need):
+    """`have` ("1.0.0-rc3", "1.0.0", "1.0.0-rc4-debug") is the same as or later than `need`. A pre-release sorts before its release; our own
+    debug builds always pass; an empty or unreadable `have` fails unless nothing is required (need "0.0.0" or empty)."""
+    n = _VER_RE.match((need or "").strip())
+    if not n or n.groups()[:3] == ("0", "0", "0"):
+        return True
+    h = _VER_RE.match((have or "").strip())
+    if not h:
+        return False
+    if h.group(5):
+        return True
+
+    def key(m):
+        return (int(m[1]), int(m[2]), int(m[3]), 0 if m[4] is not None else 1, int(m[4] or 0))
+    return key(h) >= key(n)
 
 
 class LauncherConfig:
@@ -126,6 +148,17 @@ def clean_gamerpic(png):
     return pngtool.encode(w, h, ch, rows)
 
 
+def _require_launcher(ctx, client):
+    """Launchers announce themselves as "launcher/<version> <os>" at sign-in; one older than minLauncher is refused with a message it shows.
+    Other clients (test tools) are not held to it."""
+    m = re.match(r"^launcher/(\S+)", client)
+    c = ctx.config.get()
+    if m and not version_at_least(m.group(1), c["minLauncher"]):
+        site = (c["links"] or {}).get("website") or ""
+        raise auth.AuthError(426, "launcher_too_old", f"This launcher ({m.group(1)}) is out of date. Download the latest FH2MP launcher"
+                             + (f" from {site}" if site else "") + ".")
+
+
 def handle(ctx, method, path, headers, body, ip):
     """-> (status, object or bytes, content type). Never raises: errors become {"error", "message"}."""
     try:
@@ -145,7 +178,7 @@ def _route(ctx, method, path, headers, body, ip):
     if p == "/v1/launcher/config" and method == "GET":
         c = ctx.config.get()
         return 200, {"env": a.env, "motd": c["motd"], "links": c["links"], "minLauncher": c["minLauncher"],
-                     "latestAzimuth": c["latestAzimuth"], "supportedAzimuth": c["supportedAzimuth"], "maintenance": c["maintenance"],
+                     "minShim": c["minShim"], "latestAzimuth": c["latestAzimuth"], "supportedAzimuth": c["supportedAzimuth"], "maintenance": c["maintenance"],
                      "online": ctx.online_count(), "registration": a.registration, "auth": a.mode,
                      "lsp": ctx.lsp_public, "game": ctx.game_public, "time": int(time.time())}, ok
     if p == "/v1/auth/challenge" and method == "POST":
@@ -159,6 +192,7 @@ def _route(ctx, method, path, headers, body, ip):
         return 201, {"account": _account_json(acct)}, ok
     if p == "/v1/auth/login" and method == "POST":
         d = _json(body)
+        _require_launcher(ctx, str(d.get("client", "")))
         token, acct, ttl = a.login(ip, str(d.get("challenge", "")), str(d.get("pubkey", "")), str(d.get("sig", "")), str(d.get("client", "")))
         ctx.on_login(acct.xuid, ip)
         ctx.log(f"  v1 login {acct.xuid:#x} {acct.gamertag!r}")

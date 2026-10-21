@@ -46,7 +46,138 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(len(j.sign("test", "login", b"\x01" * 41, j.pubkey)), 64)
 
 
+class GamerpicSyncTests(unittest.TestCase):
+    """sync_gamerpic: the server's picture reaches both Gamerpic.png files at every start (GitHub issue: the mod's default picture stayed)."""
+
+    def fake(self, folder, api_png=b"PNGDATA" * 20, fail=False, kept=None):
+        from types import SimpleNamespace
+        cfg = tempfile.mkdtemp()
+        if kept:
+            with open(os.path.join(cfg, "gamerpic.png"), "wb") as f:
+                f.write(kept)
+
+        class Api:
+            def gamerpic(self, xuid):
+                if fail:
+                    raise OSError("offline")
+                return api_png
+        me = SimpleNamespace(settings={"azimuth_dir": folder}, account={"xuid": 7}, gamerpic_converter=None, api=lambda: Api())
+        return me, cfg
+
+    def test_writes_both_copies_then_leaves_them_alone(self):
+        from fh2mp_launcher import core, paths
+        folder = tempfile.mkdtemp()
+        os.makedirs(os.path.join(folder, "fh2extra"))
+        with open(os.path.join(folder, "fh2extra", "Gamerpic.png"), "wb") as f:
+            f.write(b"the mod's default picture")
+        me, cfg = self.fake(folder)
+        real = paths.config_dir
+        paths.config_dir = lambda: cfg
+        try:
+            self.assertIn("updated", core.Launcher.sync_gamerpic(me))
+            for rel in ("Gamerpic.png", os.path.join("fh2extra", "Gamerpic.png")):
+                with open(os.path.join(folder, rel), "rb") as f:
+                    self.assertEqual(f.read(), b"PNGDATA" * 20, rel)
+            self.assertEqual(core.Launcher.sync_gamerpic(me), "")          # nothing to do the second time
+        finally:
+            paths.config_dir = real
+
+    def test_offline_uses_the_kept_copy(self):
+        from fh2mp_launcher import core, paths
+        folder = tempfile.mkdtemp()
+        me, cfg = self.fake(folder, fail=True, kept=b"KEPT" * 30)
+        real = paths.config_dir
+        paths.config_dir = lambda: cfg
+        try:
+            self.assertIn("updated", core.Launcher.sync_gamerpic(me))
+            with open(os.path.join(folder, "Gamerpic.png"), "rb") as f:
+                self.assertEqual(f.read(), b"KEPT" * 30)
+        finally:
+            paths.config_dir = real
+
+
 class UpdaterTests(unittest.TestCase):
+    def _portable(self, members):
+        import tempfile
+        import zipfile
+        d = tempfile.mkdtemp()
+        here = os.path.join(d, "FH2MP")
+        os.makedirs(here)
+        exe = os.path.join(here, "fh2mp-launcher.exe")
+        open(exe, "wb").close()
+        zp = os.path.join(d, "p.zip")
+        with zipfile.ZipFile(zp, "w") as z:
+            for n in members:
+                z.writestr(n, "x")
+        return d, here, exe, zp
+
+    def test_portable_flavour_has_no_uninstaller(self):
+        d, here, exe, _zp = self._portable(["fh2mp-launcher.exe"])
+        real = (sys.platform, sys.executable, getattr(sys, "frozen", None))
+        sys.platform, sys.executable, sys.frozen = "win32", exe, True
+        try:
+            self.assertEqual(updater.launcher_flavour(), "windows-x64-portable")
+            open(os.path.join(here, "unins000.exe"), "wb").close()
+            self.assertEqual(updater.launcher_flavour(), "windows-x64-installer")
+        finally:
+            sys.platform, sys.executable = real[0], real[1]
+            del sys.frozen
+
+    def test_portable_update_stages_the_zip_and_hands_over_to_a_script(self):
+        import subprocess
+        d, here, exe, zp = self._portable(["fh2mp-launcher.exe", "_internal/x.dll"])
+        launched = []
+        real = (subprocess.Popen, sys.executable)
+        subprocess.Popen = lambda *a, **k: launched.append(a[0])
+        sys.executable = exe
+        try:
+            self.assertEqual(updater._apply_portable_zip(zp), "exit")
+            script = launched[0][-1]
+            text = open(script).read()
+            stage = os.path.dirname(script)
+            self.assertTrue(os.path.isfile(os.path.join(stage, "_internal", "x.dll")))
+            self.assertIn(f'robocopy "{stage}" "{here}"', text)
+            _d2, _h2, _e2, bad = self._portable(["../evil.txt", "fh2mp-launcher.exe"])
+            with self.assertRaises(updater.UpdateError):
+                updater._apply_portable_zip(bad)
+            _d3, _h3, _e3, nolauncher = self._portable(["other.txt"])
+            with self.assertRaises(updater.UpdateError):
+                updater._apply_portable_zip(nolauncher)
+        finally:
+            subprocess.Popen, sys.executable = real
+
+    def test_a_distrusted_system_store_falls_back_to_the_bundled_roots(self):
+        import ssl
+        import urllib.error
+        import urllib.request
+        calls = []
+        verify_error = ssl.SSLCertVerificationError("unable to get local issuer certificate")
+
+        class Reply:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self, n):
+                return b"{}"
+
+        def fake_urlopen(req, timeout=None, context=None):
+            calls.append(context)
+            if len(calls) == 1:
+                raise urllib.error.URLError(verify_error)
+            return Reply()
+        real = urllib.request.urlopen
+        urllib.request.urlopen = fake_urlopen
+        try:
+            up = updater.Updater()
+            self.assertEqual(up._get("https://api.github.com/x", 100), b"{}")
+        finally:
+            urllib.request.urlopen = real
+        self.assertEqual(len(calls), 2)
+        self.assertIsNot(calls[0], calls[1])          # the retry used the bundled roots (the AppImage's OpenSSL does not trust the system store)
+
     def setUp(self):
         self.sk = Ed25519PrivateKey.generate()
         import base64
@@ -91,6 +222,12 @@ class UpdaterTests(unittest.TestCase):
         self.assertTrue(updater.newer("1.0.0", "1.0.0-rc1"))
         self.assertFalse(updater.newer("1.0.0", "1.0.0"))
         self.assertFalse(updater.newer("0.9.9", "0.10.0"))
+        self.assertTrue(updater.newer("1.0.0-rc10", "1.0.0-rc9"))
+
+    def test_at_least(self):
+        self.assertTrue(all(updater.at_least(h, "0.0.0") for h in ("", "junk")))
+        self.assertEqual([updater.at_least(h, "1.0.0-rc4") for h in ("", "1.0.0-rc1", "1.0.0-rc3", "0.9.9")], [False] * 4)
+        self.assertEqual([updater.at_least(h, "1.0.0-rc4") for h in ("1.0.0-rc4", "1.0.0-rc10", "1.0.0", "1.0.0-rc2-debug")], [True] * 4)
 
     def test_download_checks_hash(self):
         import http.server
@@ -414,6 +551,29 @@ class DevModeTests(unittest.TestCase):
             self.assertTrue(lc.shim_pinned())                   # -debug is pinned even without the setting
             lc.manifest = {"tag": "v1.0.0", "shim": {"version": "1.0.0"}, "launcher": {"version": "1.0.0"}}
             self.assertIsNone(lc.update_status()["shim"])
+
+    def test_too_old_launcher_and_shim_are_held_back(self):
+        from fh2mp_launcher import core, version
+        from fh2mp_launcher.settings import Settings
+        os.environ.pop("FH2MP_DEV", None)
+        with tempfile.TemporaryDirectory() as d:
+            lc = core.Launcher(Settings(), load_identity=False)
+            lc.settings["azimuth_dir"] = d
+            lc.server = {"minLauncher": "0.0.0", "minShim": "0.0.0"}
+            self.assertFalse(lc.launcher_outdated())
+            lc.server = {"minLauncher": "99.0.0", "minShim": "1.0.0-rc4"}
+            self.assertTrue(lc.launcher_outdated())
+            self.assertEqual(lc.update_status()["minLauncherOk"], True)          # no manifest yet: nothing known
+            lc.refresh_server = lambda: lc.server
+            with self.assertRaises(core.PlayBlocked) as cm:
+                lc.prepare_play()
+            self.assertEqual(cm.exception.code, "launcher_outdated")
+            lc.server = {"minLauncher": version.__version__, "minShim": "1.0.0-rc4"}
+            self.assertFalse(lc.shim_outdated())                    # nothing installed: that is "no shim", not "old shim"
+            lc.shim_state = lambda: ("ours", "1.0.0-rc3")
+            self.assertTrue(lc.shim_outdated())
+            lc.shim_state = lambda: ("ours", "1.0.0-rc4")
+            self.assertFalse(lc.shim_outdated())
 
     def test_extra_env_reaches_the_game(self):
         from fh2mp_launcher import launch

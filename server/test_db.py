@@ -100,6 +100,8 @@ class ScoreTests(Base):
         free = scoreboard.ScoreStore(self.db, names, records={})
         capped = scoreboard.ScoreStore(self.db, names, records=wr)
         fast = lambda s: min(r["score"] for r in s.rows(10, 1, 1, 856, 1, 100, 5)[0] if r.get("fake"))
+        self.addCleanup(setattr, scoreboard, "FAKE_ROWS", scoreboard.FAKE_ROWS)
+        scoreboard.FAKE_ROWS = 40                                   # made-up rivals are off by default
         self.assertLess(fast(free), 44.564)                         # without records some made-up rival is faster than the record
         self.assertGreaterEqual(fast(capped), 44.564 * scoreboard.WR_FLOOR - 1e-9)
         other = scoreboard.ScoreStore(self.db, names, records=wr).rows(10, 1, 1, 857, 1, 100, 5)[0]

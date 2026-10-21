@@ -11,7 +11,7 @@ from ..api import ApiError
 from ..constants import AZIMUTH_PAGE, GITHUB_REPO
 from ..core import Launcher, PlayBlocked, friendly
 from ..version import __version__
-from . import theme
+from . import images, theme
 from .dialogs import ProfileDialog, RecoveryDialog, SettingsDialog, open_folder
 from .widgets import Avatar, Banner, Brand, Card, StatusRow, hrule
 from .wizard import Wizard
@@ -72,6 +72,7 @@ class MainWindow(QMainWindow):
         self.banner = Banner()
         self.banner.action.connect(self._banner_action)
         self._banner_kind = ""
+        self._update_asked = False
         outer.addWidget(self.banner)
         self.motd = Banner()
         outer.addWidget(self.motd)
@@ -260,6 +261,19 @@ class MainWindow(QMainWindow):
     # ---- startup and refresh
     def start(self):
         lc = self.lc
+        if not lc.identity_loaded:           # the keyring may be locked and wait for the user's password: show the window first, decide about the wizard after
+            self.say("Waiting for your system keyring (unlock it if a prompt appears)...", theme.WARN)
+
+            def loaded(_r):
+                self.say("")
+                self.start()
+
+            def failed(e):
+                lc.identity_loaded = True
+                self.say(f"Could not read the keyring: {e}", theme.WARN)
+                self.start()
+            run_async(lambda j: lc.load_identity(), loaded, failed)
+            return
         lc.ensure_game()
         self.render()
         if not lc.has_identity() or not lc.settings["azimuth_dir"]:
@@ -277,9 +291,29 @@ class MainWindow(QMainWindow):
             self._load_avatar()
         self.render()
 
+    def _require_update(self):
+        """The server no longer accepts this launcher: the only ways on are to update or to quit."""
+        if self._update_asked:
+            return
+        self._update_asked = True
+        box = QMessageBox(self)
+        box.setWindowTitle("Update required")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(f"This FH2MP launcher ({__version__}) is too old to connect.\nUpdate it to keep playing.")
+        upd = box.addButton("Update now", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Quit", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        self._update_asked = False
+        if box.clickedButton() is upd:
+            self.update_launcher()
+        else:
+            QApplication.quit()
+
     def refresh_server(self):
         def ok(_c):
             self.render()
+            if self.lc.launcher_outdated():
+                QTimer.singleShot(0, self._require_update)
 
         def fail(e):
             self.lc.server = {}
@@ -302,7 +336,7 @@ class MainWindow(QMainWindow):
 
         def fail(e):
             if "no release key" not in str(e):
-                self.say("")
+                self.say(f"Could not check for updates: {friendly(e)}", theme.WARN)
         run_async(lambda j: self.lc.check_updates(), ok, fail)
 
     def _load_avatar(self):
@@ -429,6 +463,7 @@ class MainWindow(QMainWindow):
         if self._busy or lc.game_running():
             return
         self.set_busy(True, "Checking everything...")
+        lc.gamerpic_converter = images.azimuth_png_from_bytes
 
         def work(job):
             if lc.settings["check_updates"]:
@@ -460,9 +495,12 @@ class MainWindow(QMainWindow):
                     if QMessageBox.question(self, "Untested Azimuth", f"{e}\nStart anyway?") == QMessageBox.StandardButton.Yes:
                         return self.on_play(force=True, azimuth_window=azimuth_window)
                     return self.say("Cancelled.")
-                if e.code == "no_shim":
+                if e.code in ("no_shim", "shim_outdated"):
                     self.say("Installing the shim...")
                     return self._shim_job(False)
+                if e.code == "launcher_outdated":
+                    self.say(str(e), theme.BAD)
+                    return self._require_update()
                 return self.say(str(e), theme.BAD)
             if isinstance(e, ApiError) and e.code == "unknown_account":
                 return self._signup_existing()

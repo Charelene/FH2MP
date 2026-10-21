@@ -3,8 +3,8 @@
 Stores the scores players submit (Scoreboard.SubmitScore / SubmitXpScore) and serves them back through
 GetBestScore / GetRival / GetRowsAnthem. Boards are keyed (scoreboardType, scoreType, trackId); `score`
 is a big-endian IEEE double carried as a u64 on the wire. Direction (lower is better for times, higher
-for everything else) is a guess by scoreType, see ASCENDING. Real rows are topped up with deterministic
-fake rivals (drawn from the Drivatar names) so a board is never empty; they are marked in the log only.
+for everything else) is a guess by scoreType, see ASCENDING. Boards can be topped up with deterministic
+fake rivals (drawn from the Drivatar names) when FH2MP_FAKE_ROWS > 0 (default 0: real players only); they are marked in the log only.
 Persistence: score_submissions / player_xp tables (db.py, PostgreSQL); best-per-player is a query, not a cached table.
 """
 import db
@@ -16,7 +16,7 @@ import time
 
 ASCENDING = {1}          # scoreTypes where a smaller score wins (lap/race times) [guess]
 XP_BOARD = (4, 9)        # (scoreboardType, scoreType) of the XP ladder [guess from SubmitXpScore traffic]
-FAKE_ROWS = 40
+FAKE_ROWS = int(os.environ.get("FH2MP_FAKE_ROWS", "0"))   # synthesized rivals topping up a board; 0 = real players only
 CLASS_AVG_KMH = (88, 103, 119, 134, 150, 166)   # km/h; first race data: A-class Huracan averaged ~144 km/h on route 8001
 EVENT_BOARDS = {3, 6}   # scoreboardType whose pivotId is the rival event id (Monthly = 3, Showcase = 6) and SubmitScore.gameScoreboardId matches it [C]
 CLASS_PIVOT_BOARDS = {1}   # scoreboardType whose pivotId is the car class (Festival Routes rivals: pivot 0..5 = D..S2) [inferred from GetRival calls]

@@ -41,7 +41,7 @@ def main(argv=None):
     f = QFont("Roboto")
     f.setPixelSize(14)
     app.setFont(f)
-    lc = Launcher()
+    lc = Launcher(load_identity=False)
     win = MainWindow(lc)
     win.resize(820, 560)
     win.show()
