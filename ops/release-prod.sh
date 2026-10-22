@@ -89,5 +89,9 @@ none=$(ssh_ "curl -s -o /dev/null -w '%{http_code}' -H 'X-ClassName: x' -H 'X-Me
 echo "shim rc3 -> $old (want 426), shim $ver -> $new (want anything but 426), no header -> $none (want 426)"
 [ "$old" = 426 ] && [ "$new" != 426 ] && [ "$none" = 426 ] || { echo "CHECK FAILED"; exit 1; }
 ssh_ 'systemctl is-active fh2mp-lsp fh2mp'
+# game server load (the send queue, issue 35): CPU of the service and the kernel's UDP receive drops; run this again after ~10 minutes of play
+ssh_ 'ps -o pcpu=,etime= -p "$(systemctl show -p MainPID --value fh2mp)" | awk "{print \"game server CPU \" \$1 \" % over \" \$2}";
+      awk "/^Udp:/{if(!h){split(\$0,k);h=1}else for(i=1;i<=NF;i++)if(k[i]==\"RcvbufErrors\")print \"udp RcvbufErrors since boot: \" \$i}" /proc/net/snmp'
 echo "done: production runs $tag and requires it."
+echo "Watch: RcvbufErrors should stay flat while lobbies are full. Fallback (one message per datagram): Environment=FH2MP_MAX_PACKET_BYTES=1 for fh2mp."
 echo "Rollback of the requirement only: put the old values into $cfg (backup $cfg.bak-*); it is re-read at once."

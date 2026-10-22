@@ -281,7 +281,8 @@ def apply_launcher_update(flavour, path):
             os.replace(staged, target)
             return "restart"
         if flavour == "linux-deb":
-            r = subprocess.run(["pkexec", "apt-get", "install", "-y", path], capture_output=True, timeout=600)
+            from . import launch
+            r = subprocess.run(["pkexec", "apt-get", "install", "-y", path], capture_output=True, timeout=600, env=launch.host_env())
             if r.returncode != 0:
                 raise UpdateError("the package could not be installed (" + (r.stderr or b"").decode("utf-8", "replace")[-200:].strip() + ")")
             return "restart"

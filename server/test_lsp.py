@@ -73,19 +73,31 @@ class LayerCountTests(unittest.TestCase):
     def test_min_shim_turns_old_clients_away(self):
         cfg = L.launcher_api.LauncherConfig()
         self.assertEqual(cfg.get()["minShim"], "0.0.0")
-        old_launcher, old_auth = L.LAUNCHER, L.AUTH
-        L.LAUNCHER, L.AUTH = L.launcher_api.Ctx(None, None, cfg, lambda: 0), None
+        old_launcher, old_auth, old_revoke = L.LAUNCHER, L.AUTH, L.on_revoke
+        revoked = []
+
+        class FakeAuth:
+            mode = "optional"
+
+            def authenticate(self, token, ip):
+                if token != "fh2.good":
+                    raise L.auth.AuthError(401, "invalid_token")
+                return type("A", (), {"xuid": 0x900000000abc, "gamertag": "Old Timer"})()
+        L.LAUNCHER, L.AUTH, L.on_revoke = L.launcher_api.Ctx(None, None, cfg, lambda: 0), FakeAuth(), revoked.append
+        L._OLD_REMOVED.clear()
+        ctx_before = {k: getattr(L.CTX, k, None) for k in ("xuid", "tag", "authed", "shim")}          # _identify writes the request context
         replies = []
 
         class Req:
             headers = {}
+            _remove_old_client = L.Handler._remove_old_client
             client_ip = lambda self: "127.0.0.1"          # noqa: E731
             _reply_json = lambda self, status, obj, *a, **k: replies.append((status, obj["error"]))     # noqa: E731
         try:
-            def ask(shim):
+            def ask(shim, token=""):
                 replies.clear()
                 r = Req()
-                r.headers = {"X-FH2MP-Shim": shim} if shim else {}
+                r.headers = {**({"X-FH2MP-Shim": shim} if shim else {}), **({"X-FH2MP-Token": token} if token else {})}
                 return L.Handler._identify(r), list(replies)
             self.assertEqual(ask(""), (True, []))                          # off by default
             cfg.overlay = {"minShim": "1.0.0-rc4"}
@@ -93,8 +105,19 @@ class LayerCountTests(unittest.TestCase):
             self.assertEqual(ask("1.0.0-rc3"), (False, [(426, "shim_too_old")]))
             self.assertEqual(ask("1.0.0-rc4"), (True, []))
             self.assertEqual(ask("1.0.0"), (True, []))
+            self.assertEqual(revoked, [])                                   # nobody was identified so far: nobody removed
+            self.assertEqual(ask("1.0.0-rc3", "fh2.bad")[0], False)
+            self.assertEqual(revoked, [])                                   # a token that does not check out proves nothing
+            self.assertEqual(ask("1.0.0-rc3", "fh2.good")[0], False)
+            self.assertEqual(revoked, [0x900000000abc])                     # a verified old client is taken out of the game ...
+            ask("1.0.0-rc3", "fh2.good")
+            self.assertEqual(len(revoked), 1)                               # ... once a minute, not on every request
+            self.assertEqual(ask("1.0.0-rc4", "fh2.good")[0], True)
+            self.assertEqual(len(revoked), 1)                               # an up-to-date client is left alone
         finally:
-            L.LAUNCHER, L.AUTH = old_launcher, old_auth
+            L.LAUNCHER, L.AUTH, L.on_revoke = old_launcher, old_auth, old_revoke
+            for k, v in ctx_before.items():
+                setattr(L.CTX, k, v)
 
     def test_layered_designs_are_recognised_even_when_the_stored_count_is_wrong(self):
         self.assertFalse(L.design_has_layers(0, b""))
@@ -368,7 +391,7 @@ class LspTests(unittest.TestCase):
         rows, mine, real, fake = L.SB.rows(x, 3, 1, 7, 1, 20, 1000)
         self.assertEqual(real, 1)
         self.assertEqual(mine["position"] > 0, True)
-        self.assertAlmostEqual(L.SB.add_xp(x, 10.0) - L.SB.add_xp(x, 0.0), 0.0)
+        self.assertAlmostEqual(L.SB.add_xp(x, 10.0)[0] - L.SB.add_xp(x, 0.0)[0], 0.0)
 
     def test_stored_events_get_the_class_they_show_enforced(self):
         with L.DB.tx() as c:

@@ -305,6 +305,106 @@ class UpdaterTests(unittest.TestCase):
         srv.shutdown()
 
 
+class HostEnvTests(unittest.TestCase):
+    """GitHub #10: Proton started from the AppImage/PyInstaller launcher inherited the bundle's old libstdc++ and Vulkan did not load."""
+
+    def setUp(self):
+        from fh2mp_launcher import launch
+        self.launch = launch
+        self.bundle = tempfile.mkdtemp()
+        self.addCleanup(lambda: delattr(sys, "_MEIPASS") if hasattr(sys, "_MEIPASS") else None)
+        sys._MEIPASS = self.bundle
+
+    @unittest.skipIf(sys.platform == "win32", "Linux only")
+    def test_bundle_is_removed_and_the_original_restored(self):
+        env = self.launch.host_env({"LD_LIBRARY_PATH": self.bundle + ":/usr/lib", "LD_LIBRARY_PATH_ORIG": "/opt/mine",
+                                    "PATH": "/usr/bin:" + self.bundle, "HOME": "/home/x", "APPDIR": "/tmp/.mount_x", "_PYI_ARCHIVE_FILE": "x"})
+        self.assertEqual(env["LD_LIBRARY_PATH"], "/opt/mine")
+        self.assertNotIn("LD_LIBRARY_PATH_ORIG", env)
+        self.assertEqual(env["PATH"], "/usr/bin")
+        self.assertEqual(env["HOME"], "/home/x")
+        self.assertNotIn("APPDIR", env)
+        self.assertNotIn("_PYI_ARCHIVE_FILE", env)
+
+    @unittest.skipIf(sys.platform == "win32", "Linux only")
+    def test_nothing_left_of_the_bundle_means_no_variable_and_other_entries_stay(self):
+        env = self.launch.host_env({"LD_LIBRARY_PATH": self.bundle + "/sub:" + self.bundle})
+        self.assertNotIn("LD_LIBRARY_PATH", env)
+        env = self.launch.host_env({"LD_LIBRARY_PATH": "/usr/lib32:" + self.bundle, "QT_PLUGIN_PATH": self.bundle + "/qt"})
+        self.assertEqual(env["LD_LIBRARY_PATH"], "/usr/lib32")
+        self.assertNotIn("QT_PLUGIN_PATH", env)
+
+
+class ProtonPathTests(unittest.TestCase):
+    """Issue 37: Settings > Proton pointed at the folder; executing the folder failed with EACCES."""
+
+    def test_folder_script_and_errors(self):
+        from fh2mp_launcher import launch
+        d = tempfile.mkdtemp()
+        self.assertEqual(launch.resolve_proton(""), "")
+        with self.assertRaises(launch.LaunchError):
+            launch.resolve_proton(d)                              # a folder without the script
+        script = os.path.join(d, "proton")
+        open(script, "w").write("#!/bin/sh\n")
+        os.chmod(script, 0o644)
+        with self.assertRaises(launch.LaunchError):
+            launch.resolve_proton(d)                              # present but not executable
+        if sys.platform != "win32":
+            os.chmod(script, 0o755)
+            self.assertEqual(launch.resolve_proton(d), script)    # the folder is accepted
+            self.assertEqual(launch.resolve_proton(d + "/"), script)
+            self.assertEqual(launch.resolve_proton(script), script)
+
+    @unittest.skipIf(sys.platform == "win32", "Linux only")
+    def test_build_command_runs_the_script_inside_the_folder(self):
+        from fh2mp_launcher import launch
+        from fh2mp_launcher.settings import Settings
+        d = tempfile.mkdtemp()
+        script = os.path.join(d, "proton")
+        open(script, "w").write("#!/bin/sh\n")
+        os.chmod(script, 0o755)
+        st = Settings(os.path.join(d, "s.json"))
+        st["proton"], st["launch_mode"], st["prefix"] = d, "proton", os.path.join(d, "pfx")
+        argv, env, _ = launch.build_command(st, d)
+        self.assertEqual(argv[:2], [script, "run"])
+        self.assertEqual(env["WINEDLLOVERRIDES"], "winmm=n,b")
+
+
+class NoProtonTests(unittest.TestCase):
+    @unittest.skipIf(sys.platform == "win32", "Linux only")
+    def test_auto_never_picks_the_system_wine(self):
+        from unittest import mock
+        from fh2mp_launcher import launch
+        from fh2mp_launcher.settings import Settings
+        d = tempfile.mkdtemp()
+        st = Settings(os.path.join(d, "s.json"))
+        with mock.patch.object(launch, "find_proton", return_value=""), mock.patch.object(launch.shutil, "which", return_value="/usr/bin/wine"):
+            st["launch_mode"] = "auto"
+            with self.assertRaises(launch.LaunchError) as e:
+                launch.build_command(st, d)
+            self.assertIn("No Proton found", str(e.exception))
+            st["launch_mode"] = "wine"                       # still available when asked for
+            self.assertEqual(launch.build_command(st, d)[0][0], "/usr/bin/wine")
+
+
+class GpuCheckTests(unittest.TestCase):
+    """GitHub #10: Azimuth stops at CreateDXGIFactory2 when `proton run` starts it outside Steam on AMD."""
+
+    def test_gpu_check_failure_reads_the_last_session_only(self):
+        import time
+        from fh2mp_launcher import launch
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "data", "logs"))
+        log = os.path.join(d, "data", "logs", "azimuth.log")
+        open(log, "w").write("1 tid=1 session A began x\n2 tid=2 STOPPED CreateDXGIFactory2 HRESULT=0x80004005 at azimuth+0x595c3\n"
+                             "3 tid=1 session B began x\n4 tid=1 graphics adapter AMD\n")
+        self.assertFalse(launch.gpu_check_failure(d))               # the failure belongs to the earlier session
+        open(log, "a").write("5 tid=2 STOPPED CreateDXGIFactory2 HRESULT=0x80004005 at azimuth+0x595c3\n")
+        self.assertTrue(launch.gpu_check_failure(d))
+        self.assertFalse(launch.gpu_check_failure(d, since=time.time() + 100))   # a log older than this launch says nothing
+        self.assertFalse(launch.gpu_check_failure(tempfile.mkdtemp()))
+
+
 class ShimTests(unittest.TestCase):
     DLL = b"MZ....FH2MP-SHIM-VERSION:0.1.0:END...."
 

@@ -16,6 +16,38 @@ class LaunchError(Exception):
     pass
 
 
+# Search-path variables the packaging (PyInstaller bootloader, AppImage) points at the launcher's own bundle
+_BUNDLE_PATH_VARS = ("LD_LIBRARY_PATH", "LD_PRELOAD", "PATH", "XDG_DATA_DIRS", "QT_PLUGIN_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH",
+                     "GIO_EXTRA_MODULES", "GDK_PIXBUF_MODULE_FILE", "PYTHONHOME", "PYTHONPATH")
+_APPIMAGE_VARS = ("APPDIR", "APPIMAGE", "ARGV0", "OWD")
+
+
+def host_env(env=None):
+    """The environment for a program that is not part of the launcher (Proton, Wine, pkexec): without the launcher's own bundle in it.
+    The PyInstaller bootloader puts the bundle's libraries first in LD_LIBRARY_PATH (the original is kept in LD_LIBRARY_PATH_ORIG) and an AppImage
+    adds its own paths. The bundle's libstdc++ is older than the one a current Mesa needs (GLIBCXX_3.4.32), so Vulkan failed to load inside
+    Proton and Azimuth said "Your graphics card or driver is not supported" (CreateDXGIFactory2 0x80004005, GitHub #10)."""
+    env = dict(os.environ if env is None else env)
+    if WIN:
+        return env
+    orig = env.pop("LD_LIBRARY_PATH_ORIG", None)
+    if orig is not None:
+        env["LD_LIBRARY_PATH"] = orig
+    bundle = [os.path.realpath(p) for p in (getattr(sys, "_MEIPASS", ""), env.get("APPDIR", "")) if p]
+    for k in _BUNDLE_PATH_VARS:
+        if k in env:
+            keep = [e for e in env[k].split(":") if e and not any(os.path.realpath(e) == b or os.path.realpath(e).startswith(b + os.sep) for b in bundle)]
+            if keep:
+                env[k] = ":".join(keep)
+            else:
+                del env[k]
+    for k in _APPIMAGE_VARS:
+        env.pop(k, None)
+    for k in [k for k in env if k.startswith("_PYI_") or k == "_MEIPASS2"]:
+        del env[k]
+    return env
+
+
 def find_proton():
     """The newest `proton` script in the usual Steam compatibility-tool folders."""
     roots = ["~/.steam/steam/compatibilitytools.d", "~/.local/share/Steam/compatibilitytools.d", "/usr/share/steam/compatibilitytools.d",
@@ -29,6 +61,48 @@ def find_proton():
         nums = [int(n) for n in re.findall(r"\d+", os.path.basename(os.path.dirname(f)))]
         return (not nums, nums, f)
     return max(found, key=rank) if found else ""
+
+
+def gpu_check_failure(folder, since=0.0):
+    """True when Azimuth's last session in `folder` stopped at the graphics check (CreateDXGIFactory2: "Your graphics card or driver is not
+    supported"). `since` = time the game was started; an older log (mtime before it) says nothing about this run."""
+    log = os.path.join(folder, "data", "logs", "azimuth.log")
+    try:
+        if os.path.getmtime(log) < since:
+            return False
+        with open(log, encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()[-200:]
+    except OSError:
+        return False
+    start = max((i for i, ln in enumerate(lines) if " session " in ln and " began " in ln), default=0)
+    return any("STOPPED CreateDXGIFactory2" in ln for ln in lines[start:])
+
+
+def gpu_check_advice(settings):
+    """What to tell the player when the game stopped at the graphics check (empty on Windows). Evidence (GitHub #10): on AMD machines every
+    session started by `proton run` outside Steam stops there, every session started from Steam finds the GPU, with any Proton version
+    (a Mint tester's log: GE-Proton11-9, Experimental and Valve's Proton 11.0 all work from Steam and fail outside it). Cause not found."""
+    if WIN:
+        return ""
+    return ("Azimuth stopped at the graphics check (\"Your graphics card or driver is not supported\"). Your GPU is probably fine: on some "
+            "AMD systems the game only starts from Steam. Workaround: leave this launcher open, add Azimuth to Steam as a non-Steam game with "
+            "the launch option WINEDLLOVERRIDES=\"winmm=n,b\" %command% , and start it from Steam.")
+
+
+def resolve_proton(path):
+    """The `proton` script for what the player typed in Settings: the script itself, or the Proton folder (Heroic's GE-Proton-latest/, a
+    compatibilitytools.d entry) with the script inside. "" for no setting. Raises LaunchError, saying what to pick, when it cannot run
+    (GitHub #10 / issue 37: a folder was executed as if it were the script and the game "could not start: Permission denied")."""
+    path = os.path.expanduser((path or "").strip())
+    if not path:
+        return ""
+    if os.path.isdir(path):
+        path = os.path.join(path, "proton")
+    if not os.path.isfile(path):
+        raise LaunchError(f"No `proton` script at {path}. In Settings, pick the `proton` file inside your Proton or GE-Proton folder.")
+    if not os.access(path, os.X_OK):
+        raise LaunchError(f"{path} is not executable. Run `chmod +x` on it, or pick the `proton` script of another Proton version.")
+    return path
 
 
 def steam_roots():
@@ -74,7 +148,8 @@ def build_command(settings, folder, extra_args=(), skip_launcher=True):
             raise LaunchError("Set the launch command in Settings, or pick Proton/Wine.")
         argv = [a.replace("{exe}", exe).replace("{dir}", folder) for a in shlex.split(tpl)]
         return argv, {"WINEDLLOVERRIDES": "winmm=n,b"}, folder
-    proton = os.path.expanduser(settings["proton"]) if settings["proton"] else find_proton()
+    proton = resolve_proton(settings["proton"]) if mode in ("auto", "proton") else ""
+    proton = proton or (find_proton() if mode in ("auto", "proton") else "")
     if mode in ("auto", "proton") and proton:
         # Never fall back to the system Wine just because no Steam prefix was found: distro Wine is often too old for Azimuth
         # ("Your graphics card or driver is not supported", CreateDXGIFactory2). Proton makes its own prefix on first run.
@@ -86,18 +161,21 @@ def build_command(settings, folder, extra_args=(), skip_launcher=True):
         return [proton, "run", exe, *args], env, folder
     if mode == "proton":
         raise LaunchError("Proton not found. In Settings, set the path to the `proton` script (for example a Proton 11 or GE-Proton folder).")
-    if mode in ("auto", "wine") and shutil.which("wine"):
+    if mode == "wine" and shutil.which("wine"):      # only when the player asks for it: distro Wine fails Azimuth (CreateDXGIFactory2, GitHub #10)
         env = {"WINEDLLOVERRIDES": "winmm=n,b"}
         if settings["prefix"]:
             env["WINEPREFIX"] = os.path.expanduser(settings["prefix"])
         return [shutil.which("wine"), exe, *args], env, folder
-    raise LaunchError("Could not work out how to run Azimuth on this system (no Proton found)"
-                      ". In Settings, choose the Proton script, or enter a custom launch command.")
+    if mode == "wine":
+        raise LaunchError("Wine not found. In Settings, install Wine, or choose Proton.")
+    raise LaunchError("No Proton found. Install Proton (Steam's Proton 11, or GE-Proton) and pick its `proton` script in Settings. "
+                      "The system Wine is not used automatically: it usually fails with \"Your graphics card or driver is not supported\". "
+                      "You can also choose Wine yourself or enter a custom launch command in Settings.")
 
 
 def start(settings, folder, extra_args=(), skip_launcher=True, extra_env=None):
     argv, env_add, cwd = build_command(settings, folder, extra_args, skip_launcher)
-    env = dict(os.environ)
+    env = host_env()
     env.update(env_add)
     env.update(extra_env or {})          # e.g. FH2MP_SERVER_PORT from the server; the developer's own lines below still win
     for line in (settings["extra_env"] or "").splitlines():            # developer option: KEY=VALUE per line

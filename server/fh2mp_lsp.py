@@ -327,7 +327,9 @@ def sb_submit_score(req):
     d = req["data"]
     s = SB.submit(xuid, tag, req["type"], d)
     if s is None:
-        log(f"  SubmitScore board=({d['scoreboardType']},{req['type']}) track={d['trackId']}: ignored, score is not a finite number")
+        why = "class X/R not allowed on a Rivals board" if (d["scoreboardType"] in scoreboard.EVENT_BOARDS and
+                                                             d["carClassId"] in scoreboard.MAXED_CLASSES) else "score is not a finite number"
+        log(f"  SubmitScore board=({d['scoreboardType']},{req['type']}) track={d['trackId']}: ignored, {why}")
         return None
     log(f"  SubmitScore board=({d['scoreboardType']},{req['type']}) track={d['trackId']} car={d['carId']} "
         f"score={s['score']:.3f} clean={d['isClean']} -> ghost upload for score {s['score_id'].hex()[:8]}")
@@ -420,8 +422,11 @@ def sb_download_file(req):
 
 def sb_submit_xp(req):
     xuid, _ = _me()
-    total = SB.add_xp(xuid, req["xp"])
-    log(f"  SubmitXpScore +{req['xp']:g} -> total {total:g}")
+    total, verdict, reason = SB.add_xp(xuid, req["xp"])
+    if verdict == "ok":
+        log(f"  SubmitXpScore +{req['xp']:g} -> total {total:g} user={xuid:#x}")
+    else:
+        log(f"  SubmitXpScore +{req['xp']:g} REJECTED ({reason}), total stays {total:g} user={xuid:#x}")
     return None
 
 
@@ -438,14 +443,16 @@ def sb_best(req):
 
 def sb_rival(req):
     xuid, _ = _me()
-    r = SB.rival_for(xuid, req["scoreboardType"], req["scoreType"], req["trackId"], req["pivotId"])
+    r = SB.rival_for(xuid, req["scoreboardType"], req["scoreType"], req["trackId"], req["pivotId"],
+                    req["rivalXuid"])
     res = xls.default_struct(SC, SC.call_struct("ForzaWebServicesScoreboardGetRival_Results"))
     if r is None:
         log("  GetRival: no rival")
         return res
     sd = res["rival"]["scoreData"]
     _score_row(r, sd)
-    sd["bounty"] = res["rival"]["bounty"] = SB.bounty_for(_bounty_track(req), r["position"])
+    # your own ghost (you are #1, or picked yourself) pays nothing: otherwise racing it would farm credits
+    sd["bounty"] = res["rival"]["bounty"] = 0 if r["xuid"] == xuid else SB.bounty_for(_bounty_track(req), r["position"])
     log(f"  GetRival board=({req['scoreboardType']},{req['scoreType']}) event={req['rivalEventId']} "
         f"track={req['trackId']} pivot={req['pivotId']} rivalXuid={req['rivalXuid']:#x}: {r['tag']} {r['score']:.3f}")
     return res
@@ -2142,6 +2149,26 @@ class Handler(BaseHTTPRequestHandler):
         status, obj = ops_api.handle(OPS, sys.modules[__name__], self.command, self.path, self.headers, body, self.client_address[0], proxied)
         self._reply_json(status, obj, extra=[("Cache-Control", "no-store")])
 
+    def _remove_old_client(self):
+        """A client with a shim below minShim that proves who it is (a live launcher token) is also taken out of the game: its live
+        connections end and it stays out until it signs in again from an up-to-date launcher (on_revoke / on_login). Only a verified token
+        counts, because anyone can send an X-UserId header for somebody else. At most once a minute per player."""
+        token = self.headers.get("X-FH2MP-Token", "")
+        if not token or AUTH is None:
+            return
+        try:
+            acct = AUTH.authenticate(token, self.client_ip())
+        except auth.AuthError:
+            return
+        now = time.monotonic()
+        if now - _OLD_REMOVED.get(acct.xuid, -1e9) < 60:
+            return
+        _OLD_REMOVED[acct.xuid] = now
+        if len(_OLD_REMOVED) > 20000:
+            _OLD_REMOVED.clear()
+        log(f"  old shim {CTX.shim or '(none)'!r}: removing {acct.gamertag!r} {acct.xuid:#x} from the game")
+        on_revoke(acct.xuid)
+
     def _identify(self):
         """Sets CTX.xuid / CTX.authed / CTX.tag from the session token. False (after answering) when the request must not go on."""
         CTX.authed, CTX.tag = False, ""
@@ -2149,6 +2176,7 @@ class Handler(BaseHTTPRequestHandler):
         need = LAUNCHER.config.get()["minShim"] if LAUNCHER is not None else "0.0.0"
         if not launcher_api.version_at_least(CTX.shim, need):
             log(f"  refused: shim {CTX.shim or '(none)'!r} is older than {need}")
+            self._remove_old_client()
             self._reply_json(426, {"error": "shim_too_old", "message": f"FH2MP is out of date. Update the launcher and press Play (needs {need})."})
             return False
         token = self.headers.get("X-FH2MP-Token", "")
@@ -2444,6 +2472,9 @@ def announce_auth(xuid, ip):
     if len(_AUTH_ANNOUNCED) > 20000:
         _AUTH_ANNOUNCED.clear()
     xbl.announce_auth(xuid, ip)
+
+
+_OLD_REMOVED = {}
 
 
 def on_login(xuid, ip):

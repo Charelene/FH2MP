@@ -568,6 +568,7 @@ static DWORD WINAPI xhr_thread(LPVOID param)
     wchar_t hdrline[600];
     int i, k;
     HRESULT hr = S_OK;
+    const char *stage = "winhttp load";
 
     /* split "scheme://host[:port]/path" */
     orig_host[0] = 0;
@@ -604,6 +605,7 @@ static DWORD WINAPI xhr_thread(LPVOID param)
     log_raw("\n");
     xhr_dump_request(x, path);
 
+    stage = "open";
     ses = g_wh.open(L"fh2mp", WINHTTP_ACCESS_TYPE_NO_PROXY, NULL, NULL, 0);
     if (!ses) {
         hr = HRESULT_FROM_WIN32(GetLastError());
@@ -612,11 +614,13 @@ static DWORD WINAPI xhr_thread(LPVOID param)
     if (g_wh.timeouts) {
         g_wh.timeouts(ses, 3000, 3000, 10000, 30000);
     }
+    stage = "connect";
     con = g_wh.connect(ses, g_lsp_host, (INTERNET_PORT)g_lsp_port, 0);
     if (!con) {
         hr = HRESULT_FROM_WIN32(GetLastError());
         goto fail;
     }
+    stage = "open request";
     req = g_wh.openreq(con, x->method, path, NULL, NULL, NULL, g_lsp_secure ? WINHTTP_FLAG_SECURE : 0);
     if (!req) {
         hr = HRESULT_FROM_WIN32(GetLastError());
@@ -646,6 +650,7 @@ static DWORD WINAPI xhr_thread(LPVOID param)
     }
     g_wh.addhdr(req, L"X-FH2MP-Shim: " FH2MP_WSTR(FH2MP_SHIM_VERSION), (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
 
+    stage = "send/receive";
     if (!g_wh.send(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, x->body, x->nbody, x->nbody, 0) || !g_wh.recv(req, NULL)) {
         hr = HRESULT_FROM_WIN32(GetLastError());
         goto fail;
@@ -664,6 +669,7 @@ static DWORD WINAPI xhr_thread(LPVOID param)
         }
     }
     x->status = status;
+    stage = "read body";
     for (;;) {
         DWORD got = 0;
         if (cap - ndata < 4096) {
@@ -714,6 +720,26 @@ static DWORD WINAPI xhr_thread(LPVOID param)
     goto done;
 
 fail:
+    {
+        /* release builds keep this line ("fail"): without it a player whose game never reaches the server has nothing to send us */
+        static volatile LONG logged;
+        if (InterlockedIncrement(&logged) <= 20) {
+            log_begin();
+            log_raw("xhr#");
+            log_dec(x->seq);
+            log_raw(" failed at ");
+            log_raw(stage);
+            log_raw(": hr=0x");
+            log_hex((unsigned long)hr, 8);
+            log_raw(" server ");
+            log_wide(g_lsp_host);
+            log_raw(":");
+            log_dec(g_lsp_port);
+            log_raw(" (orig host ");
+            log_wide(orig_host);
+            log_raw(")\n");
+        }
+    }
     if (!InterlockedCompareExchange(&x->aborted, 0, 0)) {
         xhr_signal_error(x, hr);
     }
@@ -879,13 +905,30 @@ static const void *const g_xhr_vtbl[] = {
 /* ------------------------------------------------------------------ CoCreateInstance hook */
 
 #define FH2_COCREATE_IAT_RVA 0x1dd0ea0u
+static unsigned char *g_cocreate_img;
 
 static HRESULT WINAPI hooked_cocreate(const GUID *clsid, void *outer, DWORD ctx, const GUID *iid, void **out)
 {
     if (clsid && xhr_guid_eq(clsid, &XHR_CLSID_FREETHREADED) && !outer) {
         xhr_obj *x = (xhr_obj *)xhr_alloc(sizeof *x);
         HRESULT hr;
+        static volatile LONG first;
 
+        if (InterlockedExchange(&first, 1) == 0) {
+            /* compared with the "import hooked" line: a game that asked before the hook got Azimuth's offline stub instead */
+            unsigned char *ra = (unsigned char *)__builtin_return_address(0);
+            log_begin();
+            log_raw("xhr: first request object through the hook, caller ");
+            if (g_cocreate_img && ra >= g_cocreate_img && ra < g_cocreate_img + 0x4000000u) {
+                log_raw("game+0x");
+                log_hex((unsigned long long)(ra - g_cocreate_img), 8);
+            } else {
+                log_raw("0x");
+                log_hex((unsigned long long)ra, 16);
+                log_raw(" (XSAPI or other)");
+            }
+            log_raw("\n");
+        }
         if (!x) {
             return E_OUTOFMEMORY;
         }
@@ -918,12 +961,19 @@ static void patch_game_cocreate(unsigned char *img)
         return;
     }
     g_real_cocreate = (co_create_fn)*slot;
+    g_cocreate_img = img;
     *slot = (void *)hooked_cocreate;
     VirtualProtect(slot, 8, old, &old);
     if (!announced) {
         announced = 1;
         log_begin();
-        log_raw("xhr: game CoCreateInstance import hooked; XMLHTTP60 requests go to the local LSP server\n");
+        log_raw("xhr: game CoCreateInstance import hooked (was 0x");
+        log_hex((unsigned long long)g_real_cocreate, 16);
+        log_raw("); XMLHTTP60 requests go to the local LSP server\n");
+    } else {
+        /* Azimuth rebound the slot after we hooked it: anything the game created in between went to its offline stub */
+        log_begin();
+        log_raw("xhr: game CoCreateInstance import was rebound, hooked again\n");
     }
 }
 

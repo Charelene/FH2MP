@@ -1,6 +1,6 @@
 # FH2MP: Forza Horizon 2 online, back from the dead (sort of)
 
-> **v1.0.0-rc4, a pre-release.** It works and it is young: expect crashes, desyncs and rough edges.
+> **v1.0.0-rc5, a pre-release.** It works and it is young: expect crashes, desyncs and rough edges.
 > Known problems and workarounds: [KNOWN_ISSUES.md](KNOWN_ISSUES.md). Changes per version: [Releases](https://github.com/Charelene/FH2MP/releases).
 
 Microsoft switched off Forza Horizon 2's online services on 2023-08-22. FH2MP brings them back: the **real game client**, speaking the

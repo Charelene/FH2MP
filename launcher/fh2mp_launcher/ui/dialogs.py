@@ -414,6 +414,12 @@ class SettingsDialog(QDialog):
         if d and not os.path.isfile(os.path.join(d, "azimuth.exe")):
             QMessageBox.warning(self, "Azimuth folder", "azimuth.exe isn't in that folder.")
             return
+        if sys.platform != "win32" and self.mode.currentData() in ("auto", "proton"):     # a stale path must not block Wine / custom
+            try:
+                launch.resolve_proton(self.proton.text())
+            except launch.LaunchError as e:
+                QMessageBox.warning(self, "Proton", str(e))
+                return
         s["azimuth_dir"] = d
         s["extra_options"] = self.extra_opts.isChecked()
         if paths.is_dev():                          # players cannot change the channel or the server

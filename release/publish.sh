@@ -31,7 +31,7 @@ echo "clean ($(git diff --cached --name-only | wc -l) files)"
 echo "== tests"
 FH2MP_NO_KEYRING=1 launcher/.venv/bin/python launcher/tests/test_core.py 2>&1 | tail -2
 echo "== server tests (no database needed)"
-for t in server/test_security.py server/test_race_end.py server/test_freeroam_tag_grant.py; do
+for t in server/test_security.py server/test_race_end.py server/test_freeroam_tag_grant.py server/test_send_queue.py server/test_parts.py server/test_xp_audit.py; do
   [ -f "$t" ] || continue
   echo "$t: $(python3 -W ignore "$t" 2>&1 | tail -1)"
 done

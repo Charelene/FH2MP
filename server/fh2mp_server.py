@@ -138,6 +138,8 @@ CONSOLE_BOOL_VAR_NAMES = {0: "RenderReady", 1: "SessionEntryFinalised", 2: "Part
                           6: "HasGrid"}
 RACE_INVITE_SECONDS = 20.0          # leader requested a race: wait this long for others, then start
 RACE_JOIN_GRACE_SECONDS = 90.0      # ...but keep waiting this long for clients that accepted and are picking a car
+EVENT_BLOCK_MAX_SECONDS = 1200.0    # a running event stops blocking new race requests after this long
+EVENT_LOAD_TIMEOUT_SECONDS = float(os.environ.get("FH2MP_EVENT_LOAD_TIMEOUT", "60"))   # a participant that has not reported HasLoadedCars this long after the event start is dropped from it
 MSG_OBJECT_DELETE = 9
 MSG_OBJECT_REQUEST_OWNERSHIP = 10   # client -> server: router:4 | typeId | key (A=1,B=0 transfer id)
 MSG_OBJECT_GRANT_OWNERSHIP = 11     # server -> client: router:4 | key | seq:8 | size:14 (+size bits)
@@ -151,15 +153,15 @@ MSG_SCORE_KEYFRAME = 45             # key | 5 x blob | u32 | 3 x u8 | 3 x bool (
 RACE_FLAGS_CLEAR_SECONDS = 4.0       # after InRace=0, drop RaceReady/ParticipantsSelected as well
 RACE_LAST_FINISHER_SECONDS = 30.0   # after the first finisher the others get this long (client UI: RACE ENDS IN)
 CAR_PREDICTION_BODY_BITS = 710      # CarPredictionFull body, see the handler
-CAR_POLICY = os.environ.get("FH2MP_CAR_POLICY", "kick")   # a car in BLOCKED_CARS (traffic vehicles, hidden variants): off = ignore, log = report it, kick = withhold it and end the account's connections
-PART_POLICY = os.environ.get("FH2MP_PART_POLICY", "log")     # a car whose part list holds an id that is not in the game data (it crashes the other clients that build its engine): off / log / kick
+CAR_POLICY = os.environ.get("FH2MP_CAR_POLICY", "kick")   # a car in BLOCKED_CARS (traffic vehicles): off = ignore, log = report it, kick = withhold it and end the account's connections
+PART_POLICY = os.environ.get("FH2MP_PART_POLICY", "fix")     # a car whose part list holds an id that is not in the game data (it crashes the other clients that build it): fix = relay it with stock parts / log / kick / off
 UNKNOWN_CAR_POLICY = os.environ.get("FH2MP_UNKNOWN_CAR_POLICY", "log")   # a car id that is in neither the base catalog nor data/dlc_cars.txt (not in the game): off / log / kick
 SPEED_POLICY = os.environ.get("FH2MP_SPEED_POLICY", "log")   # speed check (parked, see docs/anticheat-todo.md): off / log / kick; log only by default
 CAR_CAPTURE = bool(os.environ.get("FH2MP_CAR_CAPTURE"))   # dev only: log every car object message and every speed measurement (ground truth for the checks)
 ROUTER_CAR = 2                      # ICarRouter: the client's ForzaCarNetworked (CarInitSynced, CarSetupSynced, CarColorSynced, ...)
 # Speed check on what a car actually does (a client can lie about its car, parts and tune, not about where it ends up). Speeds come from
 # the car positions the server relays; all limits are guesses to be calibrated from the logs (the fastest stock car, the Venom GT, does 439 km/h).
-HARD_CAP_KMH = 480.0                # no car does this for long, however it was modified
+HARD_CAP_KMH = 451.0                # no car does this for long, however it was modified (user decision 2026-10-21)
 SOFT_FACTOR, SOFT_EXTRA_KMH = 1.5, 140.0   # soft limit = min(hard cap, max(stock x 1.5, stock + 140 km/h)); log only
 TELEPORT_KMH = 1000.0               # an apparent speed above this is a respawn / fast travel, not driving
 SPEED_SECONDS = 3.0                 # how long a speed must hold before it is reported
@@ -224,6 +226,11 @@ RT_INITIALISING, RT_DESTINATION_VOTE, RT_CAR_SELECT, RT_STATE_3, RT_DRIVE_TO_EVE
 RT_ARRIVED_AT_DESTINATION, RT_PREPARE_FOR_EVENT, RT_IN_EVENT, RT_FINALISE_EVENT = 5, 6, 7, 8
 RELAY_ROUTERS = (1, 2, 3, 6, 9)   # player / console / car objects other clients must see
 RELAY_HISTORY_CAP = 2000       # stored messages per client, replayed to late joiners
+# Outgoing messages are queued per client and sent together: one datagram per client every few ms instead of one per relayed car update.
+# On prod (2026-10-21, 72 players) half the server's time went into sendto (~12k datagrams/s), the receive queue overflowed and races rubberbanded.
+RELAY_FLUSH_SECONDS = float(os.environ.get("FH2MP_RELAY_FLUSH_MS", "10")) / 1000.0   # longest a relayed message waits for company
+MAX_PACKET_BYTES = int(os.environ.get("FH2MP_MAX_PACKET_BYTES", "1000"))          # late-join replays already send ~1 KB datagrams
+REPLY_HOLD_SECONDS = 0.002     # replies leave >= 2 ms after the client's packet (see Server.send)
 STALE_SECONDS = 20.0
 PENDING_SECONDS = 15.0        # a peer that opened a connection but never completed the handshake is forgotten after this long
 MAX_PENDING_PEERS = 256       # unconnected peers per world: beyond this new OpenConnections are ignored (spoofed-source flood)
@@ -314,6 +321,26 @@ def build_packet(messages, ack_id=0xFFFF, remote_ack=0, ack_bits=0) -> bytes:
     w.value |= body.value << HEADER_BITS
     w.pos = HEADER_BITS + body.pos
     return w.tobytes()
+
+
+def bake(write):
+    """A message written once, as (bits, bit count), so it can be queued for many clients without writing it again."""
+    w = BitWriter()
+    write(w)
+    return (w.value, w.pos)
+
+
+PACKET_HEADER = struct.Struct("<HHIBH")    # ackId, remoteAckId, ackBits, count, size: the 88 header bits are byte aligned
+
+
+def pack_messages(baked, ack_id=0xFFFF, remote_ack=0, ack_bits=0) -> bytes:
+    """build_packet for messages already baked; same bytes."""
+    body = pos = 0
+    for value, n in baked:
+        body |= value << pos
+        pos += n
+    nbytes = (pos + 7) // 8
+    return PACKET_HEADER.pack(ack_id, remote_ack, ack_bits, len(baked), HEADER_BITS // 8 + nbytes) + body.to_bytes(nbytes, "little")
 
 
 def open_connection_response(flag2: int, result: int, echo: int, server_counter: int):
@@ -975,16 +1002,22 @@ class Peer:
         self.kick_reason = None    # set by the car policy; acted on in tick()
         self.parts = None          # the car's 43 part ids as sent at join (parts.find_parts)
         self.part_notes = 0        # part check log lines written for this client
+        self.part_logged = None    # (part list, policy) last reported, so one car is reported once and not on every update
         self.speed_ref = None      # (monotonic, position) the last speed was measured from
         self.top_kmh = 0.0         # highest measured speed (km/h)
         self.hard_s = 0.0          # seconds the speed has held above the hard cap
         self.soft_s = 0.0          # same for the soft limit
         self.speed_flagged = set() # which reports were already made for this client
         self.max_abs = 0.0         # largest |coordinate| seen
+        self.outbox = []           # baked messages waiting for the next datagram to this client (Server.send / flush_peer)
+        self.due = math.inf        # when the queued messages must leave
+        self.hold = 0.0            # not before this (a reply: 2 ms after the client's packet)
+        self.ack_cache = None
 
     def note_packet_id(self, pid: int) -> None:
         if pid == UNRELIABLE_ID:
             return
+        self.ack_cache = None
         if self.last_id == NO_ID or ((pid - self.last_id) % 0xFFFF) < 0x8000:
             self.last_id = pid
         self.seen.add(pid)
@@ -993,6 +1026,8 @@ class Peer:
             self.seen = keep
 
     def ack_fields(self):
+        if self.ack_cache is not None:
+            return self.ack_cache
         if self.last_id == NO_ID:
             return NO_ID, 0
         bits = 0
@@ -1000,7 +1035,8 @@ class Peer:
             d = (self.last_id - pid) % 0xFFFF
             if 1 <= d <= 32:
                 bits |= 1 << (d - 1)
-        return self.last_id, bits
+        self.ack_cache = (self.last_id, bits)
+        return self.ack_cache
 
 
 class Server:
@@ -1061,6 +1097,7 @@ class Server:
         self.wx_next = 0.0         # monotonic time of the next weather change
         self.weather_init()
         self.peers = {}
+        self.dirty = set()         # peers with queued messages (send -> flush)
         self.next_owner = 1
         self.pending_race = None   # (deadline, leader Peer)
         self.game_options = None   # (size, payload) latest GameOptionsSynced written by the leader
@@ -1201,19 +1238,20 @@ class Server:
             self.log(f"SPEED (log only): owner {peer.owner_id} xuid {peer.xuid:#x} car {peer.model_id} (stock {stock} km/h) drove {kmh:.0f} km/h for {peer.soft_s:.0f} s (soft limit {soft:.0f})")
 
     def check_parts(self, peer: Peer, size: int, payload: int):
-        """The car's installed part ids (in the LobbyPlayer object, see parts.py) against the game data. An id the game does not know
-        makes the other clients crash when they build that car's engine (FUN_1410643b0 reads a torque curve that is not there), so a
-        car like that is reported (PART_POLICY=log) or its owner is removed (kick). Returns True when something is wrong."""
+        """The car's installed part ids (in the LobbyPlayer object, see parts.py) against the game data. An id the game does not have makes
+        the other clients crash when they build that car (prod 2026-10-21/22: lobby wipes in the same second a car with a made-up engine
+        row appeared). PART_POLICY fix (default) relays the object with those ids replaced by the car's stock parts, so the others build a
+        car they have and the owner keeps playing with its own (its game never gets its own object back); log only reports, kick removes
+        the account. Returns (something was wrong, withhold the object, the payload to relay)."""
         if parts_check is None or PART_POLICY == "off":
-            return False, False
+            return False, False, payload
         found = parts_check.find_parts(size, payload)
         if found is None:
             if peer.part_notes < 3:
                 peer.part_notes += 1
                 self.log(f"{peer.addr[1]} part check: no part list found in the {size}-bit player object (owner {peer.owner_id})")
-            return False, False
+            return False, False, payload
         offset, words = found
-        issues = parts_check.audit_parts(words)
         peer.parts = words
         # The car itself: slot 2 (body) holds the CarBody row of the car, id = car id x 1000 (the 354 rows of the catalog table). The car's
         # object (router 2) only says things like "100.0" (a float), so this is where the car id is actually readable. Same rules as before:
@@ -1222,16 +1260,26 @@ class Server:
         body = words[2]
         if body != parts_check.NONE and body in parts_check.P.TABLE_IDS["CarBody"]:
             hide = self.car_model_seen(peer, body // 1000)
-        # a wrong id is only certain when no table has it, or when it sits in the camshaft slot (slot 12: the torque curve comes from there)
-        hard = [i for i in issues if "no such id" in i[2] or i[0] == 12]
-        if issues and peer.part_notes < 6:
+        fixed, changes, odd = parts_check.neutralize(words)
+        car = body // 1000 if body in parts_check.P.TABLE_IDS["CarBody"] else None
+        name = lambda s: parts_check.P.SLOT_TABLE.get(s, "?")          # noqa: E731
+        key = (tuple(words), PART_POLICY)
+        if (changes or odd) and peer.part_logged != key and peer.part_notes < 6:   # once per car, and at most 6 cars per client
+            peer.part_logged = key
             peer.part_notes += 1
-            self.log(f"PART CHECK{'' if PART_POLICY == 'kick' and hard else ' (log only)'}: owner {peer.owner_id} xuid {peer.xuid:#x}: "
-                     + "; ".join(f"slot {s} {parts_check.P.SLOT_TABLE.get(s, '?')} = {w:#x} ({text})" for s, w, text in issues[:6])
-                     + (" -> ending the connection" if PART_POLICY == "kick" and hard else ""))
-        if hard and PART_POLICY == "kick" and peer.kick_reason is None:
-            peer.kick_reason = "part id " + str(hard[0][1]) + " in slot " + str(hard[0][0])
-        return bool(hard), hide
+            what = {"fix": "replaced with the stock part for the others", "kick": "ending the connection", "log": "log only"}.get(PART_POLICY, PART_POLICY)
+            if changes:
+                self.log(f"PART CHECK ({what}): owner {peer.owner_id} xuid {peer.xuid:#x} car {car}: "
+                         + "; ".join(f"slot {s} {name(s)} {old:#x} ({old}, {why}) -> {new:#x}" for s, old, new, why in changes))
+                self.note("parts", peer.owner_id, f"car {car}: " + ", ".join(f"slot {s} {old} -> {new}" for s, old, new, _ in changes))
+            if odd:
+                self.log(f"PART CHECK (log only, row of another owner): owner {peer.owner_id} xuid {peer.xuid:#x} car {car}: "
+                         + "; ".join(f"slot {s} {w} ({text})" for s, w, text in odd[:8]))
+        if changes and PART_POLICY == "kick" and peer.kick_reason is None:
+            peer.kick_reason = f"part id {changes[0][1]} in slot {changes[0][0]}"
+        if changes and PART_POLICY == "fix":
+            payload = parts_check.write_parts(payload, offset, fixed)
+        return bool(changes), hide, payload
 
     def kick_for_cars(self) -> None:
         for q in [q for q in self.peers.values() if q.kick_reason]:
@@ -1273,17 +1321,62 @@ class Server:
             self.log_file.write(line + "\n")
 
     def send(self, peer: Peer, messages, fast: bool = False) -> None:
-        # The client measures RTT in whole milliseconds and discards 0 ms as invalid, which makes
-        # it fall back to a 100 ms retransmit timer. Hold a reply back until ~2 ms after that client's last
-        # packet so RTT reads >= 1. Packets relayed from other clients (fast=True) do not need it and must not
-        # stall the loop: the sleep blocks every world on the port (it, not CPU, capped a full server at ~60 players).
-        if not fast:
-            gap = time.monotonic() - peer.last_rx
-            if gap < 0.002:
-                time.sleep(0.002 - gap)
+        """Queues messages (writers or baked) for one client; flush() sends them. An empty list still sends a datagram (an ack).
+        The client measures RTT in whole milliseconds and discards 0 ms as invalid, which makes it fall back to a 100 ms retransmit
+        timer, so a reply is held until 2 ms after that client's last packet. That used to be a sleep, which stalled every world
+        on the port; now the reply waits in the queue. Relayed messages (fast=True) may wait up to RELAY_FLUSH_SECONDS for others."""
+        now = time.monotonic()
+        peer.outbox.extend(m if type(m) is tuple else bake(m) for m in messages)
+        if fast:
+            peer.due = min(peer.due, now + RELAY_FLUSH_SECONDS)
+        else:
+            peer.due = min(peer.due, now)
+            peer.hold = max(peer.hold, peer.last_rx + REPLY_HOLD_SECONDS)
+        if self.peers.get(peer.addr) is peer:
+            self.dirty.add(peer)
+        else:
+            self.flush_peer(peer)       # a stranger or a removed client (CloseConnection): nothing will flush it later
+
+    def relay(self, sender: Peer, msg) -> None:
+        """send(fast=True) of one message to everybody else in the sender's world: the hot path (every car update)."""
+        baked = bake(msg)
+        due = time.monotonic() + RELAY_FLUSH_SECONDS
+        for q in self.others(sender):
+            q.outbox.append(baked)
+            if due < q.due:
+                q.due = due
+            self.dirty.add(q)
+
+    def flush_peer(self, peer: Peer) -> None:
+        out, peer.outbox = peer.outbox, []
+        peer.due, peer.hold = math.inf, 0.0
+        self.dirty.discard(peer)
         ack, bits = peer.ack_fields()
-        pkt = build_packet(messages, ack_id=UNRELIABLE_ID, remote_ack=ack, ack_bits=bits)
-        self.sock.sendto(pkt, peer.addr)
+        limit = MAX_PACKET_BYTES * 8 - HEADER_BITS
+        i = 0
+        while True:
+            j, size = i, 0
+            while j < len(out) and j - i < 255 and (j == i or size + out[j][1] <= limit):
+                size += out[j][1]
+                j += 1
+            try:
+                self.sock.sendto(pack_messages(out[i:j], UNRELIABLE_ID, ack, bits), peer.addr)
+            except OSError as exc:
+                self.noise(f"{peer.addr[1]} send failed: {exc!r}")
+            i = j
+            if i >= len(out):
+                return
+
+    def flush(self, now: float) -> float:
+        """Sends every queue that is due; returns when the next one will be."""
+        nxt = math.inf
+        for peer in list(self.dirty):
+            at = max(peer.due, peer.hold)
+            if at <= now:
+                self.flush_peer(peer)
+            else:
+                nxt = min(nxt, at)
+        return nxt
 
     def others(self, peer: Peer):
         return [q for q in self.peers.values()
@@ -1310,8 +1403,7 @@ class Server:
             hist.append((mtype, tid, seq, size, payload))
         msg = relay_object_message(mtype, router, oid, peer.owner_id, tid, seq, id_bits,
                                    type_bits, size, payload)
-        for q in self.others(peer):
-            self.send(q, [msg], fast=True)
+        self.relay(peer, msg)
 
     GAME_OPTIONS_TRANSFER_ID = 0   # transfer-object id of the lobby's GameOptions (router 6, type 1)
 
@@ -1571,6 +1663,51 @@ class Server:
             self.pending_race = (min(self.pending_race[0], time.monotonic() + 1.5), self.pending_race[1])
             self.log("all invited clients ready -> starting the event now")
 
+    def request_race_blocked(self, peer: Peer) -> bool:
+        """One event at a time per Free Roam lobby (prod 2026-10-21/22: 61 of 285 multi-player events were started while the lobby's
+        previous event was still loading or racing, and 50 % of those never began against 7 % of the others; the new request replaced
+        the old event and invited its participants again). A second request during somebody else's invite window is ignored as well.
+        The client greys the event tile out while SessionHost.ParticipantsSelected / InRace is set, so a real client sends this only
+        in the gaps [inferred]."""
+        if self.roadtrip:
+            return False
+        ev = self.event
+        if ev and not ev.get("over") and any(q.connected for q in ev["people"]) \
+                and time.monotonic() - ev.get("started", time.monotonic()) < EVENT_BLOCK_MAX_SECONDS:
+            return True       # (an event whose participants all vanished, or that never ends, must not lock the lobby)
+        pr = self.pending_race
+        return bool(pr and pr[1] is not peer and pr[1].connected)
+
+    def close_finished_event(self) -> set:
+        """A new request while the previous event only sits on its results screen (InRace=0, participants still leaving): end the old
+        event first so the new one starts clean. Returns the peers that are still on its results screen."""
+        ev = self.event
+        if not ev or self.roadtrip:
+            return set()
+        busy = {q for q in ev["people"] if q.connected and q.console_vars.get(3)}
+        self.end_event("a new race was requested")
+        return busy
+
+    def drop_unloaded(self, now: float) -> None:
+        """Participants that never reported HasLoadedCarsForAllParticipants (a client that hung or crashed while building the grid, but
+        still answers the keep-alive) held everybody else on the loading screen for good; only 20 s of silence ever removed them."""
+        ev = self.event
+        ev["load_checked"] = True
+        stuck = [q for q in ev["people"] if not (q.connected and q.console_vars.get(CONSOLE_VAR_HAS_LOADED_CARS))]
+        if not stuck:
+            return
+        self.log(f"event load timeout ({EVENT_LOAD_TIMEOUT_SECONDS:.0f} s): dropping {[q.owner_id for q in stuck]} from the event, "
+                 f"{len(ev['people']) - len(stuck)} participant(s) remain")
+        for q in stuck:
+            ev["people"].remove(q)
+            if q.connected:
+                self.set_console_bool(q, CONSOLE_VAR_PARTICIPATING_IN_RACE, 0, "did not load in time")
+        if not any(q.connected for q in ev["people"]):
+            self.end_event("nobody loaded the event in time")
+        else:
+            self.maybe_begin_race()
+            self.maybe_go_race()
+
     def start_event(self, leader: Peer) -> None:
         """Participants = the leader plus every client that reported Console.Ready."""
         people = [leader] + [q for q in self.peers.values()
@@ -1579,7 +1716,7 @@ class Server:
         for q in self.peers.values():
             if q is not leader:
                 self.log(f"  other client owner {q.owner_id}: connected={q.connected} Console vars={q.console_vars}")
-        self.event = {"people": people, "begun": False, "start_at": None,
+        self.event = {"people": people, "begun": False, "start_at": None, "started": time.monotonic(),
                       "numlaps": self.rt_numlaps(self.rt_race()) if self.roadtrip and self.rt_winner is not None
                       and self.rt_gamedb else None}
         mode = self.rt_race_mode(self.rt_race()) if self.roadtrip and self.rt_winner is not None and self.rt_gamedb else None
@@ -1732,6 +1869,9 @@ class Server:
 
     def drop_peer(self, peer: Peer, why: str) -> None:
         self.peers.pop(peer.addr, None)
+        if peer in self.dirty:
+            self.flush_peer(peer)   # what was queued for it, e.g. the CloseConnection of a kick
+        peer.connected = False      # other references (pending_race, event people) must not see a removed peer as present
         self.traffic.leave(peer)
         self.rt_votes.pop(peer, None)
         if self.roadtrip and not any(c.connected for c in self.peers.values()):
@@ -1745,6 +1885,10 @@ class Server:
         if (not self.wipe_at and now_m - self.wipe_last > 30.0
                 and sum(1 for d in self.drops if now_m - d[0] <= WIPE_WINDOW_S) >= WIPE_MIN_DROPS):
             self.wipe_at = now_m + 1.0          # the rest of the group is removed in the same sweep: report once they are all in
+        if self.pending_race and self.pending_race[1] is peer:
+            # the leader left during the invite window (prod 2026-10-21 19:04, lobby 84dcc3a1): the event used to start around it anyway
+            # and everybody else waited on "loading" for a client that no longer existed
+            self.end_event("the event leader left before it started")
         ev = self.event
         if ev and peer in ev["people"] and not ev.get("racing") and not ev.get("over"):
             # a participant vanished while the event was being set up (King/Infection stuck on "setting up event" for the others, 2026-10-20):
@@ -1760,8 +1904,7 @@ class Server:
             id_bits, _ = ROUTER_BITS[router]
             n = peer.relay_next.get((router, oid), 0)
             msg = relay_delete_message(router, oid, peer.owner_id, id_bits, n % 0xFF)
-            for q in self.others(peer):
-                self.send(q, [msg], fast=True)
+            self.relay(peer, msg)
 
     def noise(self, msg: str) -> None:
         """Log about datagrams from strangers at most once a second, so a flood of junk cannot fill the disk."""
@@ -1936,12 +2079,15 @@ class Server:
                 self.log(f"{addr[1]} RequestOwnership router={router} type={tid} key={a}{b} id={oid} "
                          f"-> grant")
                 replies.append(self.ownership_grant(peer, router, tid, oid, id_bits))
+            elif mtype == MSG_REQUEST_RACE and self.request_race_blocked(peer):
+                self.log(f"{addr[1]} MsgRequestRace (owner {peer.owner_id}) ignored: an event is already being set up or running in this lobby")
             elif mtype == MSG_REQUEST_RACE:
+                busy = self.close_finished_event()      # players still on the previous event's results screen cannot take an invite
                 self.log(f"{addr[1]} MsgRequestRace (owner {peer.owner_id}) -> RaceReady=1")
                 self.set_session_host_bool(SH_RACE_READY, 1, "race requested")
                 self.pending_race = (time.monotonic() + RACE_INVITE_SECONDS, peer)
                 self.race_hard_deadline = time.monotonic() + RACE_JOIN_GRACE_SECONDS
-                invited = [q for q in self.others(peer) if q.connected and q.entered]
+                invited = [q for q in self.others(peer) if q.connected and q.entered and q not in busy]
                 for q in invited:
                     self.send(q, [request_race_relay()])
                 self.log(f"MsgRequestRace relayed to {len(invited)} other client(s): "
@@ -1994,7 +2140,7 @@ class Server:
                     self.log(f"{addr[1]} CAPTURE player {'create' if mtype == 7 else 'update'} id={oid} seq={seq} bits={size} "
                              f"xuid={peer.xuid:#x} hex={payload.to_bytes((size + 7) // 8, 'little').hex()}")
                 if router == 1 and size >= 1500 and parts_check is not None:       # the join-time object, and later updates that carry the whole car
-                    bad_parts, hide_car = self.check_parts(peer, size, payload)
+                    bad_parts, hide_car, payload = self.check_parts(peer, size, payload)
                     if hide_car or (bad_parts and PART_POLICY == "kick"):
                         suppress = True
                 if CAR_CAPTURE and router == ROUTER_CAR and size:
@@ -2117,8 +2263,7 @@ class Server:
                         w.pos += 192
                 else:
                     msg = relay_score_message(mtype, cid, peer.owner_id, rest, 192)
-                for q in self.others(peer):
-                    self.send(q, [msg], fast=True)
+                self.relay(peer, msg)
                 peer.collisions_relayed = getattr(peer, "collisions_relayed", 0) + 1
                 if peer.collisions_relayed <= 3 or peer.collisions_relayed % 200 == 0:
                     self.log(f"{addr[1]} car collision #{peer.collisions_relayed} relayed")
@@ -2149,8 +2294,7 @@ class Server:
                 r.pos = start
                 rest = r.bits(end - start)
                 msg = relay_score_message(mtype, cid, peer.owner_id, rest, end - start)
-                for q in self.others(peer):
-                    self.send(q, [msg], fast=True)
+                self.relay(peer, msg)
                 if mtype == MSG_LAP_SCORE:
                     self.note_lap_score(peer, lap, blobs)
                 elif mtype == MSG_SCORE_KEYFRAME:
@@ -2164,32 +2308,31 @@ class Server:
                 rest = r.bits(rest_bits)
                 peer.cars_relayed += 1
                 pos = car_position(rest) if rest_bits >= 96 else None
+                far = max(abs(pos[0]), abs(pos[1]), abs(pos[2])) if pos is not None else math.nan
                 if pos is not None and a == 0 and b == 0:
                     peer.pos = pos
-                    if math.isfinite(max(abs(c) for c in pos)):
-                        peer.max_abs = max(peer.max_abs, max(abs(c) for c in pos))
-                    if not peer.pos_flagged and (not all(math.isfinite(c) for c in pos) or max(abs(c) for c in pos) > POSITION_LIMIT):
+                    if math.isfinite(far):
+                        peer.max_abs = max(peer.max_abs, far)
+                    if not peer.pos_flagged and (not all(math.isfinite(c) for c in pos) or far > POSITION_LIMIT):
                         peer.pos_flagged = True
                         self.log(f"{addr[1]} car position out of range: ({pos[0]:.1f},{pos[1]:.1f},{pos[2]:.1f}) owner {peer.owner_id} xuid {peer.xuid:#x}")
                 if peer.cars_relayed <= 3 or peer.cars_relayed % 500 == 0:
                     ps = '' if pos is None else f' pos=({pos[0]:.0f},{pos[1]:.0f},{pos[2]:.0f})'
                     self.log(f"{addr[1]} car prediction #{peer.cars_relayed} flags={a}{b} id={cid} "
                              f"rest={rest_bits} bits -> {len(self.others(peer))} peer(s){ps}")
-                if pos is not None and a == 0 and b == 0 and SPEED_POLICY != "off" and math.isfinite(max(abs(c) for c in pos)):
+                if pos is not None and a == 0 and b == 0 and SPEED_POLICY != "off" and math.isfinite(far):
                     self.track_speed(peer, pos)
                 if peer.cars_relayed % 20 == 1 and pos is not None:
                     self.note("car", peer.owner_id, f"pos=({pos[0]:.0f},{pos[1]:.0f},{pos[2]:.0f}) id={cid}")
                 if a == 0 and b == 0 and not peer.kick_reason:
                     peer.car_id = cid
                     msg = relay_car_prediction(cid, peer.owner_id, rest, rest_bits)
-                    for q in self.others(peer):
-                        self.send(q, [msg], fast=True)
+                    self.relay(peer, msg)
             elif mtype == MSG_REPAIR_DAMAGE:
                 kind, cid, _ = read_car_key(r)
                 if kind == "own":
                     msg = relay_repair_message(cid, peer.owner_id)
-                    for q in self.others(peer):
-                        self.send(q, [msg], fast=True)
+                    self.relay(peer, msg)
             elif mtype == MSG_TAG_COLLISION:
                 k1, k2 = read_car_key(r), read_car_key(r)
                 olds_news = [r.bits(3) for _ in range(4)]
@@ -2545,6 +2688,10 @@ class Server:
         if self.wipe_at and now >= self.wipe_at:
             self.report_wipe(now)
         self.kick_for_cars()
+        ev = self.event
+        if ev and not ev["begun"] and not ev.get("load_checked") and not self.roadtrip \
+                and now - ev.get("started", now) > EVENT_LOAD_TIMEOUT_SECONDS:
+            self.drop_unloaded(now)
         if self.event and self.event.get("go_at") and now >= self.event["go_at"]:
             self.go_race()
         self.check_race_end(now)
@@ -2593,8 +2740,9 @@ class Server:
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
         self.sock.setblocking(False)
         sel.register(self.sock, selectors.EVENT_READ)
+        nxt = math.inf
         while True:
-            if sel.select(timeout=0.01):
+            if sel.select(timeout=min(0.01, max(0.0, nxt - time.monotonic()))):
                 while True:     # drain everything queued before the next timer pass
                     try:
                         data, addr = self.sock.recvfrom(65535)
@@ -2605,6 +2753,7 @@ class Server:
                     except Exception as exc:  # keep serving
                         self.log(f"error handling {data.hex()}: {exc!r}")
             self.tick()
+            nxt = self.flush(time.monotonic())
 
 
 class Hub:
@@ -2708,6 +2857,8 @@ class Hub:
 
     def open_connection_fields(self, data: bytes):
         """(player id, lobby type) when the datagram starts with an OpenConnection, else None."""
+        if len(data) < 12 or data[8] == 0 or data[11] & 0x7F != MSG_OPEN_CONNECTION:
+            return None         # message count (byte 8) and first type (low 7 bits of byte 11): no parse for the other ~99.9 %
         try:
             r = BitReader(data)
             hdr = parse_header(r)
@@ -2825,8 +2976,9 @@ class Hub:
             self.ctl.setblocking(False)
             sel.register(self.ctl, selectors.EVENT_READ)
         last_sweep = 0.0
+        nxt = math.inf
         while True:
-            if sel.select(timeout=0.01):
+            if sel.select(timeout=min(0.01, max(0.0, nxt - time.monotonic()))):
                 self.control()
                 while True:     # drain everything queued before the next timer pass
                     try:
@@ -2843,6 +2995,9 @@ class Hub:
                 except Exception as exc:  # one broken world must not stop the others
                     w.log(f"tick error: {exc!r}")
             now = time.monotonic()
+            nxt = self.idle.flush(now)
+            for w in self.worlds.values():
+                nxt = min(nxt, w.flush(now))
             if now - last_sweep > 1.0:
                 last_sweep = now
                 self.sweep()

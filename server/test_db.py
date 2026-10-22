@@ -107,6 +107,17 @@ class ScoreTests(Base):
         other = scoreboard.ScoreStore(self.db, names, records=wr).rows(10, 1, 1, 857, 1, 100, 5)[0]
         self.assertTrue(other)                                      # a track without a record still works
 
+    def test_top_player_races_their_own_ghost(self):
+        for xuid, t in ((10, 60.0), (11, 70.0)):
+            self.sc.submit(xuid, "p%d" % xuid, 1, sub(t, sb=3))
+            self.sc.attach_ghost(self.sc.db.one("SELECT score_id FROM score_submissions WHERE xuid=?", (xuid,))[0], b"g")
+        args = (3, 1, 7, 1)
+        self.assertEqual(self.sc.rival_for(11, *args)["xuid"], 10)                    # the row just above
+        self.assertEqual(self.sc.rival_for(10, *args)["xuid"], 10)                    # #1: nobody above, so their own best
+        self.assertTrue(self.sc.rival_for(10, *args)["ghost"])
+        self.assertEqual(self.sc.rival_for(11, *args, rival_xuid=11)["xuid"], 11)     # picking yourself
+        self.assertEqual(self.sc.rival_for(11, *args, rival_xuid=10)["xuid"], 10)
+
     def test_non_finite_scores_are_rejected(self):
         for bad in (math.nan, math.inf, -math.inf):
             self.assertIsNone(self.sc.submit(10, "x", 1, sub(bad)))
@@ -121,6 +132,36 @@ class ScoreTests(Base):
     def test_xp_board_takes_accumulated_xp(self):
         self.sc.add_xp(5, 1234.0)
         self.assertEqual(self.sc.best_of(5, *scoreboard.XP_BOARD, 65535)["score"], 1234.0)
+
+    def test_impossible_xp_awards_are_kept_in_the_ledger_but_not_counted(self):
+        self.sc.add_xp(7, 7500.0)
+        self.assertEqual(self.sc.add_xp(7, 0.0)[:2], (7500.0, "ok"))      # a zero award adds nothing and is not worth a row
+        for bad in (12_500_000.0, 56_001.0, -5.0, math.nan):
+            total, verdict, reason = self.sc.add_xp(7, bad)
+            self.assertEqual((total, verdict), (7500.0, "rejected"), bad)
+            self.assertTrue(reason)
+        self.assertEqual(self.sc.add_xp(7, 56_000.0)[:2], (63_500.0, "ok"))
+        rows = self.db.query("SELECT verdict, COUNT(*) AS n FROM xp_awards WHERE xuid=7 GROUP BY verdict ORDER BY verdict")
+        self.assertEqual([(r["verdict"], r["n"]) for r in rows], [("ok", 2), ("rejected", 4)])
+
+    def test_backfill_takes_logged_cheats_off_the_total_and_the_club_base(self):
+        import xp_audit
+        with self.db.tx() as c:          # the state the old code left: every award counted
+            c.execute("INSERT INTO player_xp (xuid, xp, updated) VALUES (8, 25007550, 0), (9, 300, 0)")
+            c.execute("INSERT INTO clubs (id, name, tag, created) VALUES (1, 'c', 't', 0)")
+            c.execute("INSERT INTO club_members (xuid, club_id, role, joined, status_changed, xp_base) VALUES (8, 1, 1, 150, 150, 12507500)")
+        awards = [(8, 7500.0, 7500.0, 100.0), (8, 12_500_000.0, 12_507_500.0, 120.0), (8, 12_500_000.0, 25_007_500.0, 200.0),
+                  (8, 50.0, 25_007_550.0, 210.0), (9, 300.0, 300.0, 100.0)]
+        acc = xp_audit.audit(awards)
+        self.assertEqual(xp_audit.apply(self.db, acc, write=False), ["0x8: 25007550 -> 7550, club base -12500000"])
+        with self.db.tx() as c:          # an honest award after the log was read: it must survive the backfill
+            c.execute("UPDATE player_xp SET xp = xp + 200 WHERE xuid=8")
+        self.assertEqual(self.sc.xp_of(8), 25_007_750.0)                      # dry run wrote nothing (only the +200 above)
+        xp_audit.apply(self.db, acc, write=True)
+        self.assertEqual(self.sc.xp_of(8), 7750.0)
+        self.assertEqual(self.sc.xp_of(9), 300.0)
+        self.assertEqual(self.db.one("SELECT xp_base FROM club_members WHERE xuid=8")[0], 7500.0)   # club gain stays the honest 50
+        self.assertEqual(self.db.one("SELECT COUNT(*) FROM xp_awards WHERE xuid=8 AND reason LIKE 'backfill%'")[0], 2)
 
 
 class NotificationTests(Base):

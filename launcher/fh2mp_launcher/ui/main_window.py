@@ -543,7 +543,9 @@ class MainWindow(QMainWindow):
             lc.process = None
             quick = time.time() - self._launched_at < 25
             run_async(lambda j: lc.after_game(), lambda _r: None, lambda e: None)
-            if quick and code not in (0, None):
+            if quick and launch.gpu_check_failure(lc.settings["azimuth_dir"], self._launched_at - 5):
+                self.say(launch.gpu_check_advice(lc.settings), theme.BAD)
+            elif quick and code not in (0, None):
                 self.say(f"The game closed right away (exit code {code}). See Logs.", theme.BAD)
             else:
                 self.say("")

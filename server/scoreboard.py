@@ -13,12 +13,14 @@ import os
 import math
 import struct
 import time
+import xp_audit
 
 ASCENDING = {1}          # scoreTypes where a smaller score wins (lap/race times) [guess]
 XP_BOARD = (4, 9)        # (scoreboardType, scoreType) of the XP ladder [guess from SubmitXpScore traffic]
 FAKE_ROWS = int(os.environ.get("FH2MP_FAKE_ROWS", "0"))   # synthesized rivals topping up a board; 0 = real players only
 CLASS_AVG_KMH = (88, 103, 119, 134, 150, 166)   # km/h; first race data: A-class Huracan averaged ~144 km/h on route 8001
 EVENT_BOARDS = {3, 6}   # scoreboardType whose pivotId is the rival event id (Monthly = 3, Showcase = 6) and SubmitScore.gameScoreboardId matches it [C]
+MAXED_CLASSES = {6, 7}  # X, R: classes above S2 the client reports for maxed-out cars; never allowed on a Rivals board (user decision)
 CLASS_PIVOT_BOARDS = {1}   # scoreboardType whose pivotId is the car class (Festival Routes rivals: pivot 0..5 = D..S2) [inferred from GetRival calls]
 SPEED_BOARDS = {9}       # scoreboardType of the speed trap / speed zone boards: score = m/s (32.565 shows as 117.23 km/h)
 GSID_BOARDS = {9}        # scoreboardType with one board per trap/zone: GetRows pivotId == SubmitScore.gameScoreboardId (scoreType 5 traps ids 1-30,
@@ -61,9 +63,12 @@ class ScoreStore:
     # ---- writes
     def submit(self, xuid, tag, score_type, d):
         """Stores one submission and returns it as a row dict, or None if the score is not a finite number
-        (a NaN/inf time must never reach a public board)."""
+        (a NaN/inf time must never reach a public board) or the car is class X/R on a Rivals board (user
+        decision: a maxed-out car must never appear on a Rivals leaderboard, not even disguised as S2)."""
         score = u64_to_dbl(d["score"])
         if not math.isfinite(score):
+            return None
+        if d["scoreboardType"] in EVENT_BOARDS and d["carClassId"] in MAXED_CLASSES:
             return None
         now = time.time()
         score_id = os.urandom(16)
@@ -100,14 +105,23 @@ class ScoreStore:
         return bytes(r["data"]) if r else None
 
     def add_xp(self, xuid, xp):
-        """Atomic increment (one statement, so concurrent submissions cannot lose an update)."""
-        if not math.isfinite(xp):
-            return self.xp_of(xuid)
+        """Records the award in the XP ledger and, when xp_audit accepts it, adds it to the total (atomic increment, so concurrent
+        submissions cannot lose an update). Returns (total, verdict, reason)."""
+        verdict, reason = xp_audit.judge(xp)
+        if verdict == xp_audit.OK and xp == 0:
+            return self.xp_of(xuid), verdict, reason        # nothing to add, nothing worth a ledger row
+        now = time.time()
         with self.db.tx() as c:
-            db.touch_player(c, xuid, "", time.time())
-            return c.execute("INSERT INTO player_xp (xuid, xp, updated) VALUES (?,?,?) ON CONFLICT(xuid) "
-                             "DO UPDATE SET xp = player_xp.xp + excluded.xp, updated = excluded.updated RETURNING xp",
-                             (xuid, xp, time.time())).fetchone()[0]
+            db.touch_player(c, xuid, "", now)
+            c.execute("INSERT INTO xp_awards (xuid, xp, at, verdict, reason) VALUES (?,?,?,?,?)",
+                      (xuid, xp if math.isfinite(xp) else 0.0, now, verdict, reason))
+            if verdict != xp_audit.OK:
+                r = c.execute("SELECT xp FROM player_xp WHERE xuid=?", (xuid,)).fetchone()
+                return (r[0] if r else 0.0), verdict, reason
+            total = c.execute("INSERT INTO player_xp (xuid, xp, updated) VALUES (?,?,?) ON CONFLICT(xuid) "
+                              "DO UPDATE SET xp = player_xp.xp + excluded.xp, updated = excluded.updated RETURNING xp",
+                              (xuid, xp, now)).fetchone()[0]
+            return total, verdict, reason
 
     def xp_of(self, xuid):
         r = self.db.one("SELECT xp FROM player_xp WHERE xuid=?", (xuid,))
@@ -122,6 +136,8 @@ class ScoreStore:
         xuid. The XP ladder also takes the accumulated XP when that beats a submitted score."""
         asc = st in ASCENDING
         where, args = "s.sb=? AND s.st=?", [sb, st]
+        if sb in EVENT_BOARDS:    # class X/R must never surface on a Rivals board, read or write (user decision); belt-and-suspenders
+            where += f" AND s.cls NOT IN ({','.join(str(c) for c in MAXED_CLASSES)})"
         if (sb in EVENT_BOARDS or sb in GSID_BOARDS) and pivot > 0:   # one board per event / per trap or zone (the client's track field is 0, the track or 65535)
             where += " AND s.gsid=?"
             args.append(pivot)
@@ -254,10 +270,12 @@ class ScoreStore:
         page = allrows[max(0, start_at - 1):max(0, start_at - 1) + max_results]
         return page, mine, len(real), len(fake)
 
-    def rival_for(self, xuid, sb, st, track, pivot=-1):
+    def rival_for(self, xuid, sb, st, track, pivot=-1, rival_xuid=0):
         """The rival to chase: the row just above the player's best; with no best yet, one near the middle of the board. A real
         player's row (it has a ghost to race) is preferred over a made-up one: for a newcomer any real ghost on the board, otherwise
-        one within 4 rows above the player's best."""
+        one within 4 rows above the player's best. The player's own row is the rival when they are #1 (nobody is above them, so they
+        race their own best ghost) or when the client asks for their own xuid (picking yourself on the board); the caller pays no
+        bounty for it."""
         rows, mine, _, _ = self.rows(xuid, sb, st, track, 1, 1000, pivot)
         if not rows:
             return None
@@ -265,8 +283,8 @@ class ScoreStore:
             mid = len(rows) // 2
             return self._near_real(rows, mid, xuid, len(rows)) or rows[mid]      # any real ghost on the board beats a made-up rival
         above = [r for r in rows if r["position"] < mine["position"]]
-        if not above:
-            return None
+        if not above or rival_xuid == xuid:
+            return mine
         return self._near_real(rows, above[-1]["position"] - 1, xuid, 4, only_above=mine["position"]) or above[-1]
 
     @staticmethod
