@@ -44,12 +44,16 @@ fi
 
 echo; git status --short | head -40; echo "($(git diff --cached --name-only | wc -l) files staged)"
 [ -f "$msgfile" ] && { echo; echo "commit message ($msgfile):"; sed 's/^/  | /' "$msgfile"; }
-read -r -p "Commit, push to origin, set RELEASE_SIGNING_KEY and tag $tag? [y/N] " yn
+read -r -p "Commit, push to origin, set RELEASE_SIGNING_KEY${FH2MP_PUBLISH_NO_TAG:+ (ship.sh then merges into main and tags it)}${FH2MP_PUBLISH_NO_TAG:- and tag $tag}? [y/N] " yn
 [ "$yn" = y ] || { git reset -q; echo aborted; exit 1; }
 
-if [ -f "$msgfile" ]; then git commit -q -F "$msgfile"; else git commit -q -m "Release $tag"; fi
+if git diff --cached --quiet; then echo "nothing new to commit"
+elif [ -f "$msgfile" ]; then git commit -q -F "$msgfile"; else git commit -q -m "Release $tag"; fi
 git push origin HEAD
 gh secret set RELEASE_SIGNING_KEY < "$key"
+if [ -n "${FH2MP_PUBLISH_NO_TAG:-}" ]; then        # ops/ship.sh: it merges develop into main and tags main itself
+  echo "Pushed (not tagged)."; exit 0
+fi
 git tag -a "$tag" -m "FH2MP $tag"
 git push origin "$tag"
 echo "Pushed. Watching the build (Ctrl+C is safe, it keeps running on GitHub):"
