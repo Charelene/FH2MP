@@ -17,7 +17,7 @@ jobs:
         timeout-minutes: 5
       - run: shim/build.sh
       - uses: actions/upload-artifact@v4
-        with: { name: dll, path: shim/build/FH2MP.dll }
+        with: { name: dll, path: shim/build/*.dll, if-no-files-found: error }
 
   sign:
     needs: build
@@ -33,13 +33,16 @@ jobs:
           endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
           signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
-          files: ${{ github.workspace }}\dll\FH2MP.dll
+          files-folder: ${{ github.workspace }}\dll
+          files-folder-filter: dll
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
       - name: check the signature
         shell: pwsh
         run: |
-          $s = Get-AuthenticodeSignature dll\FH2MP.dll
-          $s | Format-List Status, StatusMessage, SignerCertificate, TimeStamperCertificate
-          if ($s.Status -ne 'Valid') { throw "signature is $($s.Status)" }
+          foreach ($f in Get-ChildItem dll\*.dll) {
+            $s = Get-AuthenticodeSignature $f.FullName
+            $f.Name; $s | Format-List Status, StatusMessage, SignerCertificate, TimeStamperCertificate
+            if ($s.Status -ne 'Valid') { throw "$($f.Name): signature is $($s.Status)" }
+          }
