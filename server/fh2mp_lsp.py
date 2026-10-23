@@ -18,6 +18,7 @@ Usage: python3 -I server/fh2mp_lsp.py [port]
        FH2MP_GAME_PORT (the game server address handed to clients).
 """
 import json
+import math
 import os
 import re
 import struct
@@ -42,6 +43,8 @@ import clubs  # noqa: E402
 import social  # noqa: E402
 import xbl  # noqa: E402
 import auth  # noqa: E402
+import gamedb_sync  # noqa: E402
+import home  # noqa: E402
 import launcher_api  # noqa: E402
 import ops_api  # noqa: E402
 
@@ -60,6 +63,9 @@ SOCIAL = None             # social.SocialStore
 AUTH = None               # auth.AuthService (accountless identity, server/auth.py)
 LAUNCHER = None           # launcher_api.Ctx
 OPS = ops_api.OpsConfig() # operator API access (token + allowed addresses), see ops_api.py; replaced from the environment in setup_auth
+# The client shows a club's level as clubXP / 100 + 1 (578 for 57713 XP, seen in game), and the club XP is what its members earned since they
+# joined: a one-member club of a level-41 player reads 480. FH2MP_CLUB_XP_DIVISOR scales the XP sent (12 puts a solo club near its member's level).
+CLUB_XP_DIVISOR = max(1, int(os.environ.get("FH2MP_CLUB_XP_DIVISOR", "1")))
 LEVELS = {}               # xuid -> currentCareerLevel as sent at Logon
 TAGS = {}                 # xuid -> gamertag, learned at Logon
 
@@ -101,6 +107,7 @@ def logon(req):
     if getattr(CTX, "authed", False):
         lg["xuid"], lg["gamerTag"] = CTX.xuid, CTX.tag          # the account decides who this is, not what the client claims
     TAGS[lg["xuid"]] = lg["gamerTag"]
+    lg["currentCareerLevel"] = db.clean_level(lg["currentCareerLevel"])       # a number from the client's save: keep it sane
     LEVELS[lg["xuid"]] = lg["currentCareerLevel"]
     with DB.tx() as c:
         db.touch_player(c, lg["xuid"], lg["gamerTag"], level=lg["currentCareerLevel"])
@@ -294,11 +301,15 @@ def drv_for_cache(req):
 def drv_for_race(req):
     xuid, tag = _me()
     me = DRV.for_player(xuid, tag)
-    me["wristbandLevel"] = DRV.bucket_wristband(req["bucketId"])   # the car the player is driving now
-    DRV.set_wristband(xuid, me["wristbandLevel"])
+    # Free Roam and Car Meets send bucket 0 (no car in play): keep the player's own value there and draw the grid from the
+    # whole shipped range, or every name tag shows the lowest level.
+    in_car = req["bucketId"] > 0
+    if in_car:
+        me["wristbandLevel"] = DRV.bucket_wristband(req["bucketId"])   # the car the player is driving now
+        DRV.set_wristband(xuid, me["wristbandLevel"])
     cached = set(req["cachedDrivatars"]) | set(req["cachedDrivatarsNewCars"])
     skill = req["skillSelection"] if 0 <= req["skillSelection"] <= 4 else None
-    others = DRV.pool(max(0, req["numberOfDrivatars"]), skill=skill, near_wristband=me["wristbandLevel"],
+    others = DRV.pool(max(0, req["numberOfDrivatars"]), skill=skill, near_wristband=me["wristbandLevel"] if in_car else None,
                       exclude_xuid=xuid, exclude_xuids=cached)
     log(f"  ForRace bucket={req['bucketId']} n={req['numberOfDrivatars']} skill={req['skillSelection']} "
         f"cached={len(req['cachedDrivatars'])}+{len(req['cachedDrivatarsNewCars'])}: me + {len(others)} others")
@@ -318,7 +329,8 @@ def _score_row(sc_row, rowdict):
         "position": sc_row["position"], "rank": sc_row["position"], "score": scoreboard.dbl_to_u64(sc_row["score"]),
         "submittedTime": scoreboard.iso(sc_row["t"]), "carId": sc_row["car"], "carClassId": min(sc_row["cls"], TOP_CLASS),
         "carPerformanceIndex": sc_row["cpi"], "usedSTM": sc_row["stm"], "usedTCS": sc_row["tcs"],
-        "usedABS": sc_row["abs"], "isClean": sc_row["clean"], "ghostFileId": sc_row.get("ghost", 0), "bounty": 0})
+        "usedABS": sc_row["abs"], "usedAutoBrake": sc_row.get("autobrake", False), "usedAutoShifting": sc_row.get("autoshift", False),
+        "usedClutch": sc_row.get("clutch", False), "isClean": sc_row["clean"], "ghostFileId": sc_row.get("ghost", 0), "bounty": 0})
     return rowdict
 
 
@@ -327,8 +339,10 @@ def sb_submit_score(req):
     d = req["data"]
     s = SB.submit(xuid, tag, req["type"], d)
     if s is None:
-        why = "class X/R not allowed on a Rivals board" if (d["scoreboardType"] in scoreboard.EVENT_BOARDS and
-                                                             d["carClassId"] in scoreboard.MAXED_CLASSES) else "score is not a finite number"
+        score = scoreboard.u64_to_dbl(d["score"])
+        why = ("class X/R not allowed on a Rivals board" if (d["scoreboardType"] in scoreboard.EVENT_BOARDS and
+                                                              d["carClassId"] in scoreboard.MAXED_CLASSES) else
+               f"speed {score:.3f} m/s is above the {scoreboard.SPEED_CAP} m/s cap" if math.isfinite(score) else "score is not a finite number")
         log(f"  SubmitScore board=({d['scoreboardType']},{req['type']}) track={d['trackId']}: ignored, {why}")
         return None
     log(f"  SubmitScore board=({d['scoreboardType']},{req['type']}) track={d['trackId']} car={d['carId']} "
@@ -379,7 +393,7 @@ def sb_notify_rival(req):
     sub = SB.by_score_id(req["myScoreId"])
     e = event_info(req["rivalEventId"])
     log(f"  NotifyRival event={req['rivalEventId']} rival={req['rivalXuid']:#x} score={'%.3f' % sub['score'] if sub else '?'}")
-    if sub is None or e is None or not req["rivalXuid"] or req["rivalXuid"] == xuid:
+    if sub is None or e is None or not req["rivalXuid"] or req["rivalXuid"] == xuid or SB.fake_name(req["rivalXuid"]):
         return None
     send_beaten(req["rivalXuid"], xuid, tag or sub["tag"], e, sub["car"], sub["cls"], sub["st"], sub["score"])
     return None
@@ -447,14 +461,16 @@ def sb_rival(req):
                     req["rivalXuid"])
     res = xls.default_struct(SC, SC.call_struct("ForzaWebServicesScoreboardGetRival_Results"))
     if r is None:
-        log("  GetRival: no rival")
+        log(f"  GetRival board=({req['scoreboardType']},{req['scoreType']}) event={req['rivalEventId']} track={req['trackId']} "
+            f"pivot={req['pivotId']} rivalXuid={req['rivalXuid']:#x}: no rival")
         return res
     sd = res["rival"]["scoreData"]
     _score_row(r, sd)
-    # your own ghost (you are #1, or picked yourself) pays nothing: otherwise racing it would farm credits
-    sd["bounty"] = res["rival"]["bounty"] = 0 if r["xuid"] == xuid else SB.bounty_for(_bounty_track(req), r["position"])
+    # your own ghost (you are #1, or picked yourself) and the made-up time of an empty board pay nothing: no credits to farm
+    sd["bounty"] = res["rival"]["bounty"] = 0 if r["xuid"] == xuid or r.get("fake") else SB.bounty_for(_bounty_track(req), r["position"])
     log(f"  GetRival board=({req['scoreboardType']},{req['scoreType']}) event={req['rivalEventId']} "
-        f"track={req['trackId']} pivot={req['pivotId']} rivalXuid={req['rivalXuid']:#x}: {r['tag']} {r['score']:.3f}")
+        f"track={req['trackId']} pivot={req['pivotId']} rivalXuid={req['rivalXuid']:#x}: {r['tag']} {r['score']:.3f}"
+        f"{' (world record, empty board)' if r.get('fake') else ''}")
     return res
 
 
@@ -1197,7 +1213,7 @@ def _club_struct(tmpl, club):
         "isOpenForMembership": club["privacy"] == clubs.PRIVACY_OPEN, "creationDate": _stamp(club["created"]),
         "carCount": 0, "memberCount": CLUBS.member_count(cid), "clubLeader": user(CLUBS.leader(cid)) if CLUBS.leader(cid) else tmpl["clubLeader"],
         "clubChampion": user(CLUBS.champion(cid)) if CLUBS.champion(cid) else tmpl["clubChampion"],
-        "clubPrivacy": club["privacy"], "clubXP": CLUBS.xp(cid), "clubXPRank": CLUBS.xp_rank(cid),
+        "clubPrivacy": club["privacy"], "clubXP": CLUBS.xp(cid) // CLUB_XP_DIVISOR, "clubXPRank": CLUBS.xp_rank(cid),
     }
     for k, v in values.items():
         if k in out:
@@ -2092,7 +2108,7 @@ def gsds_qos_servers():
 
 
 def xbl_xuid(headers):
-    """The caller's Xbox user id: the shim's XSAPI token is "XBL3.0 x=fh2mp;<decimal xuid>" (shim/src/winmm_proxy.c)."""
+    """The caller's Xbox user id: the shim's XSAPI token is "XBL3.0 x=fh2mp;<decimal xuid>" (shim/src/fh2mp_mod.c)."""
     if getattr(CTX, "authed", False):
         return str(CTX.xuid)                                    # from the session token, never from a header the client wrote
     if AUTH is not None and AUTH.mode == "required":
@@ -2169,6 +2185,27 @@ class Handler(BaseHTTPRequestHandler):
         log(f"  old shim {CTX.shim or '(none)'!r}: removing {acct.gamertag!r} {acct.xuid:#x} from the game")
         on_revoke(acct.xuid)
 
+    def _gamedb_ok(self, acct):
+        """A game whose car database is not the server's (X-FH2MP-GameDb, the shim's hash of the copy the launcher synced) is refused and
+        taken out of the game until it signs in again: a car the others do not have crashes them. No header = a shim without the check
+        (minShim decides about those). Replace the database during maintenance: everyone in the game is removed and gets the new copy at
+        the next Play."""
+        have = self.headers.get("X-FH2MP-GameDb")
+        if have is None or LAUNCHER is None:
+            return True
+        m = LAUNCHER.gamedb.manifest()
+        if m is None or have.strip().lower() == m["sha256"]:
+            return True
+        now = time.monotonic()
+        if now - _GAMEDB_REMOVED.get(acct.xuid, -1e9) >= 60:
+            _GAMEDB_REMOVED[acct.xuid] = now
+            if len(_GAMEDB_REMOVED) > 20000:
+                _GAMEDB_REMOVED.clear()
+            log(f"  car database {have.strip()[:16]!r} is not the server's {m['sha256'][:16]}: removing {acct.gamertag!r} {acct.xuid:#x} from the game")
+            on_revoke(acct.xuid)
+        self._reply_json(409, {"error": "gamedb_mismatch", "message": "Your car database is not the server's. Press Play in the FH2MP launcher."})
+        return False
+
     def _identify(self):
         """Sets CTX.xuid / CTX.authed / CTX.tag from the session token. False (after answering) when the request must not go on."""
         CTX.authed, CTX.tag = False, ""
@@ -2188,6 +2225,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._reply_json(e.status, {"error": e.code, "message": e.message})
                     return False
                 CTX.xuid, CTX.tag, CTX.authed = acct.xuid, acct.gamertag, True
+                if not self._gamedb_ok(acct):
+                    return False
                 announce_auth(acct.xuid, self.client_ip())
                 return True
             if AUTH.mode == "required":
@@ -2285,6 +2324,8 @@ class Handler(BaseHTTPRequestHandler):
                 st, doc = (xbl.put_session(self.path, body, caller) if self.command in ("PUT", "POST")
                            else xbl.get_session(self.path, caller))
                 status = st
+                if doc is not None and self.headers.get("X-FH2MP-Tunnel"):
+                    xbl.for_tunnel(doc)                 # a client on the TCP fallback reaches the game server through its own machine
                 out = json.dumps(doc).encode() if doc is not None else b"{}"
             ctype = "application/json"
             if doc is not None:
@@ -2406,7 +2447,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
-    do_GET = do_POST = do_PUT = do_DELETE = _handle
+    do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = _handle
 
 
 def setup(dsn=None):
@@ -2439,6 +2480,7 @@ def setup(dsn=None):
     shipped = [json.loads(r["record"]) for r in DB.query("SELECT record FROM game.drivatar_shipped ORDER BY idx")]
     DRV = drivatar.DrivatarStore(SC, shipped, DB)
     SOCIAL.bot_name, SOCIAL.name_lookup = DRV.bot_name, DRV.tag_for_xuid       # bots show their racing-driver names in lobbies, not Player#
+    xbl.NAME_LOOKUP = lambda x: _tag(x) or DRV.tag_for_xuid(x)                  # session members carry their gamertag, not "Player 1" (GitHub #3)
     log(f"drivatar store: {len(DRV.templates)} shipped templates, {DRV.count()} stored players")
     global SB
     SB = scoreboard.ScoreStore(DB, [t["GamerTag"] for t in DRV.templates] + DRV.gamertags(), cars=CARS.fake_pool(), route_length=CARS.route_length, event_info=event_info,
@@ -2475,6 +2517,7 @@ def announce_auth(xuid, ip):
 
 
 _OLD_REMOVED = {}
+_GAMEDB_REMOVED = {}
 
 
 def on_login(xuid, ip):
@@ -2514,10 +2557,15 @@ def setup_auth():
     for r in DB.query("SELECT xuid, gamertag FROM accounts"):
         TAGS[r["xuid"]] = r["gamertag"]
     host = os.environ.get("FH2MP_PUBLIC_HOST", "127.0.0.1")
+    game_public = {"host": host, "port": int(os.environ.get("FH2MP_GAME_PORT", "5000"))}
+    if os.environ.get("FH2MP_GAME_TCP_PORT"):
+        game_public["tcp"] = int(os.environ["FH2MP_GAME_TCP_PORT"])         # the game server's experimental TCP carrier (FH2MP_TUNNEL_PORT)
     LAUNCHER = launcher_api.Ctx(
         AUTH, SOCIAL, launcher_api.LauncherConfig(), online_count, log=log, on_login=on_login,
         lsp_public={"url": os.environ.get("FH2MP_LSP_URL", f"http://{host}:{os.environ.get('FH2MP_LSP_PUBLIC_PORT', '5080')}")},
-        game_public={"host": host, "port": int(os.environ.get("FH2MP_GAME_PORT", "5000"))})
+        game_public=game_public, gamedb=gamedb_sync.GameDb(),
+        boards=lambda kind, n: (home.build(sys.modules[__name__]) if kind == "home"
+                                else (ops_api.challenges if kind == "challenges" else ops_api.leaderboards)(sys.modules[__name__], n)))
     global OPS
     OPS = ops_api.OpsConfig.from_env()
     ops_api.load_saved(sys.modules[__name__])

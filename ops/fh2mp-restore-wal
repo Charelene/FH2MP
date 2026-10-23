@@ -1,0 +1,12 @@
+#!/bin/bash
+# PostgreSQL restore_command for the fh2mp WAL archive: restore_command = '/usr/local/sbin/fh2mp-restore-wal %f %p'
+# Segments are archived zstd-compressed by fh2mp-archive-wal (<name>.zst); older ones and history files are plain.
+set -euo pipefail
+name=$1; out=$2; src=/var/backups/fh2mp/wal
+if [ -f "$src/$name.zst" ]; then
+  zstd -dqc "$src/$name.zst" > "$out"
+elif [ -f "$src/$name" ]; then
+  cp "$src/$name" "$out"
+else
+  exit 1                                   # not archived (normal at the end of the archive)
+fi

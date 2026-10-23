@@ -25,6 +25,8 @@ CLASS_PIVOT_BOARDS = {1}   # scoreboardType whose pivotId is the car class (Fest
 SPEED_BOARDS = {9}       # scoreboardType of the speed trap / speed zone boards: score = m/s (32.565 shows as 117.23 km/h)
 GSID_BOARDS = {9}        # scoreboardType with one board per trap/zone: GetRows pivotId == SubmitScore.gameScoreboardId (scoreType 5 traps ids 1-30,
                          # scoreType 6 zones ids 36-50 in the live data) [C]. Without this every trap and zone shared one board per player.
+SPEED_CAP = 127.4        # m/s (285 mph): highest speed a trap can really show (Ultima GTR with bounce wheelies; Sisteron Highway record 283 mph,
+                         # GitHub #12). Faster speed-board scores are rejected on submit and hidden on read (older ones are still stored).
 
 
 def dbl_to_u64(x):
@@ -64,9 +66,11 @@ class ScoreStore:
     def submit(self, xuid, tag, score_type, d):
         """Stores one submission and returns it as a row dict, or None if the score is not a finite number
         (a NaN/inf time must never reach a public board) or the car is class X/R on a Rivals board (user
-        decision: a maxed-out car must never appear on a Rivals leaderboard, not even disguised as S2)."""
+        decision: a maxed-out car must never appear on a Rivals leaderboard, not even disguised as S2), or a speed above SPEED_CAP."""
         score = u64_to_dbl(d["score"])
         if not math.isfinite(score):
+            return None
+        if d["scoreboardType"] in SPEED_BOARDS and score > SPEED_CAP:
             return None
         if d["scoreboardType"] in EVENT_BOARDS and d["carClassId"] in MAXED_CLASSES:
             return None
@@ -75,10 +79,11 @@ class ScoreStore:
         with self.db.tx() as c:
             db.touch_player(c, xuid, tag, now)
             cur = c.execute("INSERT INTO score_submissions (xuid, sb, st, gsid, track, car, cls, cpi, score, clean, stm, tcs, "
-                            "abs, submitted, score_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            "abs, autobrake, autoshift, clutch, submitted, score_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                             (xuid, d["scoreboardType"], score_type, d["gameScoreboardId"], d["trackId"], d["carId"],
                              d["carClassId"], d["carPerformanceIndex"], score, int(d["isClean"]), int(d["usedSTM"]),
-                             int(d["usedTCS"]), int(d["usedABS"]), now, score_id))
+                             int(d["usedTCS"]), int(d["usedABS"]), int(d.get("usedAutoBrake", False)),
+                             int(d.get("usedAutoShifting", False)), int(d.get("usedClutch", False)), now, score_id))
         return {"id": cur.lastrowid, "score_id": score_id, "xuid": xuid, "tag": tag, "sb": d["scoreboardType"],
                 "st": score_type, "score": score}
 
@@ -138,6 +143,8 @@ class ScoreStore:
         where, args = "s.sb=? AND s.st=?", [sb, st]
         if sb in EVENT_BOARDS:    # class X/R must never surface on a Rivals board, read or write (user decision); belt-and-suspenders
             where += f" AND s.cls NOT IN ({','.join(str(c) for c in MAXED_CLASSES)})"
+        if sb in SPEED_BOARDS:    # impossible speeds submitted before the cap existed stay stored but never show
+            where += f" AND s.score <= {SPEED_CAP}"
         if (sb in EVENT_BOARDS or sb in GSID_BOARDS) and pivot > 0:   # one board per event / per trap or zone (the client's track field is 0, the track or 65535)
             where += " AND s.gsid=?"
             args.append(pivot)
@@ -179,6 +186,8 @@ class ScoreStore:
         return rows[:max(0, limit)]
 
     FAKE_BASE = 0x9100000000000
+    TARGET_XUID = FAKE_BASE + 0xFFFFFF     # the empty board's world record to beat (rival_for); outside every fake_xuid value
+    TARGET_TAG = "World Record"            # not a person: the community record time, never a player's name
 
     @classmethod
     def fake_xuid(cls, name):
@@ -188,6 +197,8 @@ class ScoreStore:
         """The racing-driver name behind a fake rival's id ('' if the id is not one): the profile service needs it, the game shows what it says."""
         if xuid < self.FAKE_BASE or xuid > self.FAKE_BASE + 0xFFFFFF:
             return ""
+        if xuid == self.TARGET_XUID:
+            return self.TARGET_TAG
         if not hasattr(self, "_fake_names"):
             self._fake_names = {self.fake_xuid(n): n[:15] for n in self.names}
         return self._fake_names.get(xuid, "")
@@ -226,7 +237,7 @@ class ScoreStore:
             car, cls, cpi = self._fake_car(nm, score if sb in SPEED_BOARDS else None, ev_cars)
             out.append({"xuid": self.fake_xuid(nm), "tag": nm[:15], "sb": sb, "st": st,
                         "track": track, "car": car, "cls": cls, "cpi": cpi, "score": round(score, 3), "clean": r > 0.3,
-                        "stm": False, "tcs": r < 0.5, "abs": True, "t": time.time() - 86400 * (1 + 20 * r), "fake": True})
+                        "stm": False, "tcs": r < 0.5, "abs": True, "autoshift": r < 0.6, "t": time.time() - 86400 * (1 + 20 * r), "fake": True})
         return out
 
     def bounty_for(self, track, position=1):
@@ -271,21 +282,57 @@ class ScoreStore:
         return page, mine, len(real), len(fake)
 
     def rival_for(self, xuid, sb, st, track, pivot=-1, rival_xuid=0):
-        """The rival to chase: the row just above the player's best; with no best yet, one near the middle of the board. A real
-        player's row (it has a ghost to race) is preferred over a made-up one: for a newcomer any real ghost on the board, otherwise
-        one within 4 rows above the player's best. The player's own row is the rival when they are #1 (nobody is above them, so they
-        race their own best ghost) or when the client asks for their own xuid (picking yourself on the board); the caller pays no
-        bounty for it."""
+        """The rival to chase: the row of `rival_xuid` when the player picked one on the board (GitHub #12), else the row just above
+        the player's best; with no best yet, one near the middle of the board. A real player's row (it has a ghost to race) is
+        preferred over a made-up one: for a newcomer any real ghost on the board, otherwise one within 4 rows above the player's
+        best. The player's own row is the rival when they are #1 (nobody is above them, so they race their own best ghost) or when
+        the client asks for their own xuid (picking yourself on the board); the caller pays no bounty for it. On an empty board it
+        is the world record ("World Record", no ghost, never listed on the board; see record_target), or None when there is no
+        record: GetRival has no "not found" flag, and the client spins forever on an all-zero answer (GitHub #12)."""
         rows, mine, _, _ = self.rows(xuid, sb, st, track, 1, 1000, pivot)
         if not rows:
-            return None
+            return self._record_row(sb, st, track, pivot)
+        picked = next((r for r in rows if rival_xuid and r["xuid"] == rival_xuid), None)
+        if picked is not None:
+            return picked
         if mine is None:
             mid = len(rows) // 2
             return self._near_real(rows, mid, xuid, len(rows)) or rows[mid]      # any real ghost on the board beats a made-up rival
         above = [r for r in rows if r["position"] < mine["position"]]
-        if not above or rival_xuid == xuid:
+        if not above:
             return mine
         return self._near_real(rows, above[-1]["position"] - 1, xuid, 4, only_above=mine["position"]) or above[-1]
+
+    def record_target(self, sb, st, track, pivot=-1):
+        """(seconds, class) of the world record an empty time board is raced against, or None. Festival Routes: the record of
+        the board's class. Monthly (always 1 lap, rivals.py): the event's track and class. Showcase / open events: the track's fastest
+        class. A class without a record on that track takes the next faster class that has one (never a slower class's time)."""
+        if st not in ASCENDING:
+            return None
+        cls = None
+        if sb in CLASS_PIVOT_BOARDS and 0 <= pivot <= 5:
+            cls = pivot
+        elif sb in EVENT_BOARDS and pivot > 0:
+            ev = self.event_info(pivot)       # Monthly only; Showcase pivots are the game's own event ids (request track, any class)
+            if ev:
+                track, cls = ev["track"], ev["cls"]
+        on_track = {c: t for (tr, c), t in self.records.items() if tr == track}
+        usable = [c for c in on_track if cls is None or c >= cls]
+        if not usable:
+            return None
+        c = max(usable) if cls is None else min(usable)
+        return on_track[c], c
+
+    def _record_row(self, sb, st, track, pivot):
+        target = self.record_target(sb, st, track, pivot)
+        if target is None:
+            return None
+        secs, cls = target
+        pool = (self.event_cars(pivot) if sb in EVENT_BOARDS and pivot > 0 else None) or self.cars
+        car, ccls, cpi = self._fake_car(self.TARGET_TAG, None, [c for c in pool if c[1] == cls] or pool)   # a car of the record's class
+        return {"xuid": self.TARGET_XUID, "tag": self.TARGET_TAG, "sb": sb, "st": st, "track": track, "car": car, "cls": ccls,
+                "cpi": cpi, "score": secs, "clean": True, "stm": False, "tcs": False, "abs": False, "t": time.time(),
+                "position": 1, "fake": True}
 
     @staticmethod
     def _near_real(rows, idx, xuid, radius, only_above=None):
@@ -314,5 +361,6 @@ def _row(r):
     """score_submissions row (+ joined tag) -> the dict the rest of the server uses."""
     return {"xuid": r["xuid"], "tag": r["tag"], "sb": r["sb"], "st": r["st"], "gsid": r["gsid"], "track": r["track"],
             "car": r["car"], "cls": r["cls"], "cpi": r["cpi"], "score": r["score"], "clean": bool(r["clean"]),
-            "stm": bool(r["stm"]), "tcs": bool(r["tcs"]), "abs": bool(r["abs"]), "t": r["submitted"],
+            "stm": bool(r["stm"]), "tcs": bool(r["tcs"]), "abs": bool(r["abs"]), "autobrake": bool(r["autobrake"]),
+            "autoshift": bool(r["autoshift"]), "clutch": bool(r["clutch"]), "t": r["submitted"],
             "ghost": r["ghost"] if "ghost" in r.keys() else 0}

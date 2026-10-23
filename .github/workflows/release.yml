@@ -29,23 +29,79 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
-      - run: release/build_shim_zip.sh
-      - run: python3 -I release/fetch_extra_options.py --dist dist     # FH2 Extra Options (GPL-3.0, RokkuDayo), unchanged, with licence + source
+      # the runner image usually has mingw already; the apt mirror has hung here, so install only if missing, with timeouts
+      - run: command -v x86_64-w64-mingw32-gcc || sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 install -y gcc-mingw-w64-x86-64
+        timeout-minutes: 5
+      - run: release/build_shim_zip.sh                                # fh2-mods/FH2MP.dll (the launcher fetches the FH2 Mod Platform and Extra Options from their authors)
       - uses: actions/upload-artifact@v4
-        with: { name: shim, path: dist/*.zip }
+        with: { name: shim-unsigned, path: dist/*.zip }
+
+  # FH2MP.dll is built with mingw on Linux; the signing action runs on Windows, so the zip is unpacked, signed and packed again here.
+  shim-sign:
+    needs: shim
+    runs-on: windows-2022
+    env: { AZURE_CLIENT_ID: "${{ secrets.AZURE_CLIENT_ID }}" }
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: shim-unsigned, path: in }
+      - name: unpack
+        shell: pwsh
+        run: Expand-Archive -Path (Get-Item in\*.zip).FullName -DestinationPath pkg
+      - name: sign FH2MP.dll
+        if: env.AZURE_CLIENT_ID != ''
+        uses: azure/artifact-signing-action@v2
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\pkg\fh2-mods\FH2MP.dll
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - name: pack
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          $zip = Get-Item in\*.zip
+          Compress-Archive -Path pkg\* -DestinationPath "out\$($zip.Name)"
+      - uses: actions/upload-artifact@v4
+        with: { name: shim, path: out/*.zip }
 
   launcher-windows:
     needs: check
     runs-on: windows-2022
     defaults: { run: { working-directory: launcher } }
+    env: { AZURE_CLIENT_ID: "${{ secrets.AZURE_CLIENT_ID }}" }       # set = sign with Azure Artifact Signing (see "sign the launcher")
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
+      # PyInstaller with a bootloader compiled here: the prebuilt one is shared with a lot of malware and gets the exe ML-flagged by Defender
+      - run: pip install --no-binary pyinstaller "pyinstaller>=6.6"
+        env: { PYINSTALLER_COMPILE_BOOTLOADER: "1" }
       - run: pip install -e ".[build]"
       - run: pyinstaller --noconfirm --clean --distpath dist packaging/fh2mp.spec
       - run: dist\fh2mp-launcher\fh2mp-launcher.exe --selftest
+      # Azure Artifact Signing, skipped while the secrets are not set. Secrets: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET (an app
+      # registration with the "Artifact Signing Certificate Profile Signer" role); variables: AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT,
+      # AZURE_SIGNING_PROFILE.
+      - name: sign the launcher
+        if: env.AZURE_CLIENT_ID != ''
+        uses: azure/artifact-signing-action@v2
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\launcher\dist\fh2mp-launcher\fh2mp-launcher.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
       - name: installer
         shell: pwsh
         run: |
@@ -53,6 +109,21 @@ jobs:
           $v = (Select-String -Path fh2mp_launcher/version.py -Pattern '"(.+)"').Matches[0].Groups[1].Value
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" packaging\fh2mp.iss
           Compress-Archive -Path dist\fh2mp-launcher\* -DestinationPath "dist\FH2MP-Launcher-$v-windows-x64-portable.zip"
+      - name: sign the installer
+        if: env.AZURE_CLIENT_ID != ''
+        uses: azure/artifact-signing-action@v2
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}\launcher\dist
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
       - uses: actions/upload-artifact@v4
         with: { name: windows, path: "launcher/dist/*.exe\nlauncher/dist/*.zip" }
 
@@ -77,7 +148,7 @@ jobs:
         with: { name: linux, path: "launcher/dist/*.deb\nlauncher/dist/*.AppImage\nlauncher/dist/*.zsync" }
 
   publish:
-    needs: [shim, launcher-windows, launcher-linux]
+    needs: [shim-sign, launcher-windows, launcher-linux]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4

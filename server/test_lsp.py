@@ -91,6 +91,7 @@ class LayerCountTests(unittest.TestCase):
         class Req:
             headers = {}
             _remove_old_client = L.Handler._remove_old_client
+            _gamedb_ok = L.Handler._gamedb_ok
             client_ip = lambda self: "127.0.0.1"          # noqa: E731
             _reply_json = lambda self, status, obj, *a, **k: replies.append((status, obj["error"]))     # noqa: E731
         try:
@@ -114,6 +115,52 @@ class LayerCountTests(unittest.TestCase):
             self.assertEqual(len(revoked), 1)                               # ... once a minute, not on every request
             self.assertEqual(ask("1.0.0-rc4", "fh2.good")[0], True)
             self.assertEqual(len(revoked), 1)                               # an up-to-date client is left alone
+        finally:
+            L.LAUNCHER, L.AUTH, L.on_revoke = old_launcher, old_auth, old_revoke
+            for k, v in ctx_before.items():
+                setattr(L.CTX, k, v)
+
+    def test_another_car_database_is_turned_away(self):
+        import hashlib
+        import tempfile
+        path = os.path.join(tempfile.mkdtemp(), "gamedbRC.slt")
+        with open(path, "wb") as f:
+            f.write(b"SQLite format 3\x00" + b"cars" * 100)
+        with open(path, "rb") as f:
+            good = hashlib.sha256(f.read()).hexdigest()
+        old_launcher, old_auth, old_revoke = L.LAUNCHER, L.AUTH, L.on_revoke
+        revoked, replies = [], []
+
+        class FakeAuth:
+            mode = "optional"
+
+            def authenticate(self, token, ip):
+                return type("A", (), {"xuid": 0x900000000def, "gamertag": "Panzer Fan"})()
+        L.LAUNCHER = L.launcher_api.Ctx(None, None, L.launcher_api.LauncherConfig(), lambda: 0, gamedb=L.gamedb_sync.GameDb(""))
+        L.AUTH, L.on_revoke = FakeAuth(), revoked.append
+        L._GAMEDB_REMOVED.clear()
+        ctx_before = {k: getattr(L.CTX, k, None) for k in ("xuid", "tag", "authed", "shim")}
+
+        class Req:
+            headers = {}
+            _gamedb_ok = L.Handler._gamedb_ok
+            client_ip = lambda self: "127.0.0.1"          # noqa: E731
+            _reply_json = lambda self, status, obj, *a, **k: replies.append((status, obj["error"]))     # noqa: E731
+        try:
+            def ask(db=None):
+                replies.clear()
+                r = Req()
+                r.headers = {"X-FH2MP-Token": "fh2.x", **({"X-FH2MP-GameDb": db} if db is not None else {})}
+                return L.Handler._identify(r), list(replies)
+            self.assertEqual(ask("missing"), (True, []))                   # the server sets no database: nothing to compare
+            L.LAUNCHER.gamedb = L.gamedb_sync.GameDb(path)
+            self.assertEqual(ask(good), (True, []))
+            self.assertEqual(ask(good.upper()), (True, []))
+            self.assertEqual(ask(None), (True, []))                        # a shim without the check (minShim decides)
+            self.assertEqual(revoked, [])
+            self.assertEqual(ask("0" * 64), (False, [(409, "gamedb_mismatch")]))
+            self.assertEqual(ask("missing"), (False, [(409, "gamedb_mismatch")]))
+            self.assertEqual(revoked, [0x900000000def])                    # taken out of the game once a minute, not on every request
         finally:
             L.LAUNCHER, L.AUTH, L.on_revoke = old_launcher, old_auth, old_revoke
             for k, v in ctx_before.items():

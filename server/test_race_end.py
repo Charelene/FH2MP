@@ -23,7 +23,7 @@ def world(event):
     for p in peers:
         p.connected = True
         w.peers[p.addr] = p
-    w.event = dict(event, people=list(peers), racing=True, finished={}, over=False)
+    w.event = dict(event, people=list(peers), racing=True, finished={}, over=False, laps={p: 3 for p in peers})
     return w, peers
 
 
@@ -52,6 +52,28 @@ class FreeRoamRaceEnd(unittest.TestCase):
         w.event["finished"][a] -= S.RACE_LAST_FINISHER_SECONDS + 1
         w.check_race_end(time.monotonic())
         self.assertTrue(w.event["over"])
+
+    def test_a_player_out_of_the_race_does_not_start_the_end_timer(self):
+        """Prod 2026-10-22 22:18:19 lobby c0759261: a participant sat at the finish line in a car the A-class event did not allow; its
+        final score 15 s after GO started "30 s after the first finisher" and ended a 3-lap race at 45 s for everybody."""
+        w, (a, b) = world({"numlaps": None})
+        w.set_session_host_bool = lambda *x: None
+        w.event["laps"] = {a: 0}                                   # a never completed a lap
+        w.note_score_keyframe(a)
+        w.event["finished"][a] -= S.RACE_LAST_FINISHER_SECONDS + 100
+        w.check_race_end(time.monotonic())
+        self.assertFalse(w.event["over"])
+        w.event["laps"][b] = 3                                     # b really finishes: everybody is done
+        w.note_score_keyframe(b)
+        w.check_race_end(time.monotonic())
+        self.assertTrue(w.event["over"])
+
+    def test_lap_scores_count_the_laps(self):
+        w, (a, b) = world({"numlaps": None})
+        w.event["laps"] = {}
+        one = int.from_bytes(S.struct.pack("<d", 60.0), "little")
+        w.note_lap_score(a, 2, [one, one, int.from_bytes(S.struct.pack("<d", 130.0), "little")])
+        self.assertEqual(w.event["laps"][a], 2)
 
     def test_keyframe_counts_once(self):
         w, (a, b) = world({"numlaps": None})
@@ -145,6 +167,67 @@ class OneEventAtATime(unittest.TestCase):
         self.assertFalse(w.request_race_blocked(a))
 
 
+class LeavingTheEvent(unittest.TestCase):
+    def test_a_player_who_leaves_while_racing_is_no_longer_a_participant_for_anybody(self):
+        w, (a, b) = world({"numlaps": None})
+        writes = []
+        w.set_console_bool = lambda q, var, value, why: writes.append((q, var, value, why))
+        w.set_session_host_bool = lambda *x: None
+        w.participant_left(b)
+        self.assertEqual(w.event["people"], [a])
+        self.assertEqual(writes, [(b, S.CONSOLE_VAR_PARTICIPATING_IN_RACE, 0, "left the event")])
+
+    def test_a_finished_player_leaving_the_results_keeps_the_flag(self):
+        w, (a, b) = world({"numlaps": None})
+        writes = []
+        w.set_console_bool = lambda *x: writes.append(x)
+        w.set_session_host_bool = lambda *x: None
+        w.event["finished"][b] = time.monotonic()
+        w.participant_left(b)
+        self.assertEqual(writes, [])
+        self.assertEqual(w.event["people"], [a])
+
+    def test_the_last_one_leaving_ends_the_event(self):
+        w, (a, b) = world({"numlaps": None})
+        w.set_console_bool = lambda *x: None
+        w.set_session_host_bool = lambda *x: None
+        w.participant_left(a)
+        w.participant_left(b)
+        self.assertIsNone(w.event)
+
+
+class InviteHold(unittest.TestCase):
+    def test_a_client_starting_its_own_event_does_not_hold_the_invite(self):
+        """Prod 2026-10-22 21:54:24: two requests in one second; the server held everybody 90 s for the second requester."""
+        w, (leader, other) = world({"numlaps": None})
+        w.event = None
+        w.set_session_host_bool = lambda *x: None
+        started = []
+        w.start_event = lambda q: started.append(q)
+        now = time.monotonic()
+        leader.entered = other.entered = True
+        other.console_vars[3] = 1                                    # RaceInProgress, not Ready
+        w.race_requested_at, w.race_hard_deadline = now, now + S.RACE_JOIN_GRACE_SECONDS
+        w.pending_race = (now - 0.1, leader)
+        other.gopts_written_at = now - 0.5                           # wrote GameOptions of its own in the same moment
+        w.tick()
+        self.assertEqual(started, [leader])
+
+    def test_an_invitee_choosing_a_car_is_still_waited_for(self):
+        w, (leader, other) = world({"numlaps": None})
+        w.event = None
+        w.set_session_host_bool = lambda *x: None
+        w.start_event = lambda q: self.fail("started while an invitee was choosing a car")
+        now = time.monotonic()
+        leader.entered = other.entered = True
+        other.console_vars[3] = 1
+        w.race_requested_at, w.race_hard_deadline = now, now + S.RACE_JOIN_GRACE_SECONDS
+        w.pending_race = (now - 0.1, leader)
+        w.tick()
+        self.assertIsNotNone(w.pending_race)
+        self.assertLessEqual(S.RACE_JOIN_GRACE_SECONDS, 45)
+
+
 class LoadTimeout(unittest.TestCase):
     def test_participant_that_never_loads_is_dropped_and_the_rest_begin(self):
         w, (a, b) = world({"numlaps": None, "begun": False, "started": time.monotonic() - S.EVENT_LOAD_TIMEOUT_SECONDS - 1})
@@ -156,11 +239,40 @@ class LoadTimeout(unittest.TestCase):
         self.assertEqual(w.event["people"], [a])
         self.assertTrue(w.event["begun"])
 
-    def test_nobody_loaded_ends_the_event(self):
-        w, (a, b) = world({"numlaps": None, "begun": False, "started": time.monotonic() - S.EVENT_LOAD_TIMEOUT_SECONDS - 1})
+    def test_nobody_loaded_drops_one_suspect_not_everyone(self):
+        """Prod 2026-10-22 lobby e7255c39: every game waits for the others' cars, so one car nobody could load got the whole group kicked."""
+        now = time.monotonic()
+        w, (a, b) = world({"numlaps": None, "begun": False, "started": now - S.EVENT_LOAD_TIMEOUT_SECONDS - 1})
+        c = S.Peer(("10.0.0.3", 5003))
+        c.connected = True
+        w.peers[c.addr] = c
+        w.event["people"].append(c)
+        w.event["racing"] = False
+        w.set_session_host_bool = lambda *x: None
+        dropped = []
+        w.set_console_bool = lambda q, var, value, why: dropped.append((q, value, why))
+        b.car_seen_at, b.car_doubt_at = now - 30, now - 30           # b's car change failed a check: the first suspect
+        c.car_seen_at = now - 5
+        w.tick()
+        self.assertEqual(w.event["people"], [a, c])
+        self.assertEqual(dropped, [(b, 0, "the others could not load its car")])
+        w.tick()                                                     # the next suspect only after a step
+        self.assertEqual(len(w.event["people"]), 2)
+        for q in (a, c):                                             # with b out, the others finish loading and the event begins
+            q.console_vars[S.CONSOLE_VAR_HAS_LOADED_CARS] = 1
+        w.maybe_begin_race()
+        self.assertTrue(w.event["begun"])
+
+    def test_the_leader_goes_last_and_a_lone_participant_ends_it(self):
+        now = time.monotonic()
+        w, (a, b) = world({"numlaps": None, "begun": False, "started": now - S.EVENT_LOAD_TIMEOUT_SECONDS - 1})
         w.event["racing"] = False
         w.set_session_host_bool = lambda *x: None
         w.set_console_bool = lambda *x: None
+        a.car_seen_at = now                                          # the leader changed car last, still not the first suspect
+        w.tick()
+        self.assertEqual(w.event["people"], [a])
+        w.event["load_next"] = 0.0
         w.tick()
         self.assertIsNone(w.event)
 

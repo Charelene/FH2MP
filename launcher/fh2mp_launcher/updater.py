@@ -127,6 +127,12 @@ class Updater:
                 return r["tag_name"]
         raise UpdateError("no release with a manifest was found")
 
+    def releases(self, n=5):
+        """The newest published releases (no drafts), for the launcher's patch-notes card: [{tag, name, body, url, prerelease}]."""
+        rels = json.loads(self._get(f"{self.api}/repos/{self.repo}/releases?per_page={int(n)}", 1_000_000, accept="application/vnd.github+json"))
+        return [{"tag": str(r.get("tag_name") or ""), "name": str(r.get("name") or ""), "body": str(r.get("body") or ""),
+                 "url": str(r.get("html_url") or ""), "prerelease": bool(r.get("prerelease"))} for r in rels if not r.get("draft")]
+
     def asset_url(self, tag, name):
         if not _TAG_RE.match(tag) or not _NAME_RE.match(name):
             raise UpdateError("refusing a suspicious file name")
@@ -144,14 +150,19 @@ class Updater:
 
     def download(self, tag, entry, progress=None, cancelled=lambda: False, dest_dir=None):
         """Downloads one manifest entry ({name, sha256, size}) to the cache, checks size and SHA-256, returns the path."""
+        return self.download_url(self.asset_url(tag, entry["name"]), entry, progress, cancelled, dest_dir)
+
+    def download_url(self, url, entry, progress=None, cancelled=lambda: False, dest_dir=None):
+        """Downloads `url` as entry["name"] to the cache when it is not there already; it must be exactly entry["size"] bytes with SHA-256
+        entry["sha256"] (a signed manifest entry, or a pin the launcher carries). Returns the path."""
         name, want = entry["name"], entry["sha256"].lower()
         size = int(entry["size"])
-        if size > MAX_ASSET or not re.fullmatch(r"[0-9a-f]{64}", want):
-            raise UpdateError("the manifest entry is not acceptable")
+        if size > MAX_ASSET or not re.fullmatch(r"[0-9a-f]{64}", want) or not _NAME_RE.match(name):
+            raise UpdateError("the download entry is not acceptable")
         dest = os.path.join(dest_dir or paths.cache_dir(), name)
         if os.path.isfile(dest) and sha256_file(dest) == want:
             return dest
-        req = urllib.request.Request(self.asset_url(tag, name), headers={"User-Agent": f"{USER_AGENT}/{__version__}"})
+        req = urllib.request.Request(url, headers={"User-Agent": f"{USER_AGENT}/{__version__}"})
         h, got = hashlib.sha256(), 0
         tmp = dest + ".part"
         try:
@@ -177,7 +188,7 @@ class Updater:
             raise
         if got != size or h.hexdigest() != want:
             _rm(tmp)
-            raise UpdateError("the download does not match the signed checksum")
+            raise UpdateError("the download does not match its checksum")
         os.replace(tmp, dest)
         return dest
 
@@ -217,6 +228,8 @@ def launcher_flavour():
 def shim_update_needed(installed_kind, installed_version, manifest):
     """None when the installed shim is current, else a short reason."""
     want = manifest.get("shim", {}).get("version", "")
+    if installed_kind == "old":
+        return "needs installing again"
     if installed_kind != "ours":
         return "not installed"
     if newer(want, installed_version):

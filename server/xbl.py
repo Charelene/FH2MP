@@ -14,6 +14,7 @@ import copy
 import json
 import os
 import re
+import threading
 import time
 import uuid
 
@@ -22,6 +23,7 @@ SESSION_PATH = re.compile(
     re.IGNORECASE)
 
 _SESSIONS = {}   # (scid, template, name) lowercase -> record
+NAME_LOOKUP = lambda xuid: ""   # xuid -> gamertag, set by fh2mp_lsp; the real MPSD fills a member's gamertag itself, the game never sends it
 
 
 def _now():
@@ -45,6 +47,16 @@ def parse_path(path):
     return m.group("scid"), m.group("template"), m.group("name")
 
 
+def _member_name(key):
+    """The registered gamertag of the member whose entry is keyed by this xuid (GitHub #3: the game shows what the session says)."""
+    if not key.isdigit():
+        return ""
+    try:
+        return NAME_LOOKUP(int(key)) or ""
+    except Exception:  # noqa: BLE001 - a failed lookup must never break a session document
+        return ""
+
+
 def _member_doc(index, m, now, key=""):
     constants = copy.deepcopy(m.get("constants", {}))
     constants.setdefault("system", {})
@@ -64,7 +76,7 @@ def _member_doc(index, m, now, key=""):
     return {
         "constants": constants,
         "properties": props,
-        "gamertag": m.get("gamertag", "Player 1"),
+        "gamertag": _member_name(key) or m.get("gamertag") or "Player 1",   # the registered name wins over anything a client sends
         "reserved": False,
         "joinTime": now,
         "nat": "open",
@@ -236,7 +248,12 @@ MOMATCH_PATH = re.compile(r"^/serviceconfigs/(?P<scid>[^/]+)/hoppers/(?P<hopper>
 TARGET_TEMPLATE = "defaultTemplate"
 
 _TICKETS = {}   # ticket id -> record
-_LOBBIES = {}   # (scid, hopper) -> session name
+_LOBBIES = {}   # lobby_key -> [session name, ...]: every lobby of that hopper / location, oldest first
+_RESERVED = {}  # session name -> {xuid: time}: players matched into a lobby that the game server has not seen connect yet
+_LOBBY_LOCK = threading.Lock()
+LOBBY_CAPACITY = 12
+RESERVE_SECONDS = 30.0     # a matched player that has not connected after this long no longer holds a seat (the game connects within ~10 s)
+_POP_DOWN_UNTIL = 0.0      # the game server did not answer: do not ask again before this
 
 
 def announce_player(xuid, lobby):
@@ -288,6 +305,8 @@ def announce_revoke(xuid):
 def drop_player(xuid):
     """Takes a player out of every session and ticket (ban / kick)."""
     xuid = str(xuid)
+    for res in _RESERVED.values():
+        res.pop(xuid, None)
     for rec in _SESSIONS.values():
         if rec["members"].pop(xuid, None) is not None:
             rec["change"] += 1
@@ -332,6 +351,15 @@ def lobby_key(scid, hopper, attrs):
     return (scid, hopper, str(attrs.get("gsiSetId", "")), str(attrs.get("Location", "")))
 
 
+def for_tunnel(doc):
+    """The session document as a client sees it when its game talks to the launcher's local UDP-over-TCP proxy (header X-FH2MP-Tunnel):
+    the game server is on 127.0.0.1 (the port comes from the launcher through the shim's FH2MP_SERVER_PORT). Edits `doc` in place."""
+    custom = (((doc or {}).get("servers") or {}).get("gameServerPlatform") or {}).get("properties", {}).get("custom")
+    if isinstance(custom, dict) and "hostName" in custom:
+        custom["hostName"] = "127.0.0.1"
+    return doc
+
+
 def servers_block():
     """The allocated game server, as the game reads it (FUN_14183b360): servers.gameServerPlatform.properties.custom."""
     return {"gameServerPlatform": {"properties": {"custom": {
@@ -340,41 +368,132 @@ def servers_block():
         "hostName": os.environ.get("FH2MP_PUBLIC_HOST", "127.0.0.1")}}}}
 
 
-def _lobby_for(scid, hopper, attrs, ref):
+def hub_populations():
+    """{lobby name: [hex xuid, ...]} of the players the game server has in each lobby, asked over its control port
+    (a "pop" datagram; see fh2mp_server.Hub.populations). None when it does not answer: the caller then counts MPSD members."""
+    global _POP_DOWN_UNTIL
+    import socket
+    if time.monotonic() < _POP_DOWN_UNTIL:
+        return None
+    target = os.environ.get("FH2MP_SERVER_CONTROL", "127.0.0.1:5090").rsplit(":", 1)
+    so = None
+    try:
+        so = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        so.settimeout(0.3)
+        so.sendto(b"pop", (target[0], int(target[1])))
+        data, _ = so.recvfrom(65535)
+    except (OSError, ValueError):
+        _POP_DOWN_UNTIL = time.monotonic() + 5.0
+        return None
+    finally:
+        if so is not None:
+            so.close()
+    parts = data.decode("utf-8", "replace").split()
+    if not parts or parts[0] != "pop":
+        return None
+    out = {}
+    for item in parts[1:]:
+        name, _, xs = item.partition("=")
+        out[name] = [x for x in xs.split(",") if x]
+    return out
+
+
+def lobby_occupancy(name, rec, pops, now=None):
+    """Players in a lobby, counting the ones matched into it that are still on their way. With the game server's report that is who is
+    connected plus the recent matches it has not seen yet; without it, the session's members."""
+    now = time.time() if now is None else now
+    if pops is None:
+        return sum(1 for k in rec["members"] if k.isdigit())
+    present = {x.lstrip("0") for x in pops.get(name, [])}
+    res = _RESERVED.get(name, {})
+    for x, t in list(res.items()):
+        if now - t > RESERVE_SECONDS or ("%x" % int(x)).lstrip("0") in present:
+            del res[x]             # it connected (the report counts it from now on, and a later leave must not leave a ghost) or never came
+    return len(pops.get(name, [])) + len(res)
+
+
+def flagged_set(pops):
+    """The kicked players the game server reports (its "!flagged" entry), as ints; empty when it is not reachable."""
+    out = set()
+    for x in (pops or {}).get("!flagged", []):
+        try:
+            out.add(int(x, 16))
+        except ValueError:
+            pass
+    return out
+
+
+def pool_fits(name, pops, flagged, mine):
+    """Whether a player may be matched into this lobby: a flagged player (kicked by the cheat checks, see fh2mp_server.Hub.flag) only
+    into a lobby whose players are all flagged, anybody else only into one with no flagged player in it. Players still on their way
+    (_RESERVED) count. An empty lobby fits both; the first to be matched into it decides."""
+    members = {int(x, 16) for x in (pops or {}).get(name, []) if x}
+    members |= {int(x) for x in _RESERVED.get(name, {}) if str(x).isdigit()}
+    members.discard(0)
+    if mine:
+        return all(m in flagged for m in members)
+    return not any(m in flagged for m in members)
+
+
+def _lobby_for(scid, hopper, attrs, ref, xuid=None):
+    """The lobby a ticket is matched into: of the hopper's lobbies the one with the most players that still has room (12 per lobby), so
+    that players arriving one after another fill lobbies up (12, 12, 1) instead of leaving every lobby partly empty (8, 10, 6, 1).
+    Players leave lobbies that were filled earlier, so the newest lobby is not the only one with seats."""
     key = lobby_key(scid, hopper, attrs)
-    name = _LOBBIES.get(key)
-    if name is not None:
-        rec = _SESSIONS.get((scid.lower(), TARGET_TEMPLATE.lower(), name.lower()))
-        if rec is not None:
+    with _LOBBY_LOCK:
+        names = _LOBBIES.setdefault(key, [])
+        pops = hub_populations()
+        best, best_n = None, -1
+        flagged = flagged_set(pops)
+        mine = int(xuid) in flagged if xuid and str(xuid).isdigit() else False
+        for name in list(names):
+            rec = _SESSIONS.get((scid.lower(), TARGET_TEMPLATE.lower(), name.lower()))
+            if rec is None:
+                names.remove(name)
+                _RESERVED.pop(name, None)
+                continue
             _prune(rec)
-        cap = int((rec or {}).get("constants", {}).get("custom", {}).get("gameServerPlatform", {}).get("maxAllowedPlayers", 12))
-        if rec is None or len(rec["members"]) >= cap:
-            name = None   # lobby gone or full: start another one
-    if name is None:
-        name = str(uuid.uuid4())
-        _LOBBIES[key] = name
-        # The game reads constants.custom.gameServerPlatform.{gameVariantId,gsiSetId[,location]} from the target session
-        # (FUN_14183bb50) and throws on a missing key, so take them from the ticket session it wrote itself.
-        custom = {}
-        if ref:
-            src = _SESSIONS.get((str(ref.get("scid", "")).lower(), str(ref.get("templateName", "")).lower(),
-                                 str(ref.get("name", "")).lower()))
-            if src:
-                custom = copy.deepcopy(src["constants"].get("custom", {}))
-        gsp = custom.setdefault("gameServerPlatform", {})
-        gsp.setdefault("gameVariantId", "00000000-0000-0000-0000-000000000001")
-        gsp.setdefault("gsiSetId", attrs.get("gsiSetId", "00000000-0000-0000-0000-000000000102"))
-        gsp.setdefault("maxAllowedPlayers", 12)
-        custom.setdefault("hopperId", attrs.get("hopperId", 0))
-        body = {"constants": {"system": {"version": 1, "visibility": "open"}, "custom": custom},
-                "properties": {"system": {"joinRestriction": "none", "readRestriction": "none"}, "custom": {}}}
-        put_session("/serviceconfigs/%s/sessionTemplates/%s/sessions/%s" % (scid, TARGET_TEMPLATE, name),
-                    json.dumps(body).encode())
-        # The allocated game server, as the game reads it (FUN_14183b360): servers.gameServerPlatform.properties.custom
-        # {status Active|Queued|Error|Quarantined, datacenter, secureDeviceAddress, hostName}.
-        rec = _SESSIONS.get((scid.lower(), TARGET_TEMPLATE.lower(), name.lower()))
-        if rec is not None:
-            rec["servers"] = servers_block()
+            cap = int(rec.get("constants", {}).get("custom", {}).get("gameServerPlatform", {}).get("maxAllowedPlayers", LOBBY_CAPACITY))
+            n = lobby_occupancy(name, rec, pops)
+            if flagged and not pool_fits(name, pops, flagged, mine):
+                continue
+            if n < cap and n > best_n:
+                best, best_n = name, n
+        name = best
+        if name is None:
+            name = _new_lobby(scid, attrs, ref)
+            names.append(name)
+        if xuid:
+            for res in _RESERVED.values():
+                res.pop(str(xuid), None)        # one seat per player: a new match replaces the one it made before
+            _RESERVED.setdefault(name, {})[str(xuid)] = time.time()
+    return name
+
+
+def _new_lobby(scid, attrs, ref):
+    name = str(uuid.uuid4())
+    # The game reads constants.custom.gameServerPlatform.{gameVariantId,gsiSetId[,location]} from the target session
+    # (FUN_14183bb50) and throws on a missing key, so take them from the ticket session it wrote itself.
+    custom = {}
+    if ref:
+        src = _SESSIONS.get((str(ref.get("scid", "")).lower(), str(ref.get("templateName", "")).lower(),
+                             str(ref.get("name", "")).lower()))
+        if src:
+            custom = copy.deepcopy(src["constants"].get("custom", {}))
+    gsp = custom.setdefault("gameServerPlatform", {})
+    gsp.setdefault("gameVariantId", "00000000-0000-0000-0000-000000000001")
+    gsp.setdefault("gsiSetId", attrs.get("gsiSetId", "00000000-0000-0000-0000-000000000102"))
+    gsp.setdefault("maxAllowedPlayers", LOBBY_CAPACITY)
+    custom.setdefault("hopperId", attrs.get("hopperId", 0))
+    body = {"constants": {"system": {"version": 1, "visibility": "open"}, "custom": custom},
+            "properties": {"system": {"joinRestriction": "none", "readRestriction": "none"}, "custom": {}}}
+    put_session("/serviceconfigs/%s/sessionTemplates/%s/sessions/%s" % (scid, TARGET_TEMPLATE, name),
+                json.dumps(body).encode())
+    # The allocated game server, as the game reads it (FUN_14183b360): servers.gameServerPlatform.properties.custom
+    # {status Active|Queued|Error|Quarantined, datacenter, secureDeviceAddress, hostName}.
+    rec = _SESSIONS.get((scid.lower(), TARGET_TEMPLATE.lower(), name.lower()))
+    if rec is not None:
+        rec["servers"] = servers_block()
     return name
 
 
@@ -406,7 +525,10 @@ def get_ticket(path, xuid=None):
     t = _TICKETS.get(key[2]) if key else None
     if t is None or (xuid and t.get("xuid") and t["xuid"] != xuid):
         return 404, None
-    name = _lobby_for(t["scid"], t["hopper"], t["attrs"], t["ref"])
+    # A ticket keeps the lobby it was first matched into: the game polls it every second and the lobby it is sent to must not change
+    name = t.get("lobby")
+    if name is None or (t["scid"].lower(), TARGET_TEMPLATE.lower(), name.lower()) not in _SESSIONS:
+        name = t["lobby"] = _lobby_for(t["scid"], t["hopper"], t["attrs"], t["ref"], t.get("xuid"))
     # The matchmaker puts the ticket session's members into the target session; the game checks that it is in there.
     ref = t["ref"] or {}
     src = _SESSIONS.get((str(ref.get("scid", "")).lower(), str(ref.get("templateName", "")).lower(),

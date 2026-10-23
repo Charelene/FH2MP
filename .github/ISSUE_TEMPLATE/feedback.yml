@@ -1,0 +1,54 @@
+name: Feedback / idea
+description: A suggestion, feature request or general feedback about FH2MP (not a bug)
+labels: ["feedback"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the feedback. If something is broken, please use the **Bug report** template instead.
+        Search the open issues first: if your idea is already there, a 👍 on it helps more than a new issue.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Type
+      options:
+        - Feature request
+        - Improvement to something that works
+        - General feedback
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Launcher / sign in
+        - Online Free Roam
+        - Online Road Trip
+        - Car Meet / invites
+        - Rivals (Monthly, Showcase, Festival Routes)
+        - PR stunts / Bonus Boards / leaderboards
+        - Car Clubs / Friends / Social
+        - Paint jobs / tunes / storefront
+        - Message Center / Community News
+        - Website / docs
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: feedback
+    attributes:
+      label: Your feedback
+      description: What you would like, or what you think could be better.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it matters
+      description: The problem it solves or how it would change your play. Optional, but it helps us prioritize.
+  - type: input
+    id: gamertag
+    attributes:
+      label: Your FH2MP name (optional)
+      description: The name shown in the launcher, if we may contact you in game.

@@ -43,7 +43,7 @@ def main(argv=None):
     app.setFont(f)
     lc = Launcher(load_identity=False)
     win = MainWindow(lc)
-    win.resize(820, 560)
+    win.resize(1280, 760)
     win.show()
     win.start()
     if "--screenshot" in argv:                      # headless smoke test: render, save, quit

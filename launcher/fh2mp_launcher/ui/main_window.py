@@ -1,10 +1,10 @@
 import os
 import sys
 
-from PySide6.QtCore import QTimer, QUrl, Qt
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton, QVBoxLayout,
-                               QWidget)
+from PySide6.QtCore import QEvent, QTimer, QUrl, Qt
+from PySide6.QtGui import QDesktopServices, QPixmap
+from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar,
+                               QVBoxLayout, QWidget)
 
 from .. import azimuth, keystore, launch, paths, shim, updater
 from ..api import ApiError
@@ -13,7 +13,9 @@ from ..core import Launcher, PlayBlocked, friendly
 from ..version import __version__
 from . import images, theme
 from .dialogs import ProfileDialog, RecoveryDialog, SettingsDialog, open_folder
-from .widgets import Avatar, Banner, Brand, Card, StatusRow, hrule
+from . import sfx
+from .widgets import (AccountButton, Banner, Brand, Carousel, DetailSheet, GradientText, Hero, IconButton, LinkButton, OnlineCount, PlaySplit,
+                      has_detail, link_colour, menu)
 from .wizard import Wizard
 from .workers import run_async
 
@@ -28,11 +30,16 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.lc = lc
         self.setWindowTitle("FH2MP Dev" if paths.is_dev() else "FH2MP")
-        self.setMinimumSize(760, 540)
+        self.setMinimumSize(980, 660)
         self._busy = False
+        self._msg = None                     # (text, kind) of the last say(); shown in the status box instead of the status
+        self._server_state = "checking"      # checking | ok | down
+        self._images = {}                    # url -> QPixmap (None while loading or after a failed load)
+        self._update_asked = False
         self._avatar_png = None
         self._launched_at = 0
         self._build()
+        link_colour()
         self.poll = QTimer(self)
         self.poll.timeout.connect(self._tick)
         self.poll.start(1000)
@@ -45,212 +52,256 @@ class MainWindow(QMainWindow):
         root = QWidget()
         self.setCentralWidget(root)
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(28, 22, 28, 18)
-        outer.setSpacing(14)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        head = QHBoxLayout()
-        head.addWidget(Brand(36))
+        top = QFrame()
+        top.setObjectName("topbar")
+        top.setFixedHeight(72)
+        head = QHBoxLayout(top)
+        head.setContentsMargins(28, 0, 24, 0)
+        head.setSpacing(22)
+        head.addWidget(Brand(38))
         if paths.is_dev():
             dev = QLabel("DEV")
             dev.setStyleSheet(f"color: {theme.WARN}; font-weight: 700;")
-            head.addWidget(dev, 0, Qt.AlignmentFlag.AlignBottom)
+            head.addWidget(dev)
         head.addStretch(1)
-        self.online = QLabel("")
-        self.online.setObjectName("muted")
+        self.online = OnlineCount()
         head.addWidget(self.online)
-        self.patreon = QPushButton("Support on Patreon")
-        self.patreon.setObjectName("patreon")
-        self.patreon.clicked.connect(lambda: open_url(self.lc.links["patreon"]))
+        site = self._link("Website", lambda: open_url(self.lc.links["website"]))
+        head.addWidget(site)
+        self.patreon = self._link("Patreon", lambda: open_url(self.lc.links["patreon"]))
         self.patreon.hide()
         head.addWidget(self.patreon)
-        site = QPushButton("Website")
-        site.setObjectName("link")
-        site.clicked.connect(lambda: open_url(self.lc.links["website"]))
-        head.addWidget(site)
-        outer.addLayout(head)
+        self.account = AccountButton()
+        self.account_menu = menu(self)
+        self.account_menu.aboutToShow.connect(self._fill_account_menu)
+        self.account.set_menu(self.account_menu)
+        head.addWidget(self.account)
+        gear = IconButton("gear", 44, 12, 22, spin=45, label_text="Settings and logs")
+        gm = menu(self)
+        gm.addAction("Settings", self.open_settings)
+        gm.addAction("Logs", self.open_logs)
+        gear.set_menu(gm, right=True)
+        head.addWidget(gear)
+        outer.addWidget(top)
 
-        self.banner = Banner()
-        self.banner.action.connect(self._banner_action)
-        self._banner_kind = ""
-        self._update_asked = False
-        outer.addWidget(self.banner)
+        main = QWidget()
+        body = QVBoxLayout(main)
+        body.setContentsMargins(28, 24, 28, 0)
+        body.setSpacing(0)
+        self.hero = Hero()
+        hl = QVBoxLayout(self.hero)
+        hl.setContentsMargins(36, 36, 36, 32)
+        hl.setSpacing(16)
+        hl.addWidget(GradientText("Forza Horizon 2 Multiplayer", 54, 520))
+        hl.addStretch(1)
         self.motd = Banner()
-        outer.addWidget(self.motd)
+        hl.addWidget(self.motd)
+        self.cards = Carousel()
+        self.cards.opened.connect(self._open_card)
+        hl.addWidget(self.cards)
+        self.sheet = DetailSheet(self.hero)
+        self.sheet.open_url.connect(open_url)
+        self.sheet.action.connect(lambda a: self.on_play() if a == "play" else None)
+        body.addWidget(self.hero, 1)
 
-        body = QHBoxLayout()
-        body.setSpacing(16)
-        # profile
-        pc = Card()
-        pc.setFixedWidth(250)
-        self.avatar = Avatar(120)
-        pc.lay.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignHCenter)
-        self.gt = QLabel("")
-        self.gt.setObjectName("h2")
-        self.gt.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        pc.lay.addWidget(self.gt)
-        self.xuid = QLabel("")
-        self.xuid.setObjectName("small")
-        self.xuid.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        pc.lay.addWidget(self.xuid)
-        pc.lay.addSpacing(6)
-        self.btn_profile = QPushButton("Edit profile")
-        self.btn_profile.clicked.connect(self.open_profile)
-        pc.lay.addWidget(self.btn_profile)
-        self.btn_setup = QPushButton("Set up account")
-        self.btn_setup.setObjectName("primary")
-        self.btn_setup.clicked.connect(self.run_wizard)
-        pc.lay.addWidget(self.btn_setup)
-        pc.lay.addStretch(1)
-        body.addWidget(pc)
-
-        # status
-        sc = Card()
-        t = QLabel("Status")
-        t.setObjectName("h2")
-        sc.lay.addWidget(t)
-        self.row_az = StatusRow("Azimuth")
-        self.row_az.clicked.connect(self._azimuth_clicked)
-        self.row_shim = StatusRow("FH2MP shim")
-        self.row_shim.clicked.connect(self.install_shim)
-        self.row_srv = StatusRow("Server")
-        self.row_srv.clicked.connect(self.refresh_all)
-        self.row_app = StatusRow("Launcher")
-        self.row_app.clicked.connect(self.update_launcher)
-        for i, r in enumerate((self.row_az, self.row_shim, self.row_srv, self.row_app)):
-            box = QWidget()
-            box.setObjectName("rowbox")
-            box.setStyleSheet("#rowbox { background: transparent; }")
-            bl = QVBoxLayout(box)
-            bl.setContentsMargins(0, 0, 0, 0)
-            bl.setSpacing(0)
-            if i:
-                bl.addWidget(hrule())
-            bl.addWidget(r)
-            r._box = box
-            sc.lay.addWidget(box)
-        sc.lay.addStretch(1)
-        body.addWidget(sc, 1)
-        outer.addLayout(body, 1)
-
+        bottom = QFrame()
+        bottom.setObjectName("bottombar")
+        bottom.setMinimumHeight(88)                # a long message may need more
+        foot = QHBoxLayout(bottom)
+        foot.setContentsMargins(0, 12, 0, 12)
+        foot.setSpacing(20)
+        self.playsplit = PlaySplit()
+        self.play = self.playsplit.play
+        self.play.clicked.connect(lambda: self.on_play())
+        pm = menu(self)
+        pm.addAction("Start with Azimuth settings", lambda: self.on_play(azimuth_window=True))
+        if paths.is_dev():
+            sa = pm.addAction("Sign in only", self.on_session_only)
+            sa.setToolTip("Sign in and write the session next to the shim without starting the game (start it yourself: rig, Steam, debugger)")
+            pm.setToolTipsVisible(True)
+        self.playsplit.set_menu(pm)
+        foot.addWidget(self.playsplit)
+        self.status = Banner(name="pill")
+        self.status.action.connect(lambda: self._status_cb and self._status_cb())
+        self._status_cb = None
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
+        self.progress.setFixedWidth(120)
         self.progress.hide()
-        outer.addWidget(self.progress)
-        self.message = QLabel("")
-        self.message.setObjectName("muted")
-        self.message.setWordWrap(True)
-        outer.addWidget(self.message)
-
-        foot = QHBoxLayout()
-        self.version = QLabel(f"v{__version__}")
-        self.version.setObjectName("small")
-        foot.addWidget(self.version)
+        self.status.extra.addWidget(self.progress)
+        foot.addWidget(self.status, 0, Qt.AlignmentFlag.AlignVCenter)
+        foot.addStretch(1)
         self.channel = QLabel("")
         self.channel.setObjectName("small")
         foot.addWidget(self.channel)
-        foot.addStretch(1)
-        logs = QPushButton("Logs")
-        logs.setObjectName("link")
-        logs.clicked.connect(self.open_logs)
-        foot.addWidget(logs)
-        st = QPushButton("Settings")
-        st.setObjectName("link")
-        st.clicked.connect(self.open_settings)
-        foot.addWidget(st)
-        az = QPushButton("Azimuth settings")
-        az.setObjectName("link")
-        az.clicked.connect(lambda: self.on_play(azimuth_window=True))
-        foot.addWidget(az)
-        if paths.is_dev():
-            self.session_btn = QPushButton("Sign in only")
-            self.session_btn.setToolTip("Sign in and write the session next to the shim without starting the game (start it yourself: rig, Steam, debugger)")
-            self.session_btn.clicked.connect(self.on_session_only)
-            foot.addWidget(self.session_btn)
-        self.play = QPushButton("PLAY")
-        self.play.setObjectName("play")
-        self.play.clicked.connect(lambda: self.on_play())
-        foot.addWidget(self.play)
-        outer.addLayout(foot)
+        self.version = QLabel(f"v{__version__}")
+        self.version.installEventFilter(self)
+        self._taps = 0
+        foot.addWidget(self.version)
+        body.addWidget(bottom)
+        outer.addWidget(main, 1)
+
+    @staticmethod
+    def _link(text, fn):
+        b = LinkButton(text)
+        b.clicked.connect(fn)
+        return b
+
+    def _fill_account_menu(self):
+        m, lc = self.account_menu, self.lc
+        m.clear()
+        if lc.has_identity() and lc.settings["gamertag"]:
+            xu = (lc.account or {}).get("xuid") or lc.settings["xuid"]
+            if xu:
+                m.addAction(f"ID {xu:#x}").setEnabled(False)
+            m.addAction("Edit profile", self.open_profile)
+            m.addAction("Recovery key", self.show_recovery)
+        else:
+            m.addAction("Set up account", self.run_wizard)
 
     # ---- rendering
     def render(self):
         lc, s = self.lc, self.lc.settings
         has_acct = lc.has_identity() and bool(s["gamertag"])
         name = (lc.account or {}).get("gamertag") or s["gamertag"]
-        self.gt.setText(name if has_acct else "Not signed up")
-        self.avatar.set_name(name)
-        self.avatar.set_png(self._avatar_png)
-        xu = (lc.account or {}).get("xuid") or s["xuid"]
-        self.xuid.setText(f"ID {xu:#x}" if has_acct and xu else "")
-        self.btn_profile.setVisible(has_acct)
-        self.btn_setup.setVisible(not has_acct)
-        self.channel.setText("  ·  DEV LAUNCHER, channel " + s["channel"] + (f", server {s['api_base']}" if s["api_base"] else "") if paths.is_dev()
-                             else ("  ·  DEV CHANNEL" if s["channel"] == "dev" else ""))
+        if not has_acct:
+            state = ("Not signed up", theme.MUTED)
+        elif lc.game_running():
+            state = ("In game", theme.GOOD)
+        else:
+            state = ("Online", theme.GOOD) if self._server_state == "ok" else ("Offline", theme.MUTED)
+        self.account.set(name if has_acct else "Guest", *state)
+        self.account.avatar.set_png(self._avatar_png)
+        self.channel.setText("DEV LAUNCHER, channel " + s["channel"] + (f", server {s['api_base']}" if s["api_base"] else "") if paths.is_dev()
+                             else ("DEV CHANNEL" if s["channel"] == "dev" else ""))
         self.channel.setStyleSheet(f"color: {theme.WARN};")
-        l = lc.links
-        self.patreon.setVisible(bool(l["patreon"]))
-        n = lc.online
-        self.online.setText(f"● {n} online" if isinstance(n, int) else "")
-        self.online.setStyleSheet(f"color: {theme.GOOD};" if isinstance(n, int) else "")
-
-        info = lc.azimuth_info()
-        if not s["azimuth_dir"]:
-            self.row_az.set("bad", "No folder chosen.", "Choose...")
-        elif not info.found:
-            self.row_az.set("bad", "azimuth.exe not found.", "Change...")
-        elif not info.game_folder:
-            self.row_az.set("warn", "Game files not found.", "Azimuth setup")
-        elif info.supported:
-            self.row_az.set("good", f"Version {info.version or info.supported_version}", "Change...")
-        else:
-            self.row_az.set("warn", f"Version {info.version or '?'} is untested. Use {lc.builds()[0]['version']}.", "Change...")
-        kind, ver = lc.shim_state()
-        up = lc.update_status()
-        if not s["azimuth_dir"] or not info.found:
-            self.row_shim.set("idle", "Needs Azimuth.")
-        elif kind == "none":
-            self.row_shim.set("bad", "Not installed.", "Install")
-        elif kind == "foreign":
-            self.row_shim.set("warn", "Other winmm.dll found. It will be kept.", "Install")
-        elif lc.shim_pinned(kind, ver):
-            self.row_shim.set("good", f"Version {ver} (pinned)", "Install release" if lc.manifest else None)
-        elif up["shim"] and lc.manifest:
-            self.row_shim.set("warn", f"Version {ver}, update available.", "Update")
-        else:
-            self.row_shim.set("good", "")
-        srv = lc.server
-        if not srv:
-            self.row_srv.set("warn", "Checking...", "Retry")
-        elif srv.get("maintenance"):
-            self.row_srv.set("warn", srv["maintenance"])
-        else:
-            reg = {"invite": " · invite only", "closed": " · registration closed"}.get(srv.get("registration"), "")
-            self.row_srv.set("good", f"Online{reg}")
-        if up["launcher"]:
-            self.row_app.set("warn", f"Version {__version__}, {up['launcher']} available.", "Update")
-        elif not up["minLauncherOk"]:
-            self.row_app.set("bad", f"Version {__version__} is too old.", "Update")
-        else:
-            self.row_app.set("good", "")
-        self.row_shim._box.setVisible(not (kind == "ours" and not up["shim"]) or (paths.is_dev() and kind == "ours"))
-        self.row_app._box.setVisible(bool(up["launcher"]) or not up["minLauncherOk"])
-        m = (srv or {}).get("motd", "")
+        self.patreon.setVisible(bool(lc.links["patreon"]))
+        self.online.set_count(lc.online)
+        self.version.setStyleSheet(f"color: {theme.MUTED}; font-size: 13px;")
+        m = lc.motd
         if m:
             self.motd.show_message(m, "info")
         else:
             self.motd.hide()
+        self.hero.set_picture(self._pix(lc.hero_image))
+        self.cards.set_cards(lc.home_cards(), self._pix)
+        if self.sheet.isVisible():
+            self.sheet.place()
+        self._render_status()
         self._render_play()
+
+    def _problem(self):
+        """The most urgent thing in the way, as (kind, text, button, action), or None when all is well."""
+        lc, s = self.lc, self.lc.settings
+        up = lc.update_status()
+        if not up["minLauncherOk"]:
+            return "bad", f"Launcher {__version__} is too old.", "Update", self.update_launcher
+        if not s["azimuth_dir"]:
+            return "bad", "Choose your Azimuth folder.", "Choose...", self.open_settings
+        info = lc.azimuth_info()
+        if not info.found:
+            return "bad", "azimuth.exe not found.", "Change...", self.open_settings
+        if not info.game_folder:
+            return "warn", "Azimuth can't find the game files.", "Azimuth setup", self._azimuth_clicked
+        if not (lc.has_identity() and s["gamertag"]):
+            return "warn", "Set up an account to play.", "Set up", self.run_wizard
+        kind, ver = lc.shim_state()
+        if kind == "none":
+            return "bad", "The FH2MP shim is not installed.", "Install", self.install_shim
+        if kind == "old":
+            return "bad", "The FH2MP shim needs installing again.", "Install", self.install_shim
+        if kind == "foreign":
+            return "warn", "fh2-mods\\FH2MP.dll is not ours. It will be replaced.", "Install", self.install_shim
+        if up["shim"] and lc.manifest:
+            return "warn", f"Shim {ver}: update available.", "Update", self.install_shim
+        srv = lc.server
+        if self._server_state == "checking":
+            return "info", "Connecting to the server...", None, None
+        if not srv:
+            return "warn", "Can't reach the server.", "Retry", self.refresh_all
+        if srv.get("maintenance"):
+            return "warn", srv["maintenance"], None, None
+        if up["launcher"]:
+            return "warn", f"Launcher {up['launcher']} is available.", "Update", self.update_launcher
+        if not info.supported:
+            return "warn", f"Azimuth {info.version or '?'} is untested. Use {lc.builds()[0]['version']}.", "Change...", self.open_settings
+        return None
+
+    def _render_status(self):
+        if self._msg:
+            text, kind = self._msg
+            self._status_cb = None
+            self.status.show_message(text, kind)
+            return
+        pr = self._problem()
+        if pr is None and not self.progress.isVisible():
+            self._status_cb = None
+            self.status.hide()
+            return
+        kind, text, button, self._status_cb = pr or ("info", "", None, None)
+        self.status.show_message(text, kind, button)
+
+    def _open_card(self, c):
+        if has_detail(c):
+            self.sheet.show_card(c)
+        else:
+            open_url(c.get("url"))
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self.sheet.isVisible():
+            self.sheet.place()
+
+    def eventFilter(self, obj, e):
+        if obj is self.version and e.type() == QEvent.Type.MouseButtonPress:
+            self._tap()
+        return super().eventFilter(obj, e)
+
+    def _tap(self):
+        if self._taps >= 7:                         # once a run
+            return
+        self._taps += 1
+        n, api = self._taps, self.lc.api()
+        run_async(lambda j: sfx.fetch(api, f"v{n}.wav"), lambda path: path and sfx.play(path), lambda e: None)
+        if n == 7:
+            theme.use("ALT")
+            QApplication.instance().setStyleSheet(theme.QSS)
+            link_colour()
+            self.account.chev.colour = theme.MUTED
+            self.motd._shown = self.status._shown = None
+            self.render()
+            self.cards._show()
+            for w in self.findChildren(QWidget):
+                w.update()
 
     def _render_play(self):
         lc = self.lc
         ready = bool(lc.settings["azimuth_dir"]) and lc.has_identity() and bool(lc.settings["gamertag"])
         running = lc.game_running()
-        self.play.setText("IN GAME" if running else "PLAY")
-        self.play.setEnabled(ready and not self._busy and not running)
+        self.playsplit.set_state("IN GAME" if running else "PLAY", ready and not self._busy and not running)
+
+    def _pix(self, url):
+        """The picture at url (hero, news card) once it has been fetched; the first ask starts the download and re-renders after it."""
+        if not url:
+            return None
+        if url not in self._images:
+            self._images[url] = None
+
+            def ok(data):
+                pm = QPixmap()
+                if pm.loadFromData(data):
+                    self._images[url] = pm
+                    self.render()
+            run_async(lambda j: self.lc.api().image(url), ok, lambda e: None)
+        return self._images[url]
 
     def say(self, text, colour=None):
-        self.message.setText(text)
-        self.message.setStyleSheet(f"color: {colour};" if colour else "")
+        kind = "bad" if colour == theme.BAD else "warn" if colour == theme.WARN else "info"
+        self._msg = (text, kind) if text else None
+        self._render_status()
 
     def set_busy(self, busy, text=""):
         self._busy = busy
@@ -311,12 +362,15 @@ class MainWindow(QMainWindow):
 
     def refresh_server(self):
         def ok(_c):
+            self._server_state = "ok"
             self.render()
             if self.lc.launcher_outdated():
                 QTimer.singleShot(0, self._require_update)
+            run_async(lambda j: self.lc.refresh_home(), lambda _h: self.render(), lambda e: None)
 
         def fail(e):
             self.lc.server = {}
+            self._server_state = "down"
             self.render()
             self.say(friendly(e), theme.WARN)
         run_async(lambda j: self.lc.refresh_server(), ok, fail)
@@ -326,18 +380,10 @@ class MainWindow(QMainWindow):
         if not self.lc.settings["check_updates"]:
             return
 
-        def ok(_m):
-            self.render()
-            up = self.lc.update_status()
-            if up["launcher"] or not up["minLauncherOk"]:
-                self._banner_kind = "launcher"
-                self.banner.show_message(f"FH2MP launcher {up['launcher'] or 'update'} is available.", "warn" if up["minLauncherOk"] else "bad",
-                                         "Update now")
-
         def fail(e):
             if "no release key" not in str(e):
                 self.say(f"Could not check for updates: {friendly(e)}", theme.WARN)
-        run_async(lambda j: self.lc.check_updates(), ok, fail)
+        run_async(lambda j: self.lc.check_updates(), lambda _m: self.render(), fail)
 
     def _load_avatar(self):
         xu = self.lc.settings["xuid"]
@@ -420,10 +466,6 @@ class MainWindow(QMainWindow):
             self.say(str(e) if not isinstance(e, ApiError) else friendly(e), theme.BAD)
             self.render()
         run_async(work, ok, fail, progress=self.progress.setValue)
-
-    def _banner_action(self):
-        if self._banner_kind == "launcher":
-            self.update_launcher()
 
     def update_launcher(self):
         lc = self.lc
