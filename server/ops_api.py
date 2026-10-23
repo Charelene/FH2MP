@@ -27,6 +27,7 @@ not carry proxy headers, so nothing reachable through the public reverse proxy c
                                                 "heroImage": "https://...", "news": [{"tag", "title", "text", "url", "image"}, ...]}
     POST   /ops/v1/invites                     {"code"?, "uses", "note"} -> {"code"}   (only a hash is stored, so codes cannot be listed)
     GET    /ops/v1/auth-events[?limit=]        recent sign-ups, logins, bans, rate-limit hits
+    GET    /ops/v1/records, hall-of-fame, traps, cars[/<id>], garage[/<id>/preview.png], history, totals   website statistics (site_stats.py)
 
 Errors: {"error": "<code>", "message": "..."}.
 """
@@ -42,6 +43,7 @@ from urllib.parse import parse_qs, urlparse
 
 import rivals
 import scoreboard
+import site_stats
 import social
 
 STARTED = time.time()
@@ -173,6 +175,10 @@ def _route(lsp, method, path, body):
         return 201, make_invite(lsp, _json(body))
     if what == "auth-events" and method == "GET":
         return 200, auth_events(lsp, _int(q, "limit", 50, 1, 500))
+    if method == "GET":
+        found = site_stats.route(lsp, what, rest, q, _int)
+        if found is not None:
+            return found
     raise OpsError(404, "not_found", "unknown endpoint")
 
 
@@ -206,7 +212,7 @@ def _gamertag(lsp, r):
 def _board_row(lsp, r, car_names):
     cls = r["cls"]
     return {"position": r["position"], "xuid": r["xuid"], "gamertag": _gamertag(lsp, r), "score": r["score"],
-            "car": car_names.get(r["car"], ""), "class": rivals.CLASS_LETTERS[cls] if 0 <= cls < len(rivals.CLASS_LETTERS) else "",
+            "car": car_names.get(r["car"], ""), "carId": r["car"], "class": rivals.CLASS_LETTERS[cls] if 0 <= cls < len(rivals.CLASS_LETTERS) else "",
             "clean": r["clean"], "at": int(r["t"])}
 
 
@@ -217,12 +223,22 @@ def _event(lsp, e, rows):
             "rows": rows}
 
 
+def _year_month(month):
+    """Rotation month index (months since rivals.EPOCH) -> (year, month 1-12)."""
+    return rivals.EPOCH[0] + (rivals.EPOCH[1] - 1 + month) // 12, (rivals.EPOCH[1] - 1 + month) % 12 + 1
+
+
+def month_label(month):
+    year, mo = _year_month(month)
+    return f"{calendar.month_name[mo]} {year}"
+
+
 def _rotation(lsp):
     """(label such as 'October 2026', unix time the monthly rotation ends)."""
     month, reroll = lsp.RIV.serial()
-    year, mo = rivals.EPOCH[0] + (rivals.EPOCH[1] - 1 + month) // 12, (rivals.EPOCH[1] - 1 + month) % 12 + 1
+    year, mo = _year_month(month)
     end = calendar.timegm((year + (mo == 12), mo % 12 + 1, 1, 0, 0, 0))
-    return {"label": f"{calendar.month_name[mo]} {year}", "month": month, "reroll": reroll, "endsAt": end}
+    return {"label": month_label(month), "month": month, "reroll": reroll, "endsAt": end}
 
 
 def challenges(lsp, top):
@@ -339,7 +355,8 @@ def recent(lsp, limit):
             continue                                      # a Monthly event of an earlier rotation: nothing to name it by
         cls = r["cls"]
         out.append({"gamertag": _gamertag(lsp, r), "xuid": r["xuid"], "kind": kind, "where": where, "score": r["score"],
-                    "car": names.get(r["car"], ""), "class": rivals.CLASS_LETTERS[cls] if 0 <= cls < len(rivals.CLASS_LETTERS) else "",
+                    "car": names.get(r["car"], ""), "carId": r["car"],
+                    "class": rivals.CLASS_LETTERS[cls] if 0 <= cls < len(rivals.CLASS_LETTERS) else "",
                     "clean": bool(r["clean"]), "at": int(r["submitted"])})
         if len(out) >= limit:
             break

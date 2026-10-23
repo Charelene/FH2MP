@@ -48,6 +48,7 @@ import gamedb_sync  # noqa: E402
 import home  # noqa: E402
 import launcher_api  # noqa: E402
 import ops_api  # noqa: E402
+import site_stats  # noqa: E402
 
 SEQ = 0
 SC = None
@@ -2166,7 +2167,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _ops(self, body, proxied):
         status, obj = ops_api.handle(OPS, sys.modules[__name__], self.command, self.path, self.headers, body, self.client_address[0], proxied)
-        self._reply_json(status, obj, extra=[("Cache-Control", "no-store")])
+        self._reply_json(status, obj, "image/png" if isinstance(obj, bytes) else "application/json", [("Cache-Control", "no-store")])
 
     def _remove_old_client(self):
         """A client with a shim below minShim that proves who it is (a live launcher token) is also taken out of the game: its live
@@ -2263,7 +2264,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.command == "GET" and self.path.startswith("/gamerpic/"):          # public: the client downloads pictures from here
             return self._gamerpic()
         if self.path.startswith("/admin/"):
-            return self._admin()
+            return self._admin(body)
         if self.path.startswith("/api/"):
             return self._api(body)
         host = self.headers.get("X-FH2MP-Host", "")
@@ -2401,13 +2402,20 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
-    def _admin(self):
+    def _admin(self, body=b""):
         """GET /admin/send?text=...[&type=512][&sra=...]  |  /admin/list  |  /admin/clear  |
+        POST /admin/result  {"mode", "detail"}  (an online event result from the game server, site_stats.add_result)  |
         /admin/drivatar?tag=NAME[&xuid=0x..][&skill=0..4][&wristband=N]  (add a player)  |
         /admin/drivatar?xuid=0x..&set=sideswipeMean=0.8,blockingMean=0.9[&lock=1]  (hand-tune)"""
         from urllib.parse import parse_qs, urlparse
         u = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        if u.path == "/admin/result" and self.command == "POST":
+            try:
+                rid = site_stats.add_result(sys.modules[__name__], body)
+            except ValueError as e:
+                return self._reply_json(400, {"error": "bad_request", "message": str(e)})
+            return self._reply_json(201, {"id": rid})
         if u.path == "/admin/gamemode":
             name, template = xbl.create_game_session(int(q.get("type", "1")), [x for x in q.get("xuids", "").split(",") if x])
             out = json.dumps({"name": name, "template": template}) + "\n"
@@ -2581,6 +2589,7 @@ def main():
     setup()
     bind = os.environ.get("FH2MP_LSP_BIND", "127.0.0.1")
     srv = ThreadingHTTPServer((bind, port), Handler)
+    site_stats.start_sampler(sys.modules[__name__])
     log(f"fh2mp LSP listening on {bind}:{port}")
     srv.serve_forever()
 

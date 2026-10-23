@@ -126,7 +126,8 @@ The Windows installer is built by CI with Inno Setup (`packaging/fh2mp.iss`). Th
 commits, tags and pushes. The workflow in `.github/workflows/release.yml` then builds the shim and the Windows and Linux launchers, signs
 `manifest.json` with the Ed25519 key in the `RELEASE_SIGNING_KEY` secret (the launcher embeds the public half) and publishes the GitHub
 release, using `release/notes/<tag>.md` as the description when that file exists. `release/keygen.py` makes a signing key.
-`ops/release-prod.sh` rolls a published release out to the production server and raises its minimum versions.
+`ops/release-prod.sh` rolls a published release out to the production server and raises its minimum versions. `ops/ship.sh vX.Y.Z
+<user@host> <ssh-key>` does all of it in one go: publish, wait for the build, roll out, lift the maintenance message.
 
 ## Supported setups
 

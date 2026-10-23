@@ -19,8 +19,10 @@ import selectors
 import socket
 import sys
 import struct
+import threading
 import time
 import traceback
+import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import traffic as traffic_mod  # noqa: E402
@@ -694,6 +696,21 @@ TAG_MODES = {RACE_MODE_KING: {"name": "King", "seconds": 240.0, "per_it": 6},
 TAG_KEYFRAME_MIN_SECONDS = 20.0               # score keyframes earlier than this after GO are not taken as "the event is over"
 TAG_GRID_ASSIGN_DELAY = 1.5                   # seconds after the starting grid is sent: the first It car is drawn while the grid screen is up
 TAG_ASSIGN_REPEATS = (0.0, 0.4, 1.2, 3.0)      # seconds after the first send: the datagrams are unreliable, so repeat them
+LSP_URL = os.environ.get("FH2MP_LSP", "http://127.0.0.1:5080")    # this stack's LSP (loopback /admin endpoints)
+
+
+def post_result(mode, detail, log):
+    """An online event's result to the LSP's /admin/result (the website's statistics, server/site_stats.py). Runs on its own thread."""
+    body = json.dumps({"mode": mode, "detail": detail}).encode()
+    req = urllib.request.Request(f"{LSP_URL}/admin/result", data=body, method="POST", headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            resp.read()
+    except Exception as exc:  # noqa: BLE001 - statistics only: never more than a log line
+        log(f"event result not stored ({mode}): {exc!r}")
+
+
+RESULT_SINK = post_result      # tests replace it
 
 # Free roam events are chosen on the map, so the server is never told their mode (MsgRequestRace has no payload). The leader's GameOptions say
 # it. Found by lining up payloads whose Road Trip event, and so mode, is known (prod logs 2026-10-19/20): bits 0-7 are the event type (0 street
@@ -1868,8 +1885,10 @@ class Server:
             return
         per_it = tag["mode"]["per_it"]
         n_it = max(1, -(-len(people) // per_it)) if per_it else 1
+        self.tag_account(tag, time.monotonic())
         tag["buckets"] = {p: TAG_BUCKET_NOT_IT for p in people}
         firsts = random.sample(people, min(n_it, len(people)))
+        tag["first"] = [p.xuid for p in firsts]
         for p in firsts:
             tag["buckets"][p] = TAG_BUCKET_IT
         tag["assigned"] = True
@@ -1890,6 +1909,7 @@ class Server:
         its = [p for p in people if tag["buckets"].get(p) == TAG_BUCKET_IT]
         if people and not its:           # the It car left: draw a new one
             p = random.choice(people)
+            self.tag_account(tag, now)
             tag["buckets"][p] = TAG_BUCKET_IT
             self.log(f"tag: no It car left, owner {p.owner_id} is It now")
             self.tag_send("new It")
@@ -1930,10 +1950,55 @@ class Server:
             if it_after == TAG_BUCKET_IT:    # the It car stayed It (Infection); in King it hands the crown over
                 tag["mode"] = TAG_MODES[RACE_MODE_INFECTION]
                 self.log("tag: the It car stayed It: this is Infection, not King")
+        self.tag_account(tag, time.monotonic())
         buckets[a], buckets[b] = new_a, new_b
+        it_was, other = (a, b) if old_a == TAG_BUCKET_IT else (b, a)
+        scorer = other if tag["mode"]["name"] == "King" else it_was        # King: the crown is taken; Infection: the It car infects
+        if scorer.xuid:
+            tag.setdefault("hits", {})[scorer.xuid] = tag.get("hits", {}).get(scorer.xuid, 0) + 1
         self.log(f"tag: owner {a.owner_id} {old_a}->{new_a}, owner {b.owner_id} {old_b}->{new_b} (reported by {peer.owner_id})")
         self.tag_send("collision")
         tag["repeats"] = [time.monotonic() + x for x in TAG_ASSIGN_REPEATS[1:3]]
+
+    def tag_account(self, tag, now: float) -> None:
+        """Adds the time since the last bucket change to every It car's crown time (only from GO on). Call before buckets change."""
+        start, last = tag.get("go_at"), tag.get("marked")
+        if start is not None and last is not None and now > max(start, last):
+            held = tag.setdefault("held", {})
+            for p, bucket in tag["buckets"].items():
+                if bucket == TAG_BUCKET_IT and p.xuid:
+                    held[p.xuid] = held.get(p.xuid, 0.0) + now - max(start, last)
+        tag["marked"] = now
+
+    def report_event(self, why: str) -> None:
+        """The result of an online event (two or more players) for the website: finish order (first finisher wins a race; in a team event
+        that also names the winning team), the cars and rentals raced, and for King / Infection the crowns taken or infections made, crown
+        times (the King winner is the longest holder) and who was never infected. Posted to the LSP off the tick (RESULT_SINK)."""
+        ev = self.event
+        people = [q for q in ev["people"] if q.xuid]
+        if len(people) < 2:
+            return
+        now = time.monotonic()
+        fin, out = ev.get("finished", {}), ev.get("quit", set())
+        order = sorted((q for q in people if q in fin and q not in out), key=lambda q: fin[q])
+        team = ev.get("team", {})
+        players = [{"xuid": q.xuid, "car": q.model_id, "rental": q.rental_car is not None, "team": team.get(q),
+                    "finish": order.index(q) + 1 if q in order else None} for q in people]
+        detail = {"players": players, "end": why, "roadtrip": bool(self.roadtrip),
+                  "seconds": round(now - ev["racing_since"], 1) if ev.get("racing_since") else None}
+        tag = ev.get("tag")
+        if tag:
+            self.tag_account(tag, now)
+            mode = "infection" if tag["mode"]["name"] == "Infection" else "king"
+            held = tag.get("held", {})
+            detail.update(hits=[[x, n] for x, n in tag.get("hits", {}).items()], first=tag.get("first", []),
+                          held=[[x, round(t, 1)] for x, t in held.items()], everyone=why == "everybody is infected",
+                          survivors=[q.xuid for q in people if tag["buckets"].get(q) != TAG_BUCKET_IT] if mode == "infection" else [],
+                          winner=max(held, key=held.get) if mode == "king" and held else 0)
+        else:
+            mode = "team" if team else "race"
+            detail["winner"] = order[0].xuid if order else 0
+        threading.Thread(target=RESULT_SINK, args=(mode, detail, self.log), name="event-result", daemon=True).start()
 
     def rt_race(self) -> int:
         return self.rt_candidates[1][self.rt_winner][self.rt_idx]
@@ -2226,6 +2291,10 @@ class Server:
 
     def end_race(self, why: str) -> None:
         """SessionHost.InRace=0 is what the clients' NetworkWaitForRaceEnd waits for (FUN_1408eeb20)."""
+        try:
+            self.report_event(why)
+        except Exception as exc:  # noqa: BLE001 - statistics must never keep an event from ending
+            self.log(f"event result failed: {exc!r}")
         self.event["over"] = True
         self.event["racing"] = False
         self.event["clear_at"] = time.monotonic() + RACE_FLAGS_CLEAR_SECONDS
@@ -2252,6 +2321,7 @@ class Server:
             if not ev["tag"].get("assigned") and ev["tag"].get("assign_at") is None:
                 ev["tag"]["assign_at"] = go_at            # no grid assignment was scheduled: the crown / first infection at "GO"
             ev["tag"]["end_at"] = go_at + ev["tag"]["mode"]["seconds"]
+            ev["tag"]["go_at"] = go_at
             ev["tag"]["repeats"] = [time.monotonic() + x for x in (0.5, 2.0)]     # the buckets again at GO
         go = (self.now_ms() + RACE_COUNTDOWN_MS) & 0xFFFFFFFF
         self.log(f"MsgStartRace start time {go} (server clock now {self.now_ms()})")
@@ -2829,11 +2899,8 @@ class Server:
     def cm_create_session(self, mode: int, xuids=()):
         """The game-mode session is created by the LSP (MPSD stand-in) on the server's behalf: the client's own creation path
         does not complete here. Returns (name, template) or (None, None)."""
-        import json
-        import urllib.request
-        base = os.environ.get("FH2MP_LSP", "http://127.0.0.1:5080")
         try:
-            with urllib.request.urlopen(f"{base}/admin/gamemode?type={mode}&xuids={','.join(str(x) for x in xuids)}", timeout=3) as resp:
+            with urllib.request.urlopen(f"{LSP_URL}/admin/gamemode?type={mode}&xuids={','.join(str(x) for x in xuids)}", timeout=3) as resp:
                 doc = json.loads(resp.read().decode())
             return doc["name"], doc["template"]
         except Exception as exc:  # noqa: BLE001
