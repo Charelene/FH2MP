@@ -59,10 +59,10 @@ def main():
     if not os.path.isfile(shim_zip):
         sys.exit(f"missing {shim_zip}")
     with zipfile.ZipFile(shim_zip) as z:
-        names = set(z.namelist())
+        names = {n.replace("\\", "/"): n for n in z.namelist()}      # Windows' Compress-Archive may write a backslash (test-build.yml)
         if "fh2-mods/FH2MP.dll" not in names:
             sys.exit(f"{shim_zip} has no fh2-mods/FH2MP.dll: build it with release/build_shim_zip.sh")
-        dll = z.read("fh2-mods/FH2MP.dll")
+        dll = z.read(names["fh2-mods/FH2MP.dll"])
     if f"FH2MP-SHIM-VERSION:{ver}:END".encode() not in dll:
         sys.exit("the shim in the zip does not carry this version's marker: rebuild it with shim/VERSION = " + ver)
     for marker in (b"-debug:END", "fh2mp-dbg".encode("utf-16-le"), b"fh2mp-dbg"):      # a research build must never be published

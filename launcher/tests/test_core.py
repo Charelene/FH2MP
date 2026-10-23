@@ -622,6 +622,9 @@ class ShimTests(unittest.TestCase):
                 z.writestr("fh2mp/LICENSE.txt", b"GPL")
             self.assertEqual(core.read_shim_zip(zp), self.DLL)
             with zipfile.ZipFile(zp, "w") as z:
+                z.writestr("fh2-mods\\FH2MP.dll", self.DLL)                                 # Compress-Archive on Windows
+            self.assertEqual(core.read_shim_zip(zp), self.DLL)
+            with zipfile.ZipFile(zp, "w") as z:
                 z.writestr("winmm.dll", self.DLL)                                          # an rc5 shim zip
             with self.assertRaises(updater.UpdateError):
                 core.read_shim_zip(zp)

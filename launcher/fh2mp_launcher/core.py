@@ -53,11 +53,13 @@ def game_port_env(game):
 
 
 def read_shim_zip(path):
-    """A shim zip (release/build_shim_zip.sh) -> the bytes of its fh2-mods/FH2MP.dll. Raises updater.UpdateError when it is not one."""
+    """A shim zip (release/build_shim_zip.sh) -> the bytes of its fh2-mods/FH2MP.dll. Raises updater.UpdateError when it is not one.
+    Windows' Compress-Archive (the test build's mirror) may store the name with a backslash."""
     import zipfile
     try:
         with zipfile.ZipFile(path) as z:
-            return z.read(f"{MODS_DIR}/{SHIM_DLL}")
+            names = {n.replace("\\", "/"): n for n in z.namelist()}
+            return z.read(names[f"{MODS_DIR}/{SHIM_DLL}"])
     except (zipfile.BadZipFile, KeyError):
         raise updater.UpdateError("the shim package is not what was expected") from None
 

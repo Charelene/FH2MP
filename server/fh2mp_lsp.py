@@ -32,6 +32,7 @@ import threading  # noqa: E402
 import xls  # noqa: E402
 import drivatar  # noqa: E402
 import scoreboard  # noqa: E402
+import xp_audit  # noqa: E402
 import rivals  # noqa: E402
 import ugc  # noqa: E402
 import pngtool  # noqa: E402
@@ -632,13 +633,15 @@ def economy_settings(req):
     """Credit/XP rates for ForzaEconomyModule. Race credits are route metres * 0.001 * creditPerKm (FUN_14054a110,
     called from FUN_140614250/140614760 [confirmed]), XP is max(xpPerKm * km, minimumFinishLineXp) (FUN_14054a140), so the
     all-zero default paid 0 for everything. creditPerKm 1000 matches CreditsPerKm in the race templates
-    (EntityModel/Templates/templates_races.xml) [inferred]; the other values were Turn 10's and are guesses [guess]."""
+    (EntityModel/Templates/templates_races.xml) [inferred]; the other values were Turn 10's and are guesses [guess]. Online races pay
+    100 * xp_audit.XP_SCALE XP per km (env FH2MP_XP_SCALE, default 10); offline races and the per-finish minimum (shared by both) stay 100."""
+    online = int(round(100 * xp_audit.XP_SCALE))
     r = xls.default_struct(SC, SC.call_struct("ForzaUserGetEconomySettings_Results"))
     r["settings"].update({
-        "creditDestinationBonus": 2000, "creditDestinationFalloff": 0, "xpPerKmOffline": 100, "xpPerKmOnline": 100,
+        "creditDestinationBonus": 2000, "creditDestinationFalloff": 0, "xpPerKmOffline": 100, "xpPerKmOnline": online,
         "creditPerKm": 1000, "minimumFinishLineXp": 100, "tombolaPrizeScale": 1.0, "promoBonusScale": 1.0,
         "wagerRaceCost": 1000, "enableTokens": False, "enableXboxMusic": False})
-    log("  GetEconomySettings -> non-zero guess values")
+    log(f"  GetEconomySettings -> {online} XP per km online, 100 offline")
     return r
 
 
