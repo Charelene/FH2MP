@@ -8,7 +8,7 @@ import unittest
 import zipfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from fh2mp_launcher import azimuth, identity, shim, updater  # noqa: E402
+from fh2mp_launcher import azimuth, core, identity, shim, updater  # noqa: E402
 from cryptography.hazmat.primitives import serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey  # noqa: E402
 
@@ -46,6 +46,108 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(len(j.sign("test", "login", b"\x01" * 41, j.pubkey)), 64)
 
 
+NOW = 1_792_000_000
+
+
+class HomeCardTests(unittest.TestCase):
+    HOME = {"motd": "Restart at 18:00", "news": [{"tag": "patch notes", "title": "rc6", "url": "javascript:x", "image": "http://insecure/x.png"},
+                                                 {"text": "no title"}],
+            "heroImage": "http://insecure/h.png",
+            "release": {"tag": "v1.0.0-rc5", "name": "FH2MP v1.0.0-rc5", "url": "https://github.com/Charelene/FH2MP/releases/tag/v1.0.0-rc5",
+                        "body": "> **Release candidate 5.**\n\n## What's new\n### Added\n- The launcher tells you what to do when **Azimuth** "
+                                "stops at [the GPU check](x)."},
+            "azimuth": {"latest": "0.9.10", "supported": "0.9.10",
+                        "posts": [{"title": "0.10.0 progress", "url": "https://x.itch.io/p", "date": NOW - 3 * 86400, "summary": "Soon."}]},
+            "rotation": {"endsAt": NOW + 9 * 86400},
+            "events": [{"name": "90s Heroes Cup", "class": "B", "track": "Sisteron Circuit", "km": 4.2, "laps": 3,
+                        "rows": [{"position": 1, "gamertag": "Bob", "score": 88.25, "car": "Test Car"}]},
+                       {"name": "Classics", "class": ""}],
+            "records": [{"gamertag": "Bob", "event": "90s Heroes Cup", "score": 88.25, "car": "Test Car", "class": "B", "at": NOW - 7200}],
+            "cars": [{"car": "Nissan Skyline", "runs": 34}, {"car": "Ford Focus", "runs": 12}],
+            "stats": {"online": 50, "accounts": 1103, "clubs": 93, "runs": 29401, "designs": 80}}
+
+    def lc(self, home=None, server=None, releases=(), stats=None):
+        lc = core.Launcher.__new__(core.Launcher)
+        lc.home, lc.server, lc.releases, lc.stats = home, server or {}, list(releases), stats or {}
+        return lc
+
+    def test_order_and_shapes(self):
+        lc = self.lc(self.HOME)
+        cards = lc.home_cards(now=NOW)
+        self.assertEqual([(c["kind"], c["tag"], c["title"]) for c in cards],
+                         [("news", "PATCH NOTES", "rc6"), ("news", "PATCH NOTES", "FH2MP v1.0.0-rc5"), ("challenge", "MONTHLY CHALLENGE", "90s Heroes Cup"),
+                          ("record", "NEW RECORD", "Bob"), ("news", "AZIMUTH DEVLOG", "0.10.0 progress"), ("car", "CAR OF THE WEEK", "Nissan Skyline"),
+                          ("community", "COMMUNITY", "1,103 drivers"), ("challenge", "MONTHLY CHALLENGE", "Classics")])
+        news, rel, ev, rec, az, car, com, ev2 = cards
+        self.assertEqual((news["url"], news["image"]), ("", ""))                                        # unsafe links dropped
+        self.assertEqual((rel["text"], rel["glyph"]), ("The launcher tells you what to do when Azimuth stops at the GPU check.", ""))
+        self.assertIn("Release candidate 5", rel["body"])
+        self.assertEqual((ev["text"], ev["glyph"], ev["action"], ev["action_label"]), ("Best: Bob · 1:28.250", "B", "play", "Beat these times"))
+        self.assertEqual(ev["facts"], [("Track", "Sisteron Circuit"), ("Length", "4.2 km"), ("Laps", "3"), ("Ends", "in 9 days")])
+        self.assertEqual(ev["rows"], [{"pos": 1, "name": "Bob", "value": "1:28.250", "extra": "Test Car"}])
+        self.assertEqual((ev2["text"], ev2["action_label"], ev2["rows"]), ("No times yet. Set the first one!", "Set the first time", []))
+        self.assertEqual((rec["text"], rec["glyph"]), ("90s Heroes Cup · 1:28.250 · 2 h ago", "#1"))
+        self.assertEqual((az["text"], az["url"], az["link"]), ("Soon.", "https://x.itch.io/p", "Read on itch.io"))
+        self.assertEqual(car["rows"][1], {"pos": 2, "name": "Ford Focus", "value": "12 runs", "extra": ""})
+        self.assertEqual(com["text"], "93 car clubs · 29,401 rivals times")
+        self.assertIn(("Online now", "50"), com["facts"])
+        self.assertEqual((lc.motd, lc.hero_image), ("Restart at 18:00", ""))
+        self.assertEqual(self.lc({}).home_cards(), [])
+
+    def test_older_server_falls_back_to_public_sources(self):
+        lc = self.lc(None, {"motd": "Hi", "latestAzimuth": "0.9.10", "online": 50}, [self.HOME["release"]],
+                     {"available": True, "accounts": 1103, "clubs": 93, "scores": 29401, "userContent": 80})
+        cards = lc.home_cards()
+        self.assertEqual([c["tag"] for c in cards], ["PATCH NOTES", "COMMUNITY"])
+        self.assertIn(("Online now", "50"), cards[1]["facts"])
+        self.assertEqual(lc.motd, "Hi")
+
+    def test_formatting(self):
+        self.assertEqual([core.countdown(t, now=0) for t in (None, -5, 30, 600, 7200, 3 * 86400)],
+                         ["", "", "ends in 1 min", "ends in 10 min", "ends in 2 h", "ends in 3 days"])
+        self.assertEqual([core.lap_time(x) for x in (None, 0, 59.5, 88.25, 3725.0)], ["", "", "0:59.500", "1:28.250", "62:05.000"])
+        self.assertEqual([core.ago(NOW - d, now=NOW) for d in (5, 300, 7200, 3 * 86400)], ["just now", "5 min ago", "2 h ago", "3 days ago"])
+        self.assertTrue(core.release_summary("- " + "x" * 300).endswith("…"))
+
+
+class TcpFallbackTests(unittest.TestCase):
+    """Launcher.start_tunnel: off by default; on, the game is pointed at a local proxy."""
+
+    def me(self, on):
+        from types import SimpleNamespace
+        from fh2mp_launcher import core
+        me = SimpleNamespace(settings={"tcp_fallback": on}, tunnel=None, game_env={"FH2MP_SERVER_PORT": "5000"})
+        me.stop_tunnel = lambda: core.Launcher.stop_tunnel(me)
+        return me
+
+    def test_off_changes_nothing(self):
+        from fh2mp_launcher import core
+        me = self.me(False)
+        self.assertEqual(core.Launcher.start_tunnel(me, {"host": "h", "port": 5000, "tcp": 5000}), "")
+        self.assertEqual(me.game_env, {"FH2MP_SERVER_PORT": "5000"})
+        self.assertIsNone(me.tunnel)
+
+    def test_a_server_without_tcp_keeps_udp(self):
+        from fh2mp_launcher import core
+        me = self.me(True)
+        note = core.Launcher.start_tunnel(me, {"host": "h", "port": 5000})
+        self.assertIn("using UDP", note)
+        self.assertEqual(me.game_env, {"FH2MP_SERVER_PORT": "5000"})
+
+    def test_on_points_the_game_at_the_local_proxy(self):
+        from fh2mp_launcher import core
+        me = self.me(True)
+        try:
+            note = core.Launcher.start_tunnel(me, {"host": "127.0.0.1", "port": 5000, "tcp": 5000})
+            self.assertEqual(note, "connecting over TCP")
+            self.assertEqual(me.game_env["FH2MP_TUNNEL"], "1")
+            self.assertEqual(me.game_env["FH2MP_SERVER_PORT"], str(me.tunnel.port))
+            self.assertNotEqual(me.game_env["FH2MP_SERVER_PORT"], "5000")
+        finally:
+            core.Launcher.stop_tunnel(me)
+        self.assertIsNone(me.tunnel)
+
+
 class GamerpicSyncTests(unittest.TestCase):
     """sync_gamerpic: the server's picture reaches both Gamerpic.png files at every start (GitHub issue: the mod's default picture stayed)."""
 
@@ -64,20 +166,17 @@ class GamerpicSyncTests(unittest.TestCase):
         me = SimpleNamespace(settings={"azimuth_dir": folder}, account={"xuid": 7}, gamerpic_converter=None, api=lambda: Api())
         return me, cfg
 
-    def test_writes_both_copies_then_leaves_them_alone(self):
+    def test_writes_the_picture_then_leaves_it_alone(self):
         from fh2mp_launcher import core, paths
         folder = tempfile.mkdtemp()
-        os.makedirs(os.path.join(folder, "fh2extra"))
-        with open(os.path.join(folder, "fh2extra", "Gamerpic.png"), "wb") as f:
-            f.write(b"the mod's default picture")
         me, cfg = self.fake(folder)
         real = paths.config_dir
         paths.config_dir = lambda: cfg
         try:
             self.assertIn("updated", core.Launcher.sync_gamerpic(me))
-            for rel in ("Gamerpic.png", os.path.join("fh2extra", "Gamerpic.png")):
-                with open(os.path.join(folder, rel), "rb") as f:
-                    self.assertEqual(f.read(), b"PNGDATA" * 20, rel)
+            with open(os.path.join(folder, "Gamerpic.png"), "rb") as f:
+                self.assertEqual(f.read(), b"PNGDATA" * 20)
+            self.assertFalse(os.path.exists(os.path.join(folder, "fh2extra")))
             self.assertEqual(core.Launcher.sync_gamerpic(me), "")          # nothing to do the second time
         finally:
             paths.config_dir = real
@@ -367,7 +466,7 @@ class ProtonPathTests(unittest.TestCase):
         st["proton"], st["launch_mode"], st["prefix"] = d, "proton", os.path.join(d, "pfx")
         argv, env, _ = launch.build_command(st, d)
         self.assertEqual(argv[:2], [script, "run"])
-        self.assertEqual(env["WINEDLLOVERRIDES"], "winmm=n,b")
+        self.assertEqual(env["WINEDLLOVERRIDES"], "winmm,d3dcompiler_47=n,b")      # Extra Options and the FH2 Mod Platform
 
 
 class NoProtonTests(unittest.TestCase):
@@ -405,40 +504,130 @@ class GpuCheckTests(unittest.TestCase):
         self.assertFalse(launch.gpu_check_failure(tempfile.mkdtemp()))
 
 
+def platform_dll(version):
+    """A stand-in d3dcompiler_47.dll with the FH2 Mod Platform's version resource strings."""
+    u = lambda s: s.encode("utf-16-le")  # noqa: E731
+    return b"MZ" + u("ProductName\0\0FH2 Mod Platform\0") + u("ProductVersion\0") + b"\x00\x00" + u(version + "\0")
+
+
+def platform_files(version="2.7.1"):
+    return {"d3dcompiler_47.dll": platform_dll(version), "LICENSE-FH2ModPlatform.txt": b"MIT License Trinculo54",
+            "LICENSE-MinHook.txt": b"MinHook BSD"}
+
+
 class ShimTests(unittest.TestCase):
     DLL = b"MZ....FH2MP-SHIM-VERSION:0.1.0:END...."
 
-    def test_install_over_foreign_dll_moves_it(self):
+    def read(self, *parts):
+        with open(os.path.join(*parts), "rb") as f:
+            return f.read()
+
+    def write(self, data, *parts):
+        os.makedirs(os.path.dirname(os.path.join(*parts)), exist_ok=True)
+        with open(os.path.join(*parts), "wb") as f:
+            f.write(data)
+
+    def test_install_puts_the_shim_in_fh2_mods_with_the_platform(self):
         with tempfile.TemporaryDirectory() as d:
-            with open(os.path.join(d, "winmm.dll"), "wb") as f:
-                f.write(b"MZ extra options")
-            with open(os.path.join(d, "FH2_ExtraOptions.ini"), "w") as f:
-                f.write("x")
-            did = shim.install(d, self.DLL)
+            self.assertEqual(shim.installed(d), ("none", ""))
+            did = shim.install(d, self.DLL, platform=platform_files())
             self.assertEqual(shim.installed(d), ("ours", "0.1.0"))
-            with open(os.path.join(d, "fh2extra", "winmm.dll"), "rb") as f:
-                self.assertEqual(f.read(), b"MZ extra options")
-            self.assertTrue(os.path.exists(os.path.join(d, "fh2extra", "FH2_ExtraOptions.ini")))
-            self.assertTrue(any("moved" in x for x in did))
+            self.assertEqual(self.read(d, "fh2-mods", "FH2MP.dll"), self.DLL)
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.1"))
+            for n in ("LICENSE-FH2ModPlatform.txt", "LICENSE-MinHook.txt"):
+                self.assertTrue(os.path.isfile(os.path.join(d, n)), n)
+            self.assertTrue(any("FH2 Mod Platform 2.7.1" in s for s in did))
+            self.assertFalse(os.path.exists(os.path.join(d, "winmm.dll")))
+
+    def test_the_winmm_layout_is_moved_over(self):
+        """Up to rc5: our winmm.dll next to azimuth.exe, Extra Options (with its settings) in fh2extra."""
+        with tempfile.TemporaryDirectory() as d:
+            self.write(b"MZ FH2MP-SHIM-VERSION:1.0.0-rc5:END", d, "winmm.dll")
+            self.write(b"MZ extra options", d, "fh2extra", "winmm.dll")
+            for n, b in (("FH2_ExtraOptions.ini", b"Mine=1"), ("FH2_ExtraOptions.dat", b"dat"), ("Gamerpic.png", b"pic"),
+                         ("LICENSE.txt", b"GPL"), ("NOTICE.txt", b"notice")):
+                self.write(b, d, "fh2extra", n)
+            self.assertEqual(shim.installed(d), ("old", "1.0.0-rc5"))
+            did = shim.install(d, self.DLL, platform=platform_files())
+            self.assertEqual(shim.installed(d), ("ours", "0.1.0"))
+            self.assertEqual(self.read(d, "winmm.dll"), b"MZ extra options")
+            self.assertEqual(self.read(d, "FH2_ExtraOptions.ini"), b"Mine=1")
+            self.assertEqual(self.read(d, "FH2_ExtraOptions.dat"), b"dat")
+            for n in ("LICENSE.txt", "NOTICE.txt"):                      # the GPL notices stay with the source
+                self.assertTrue(os.path.isfile(os.path.join(d, "fh2extra", n)), n)
+            self.assertFalse(os.path.exists(os.path.join(d, "fh2extra", "winmm.dll")))
+            self.assertFalse(os.path.exists(os.path.join(d, "fh2extra", "Gamerpic.png")))
+            self.assertTrue(any("removed the old winmm.dll shim" in s for s in did))
+
+    def test_platform_newer_kept_older_and_foreign_replaced(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.write(platform_dll("2.8.0"), d, "d3dcompiler_47.dll")
+            shim.install(d, self.DLL, platform=platform_files())
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.8.0"))          # another mod's newer copy stays
+            self.write(platform_dll("2.6.1"), d, "d3dcompiler_47.dll")
+            self.assertEqual(shim.installed(d), ("old", "0.1.0"))                        # too old for this shim: install again
+            shim.install(d, self.DLL, platform=platform_files())
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.1"))
+            self.write(b"MZ fh2wheel loader", d, "d3dcompiler_47.dll")                     # fh2wheel's own loader
+            self.assertEqual(shim.platform_installed(d), ("foreign", ""))
+            did = shim.install(d, self.DLL, platform=platform_files())
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.1"))
+            self.assertEqual(self.read(d, "d3dcompiler_47.dll.old"), b"MZ fh2wheel loader")
+            self.assertTrue(any("d3dcompiler_47.dll.old" in s for s in did))
+
+    def test_a_local_build_needs_the_platform_there(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(shim.ShimError):
+                shim.install(d, self.DLL)                                                    # no platform there and none given
+            shim.install(d, self.DLL, platform=platform_files())
+            shim.install(d, self.DLL.replace(b"0.1.0", b"0.1.1-debug"))
+            self.assertEqual(shim.installed(d), ("ours", "0.1.1-debug"))
 
     def test_update_keeps_previous_and_rejects_junk(self):
         with tempfile.TemporaryDirectory() as d:
-            shim.install(d, self.DLL)
-            shim.install(d, self.DLL.replace(b"0.1.0", b"0.2.0"))
+            shim.install(d, self.DLL, platform=platform_files())
+            shim.install(d, self.DLL.replace(b"0.1.0", b"0.2.0"), platform=platform_files())
             self.assertEqual(shim.installed(d), ("ours", "0.2.0"))
-            self.assertEqual(shim.inspect_dll(os.path.join(d, "winmm.dll.prev")), ("ours", "0.1.0"))
+            self.assertEqual(shim.inspect_dll(os.path.join(d, "fh2-mods", "FH2MP.dll.prev")), ("ours", "0.1.0"))
             with self.assertRaises(shim.ShimError):
-                shim.install(d, b"not a shim")
+                shim.install(d, b"not a shim", platform=platform_files())
             with self.assertRaises(shim.ShimError):
-                shim.install(d, self.DLL, expect_sha256="0" * 64)
+                shim.install(d, self.DLL, expect_sha256="0" * 64, platform=platform_files())
 
-    def test_uninstall_restores_extra_options(self):
+    def test_turned_off_on_the_mods_tab_is_turned_back_on(self):
         with tempfile.TemporaryDirectory() as d:
-            with open(os.path.join(d, "winmm.dll"), "wb") as f:
-                f.write(b"MZ extra options")
-            shim.install(d, self.DLL)
+            shim.install(d, self.DLL, platform=platform_files())
+            self.assertFalse(shim.enable(d))
+            self.write(b"# turned off on the MODS tab\nWreckingBall.dll\nfh2mp.dll\n", d, "fh2-mods", "platform-disabled.txt")
+            self.assertTrue(shim.enable(d))
+            self.assertEqual(self.read(d, "fh2-mods", "platform-disabled.txt"), b"# turned off on the MODS tab\nWreckingBall.dll\n")
+            self.write(b"FH2MP.dll\n", d, "fh2-mods", "platform-disabled.txt")
+            self.assertTrue(any("back on" in s for s in shim.install(d, self.DLL, platform=platform_files())))
+
+    def test_uninstall_leaves_the_platform_and_extra_options(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.write(b"MZ extra options", d, "winmm.dll")
+            shim.install(d, self.DLL, platform=platform_files())
             shim.uninstall(d)
-            self.assertEqual(shim.installed(d), ("foreign", ""))
+            self.assertEqual(shim.installed(d), ("none", ""))
+            self.assertEqual(self.read(d, "winmm.dll"), b"MZ extra options")
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.1"))
+
+    def test_shim_zip(self):
+        from fh2mp_launcher import core, updater
+        with tempfile.TemporaryDirectory() as d:
+            zp = os.path.join(d, "fh2mp-shim-0.1.0.zip")
+            with zipfile.ZipFile(zp, "w") as z:
+                z.writestr("fh2-mods/FH2MP.dll", self.DLL)
+                z.writestr("fh2mp/LICENSE.txt", b"GPL")
+            self.assertEqual(core.read_shim_zip(zp), self.DLL)
+            with zipfile.ZipFile(zp, "w") as z:
+                z.writestr("fh2-mods\\FH2MP.dll", self.DLL)                                 # Compress-Archive on Windows
+            self.assertEqual(core.read_shim_zip(zp), self.DLL)
+            with zipfile.ZipFile(zp, "w") as z:
+                z.writestr("winmm.dll", self.DLL)                                          # an rc5 shim zip
+            with self.assertRaises(updater.UpdateError):
+                core.read_shim_zip(zp)
 
     def test_session_file(self):
         with tempfile.TemporaryDirectory() as d:
@@ -492,154 +681,177 @@ class AzimuthTests(unittest.TestCase):
         self.assertEqual((info.supported, info.version), (True, "0.9.10"))
 
 
+def fake_release(kind, files, dll_name):
+    """A stand-in for a pinned upstream release: a zip with `files` and the pin (constants.UPSTREAM shape) that matches it."""
+    import io
+    from fh2mp_launcher.constants import UPSTREAM
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for n, b in files.items():
+            z.writestr(n, b)
+    data = buf.getvalue()
+    pin = dict(UPSTREAM[kind], sha256=hashlib.sha256(data).hexdigest(), dllSha256=hashlib.sha256(files[dll_name]).hexdigest())
+    return data, pin
+
+
+class UpstreamTests(unittest.TestCase):
+    def test_extract_takes_only_the_pinned_build(self):
+        from fh2mp_launcher import upstream
+        files = {"Azimuth/winmm.dll": b"MZ-eo", "Azimuth/FH2_ExtraOptions.ini": b"ini", "Azimuth/data/bin/azimuth-tls.dll": b"stub",
+                 "Mezcal/xg.dll": b"other"}
+        data, pin = fake_release("extraOptions", files, "Azimuth/winmm.dll")
+        self.assertEqual(upstream.extract("extraOptions", data, pin), {"winmm.dll": b"MZ-eo", "FH2_ExtraOptions.ini": b"ini"})
+        with self.assertRaises(upstream.UpstreamError):
+            upstream.extract("extraOptions", data + b"x", pin)                         # not the pinned zip
+        with self.assertRaises(upstream.UpstreamError):
+            upstream.extract("extraOptions", data, dict(pin, dllSha256="0" * 64))     # the DLL inside is not the pinned build
+        pdata, ppin = fake_release("platform", {"d3dcompiler_47.dll": b"MZ-plat", "LICENSE.txt": b"MIT", "LICENSE-MinHook.txt": b"BSD",
+                                                "README.txt": b"r"}, "d3dcompiler_47.dll")
+        self.assertEqual(upstream.extract("platform", pdata, ppin),
+                         {"d3dcompiler_47.dll": b"MZ-plat", "LICENSE-FH2ModPlatform.txt": b"MIT", "LICENSE-MinHook.txt": b"BSD"})
+
+    def test_pins_point_at_the_authors_releases(self):
+        from fh2mp_launcher.constants import UPSTREAM
+        self.assertTrue(UPSTREAM["platform"]["url"].startswith("https://github.com/Trinculo54/fh2-mod-platform/releases/download/"))
+        self.assertTrue(UPSTREAM["extraOptions"]["url"].startswith("https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions/releases/download/"))
+        self.assertEqual(set(UPSTREAM["platform"]["files"].values()), set(shim.PLATFORM_FILES))
+
+
 class ExtraOptionsTests(unittest.TestCase):
     INI = b"; Forza Horizon 2 Extra Options\n; Release v0.2.88\n; Compatible with Azimuth 0.9.10\n[Global]\nEnabled=1\n"
 
     def setUp(self):
         self._saved = set(shim.SUPPORTED_EXTRA_SHA256)
-        for b in (b"MZ-mod-dll", b"MZ-new-dll", b"MZ-bundled-mod", b"MZ-other"):          # stand-ins for the one supported build
+        for b in (b"MZ-mod-dll", b"MZ-release"):                                        # stand-ins for the one supported build
             shim.SUPPORTED_EXTRA_SHA256.add(hashlib.sha256(b).hexdigest())
         self.addCleanup(lambda: (shim.SUPPORTED_EXTRA_SHA256.clear(), shim.SUPPORTED_EXTRA_SHA256.update(self._saved)))
 
-    def make_mod(self, d, nested=True):
-        base = os.path.join(d, "fh2extra") if nested else d
-        os.makedirs(base, exist_ok=True)
-        for n, b in (("winmm.dll", b"MZ-mod-dll"), ("FH2_ExtraOptions.ini", self.INI), ("FH2_ExtraOptions.dat", b"user-options")):
-            with open(os.path.join(base, n), "wb") as f:
-                f.write(b)
-        return base
+    def read(self, *parts):
+        with open(os.path.join(*parts), "rb") as f:
+            return f.read()
 
-    def test_import_from_another_azimuth_folder_and_zip(self):
-        with tempfile.TemporaryDirectory() as old, tempfile.TemporaryDirectory() as new, tempfile.TemporaryDirectory() as z:
-            self.make_mod(old)
-            self.assertEqual(shim.inspect_extra_source(os.path.join(old, "fh2extra"))["version"], "0.2.88")
-            self.assertEqual(shim.extra_options_installed(new), (False, "", ""))
-            self.assertIn("0.2.88", shim.import_extra_options(new, old)[0])
-            self.assertEqual(shim.extra_options_installed(new), (True, "0.2.88", "0.9.10"))
-            with open(os.path.join(new, "fh2extra", "FH2_ExtraOptions.dat"), "rb") as f:
-                self.assertEqual(f.read(), b"user-options")
-            # a zip with the usual Azimuth/ sub folder; existing settings are kept, the DLL is replaced
-            with open(os.path.join(new, "fh2extra", "FH2_ExtraOptions.ini"), "ab") as f:
-                f.write(b"Mine=1\n")
-            import zipfile
-            zp = os.path.join(z, "FH2_Extra_Options_0.2.88-release.zip")
-            with zipfile.ZipFile(zp, "w") as zf:
-                zf.writestr("Azimuth/winmm.dll", b"MZ-new-dll")
-                zf.writestr("Azimuth/FH2_ExtraOptions.ini", self.INI)
-                zf.writestr("Mezcal/xg.dll", b"other")
-            shim.import_extra_options(new, zp)
-            with open(os.path.join(new, "fh2extra", "winmm.dll"), "rb") as f:
-                self.assertEqual(f.read(), b"MZ-new-dll")
-            with open(os.path.join(new, "fh2extra", "FH2_ExtraOptions.ini"), "rb") as f:
-                self.assertIn(b"Mine=1", f.read())
+    def write(self, data, *parts):
+        os.makedirs(os.path.dirname(os.path.join(*parts)), exist_ok=True)
+        with open(os.path.join(*parts), "wb") as f:
+            f.write(data)
 
-    def make_package(self, d, dll=b"MZ-bundled-mod", source=True):
-        import zipfile
-        zp = os.path.join(d, "fh2-extra-options-0.2.98.zip")
-        with zipfile.ZipFile(zp, "w") as zf:
-            zf.writestr("winmm.dll", dll)
-            zf.writestr("FH2_ExtraOptions.ini", self.INI)
-            zf.writestr("LICENSE.txt", b"GNU GENERAL PUBLIC LICENSE Version 3")
-            zf.writestr("NOTICE.txt", b"by RokkuDayo")
-            if source:
-                zf.writestr("source/ForzaHorizon2_ExtraOptions-1ff0535f.zip", b"PK-src")
-        return zp, hashlib.sha256(dll).hexdigest()
+    def release(self):
+        return {"winmm.dll": b"MZ-release", "FH2_ExtraOptions.ini": self.INI}
 
-    def test_bundled_install_only_when_missing_and_keeps_licence_and_source(self):
-        with tempfile.TemporaryDirectory() as pkg, tempfile.TemporaryDirectory() as az:
-            zp, sha = self.make_package(pkg)
-            did = shim.install_bundled_extra(az, zp, sha)
-            self.assertIn("RokkuDayo", did[0])
-            base = os.path.join(az, "fh2extra")
-            for n in ("winmm.dll", "FH2_ExtraOptions.ini", "LICENSE.txt", "NOTICE.txt", os.path.join("source", "ForzaHorizon2_ExtraOptions-1ff0535f.zip")):
-                self.assertTrue(os.path.isfile(os.path.join(base, n)), n)
+    def test_installs_next_to_azimuth_and_keeps_settings(self):
+        with tempfile.TemporaryDirectory() as az:
+            self.assertFalse(shim.extra_options_supported(az))
+            did = shim.install_extra(az, self.release())
+            self.assertIn("RokkuDayo", did[-1])
+            self.assertEqual(self.read(az, "winmm.dll"), b"MZ-release")
             self.assertEqual(shim.extra_options_installed(az), (True, "0.2.88", "0.9.10"))
-            # a second call (the supported mod is there now) changes nothing, even with another supported DLL in the package
-            os.makedirs(os.path.join(pkg, "second"))
-            zp2, sha2 = self.make_package(os.path.join(pkg, "second"), dll=b"MZ-other")
-            self.assertEqual(shim.install_bundled_extra(az, zp2, sha2), [])
-            with open(os.path.join(base, "winmm.dll"), "rb") as f:
-                self.assertEqual(f.read(), b"MZ-bundled-mod")
-            # another version (not the supported build): kept aside, the supported one goes in, settings stay
-            with open(os.path.join(base, "winmm.dll"), "wb") as f:
-                f.write(b"MZ-0.2.88-old")
-            with open(os.path.join(base, "FH2_ExtraOptions.ini"), "ab") as f:
-                f.write(b"Mine=1\n")
-            did = shim.install_bundled_extra(az, zp, sha)
-            self.assertIn("aside", did[0])
-            with open(os.path.join(base, "winmm.dll"), "rb") as f:
-                self.assertEqual(f.read(), b"MZ-bundled-mod")
-            with open(os.path.join(base, "winmm.dll.unsupported-1"), "rb") as f:
-                self.assertEqual(f.read(), b"MZ-0.2.88-old")
-            with open(os.path.join(base, "FH2_ExtraOptions.ini"), "rb") as f:
-                self.assertIn(b"Mine=1", f.read())
+            self.assertTrue(shim.extra_options_supported(az))
+            # another build there: kept aside in fh2extra, the release goes in, the player's settings stay
+            self.write(b"MZ-0.2.88-old", az, "winmm.dll")
+            self.write(self.INI + b"Mine=1\n", az, "FH2_ExtraOptions.ini")
+            did = shim.install_extra(az, self.release())
+            self.assertTrue(any("unsupported-1" in s for s in did))
+            self.assertEqual(self.read(az, "winmm.dll"), b"MZ-release")
+            self.assertEqual(self.read(az, "fh2extra", "winmm.dll.unsupported-1"), b"MZ-0.2.88-old")
+            self.assertIn(b"Mine=1", self.read(az, "FH2_ExtraOptions.ini"))
 
-    def test_only_the_supported_build_is_imported(self):
-        with tempfile.TemporaryDirectory() as old, tempfile.TemporaryDirectory() as new:
-            base = self.make_mod(old)
-            with open(os.path.join(base, "winmm.dll"), "wb") as f:
-                f.write(b"MZ-some-older-release")
-            self.assertIsNone(shim.inspect_extra_source(base))
-            with self.assertRaises(shim.ShimError):
-                shim.import_extra_options(new, old)
-            self.assertFalse(shim.extra_options_supported(new))
+    def test_the_pinned_build_there_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as az:
+            self.write(b"MZ-mod-dll", az, "winmm.dll")
+            self.assertEqual(shim.install_extra(az, self.release()), [])
+            self.assertEqual(self.read(az, "winmm.dll"), b"MZ-mod-dll")
 
-    def test_bundled_install_checks_the_signed_hash_and_what_it_is(self):
-        with tempfile.TemporaryDirectory() as pkg, tempfile.TemporaryDirectory() as az:
-            zp, _sha = self.make_package(pkg)
-            with self.assertRaises(shim.ShimError):
-                shim.install_bundled_extra(az, zp, "0" * 64)                      # not what the manifest signed
-            self.assertFalse(os.path.exists(os.path.join(az, "fh2extra", "winmm.dll")))
-            ours, osha = self.make_package(pkg, dll=b"MZ FH2MP-SHIM-VERSION:1.0.0:END")
-            with self.assertRaises(shim.ShimError):
-                shim.install_bundled_extra(az, ours, osha)                        # our own shim is not the mod
+    def test_the_rc5_layout_is_moved_over_first(self):
+        with tempfile.TemporaryDirectory() as az:
+            self.write(b"MZ-mod-dll", az, "fh2extra", "winmm.dll")                     # the supported mod in fh2extra ...
+            self.write(self.INI, az, "fh2extra", "FH2_ExtraOptions.ini")
+            self.write(b"MZ FH2MP-SHIM-VERSION:1.0.0-rc5:END", az, "winmm.dll")         # ... behind our old winmm.dll
+            self.assertFalse(shim.extra_options_supported(az))
+            self.assertTrue(any("back next to azimuth.exe" in s for s in shim.install_extra(az, self.release())))
+            self.assertEqual(self.read(az, "winmm.dll"), b"MZ-mod-dll")                  # the player's own copy, not a download
 
     def test_refuses_what_is_not_the_mod(self):
-        with tempfile.TemporaryDirectory() as d:
-            with open(os.path.join(d, "winmm.dll"), "wb") as f:
-                f.write(b"MZ FH2MP-SHIM-VERSION:1.0.0:END")                 # our own shim is not the mod
-            with open(os.path.join(d, "FH2_ExtraOptions.ini"), "wb") as f:
-                f.write(self.INI)
+        with tempfile.TemporaryDirectory() as az:
             with self.assertRaises(shim.ShimError):
-                shim.import_extra_options(tempfile.mkdtemp(), d)
-            import zipfile
-            zp = os.path.join(d, "old.zip")
-            with zipfile.ZipFile(zp, "w") as zf:
-                zf.writestr("Azimuth/azimuth-tls.dll", b"x")                  # the 0.2.74 layout: for an older Azimuth
-                zf.writestr("Azimuth/FH2_ExtraOptions.ini", self.INI)
+                shim.install_extra(az, {"winmm.dll": b"MZ FH2MP-SHIM-VERSION:1.0.0:END"})      # our own shim is not the mod
             with self.assertRaises(shim.ShimError):
-                shim.import_extra_options(tempfile.mkdtemp(), zp)
+                shim.install_extra(az, {"winmm.dll": b"MZ-some-other-build"})
+            self.assertFalse(os.path.exists(os.path.join(az, "winmm.dll")))
 
 
 class SaveAdoptionTests(unittest.TestCase):
-    def make(self, d, *names):
-        for n in names:
-            p = os.path.join(d, "data", "titles", "1A96545B", "saves", "player-1", n, "revisions")
-            os.makedirs(p)
-            with open(os.path.join(p, "profile.bin"), "w") as f:
-                f.write(n)
+    """The layout Azimuth writes: User_<HEX>/revisions/<hex>/data/{BinarySaveState,SaveState,...}. A profile the game made for the prologue has
+    a 4-byte BinarySaveState, one with progress about 110 KB (checked on the rigs)."""
+    TITLES = ("data", "titles", "1A96545B", "saves", "player-1")
+
+    def make(self, d, name, progress=True, base=TITLES, rev="00000000000008dd", when=None):
+        p = os.path.join(d, *base, name, "revisions", rev, "data")
+        os.makedirs(p)
+        with open(os.path.join(p, "BinarySaveState"), "wb") as f:
+            f.write(name.encode().ljust(112994 if progress else 4, b"\0"))
+        if when is not None:
+            os.utime(os.path.dirname(p), (when, when))
+        return os.path.join(d, *base, name)
+
+    def state(self, profile):
+        rev = azimuth._newest_revision(profile)
+        with open(os.path.join(rev, "data", "BinarySaveState"), "rb") as f:
+            return f.read().rstrip(b"\0").decode()
 
     def test_new_account_inherits_the_default_profile(self):
         with tempfile.TemporaryDirectory() as d:
-            self.make(d, "User_9000000000000", "User_900001C7CE3F5")
+            self.make(d, "User_9000000000000")
+            self.make(d, "User_900001C7CE3F5")
             note = azimuth.adopt_saves(d, 0x000900004ADDC5F7)
             self.assertIn("User_9000000000000 -> User_900004ADDC5F7", note)
-            root = os.path.join(d, "data", "titles", "1A96545B", "saves", "player-1")
-            with open(os.path.join(root, "User_900004ADDC5F7", "revisions", "profile.bin")) as f:
-                self.assertEqual(f.read(), "User_9000000000000")
+            root = os.path.join(d, *self.TITLES)
+            self.assertEqual(self.state(os.path.join(root, "User_900004ADDC5F7")), "User_9000000000000")
             self.assertTrue(os.path.isdir(os.path.join(root, "User_9000000000000")))        # the original stays
-            self.assertEqual(azimuth.adopt_saves(d, 0x000900004ADDC5F7), "")               # once only; never overwrites
+            self.assertEqual(azimuth.adopt_saves(d, 0x000900004ADDC5F7), "")               # once only; never overwrites progress
 
-    def test_falls_back_to_the_newest_profile_and_ignores_backups(self):
+    def test_falls_back_to_the_newest_profile_and_ignores_backups_and_empty_ones(self):
         with tempfile.TemporaryDirectory() as d:
-            self.make(d, "User_AAA", "User_BBB", "User_CCC.fresh-backup")
-            root = os.path.join(d, "data", "titles", "1A96545B", "saves", "player-1")
-            os.utime(os.path.join(root, "User_AAA"), (1, 1))
+            self.make(d, "User_AAA", when=1)
+            self.make(d, "User_BBB", when=2)
+            self.make(d, "User_DDD", progress=False, when=3)
+            self.make(d, "User_CCC.fresh-backup", when=4)
             self.assertIn("User_BBB ->", azimuth.adopt_saves(d, 0x9000000000042))
+
+    def test_an_empty_profile_from_the_prologue_is_replaced_and_kept(self):
+        """#36: the game made an empty User_<xuid> because the save was not found; every later Play skipped adoption."""
+        with tempfile.TemporaryDirectory() as d:
+            self.make(d, "User_9000000000042", progress=False, rev="000000000000000a")
+            self.make(d, "User_9000000000000")
+            self.assertIn("User_9000000000000 -> User_9000000000042", azimuth.adopt_saves(d, 0x9000000000042))
+            root = os.path.join(d, *self.TITLES)
+            self.assertEqual(self.state(os.path.join(root, "User_9000000000042")), "User_9000000000000")
+            kept = [n for n in os.listdir(root) if n.startswith("User_9000000000042.fresh-")]
+            self.assertEqual(len(kept), 1)
+            self.assertFalse(azimuth.has_progress(os.path.join(root, kept[0])))
+
+    def test_the_old_layout_and_azimuths_migration_backup_are_found(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.make(d, "User_9000000000000", base=("data", "saves", "player-1"))         # Azimuth 0.9.7
+            self.assertIn("-> User_9000000000042", azimuth.adopt_saves(d, 0x9000000000042))
+            self.assertTrue(azimuth.has_progress(os.path.join(d, *self.TITLES, "User_9000000000042")))    # created where 0.9.10 reads it
+        with tempfile.TemporaryDirectory() as d:
+            self.make(d, "User_9000000000000", base=("data", "saves-backup-20261017T031818-821-232", "player-1"))
+            self.assertIn("-> User_9000000000042", azimuth.adopt_saves(d, 0x9000000000042))
+
+    def test_a_save_in_another_azimuth_folder_is_found(self):
+        """A new Azimuth release is unpacked into a new folder: the save is in the old one (zts / Rattzy)."""
+        with tempfile.TemporaryDirectory() as new, tempfile.TemporaryDirectory() as old:
+            self.make(old, "User_9000000000000", base=("data", "saves", "player-1"))
+            self.make(old, "User_9000000000042", when=1)                                  # the account's own save wins over the default
+            note = azimuth.adopt_saves(new, 0x9000000000042, [old])
+            self.assertIn(f"User_9000000000042 (from {os.path.join(old, 'data', 'titles', '1A96545B', 'saves')}) -> User_9000000000042", note)
 
     def test_nothing_to_adopt(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(azimuth.adopt_saves(d, 0x9000000000042), "")
+            self.make(d, "User_9000000000000", progress=False)
+            self.assertEqual(azimuth.adopt_saves(d, 0x9000000000042), "")
+            self.assertFalse(os.path.exists(os.path.join(d, *self.TITLES, "User_9000000000042")))
 
 
 class DevModeTests(unittest.TestCase):
@@ -675,7 +887,7 @@ class DevModeTests(unittest.TestCase):
         from fh2mp_launcher import core
         from fh2mp_launcher.settings import Settings
         with tempfile.TemporaryDirectory() as d:
-            for name, body in (("azimuth.exe", b"MZ"),):
+            for name, body in (("azimuth.exe", b"MZ"), ("d3dcompiler_47.dll", platform_dll("2.7.1"))):     # a bare DLL needs the platform
                 with open(os.path.join(d, name), "wb") as f:
                     f.write(body)
             dll = os.path.join(d, "local.dll")

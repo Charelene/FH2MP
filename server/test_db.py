@@ -54,6 +54,27 @@ class SchemaTests(Base):
         self.assertEqual(self.db.one("SELECT COUNT(*) FROM players")[0], 0)
 
 
+class LevelTests(Base):
+    """A client reports its own career level: prod had 285229462 and 3567658931."""
+
+    def level(self, reported):
+        with self.db.tx() as c:
+            db.touch_player(c, 7, "tag", level=reported)
+        return self.db.one("SELECT career_level FROM players WHERE xuid=7")[0]
+
+    def test_levels_are_kept_in_range(self):
+        self.assertEqual(self.level(41), 41)
+        self.assertEqual(self.level(3567658931), 999)
+        self.assertEqual(self.level(-5), 1)
+        self.assertEqual(self.level("junk"), 1)
+
+    def test_no_level_leaves_the_stored_one(self):
+        self.level(41)
+        with self.db.tx() as c:
+            db.touch_player(c, 7, "tag")
+        self.assertEqual(self.db.one("SELECT career_level FROM players WHERE xuid=7")[0], 41)
+
+
 class ScoreTests(Base):
     def setUp(self):
         super().setUp()
@@ -117,6 +138,56 @@ class ScoreTests(Base):
         self.assertTrue(self.sc.rival_for(10, *args)["ghost"])
         self.assertEqual(self.sc.rival_for(11, *args, rival_xuid=11)["xuid"], 11)     # picking yourself
         self.assertEqual(self.sc.rival_for(11, *args, rival_xuid=10)["xuid"], 10)
+
+    def test_picked_rival_is_the_one_raced(self):
+        # GitHub #12: picking a row on the board sends its xuid as rivalXuid; the server used to answer the row above you anyway
+        for xuid, t in ((10, 50.0), (11, 60.0), (12, 70.0), (13, 80.0)):
+            self.sc.submit(xuid, "p%d" % xuid, 1, sub(t, sb=3))
+        args = (3, 1, 7, 1)
+        self.assertEqual(self.sc.rival_for(13, *args)["xuid"], 12)                    # nothing picked: the row just above
+        self.assertEqual(self.sc.rival_for(13, *args, rival_xuid=10)["xuid"], 10)     # the top player, two rows further up
+        self.assertEqual(self.sc.rival_for(11, *args, rival_xuid=13)["xuid"], 13)     # someone slower
+        self.assertEqual(self.sc.rival_for(10, *args, rival_xuid=12)["xuid"], 12)     # picked by the #1
+        self.assertEqual(self.sc.rival_for(13, *args, rival_xuid=99)["xuid"], 12)     # not on this board: the usual choice
+        self.assertEqual(self.sc.rival_for(99, *args, rival_xuid=11)["xuid"], 11)     # no time yet, picked a row
+
+    def test_empty_board_races_the_world_record(self):
+        # GitHub #12: an empty answer leaves the client spinning; the world record (no ghost) is raced instead and never listed
+        wr = {(856, 3): 50.0, (856, 5): 44.564, (900, 1): 70.0}
+        events = {2441: {"track": 856, "laps": 1, "cls": 3}, 2442: {"track": 856, "laps": 1, "cls": None},
+                  2443: {"track": 857, "laps": 1, "cls": 3}}
+        sc = scoreboard.ScoreStore(self.db, ["A"], records=wr, event_info=events.get)
+        r = sc.rival_for(10, 1, 1, 856, 5)                                           # Festival Route, S2 board
+        self.assertEqual((r["score"], r["tag"], sc.fake_name(r["xuid"]), r["ghost"] if "ghost" in r else 0),
+                         (44.564, "World Record", "World Record", 0))                 # never a player's name, no ghost
+        self.assertEqual(sc.rival_for(10, 1, 1, 856, 4)["score"], 44.564)            # S1 has no record: the next faster class
+        self.assertIsNone(sc.rival_for(10, 1, 1, 900, 3))                            # only slower classes: no record to race
+        self.assertEqual(sc.rival_for(10, 3, 1, 856, 2441)["score"], 50.0)           # Monthly: the event's track and class
+        self.assertEqual(sc.rival_for(10, 3, 1, 856, 2442)["score"], 44.564)         # open class: the track's fastest record
+        self.assertIsNone(sc.rival_for(10, 3, 1, 857, 2443))                         # no record on that track
+        self.assertEqual(sc.rival_for(10, 6, 1, 856, 7)["score"], 44.564)            # Showcase: the request's track
+        self.assertEqual(sc.rows(10, 1, 1, 856, 1, 100, 5)[0], [])                   # not listed on the board
+        sc.submit(10, "p10", 1, dict(sub(50.0, sb=1, track=856), carClassId=5))
+        self.assertEqual(sc.rival_for(10, 1, 1, 856, 5)["xuid"], 10)                 # once a time exists: the real board
+
+    def test_speed_boards_are_capped(self):
+        def trap(v):
+            return dict(sub(v, sb=9, st=5, track=65535), gameScoreboardId=3)
+        self.assertIsNone(self.sc.submit(10, "p10", 5, trap(319.477)))                # 715 mph: rejected
+        self.assertIsNotNone(self.sc.submit(10, "p10", 5, trap(126.0)))              # 282 mph: a real record
+        self.db.execute("INSERT INTO score_submissions (xuid, sb, st, gsid, track, car, cls, cpi, score, clean, stm, tcs, abs, "
+                        "submitted) VALUES (11, 9, 5, 3, 65535, 1, 2, 0.5, 200.0, 0, 0, 0, 0, 0)")   # stored before the cap
+        rows, _, nreal, _ = self.sc.rows(10, 9, 5, 65535, 1, 100, 3)
+        self.assertEqual([r["score"] for r in rows], [126.0])
+        self.assertEqual(nreal, 1)
+        self.assertIsNotNone(self.sc.submit(10, "p10", 1, sub(200.0, sb=3)))          # the cap is only for speed boards
+
+    def test_shifting_assists_are_kept(self):
+        self.sc.submit(10, "p10", 1, dict(sub(50.0, sb=3), usedAutoShifting=False, usedClutch=True, usedAutoBrake=True))
+        self.sc.submit(11, "p11", 1, dict(sub(60.0, sb=3), usedAutoShifting=True))
+        rows = {r["xuid"]: r for r in self.sc.rows(10, 3, 1, 7, 1, 100, 1)[0]}
+        self.assertEqual((rows[10]["autoshift"], rows[10]["clutch"], rows[10]["autobrake"]), (False, True, True))
+        self.assertEqual((rows[11]["autoshift"], rows[11]["clutch"]), (True, False))
 
     def test_non_finite_scores_are_rejected(self):
         for bad in (math.nan, math.inf, -math.inf):
@@ -258,6 +329,16 @@ class DrivatarTests(Base):
         self.assertEqual(len(out), 4)
         self.assertFalse({1, 2} & {r["Xuid"] for r in out})
         self.assertEqual(len(self.d.pool(100)), 5 + len(self.d.templates))
+
+    def test_player_drivatars_do_not_all_share_one_wristband(self):
+        low = min(t["wristbandLevel"] for t in self.d.templates)
+        for x in range(1, 41):
+            self.d.add_player(x, "P%d" % x, wristband=low)
+        self.d.edit(7, {"wristbandLevel": str(low)}, lock=True)
+        first = {r["Xuid"]: r["wristbandLevel"] for r in self.d.pool(40)}
+        self.assertGreaterEqual(len({v for k, v in first.items() if k <= 40}), 10)
+        self.assertEqual(first[7], low)
+        self.assertEqual({r["Xuid"]: r["wristbandLevel"] for r in self.d.pool(40)}[3], first[3])
 
 
 if __name__ == "__main__":

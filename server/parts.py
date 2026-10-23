@@ -5,8 +5,10 @@ are always -1 and every other word is -1 (none) or a catalog id."""
 import part_ids as P
 
 NONE = P.PART_NONE
-LO = 300                        # earliest bit offset tried; the array has been seen at 910 and 919, and objects of 3129 bits exist (Road Trip), so the
-                                # search runs up to the last place where 43 words still fit
+LO = 0                          # earliest bit offset tried. Creates carry the array at 729-959; an update that changes the car (Road Trip car select,
+                                # a car swap in Free Roam) carries it at bit 48 (dev captures 2026-10-22, 1462 and 1502 bits), which the old start (300)
+                                # never reached: prod logged "no part list found" for those. The search runs up to the last place where 43 words fit.
+MIN_BITS = 32 * P.PART_SLOTS    # an object shorter than the array itself cannot hold it
 
 
 def find_parts(size, payload):
@@ -23,6 +25,26 @@ def find_parts(size, payload):
             best = (good, o, words)
             if good == 41:
                 break
+    return None if best is None else (best[1], best[2])
+
+
+def find_unknown_car(size, payload):
+    """(bit offset, [43 words]) of a part list whose car is not in the catalog (a car pack the server does not have), or None. Such a list
+    fails find_parts, because the car's own rows (body, bumpers, brakes, ...) are unknown too: here a word also counts when it is a row of
+    the same car (id // 1000 == the body's car id; body rows are car id x 1000). The body must be such an unknown row."""
+    best = None
+    top = size - 32 * P.PART_SLOTS
+    for o in range(LO, top + 1):
+        if (payload >> (o + 32 * 3)) & 0xFFFFFFFF != NONE or (payload >> (o + 32 * 26)) & 0xFFFFFFFF != NONE:
+            continue
+        body = (payload >> (o + 64)) & 0xFFFFFFFF
+        if body == NONE or body % 1000 or not 0 < body // 1000 < 100000 or body in P.TABLE_IDS["CarBody"]:
+            continue
+        words = [(payload >> (o + 32 * k)) & 0xFFFFFFFF for k in range(P.PART_SLOTS)]
+        car = body // 1000
+        good = sum(1 for k, w in enumerate(words) if k not in (3, 26) and (w == NONE or w in P.ALL_IDS or w // 1000 == car))
+        if good >= 34 and (best is None or good > best[0]):
+            best = (good, o, words)
     return None if best is None else (best[1], best[2])
 
 
@@ -97,6 +119,107 @@ def neutralize(words):
         if owner is not None and have is not None and have != owner:
             odd.append((k, w, f"{table} row of {P.OWNER_KIND[table]} {have}, this car's is {owner}"))
     return out, changes, odd
+
+
+def stock_list(car):
+    """The part list of `car` as it comes from the dealer: every slot holds its owner's stock row (-1 where the owner has none). None when
+    the catalog has no body row for it. Used for the stand-in car (NUL_Car_00, the game's own placeholder) of an unknown car."""
+    words = [NONE] * P.PART_SLOTS
+    for k in (0, 1, 2):
+        words[k] = P.STOCK.get(P.SLOT_TABLE[k], {}).get(car, NONE)
+    if words[2] == NONE:
+        return None
+    for k, t in P.SLOT_TABLE.items():
+        if k not in (0, 1, 2):
+            owner = _expected_owner(t, words)
+            words[k] = P.STOCK.get(t, {}).get(owner, NONE) if owner is not None else NONE
+    return words
+
+
+def extend(tables):
+    """Adds the rows of another game database (part_tables.read_parts of the canonical database: car packs) to the catalog's. Rows the
+    catalog has keep their owner and stock entries. -> number of part ids added."""
+    added = 0
+    for name, vals in tables["ids"].items():
+        old = P.TABLE_IDS.get(name, frozenset())
+        new = old.union(vals)
+        added += len(new) - len(old)
+        P.TABLE_IDS[name] = new
+    P.ALL_IDS = frozenset().union(*P.TABLE_IDS.values())
+    for name, k in tables["kind"].items():
+        P.OWNER_KIND.setdefault(name, k)
+    for src, dst in ((tables["owner"], P.ROW_OWNER), (tables["stock"], P.STOCK), (tables["installs"], P.INSTALLS)):
+        for name, m in src.items():
+            d = dst.setdefault(name, {})
+            for key, v in m.items():
+                d.setdefault(key, v)
+    return added
+
+
+CHOICE_VARS = (82, 83, 84, 85, 86, 87)          # PlayerChoices PerfIndex, Speed/Accel/Launch/Braking/Handling ratings: 8-bit id + 32-bit float each
+CHOICE_CLASS_VAR = 81                            # CarClass: 8-bit id + 32-bit int, just before PerfIndex when the class changed
+
+
+def find_choices(size, payload):
+    """Where a LobbyPlayer object carries the car's class and performance index (Nerd::PlayerChoices vars 81/82, every var a 40-bit
+    id + value pair, found on dev 2026-10-22: a car-select update is exactly [81 class][82 PI][83..87 ratings]; the class is left out
+    when it did not change). Returns (bit offset of the PI value, bit offset of the class value or None) or None. The six ids 82..87 at a
+    40-bit stride cannot appear in noise."""
+    for o in range(0, size - 6 * 40 + 1):
+        if all((payload >> (o + 40 * k)) & 0xFF == v for k, v in enumerate(CHOICE_VARS)):
+            cls = o - 40 + 8 if o >= 40 and (payload >> (o - 40)) & 0xFF == CHOICE_CLASS_VAR else None
+            return o + 8, cls
+    return None
+
+
+def read_choices(payload, found):
+    """(class or None, performance index) at what find_choices returned."""
+    import struct
+    pi_at, cls_at = found
+    pi = struct.unpack("<f", ((payload >> pi_at) & 0xFFFFFFFF).to_bytes(4, "little"))[0]
+    cls = (payload >> cls_at) & 0xFFFFFFFF if cls_at is not None else None
+    if cls is not None and cls >= 1 << 31:
+        cls -= 1 << 32
+    return cls, pi
+
+
+def write_choices(payload, found, cls, pi):
+    """The payload with the class (when it is carried) and the performance index replaced."""
+    import struct
+    pi_at, cls_at = found
+    payload = (payload & ~(0xFFFFFFFF << pi_at)) | (struct.unpack("<I", struct.pack("<f", pi))[0] << pi_at)
+    if cls_at is not None:
+        payload = (payload & ~(0xFFFFFFFF << cls_at)) | ((cls & 0xFFFFFFFF) << cls_at)
+    return payload
+
+
+PI_RANGE = (0.0, 1.5)          # stock cars 0.2-0.99, class R's cap is 1.1
+RATING_RANGE = (0.0, 12.0)     # the six ratings are shown on a 0-10 scale (dev captures: 3-10)
+
+
+def sanitize_choices(payload, found):
+    """PerfIndex and the five ratings come from the client and every other client's grid and results screen shows them: a NaN or an absurd
+    number is replaced by the nearest sane one (NaN by the middle of the range). -> (payload, [what was changed])."""
+    import math
+    import struct
+    pi_at = found[0]
+    notes = []
+    for k, (name, lo, hi) in enumerate([("PerfIndex", *PI_RANGE)] + [("rating %d" % i, *RATING_RANGE) for i in range(1, 6)]):
+        at = pi_at + 40 * k
+        v = struct.unpack("<f", ((payload >> at) & 0xFFFFFFFF).to_bytes(4, "little"))[0]
+        if math.isfinite(v) and lo <= v <= hi:
+            continue
+        fixed = (lo + hi) / 2 if not math.isfinite(v) else min(max(v, lo), hi)
+        notes.append(f"{name} {v!r} -> {fixed:g}")
+        payload = (payload & ~(0xFFFFFFFF << at)) | (struct.unpack("<I", struct.pack("<f", fixed))[0] << at)
+    return payload, notes
+
+
+def choices_update(cls, pi):
+    """A server-written PlayerChoices update [81 class][82 PI] -> (bits, payload), relayed to the other clients."""
+    import struct
+    v = CHOICE_CLASS_VAR | ((cls & 0xFFFFFFFF) << 8) | (82 << 40) | (struct.unpack("<I", struct.pack("<f", pi))[0] << 48)
+    return 80, v
 
 
 def write_parts(payload, offset, words):

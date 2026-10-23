@@ -272,10 +272,15 @@ class SettingsDialog(QDialog):
         lay.addLayout(row)
         self.extra_opts = QCheckBox("Install FH2 Extra Options if it is missing (by RokkuDayo, GPL-3.0)")
         self.extra_opts.setToolTip("The Social, Clubs, Rivals and Marketplace menus and several game fixes come from this free mod. "
-                                   "It is copied unchanged into the fh2extra folder of your Azimuth folder, with its licence and source. "
-                                   "Your own copy is never replaced.")
+                                   "The launcher downloads the author's release from GitHub (a pinned build) and puts it next to azimuth.exe as winmm.dll. "
+                                   "The pinned build already there is left alone; another winmm.dll is kept in the fh2extra folder.")
         self.extra_opts.setChecked(s["extra_options"])
         lay.addWidget(self.extra_opts)
+        self.tcp = QCheckBox("Connect over TCP (experimental, for networks that block UDP)")
+        self.tcp.setToolTip("Use this only if you cannot join games without a VPN. The game's traffic goes through your own machine and over "
+                            "TCP to the server, which adds delay. Needs the server to offer it.")
+        self.tcp.setChecked(s["tcp_fallback"])
+        lay.addWidget(self.tcp)
 
         if sys.platform != "win32":
             lay.addWidget(hrule())
@@ -341,7 +346,7 @@ class SettingsDialog(QDialog):
             row2.addWidget(b1)
             repo = _repo_shim_dir()
             if repo:
-                for name in ("winmm-debug.dll", "winmm.dll"):
+                for name in ("FH2MP-debug.dll", "FH2MP.dll"):
                     if os.path.isfile(os.path.join(repo, name)):
                         b = QPushButton(f"Repo: {name}")
                         b.clicked.connect(lambda _c=False, n=name: self._install_local(os.path.join(repo, n)))
@@ -422,6 +427,7 @@ class SettingsDialog(QDialog):
                 return
         s["azimuth_dir"] = d
         s["extra_options"] = self.extra_opts.isChecked()
+        s["tcp_fallback"] = self.tcp.isChecked()
         if paths.is_dev():                          # players cannot change the channel or the server
             s["channel"] = self.channel.currentData()
             s["check_updates"] = self.check_updates.isChecked()

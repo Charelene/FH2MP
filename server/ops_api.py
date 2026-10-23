@@ -23,9 +23,11 @@ not carry proxy headers, so nothing reachable through the public reverse proxy c
     DELETE /ops/v1/notifications[/<id>]        /
     POST   /ops/v1/rivals/rotate               re-roll this month's events
     GET    /ops/v1/config                      launcher settings and registration mode
-    PUT    /ops/v1/config                      {"motd", "maintenance", "minLauncher", "minShim", "links": {...}, "registration": open|invite|closed}
+    PUT    /ops/v1/config                      {"motd", "maintenance", "minLauncher", "minShim", "links": {...}, "registration": open|invite|closed,
+                                                "heroImage": "https://...", "news": [{"tag", "title", "text", "url", "image"}, ...]}
     POST   /ops/v1/invites                     {"code"?, "uses", "note"} -> {"code"}   (only a hash is stored, so codes cannot be listed)
     GET    /ops/v1/auth-events[?limit=]        recent sign-ups, logins, bans, rate-limit hits
+    GET    /ops/v1/records, hall-of-fame, traps, cars[/<id>], garage[/<id>/preview.png], history, totals   website statistics (site_stats.py)
 
 Errors: {"error": "<code>", "message": "..."}.
 """
@@ -41,6 +43,7 @@ from urllib.parse import parse_qs, urlparse
 
 import rivals
 import scoreboard
+import site_stats
 import social
 
 STARTED = time.time()
@@ -51,6 +54,8 @@ NOT_ROUTES = ("Showcase", "Road Trip", "Finale", "Arena")
 LINK_KEYS = ("website", "patreon", "discord")
 REGISTRATION_MODES = ("open", "invite", "closed")
 INVITE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"        # no 0/O/1/I/L
+NEWS_MAX = 12
+NEWS_FIELDS = {"tag": 24, "title": 80, "text": 200, "url": 300, "image": 300}       # launcher home card fields and their length limits
 
 
 class OpsError(Exception):
@@ -170,6 +175,10 @@ def _route(lsp, method, path, body):
         return 201, make_invite(lsp, _json(body))
     if what == "auth-events" and method == "GET":
         return 200, auth_events(lsp, _int(q, "limit", 50, 1, 500))
+    if method == "GET":
+        found = site_stats.route(lsp, what, rest, q, _int)
+        if found is not None:
+            return found
     raise OpsError(404, "not_found", "unknown endpoint")
 
 
@@ -203,7 +212,7 @@ def _gamertag(lsp, r):
 def _board_row(lsp, r, car_names):
     cls = r["cls"]
     return {"position": r["position"], "xuid": r["xuid"], "gamertag": _gamertag(lsp, r), "score": r["score"],
-            "car": car_names.get(r["car"], ""), "class": rivals.CLASS_LETTERS[cls] if 0 <= cls < len(rivals.CLASS_LETTERS) else "",
+            "car": car_names.get(r["car"], ""), "carId": r["car"], "class": rivals.CLASS_LETTERS[cls] if 0 <= cls < len(rivals.CLASS_LETTERS) else "",
             "clean": r["clean"], "at": int(r["t"])}
 
 
@@ -214,12 +223,22 @@ def _event(lsp, e, rows):
             "rows": rows}
 
 
+def _year_month(month):
+    """Rotation month index (months since rivals.EPOCH) -> (year, month 1-12)."""
+    return rivals.EPOCH[0] + (rivals.EPOCH[1] - 1 + month) // 12, (rivals.EPOCH[1] - 1 + month) % 12 + 1
+
+
+def month_label(month):
+    year, mo = _year_month(month)
+    return f"{calendar.month_name[mo]} {year}"
+
+
 def _rotation(lsp):
     """(label such as 'October 2026', unix time the monthly rotation ends)."""
     month, reroll = lsp.RIV.serial()
-    year, mo = rivals.EPOCH[0] + (rivals.EPOCH[1] - 1 + month) // 12, (rivals.EPOCH[1] - 1 + month) % 12 + 1
+    year, mo = _year_month(month)
     end = calendar.timegm((year + (mo == 12), mo % 12 + 1, 1, 0, 0, 0))
-    return {"label": f"{calendar.month_name[mo]} {year}", "month": month, "reroll": reroll, "endsAt": end}
+    return {"label": month_label(month), "month": month, "reroll": reroll, "endsAt": end}
 
 
 def challenges(lsp, top):
@@ -336,7 +355,8 @@ def recent(lsp, limit):
             continue                                      # a Monthly event of an earlier rotation: nothing to name it by
         cls = r["cls"]
         out.append({"gamertag": _gamertag(lsp, r), "xuid": r["xuid"], "kind": kind, "where": where, "score": r["score"],
-                    "car": names.get(r["car"], ""), "class": rivals.CLASS_LETTERS[cls] if 0 <= cls < len(rivals.CLASS_LETTERS) else "",
+                    "car": names.get(r["car"], ""), "carId": r["car"],
+                    "class": rivals.CLASS_LETTERS[cls] if 0 <= cls < len(rivals.CLASS_LETTERS) else "",
                     "clean": bool(r["clean"]), "at": int(r["submitted"])})
         if len(out) >= limit:
             break
@@ -418,7 +438,8 @@ def _notifications(lsp, method, what, rest, body):
 def get_config(lsp):
     c = lsp.LAUNCHER.config.get()
     return {"env": lsp.AUTH.env, "auth": lsp.AUTH.mode, "registration": lsp.AUTH.registration,
-            "motd": c["motd"], "maintenance": c["maintenance"], "minLauncher": c["minLauncher"], "minShim": c["minShim"], "links": c["links"]}
+            "motd": c["motd"], "maintenance": c["maintenance"], "minLauncher": c["minLauncher"], "minShim": c["minShim"], "links": c["links"],
+            "heroImage": c.get("heroImage", ""), "news": c.get("news", [])}
 
 
 def _text(d, key, limit):
@@ -428,10 +449,18 @@ def _text(d, key, limit):
     return v.strip()
 
 
+def _url(d, key, limit, https_only=False):
+    v = d[key]
+    pat = r"https://[^\s]+" if https_only else r"https?://[^\s]+"
+    if not isinstance(v, str) or len(v) > limit or (v and not re.fullmatch(pat, v)):
+        raise OpsError(400, "bad_request", f"{key} must be empty or an {'https' if https_only else 'http(s)'} URL")
+    return v
+
+
 def validate_config(d):
     """-> the settings to keep (unknown keys are errors, so a typo cannot silently do nothing)."""
     out = {}
-    unknown = set(d) - {"motd", "maintenance", "minLauncher", "minShim", "links", "registration"}
+    unknown = set(d) - {"motd", "maintenance", "minLauncher", "minShim", "links", "registration", "heroImage", "news"}
     if unknown:
         raise OpsError(400, "bad_request", f"unknown setting(s): {', '.join(sorted(unknown))}")
     for key, limit in (("motd", 500), ("maintenance", 300)):
@@ -450,6 +479,18 @@ def validate_config(d):
             if not isinstance(v, str) or len(v) > 200 or (v and not re.fullmatch(r"https?://[^\s]+", v)):
                 raise OpsError(400, "bad_request", f"links.{k} must be empty or an http(s) URL")
             out["links"][k] = v
+    if "heroImage" in d:
+        out["heroImage"] = _url(d, "heroImage", 300, https_only=True)
+    if "news" in d:
+        if not isinstance(d["news"], list) or len(d["news"]) > NEWS_MAX:
+            raise OpsError(400, "bad_request", f"news must be a list of at most {NEWS_MAX} cards")
+        out["news"] = []
+        for i, card in enumerate(d["news"]):
+            if not isinstance(card, dict) or set(card) - set(NEWS_FIELDS) or not card.get("title"):
+                raise OpsError(400, "bad_request", f"news[{i}] needs a title and may only have: {', '.join(NEWS_FIELDS)}")
+            card = {k: card.get(k, "") for k in NEWS_FIELDS}
+            out["news"].append({k: _url(card, k, NEWS_FIELDS[k], https_only=k == "image") if k in ("url", "image") else _text(card, k, NEWS_FIELDS[k])
+                                for k in NEWS_FIELDS})
     if "registration" in d:
         if d["registration"] not in REGISTRATION_MODES:
             raise OpsError(400, "bad_request", f"registration must be one of {', '.join(REGISTRATION_MODES)}")

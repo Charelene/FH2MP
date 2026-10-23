@@ -12,8 +12,9 @@ The game is the Xbox One build, run on a PC by [Azimuth](https://almost-there-ga
 online call as "offline"). FH2MP puts the online half back with three pieces:
 
 - a **launcher** (Qt) that signs you in, keeps everything up to date and starts the game;
-- a **shim** (`winmm.dll` proxy) that runs inside the game and re-enables real sockets, gives each install its own identity and redirects the
-  game's web-service calls to our server;
+- a **shim** (`fh2-mods\FH2MP.dll`, a mod for the [FH2 Mod Platform](https://github.com/Trinculo54/fh2-mod-platform)) that runs inside the
+  game and re-enables real sockets, gives each install its own identity and redirects the game's web-service calls to our server. It works
+  next to the other FH2 mods: the platform checks its changes to the game against theirs;
 - a **server** (Python) that speaks the game's UDP protocol (lobbies, worlds, relay) and stands in for the Turn 10 and Xbox Live HTTP services.
 
 The protocol was recovered from the game client itself, not from captured Microsoft traffic. No Microsoft or Xbox Live service is ever
@@ -55,8 +56,10 @@ set up so the game starts in Azimuth. No game files are in this repo or the laun
 1. Download the launcher from the [latest release](https://github.com/Charelene/FH2MP/releases/latest):
    - Windows: `...-windows-x64-setup.exe` (installer) or `...-windows-x64-portable.zip` (unpack anywhere, run `fh2mp-launcher.exe`);
    - Linux: `...-x86_64.AppImage` (`chmod +x` it, then run) or `fh2mp-launcher_<version>_amd64.deb`.
-2. Start it. The first run asks for your **Azimuth folder** (the one with `azimuth.exe`), installs the shim and the FH2 Extra Options mod
-   if they are missing, and makes your account.
+2. Start it. The first run asks for your **Azimuth folder** (the one with `azimuth.exe`), installs the shim and makes your account. The
+   [FH2 Mod Platform](https://github.com/Trinculo54/fh2-mod-platform) and [FH2 Extra Options](https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions)
+   are downloaded from their authors' GitHub releases (pinned builds, checked by SHA-256) when your folder does not have them already.
+   Mods you already have in `fh2-mods` keep working.
 3. Pick a gamertag and press **PLAY**. The launcher starts the game for you.
 
 **Account.** There is no e-mail or password. Your account is a secret key stored in the OS keyring; you get a **recovery code** to move it to
@@ -67,8 +70,11 @@ installed. The server refuses launchers and shims older than the minimum it anno
 "update required" and has to update before it can play.
 
 **Linux.** Azimuth runs under Wine/Proton. The launcher picks the newest Proton it finds in the usual Steam folders and starts the game with
-`WINEDLLOVERRIDES=winmm=n,b` (needed for the shim). Set the Proton script, prefix or a custom launch command once in Settings if yours are
-elsewhere. Tested on Proton-CachyOS 11; distro Wine is usually too old for Azimuth.
+`WINEDLLOVERRIDES="winmm,d3dcompiler_47=n,b"`, so Wine loads FH2 Extra Options (`winmm.dll`) and the FH2 Mod Platform (`d3dcompiler_47.dll`)
+instead of its own DLLs (see the platform's [Linux notes](https://github.com/Trinculo54/fh2-mod-platform/blob/main/docs/linux.md)). Starting
+Azimuth from Steam instead? Use the same value in its launch options: `WINEDLLOVERRIDES="winmm,d3dcompiler_47=n,b" %command%`. Set the Proton
+script, prefix or a custom launch command once in Settings if yours are elsewhere. Tested on Proton-CachyOS 11; distro Wine is usually too old
+for Azimuth.
 
 **Windows.** Tested on Windows 10 and 11.
 
@@ -78,7 +84,8 @@ Check [KNOWN_ISSUES.md](KNOWN_ISSUES.md), then [open an issue](https://github.co
 `data` folder inside your Azimuth folder:
 
 - `data\logs\azimuth.log` (always) and the newest `.dmp` in `data\logs` for a crash;
-- `data\bin\fh2mp.log` (the shim's log);
+- `data\bin\fh2mp.log` (the shim's log) and, next to `azimuth.exe`, `fh2-mods\platform.log` (the FH2 Mod Platform and every mod) and the
+  newest report in `fh2-mods\crashes` for a crash;
 - `data\azimuth.ini` if you changed settings.
 
 The launcher's own log is `launcher.log` in its cache folder (`%LOCALAPPDATA%\FH2MP\cache` on Windows, `~/.cache/fh2mp` on Linux). None of
@@ -88,11 +95,13 @@ these contain passwords or keys.
 
 Sources: `shim/` (C), `launcher/` (Python, PySide6), `server/` (Python), `release/` (packaging and signing), `ops/` (deploy files).
 
-**Shim.** Needs `x86_64-w64-mingw32-gcc` and Python 3.
+**Shim.** Needs `x86_64-w64-mingw32-gcc` (and `windres`). It compiles against the FH2 Mod Platform's API header in
+`third_party/fh2-mod-platform`.
 
 ```sh
-shim/build.sh          # release build -> shim/build/winmm.dll
-shim/build.sh debug    # research build -> shim/build/winmm-debug.dll (live debugger port, tracer, probes). Never ship it.
+shim/build.sh          # release build -> shim/build/FH2MP.dll
+shim/build.sh debug    # research build -> shim/build/FH2MP-debug.dll (live debugger port, tracer, probes). Never ship it.
+release/build_shim_zip.sh   # dist/fh2mp-shim-<version>.zip: fh2-mods/FH2MP.dll (the platform is not in it; the launcher fetches it)
 ```
 
 The version comes from `shim/VERSION`. A `-debug` shim is never replaced by the launcher's updater.
@@ -117,15 +126,20 @@ The Windows installer is built by CI with Inno Setup (`packaging/fh2mp.iss`). Th
 commits, tags and pushes. The workflow in `.github/workflows/release.yml` then builds the shim and the Windows and Linux launchers, signs
 `manifest.json` with the Ed25519 key in the `RELEASE_SIGNING_KEY` secret (the launcher embeds the public half) and publishes the GitHub
 release, using `release/notes/<tag>.md` as the description when that file exists. `release/keygen.py` makes a signing key.
-`ops/release-prod.sh` rolls a published release out to the production server and raises its minimum versions.
+`ops/release-prod.sh` rolls a published release out to the production server and raises its minimum versions. `ops/ship.sh vX.Y.Z
+<user@host> <ssh-key>` does all of it in one go: publish, wait for the build, roll out, lift the maintenance message.
 
 ## Supported setups
 
 - Forza Horizon 2, Xbox One build 1.0.0.64.
 - **Azimuth 0.9.10** only. The shim checks its hooks against byte signatures of that build and skips anything that does not match; the
   launcher warns you about other builds.
-- **FH2 Extra Options 0.2.98** by RokkuDayo, the only supported build. The launcher installs it when it is missing (a setting turns that off);
-  by hand, put its `winmm.dll`, ini and PNG in an `fh2extra` folder next to `azimuth.exe`. The shim chain-loads it.
+- **FH2 Mod Platform 2.7.1** (or newer) by Trinculo54, the `d3dcompiler_47.dll` next to `azimuth.exe` that loads the shim. The launcher
+  downloads the author's 2.7.1 release when your folder has none or an older one, and never replaces a newer copy another mod brought.
+- **[FH2 Extra Options](https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions) 0.2.98** by RokkuDayo, the only supported build. When the `winmm.dll` next to `azimuth.exe` is not that build, the launcher downloads the author's release (a setting turns that off; another `winmm.dll` is kept in `fh2extra`);
+  by hand, put its `winmm.dll` and ini next to `azimuth.exe`, where the author's instructions put them.
+- Other FH2 Mod Platform mods load next to the shim; the platform refuses any hook of theirs that would overlap one of ours. Online play uses the server's car
+  database, so their **database** changes are off while you play through the launcher (`platform.log` and the title screen say so).
 - Windows 10/11, or Linux with Proton/Wine.
 
 ## AI disclosure
@@ -141,8 +155,18 @@ This project is **AI-assisted**. If that makes you close the tab, fair enough. I
 ## Related projects
 
 - **Azimuth** by Almost There Games: the layer that makes any of this possible.
-- **FH2 Extra Options** by RokkuDayo: quality-of-life patches, compatible with the shim's chain-loading.
+- **[FH2 Extra Options](https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions)** by RokkuDayo: quality-of-life patches, loaded next to the shim.
+- **[FH2 Mod Platform](https://github.com/Trinculo54/fh2-mod-platform)** by Trinculo54: the shared base the shim is built on (loading,
+  shared hooks checked against other mods and Extra Options, crash reports).
 
 ## License
 
 [GPL-3.0](LICENSE). The game, Azimuth and the mods mentioned above belong to their respective authors and are not covered by it.
+
+Third-party mods FH2MP uses (not part of FH2MP and not redistributed by it; the launcher downloads their authors' own releases):
+
+- **FH2 Mod Platform** © 2026 Trinculo54, [MIT License](third_party/fh2-mod-platform/LICENSE). Its API header is in
+  `third_party/fh2-mod-platform` (the shim is built against it). The platform includes [MinHook](https://github.com/TsudaKageyu/minhook)
+  © 2009-2017 Tsuda Kageyu (BSD 2-Clause) and [SQLite](https://sqlite.org) (public domain); the launcher keeps the release's
+  `LICENSE.txt` (as `LICENSE-FH2ModPlatform.txt`) and `LICENSE-MinHook.txt` next to the DLL.
+- **[FH2 Extra Options](https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions)** © RokkuDayo, GPL-3.0.

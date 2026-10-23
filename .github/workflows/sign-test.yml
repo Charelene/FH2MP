@@ -1,0 +1,48 @@
+name: sign-test
+
+# Builds FH2MP.dll, signs it with Azure Artifact Signing and checks the signature. Nothing is released or published.
+# Runs when this file is pushed, or by hand from the Actions tab. Same secrets and variables as release.yml.
+on:
+  workflow_dispatch:
+  push:
+    paths: [".github/workflows/sign-test.yml"]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      # the runner image usually has mingw already; the apt mirror has hung here, so install only if missing, with timeouts
+      - run: command -v x86_64-w64-mingw32-gcc || sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 install -y gcc-mingw-w64-x86-64
+        timeout-minutes: 5
+      - run: shim/build.sh
+      - uses: actions/upload-artifact@v4
+        with: { name: dll, path: shim/build/*.dll, if-no-files-found: error }
+
+  sign:
+    needs: build
+    runs-on: windows-2022
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: dll, path: dll }
+      - uses: azure/artifact-signing-action@v2
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}\dll
+          files-folder-filter: dll
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - name: check the signature
+        shell: pwsh
+        run: |
+          foreach ($f in Get-ChildItem dll\*.dll) {
+            $s = Get-AuthenticodeSignature $f.FullName
+            $f.Name; $s | Format-List Status, StatusMessage, SignerCertificate, TimeStamperCertificate
+            if ($s.Status -ne 'Valid') { throw "$($f.Name): signature is $($s.Status)" }
+          }

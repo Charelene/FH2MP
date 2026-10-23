@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 import shutil
+import time
 from dataclasses import dataclass, field
 
 from . import paths
@@ -185,10 +186,8 @@ def set_player_name(folder, name):
 
 
 def write_gamerpic(folder, png):
-    """Azimuth shows Gamerpic.png from its own folder as the local player's picture; FH2 Extra Options reads its own copy in fh2extra."""
+    """Azimuth shows Gamerpic.png from its own folder as the local player's picture; FH2 Extra Options, next to it, reads the same file."""
     paths.atomic_write(os.path.join(folder, "Gamerpic.png"), png, 0o644)
-    if os.path.isdir(os.path.join(folder, "fh2extra")):
-        paths.atomic_write(os.path.join(folder, "fh2extra", "Gamerpic.png"), png, 0o644)
 
 
 # ---- the game install: found and written into Azimuth's own settings, so the player never has to
@@ -299,55 +298,85 @@ def steam_shortcut_folders():
     return found
 
 
-# ---- progress: Azimuth keeps saves per Xbox user id (data/titles/<id>/saves/player-N/User_<HEX>). Vanilla Azimuth uses one fixed id, an FH2MP
-# account has its own, so without this a new account would open an empty profile and the player's campaign would look lost.
+# ---- progress: Azimuth keeps saves per Xbox user id. 0.9.10: data/titles/<id>/saves/player-N/User_<HEX>; 0.9.7 and older: data/saves/player-N/User_<HEX>
+# (0.9.10 moves those on its first start and keeps the old folder as data/saves-backup-<time>). Vanilla Azimuth uses one fixed id, an FH2MP account
+# has its own, so without this a new account would open an empty profile and the player's campaign would look lost (docs/issues.md #36).
 
 LEGACY_SAVE_DIR = "User_9000000000000"
+TITLE_DIR = "1A96545B"                     # data/titles/<id> of Forza Horizon 2 (GAME_ID upper-case)
+PROGRESS_MIN_BYTES = 1024                  # BinarySaveState of the newest revision: 4 bytes in a profile that only saw the prologue, ~110 KB with progress
 
 
-def adopt_saves(folder, xuid):
-    """Gives the account's profile folder the player's existing progress when it has none yet: copies Azimuth's default profile
-    (User_9000000000000), else the most recently used other profile. The original stays where it is. -> description of what was done or ''."""
+def _newest_revision(profile):
+    revs = [r for r in _listdir(os.path.join(profile, "revisions")) if re.fullmatch(r"[0-9a-fA-F]+", r)]
+    return os.path.join(profile, "revisions", max(revs, key=lambda r: int(r, 16))) if revs else ""
+
+
+def has_progress(profile):
+    """The profile holds a real save (not just the empty one the game makes before the prologue)."""
+    rev = _newest_revision(profile)
+    try:
+        return bool(rev) and os.path.getsize(os.path.join(rev, "data", "BinarySaveState")) >= PROGRESS_MIN_BYTES
+    except OSError:
+        return False
+
+
+def _saved_at(profile):
+    rev = _newest_revision(profile)
+    try:
+        return os.path.getmtime(rev or profile)
+    except OSError:
+        return 0.0
+
+
+def save_profiles(folder):
+    """Every profile folder (User_<HEX>, not our .fresh-* / .adopting copies) in an Azimuth folder, in any of the layouts above."""
+    pats = [("data", "titles", "*", "saves", "player-*"), ("data", "saves", "player-*"), ("data", "saves-backup-*", "player-*")]
+    out = []
+    for pat in pats:
+        for pdir in sorted(glob.glob(os.path.join(folder, *pat))):
+            out += [os.path.join(pdir, n) for n in _listdir(pdir) if n.startswith("User_") and "." not in n and os.path.isdir(os.path.join(pdir, n))]
+    return out
+
+
+def find_progress(folder, xuid, others=()):
+    """The save to adopt for account `xuid`, or ''. Looks in this Azimuth folder first, then in the player's other ones (a new Azimuth release is
+    usually unpacked next to the old one); in each, the account's own profile wins, then Azimuth's default one, then the most recently saved."""
+    mine = f"User_{xuid:X}"
+    for f in [folder, *others]:
+        cands = [p for p in save_profiles(f) if has_progress(p)]
+        if cands:
+            return max(cands, key=lambda p: (os.path.basename(p) == mine, os.path.basename(p) == LEGACY_SAVE_DIR, _saved_at(p)))
+    return ""
+
+
+def adopt_saves(folder, xuid, others=()):
+    """Gives the account's profile the player's existing progress when it has none: copies the save find_progress picks into
+    data/titles/<id>/saves/player-N/User_<xuid>. A profile with progress is never touched; an empty one (the game made it when the save was not
+    found) is kept as User_<xuid>.fresh-<time>. The source stays where it is. -> description of what was done or ''."""
+    target_name = f"User_{xuid:X}"
+    slots = sorted(glob.glob(os.path.join(folder, "data", "titles", "*", "saves", "player-*"))) or \
+        [os.path.join(folder, "data", "titles", TITLE_DIR, "saves", "player-1")]
+    todo = [s for s in slots if not has_progress(os.path.join(s, target_name))]
+    if not todo:
+        return ""
+    src = find_progress(folder, xuid, others)
+    if not src:
+        return ""
     done = []
-    for pdir in sorted(glob.glob(os.path.join(folder, "data", "titles", "*", "saves", "player-*"))):
-        target = os.path.join(pdir, f"User_{xuid:X}")
-        if os.path.exists(target):
+    for pdir in todo:
+        target = os.path.join(pdir, target_name)
+        if os.path.realpath(src) == os.path.realpath(target):
             continue
-        cands = [n for n in os.listdir(pdir) if n.startswith("User_") and "." not in n and os.path.isdir(os.path.join(pdir, n))]
-        if not cands:
-            continue
-        src = LEGACY_SAVE_DIR if LEGACY_SAVE_DIR in cands else max(cands, key=lambda n: os.path.getmtime(os.path.join(pdir, n)))
+        os.makedirs(pdir, exist_ok=True)
         tmp = target + ".adopting"
         shutil.rmtree(tmp, ignore_errors=True)
-        shutil.copytree(os.path.join(pdir, src), tmp)
-        os.rename(tmp, target)
-        done.append(f"{src} -> User_{xuid:X}")
-    return ", ".join(done)
-
-
-# ---- progress: Azimuth keeps saves per Xbox user id (data/titles/<id>/saves/player-N/User_<HEX>). Vanilla Azimuth uses one fixed id, an FH2MP
-# account has its own, so without this a new account would open an empty profile and the player's campaign would look lost.
-
-LEGACY_SAVE_DIR = "User_9000000000000"
-
-
-def adopt_saves(folder, xuid):
-    """Gives the account's profile folder the player's existing progress when it has none yet: copies Azimuth's default profile
-    (User_9000000000000), else the most recently used other profile. The original stays where it is. -> description of what was done or ''."""
-    done = []
-    for pdir in sorted(glob.glob(os.path.join(folder, "data", "titles", "*", "saves", "player-*"))):
-        target = os.path.join(pdir, f"User_{xuid:X}")
+        shutil.copytree(src, tmp)
         if os.path.exists(target):
-            continue
-        cands = [n for n in os.listdir(pdir) if n.startswith("User_") and "." not in n and os.path.isdir(os.path.join(pdir, n))]
-        if not cands:
-            continue
-        src = LEGACY_SAVE_DIR if LEGACY_SAVE_DIR in cands else max(cands, key=lambda n: os.path.getmtime(os.path.join(pdir, n)))
-        tmp = target + ".adopting"
-        shutil.rmtree(tmp, ignore_errors=True)
-        shutil.copytree(os.path.join(pdir, src), tmp)
+            os.rename(target, f"{target}.fresh-{time.strftime('%Y%m%d%H%M%S')}")
         os.rename(tmp, target)
-        done.append(f"{src} -> User_{xuid:X}")
+        where = "" if os.path.realpath(src).startswith(os.path.realpath(folder) + os.sep) else f" (from {os.path.dirname(os.path.dirname(src))})"
+        done.append(f"{os.path.basename(src)}{where} -> {target_name}")
     return ", ".join(done)
 
 

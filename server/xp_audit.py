@@ -6,7 +6,7 @@ SubmitXpScore carries only the amount (4-byte body), so where an award came from
 and 90 accounts (real payouts); the cheated awards are flat amounts (12,500,000, 10,000,000, 130,000,000, 12,500 x 168) on few accounts.
 
 Rules (user decisions 2026-10-21):
-  * an award above MAX_AWARD (env FH2MP_XP_MAX, default 56000), not finite or not positive is rejected: stored, never counted;
+  * an award above MAX_AWARD (env FH2MP_XP_MAX, default 56000 * XP_SCALE), not finite or not positive is rejected: stored, never counted;
   * anything else counts, and `suspects` finds the amounts worth a closer look: one that few accounts ever get (fewer than RARE_USERS)
     but one account repeats at least REPEATS times. Suspects are reported, never removed automatically.
 
@@ -21,7 +21,10 @@ import os
 import re
 import sys
 
-MAX_AWARD = float(os.environ.get("FH2MP_XP_MAX", "56000"))
+# Online race XP per km is multiplied by XP_SCALE (env FH2MP_XP_SCALE, default 10; maintainer 2026-10-23: race XP only, online only;
+# fh2mp_lsp.economy_settings), and so is the largest honest award.
+XP_SCALE = float(os.environ.get("FH2MP_XP_SCALE", "10"))
+MAX_AWARD = float(os.environ.get("FH2MP_XP_MAX", str(56000 * XP_SCALE)))
 RARE_USERS = 10          # an amount fewer accounts than this ever received is "rare"
 REPEATS = 20             # ... and one account receiving it this often is a suspect
 BEFORE_PLAUSIBLE = 5e6   # a balance carried into the log above this is reported (the honest leader had under 1M on 2026-10-20, issue 18)

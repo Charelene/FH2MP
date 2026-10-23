@@ -1,10 +1,12 @@
 """The launcher's logic with no user interface: the UI (and the tests) call these and show the results."""
 import os
 import platform
+import re
+import time
 
-from . import azimuth, keystore, launch, paths, shim, updater
+from . import azimuth, gamedb, keystore, launch, paths, shim, tunnel, updater, upstream
 from .api import Api, ApiError
-from .constants import BUILTIN_AZIMUTH_BUILDS, DEFAULT_WEBSITE, EXTRA_OPTIONS_VERSION
+from .constants import BUILTIN_AZIMUTH_BUILDS, DEFAULT_WEBSITE, EXTRA_OPTIONS_VERSION, MODS_DIR, SHIM_DLL
 from .identity import Identity
 from .settings import Settings
 from .version import __version__
@@ -50,6 +52,82 @@ def game_port_env(game):
     return {}
 
 
+def read_shim_zip(path):
+    """A shim zip (release/build_shim_zip.sh) -> the bytes of its fh2-mods/FH2MP.dll. Raises updater.UpdateError when it is not one.
+    Windows' Compress-Archive (the test build's mirror) may store the name with a backslash."""
+    import zipfile
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = {n.replace("\\", "/"): n for n in z.namelist()}
+            return z.read(names[f"{MODS_DIR}/{SHIM_DLL}"])
+    except (zipfile.BadZipFile, KeyError):
+        raise updater.UpdateError("the shim package is not what was expected") from None
+
+
+def release_summary(body, limit=110):
+    """Release notes (markdown) -> their first bullet as plain text, shortened to one or two card lines."""
+    lines = [ln.strip() for ln in (body or "").splitlines()]
+    pick = next((ln[2:] for ln in lines if ln.startswith(("- ", "* "))), "") or next((ln for ln in lines if ln and ln[0] not in "#>"), "")
+    pick = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", pick)
+    pick = re.sub(r"[*_`]", "", pick).strip()
+    return pick if len(pick) <= limit else pick[:limit - 1].rstrip(" ,.;:") + "…"
+
+
+def lap_time(seconds):
+    """88.25 -> "1:28.250"; "" for anything that is not a time."""
+    if not isinstance(seconds, (int, float)) or seconds <= 0:
+        return ""
+    m, sec = divmod(float(seconds), 60)
+    return f"{int(m)}:{sec:06.3f}"
+
+
+def ago(t, now=None):
+    """unix time -> "just now" / "5 min ago" / "3 h ago" / "2 days ago"; "" when unknown."""
+    if not isinstance(t, (int, float)) or t <= 0:
+        return ""
+    d = int((time.time() if now is None else now) - t)
+    if d < 60:
+        return "just now"
+    if d < 3600:
+        return f"{d // 60} min ago"
+    if d < 2 * 86400:
+        return f"{d // 3600} h ago"
+    return f"{d // 86400} days ago"
+
+
+def notes_markdown(body):
+    """GitHub release notes for the detail view: quotes become plain paragraphs, headings one level smaller."""
+    body = re.sub(r"(?m)^> ?", "", body)
+    return re.sub(r"(?m)^(#{1,5}) ", lambda m: "#" * min(6, len(m.group(1)) + 1) + " ", body)
+
+
+def event_card(e, ends, card):
+    """A Monthly Rivals event (as /v1/home lists it) -> its home card: the best time on the card, or a call to set the first one."""
+    rows = [r for r in e.get("rows") or [] if isinstance(r, dict)]
+    text = (f"Best: {rows[0].get('gamertag', '')} · {lap_time(rows[0].get('score'))}" if rows else "No times yet. Set the first one!")
+    facts = [(k, v) for k, v in (("Track", e.get("track")), ("Length", f"{e['km']} km" if e.get("km") else ""),
+                                 ("Laps", str(e["laps"]) if e.get("laps") else ""), ("Cars", e.get("description")),
+                                 ("Ends", ends.replace("ends ", "") if ends else "")) if v]
+    return card("challenge", "MONTHLY CHALLENGE", e.get("name") or e.get("track") or "Monthly Rivals", text, glyph=e.get("class") or "",
+                facts=facts, rows=[{"pos": r.get("position", i + 1), "name": str(r.get("gamertag") or ""), "value": lap_time(r.get("score")),
+                                    "extra": str(r.get("car") or "")} for i, r in enumerate(rows)],
+                action="play", action_label="Beat these times" if rows else "Set the first time")
+
+
+def countdown(ends_at, now=None):
+    """unix time -> "ends in 9 days" / "ends in 5 h" / "ends in 20 min"; "" when unknown or past."""
+    if not isinstance(ends_at, (int, float)):
+        return ""
+    left = int(ends_at - (time.time() if now is None else now))
+    if left <= 0:
+        return ""
+    if left >= 2 * 86400:
+        return f"ends in {left // 86400} days"
+    if left >= 3600:
+        return f"ends in {left // 3600} h"
+    return f"ends in {max(1, left // 60)} min"
+
+
 class Launcher:
     def __init__(self, settings=None, load_identity=True):
         self.settings = settings or Settings()
@@ -58,10 +136,15 @@ class Launcher:
         if load_identity:                # the app passes False and loads it off the UI thread: a locked keyring waits for a password prompt
             self.load_identity()
         self.server = {}                # last /v1/launcher/config
+        self.home = None                # last /v1/home (the home page: news, release notes, Azimuth, Rivals events, records, stats)
+        self.releases = []              # newest GitHub releases (patch-notes card); refreshed hourly (GitHub allows 60 calls an hour)
+        self.stats = {}                 # the website's public counters (community card)
+        self._extras_at = {}
         self.token = ""
         self.account = None             # dict from the API: xuid, gamertag
         self.process = None
         self.manifest = None
+        self.gamedb_synced = False      # the server sets a car database and this start put it in place (sync_gamedb)
         self.gamerpic_converter = None      # set by the UI: server PNG bytes -> the PNG the game expects (needs Qt)
 
     # ---- server
@@ -81,6 +164,115 @@ class Launcher:
     @property
     def online(self):
         return (self.server or {}).get("online")
+
+    def refresh_home(self):
+        """/v1/home; a server from before it (404) gets the home cards from public sources instead (refresh_extras)."""
+        try:
+            self.home = self.api().home()
+        except ApiError as e:
+            if e.status != 404:
+                raise
+            self.home = None
+            self.refresh_extras()
+        return self.home
+
+    def refresh_extras(self):
+        """The home cards that do not come from the game server: release notes (GitHub, hourly) and the website's stats (5 min).
+        Each source fails on its own; a failure keeps what was there."""
+        now = time.time()
+        if now - self._extras_at.get("releases", 0) > 3600:
+            self._extras_at["releases"] = now
+            try:
+                self.releases = updater.Updater(channel=self.settings["channel"]).releases()
+            except Exception:  # noqa: BLE001 - no card is better than an error about a card
+                self._extras_at["releases"] = now - 3300           # try again in 5 minutes
+        if now - self._extras_at.get("stats", 0) > 300:
+            self._extras_at["stats"] = now
+            try:
+                st = self.api().get_json(self.links["website"].rstrip("/") + "/api/stats/")
+                self.stats = st if isinstance(st, dict) and st.get("available") else {}
+            except Exception:  # noqa: BLE001
+                pass
+
+    def home_data(self):
+        """The /v1/home document, or the same shape put together from the server config, GitHub and the website for an older server."""
+        if isinstance(self.home, dict):
+            return self.home
+        srv = self.server or {}
+        rel = next((r for r in self.releases or [] if isinstance(r, dict) and r.get("tag")), None)
+        st = self.stats or {}
+        return {"motd": srv.get("motd", ""), "news": srv.get("news") or [], "heroImage": srv.get("heroImage", ""), "release": rel,
+                "azimuth": {"latest": "", "supported": srv.get("latestAzimuth", ""), "posts": []}, "rotation": {}, "events": [],
+                "records": [], "cars": [],
+                "stats": {"online": srv.get("online"), "accounts": st.get("accounts"), "clubs": st.get("clubs"), "runs": st.get("scores"),
+                          "designs": st.get("userContent")} if st else {}}
+
+    @property
+    def motd(self):
+        m = self.home_data().get("motd")
+        return m if isinstance(m, str) else ""
+
+    @property
+    def hero_image(self):
+        u = self.home_data().get("heroImage") or ""
+        return u if isinstance(u, str) and u.startswith("https://") else ""
+
+    def home_cards(self, now=None):
+        """The home carousel, most interesting first: the server's news, the latest release, this month's first Rivals event, the newest
+        record, the newest Azimuth devlog post, the car of the week, the community, then the other events.
+        Each card: {kind, tag, title, text, glyph (big letters on its art), image, url + link (outside page), and for its detail view:
+        body (markdown), facts [(label, value)], rows [{pos, name, value, extra}], action ("play" + its label)}."""
+        now = time.time() if now is None else now
+        h = self.home_data()
+
+        def card(kind, tag, title, text="", url="", link="", image="", glyph="", body="", facts=(), rows=(), action="", action_label=""):
+            return {"kind": kind, "tag": tag, "title": title, "text": text, "url": url, "link": link, "image": image, "glyph": glyph,
+                    "body": body, "facts": list(facts), "rows": list(rows), "action": action, "action_label": action_label}
+
+        def https(u, prefix="https://"):
+            return u if isinstance(u, str) and u.startswith(prefix) else ""
+        out = []
+        for n in h.get("news") or []:
+            if isinstance(n, dict) and n.get("title"):
+                url = str(n.get("url") or "")
+                out.append(card("news", str(n.get("tag") or "NEWS").upper(), str(n["title"]), str(n.get("text") or ""),
+                                url if url.startswith(("https://", "http://")) else "", "Read more", https(n.get("image")),
+                                body=str(n.get("text") or "")))
+        rel = h.get("release")
+        if isinstance(rel, dict) and rel.get("tag"):
+            out.append(card("news", "PATCH NOTES", rel.get("name") or f"FH2MP {rel['tag']}", release_summary(rel.get("body", "")),
+                            https(rel.get("url"), "https://github.com/"), "View on GitHub",
+                            body=notes_markdown(str(rel.get("body") or ""))))
+        ends = countdown((h.get("rotation") or {}).get("endsAt"), now)
+        events = [event_card(e, ends, card) for e in h.get("events") or [] if isinstance(e, dict)]
+        out += events[:1]
+        rec = next((r for r in h.get("records") or [] if isinstance(r, dict)), None)
+        if rec:
+            when = ago(rec.get("at"), now)
+            out.append(card("record", "NEW RECORD", str(rec.get("gamertag") or ""),
+                            f"{rec.get('event', '')} · {lap_time(rec.get('score'))}" + (f" · {when}" if when else ""), glyph="#1",
+                            facts=[(k, v) for k, v in (("Event", rec.get("event")), ("Time", lap_time(rec.get("score"))), ("Car", rec.get("car")),
+                                                       ("Class", rec.get("class")), ("Set", when)) if v],
+                            action="play", action_label="Beat it"))
+        post = next((p for p in (h.get("azimuth") or {}).get("posts") or [] if isinstance(p, dict) and https(p.get("url"))), None)
+        if post:
+            when = ago(post.get("date"), now)
+            out.append(card("news", "AZIMUTH DEVLOG", str(post.get("title") or ""), str(post.get("summary") or ""), post["url"],
+                            "Read on itch.io", body=str(post.get("summary") or "") + (f"\n\n*Posted {when}*" if when else "")))
+        cars = [c for c in h.get("cars") or [] if isinstance(c, dict) and c.get("car")]
+        if cars:
+            out.append(card("car", "CAR OF THE WEEK", str(cars[0]["car"]), f"{int(cars[0].get('runs') or 0):,} Rivals runs this week",
+                            body="Most raced in Rivals over the last seven days.",
+                            rows=[{"pos": i + 1, "name": str(c["car"]), "value": f"{int(c.get('runs') or 0):,} runs", "extra": ""}
+                                  for i, c in enumerate(cars)]))
+        st = h.get("stats") or {}
+        if isinstance(st.get("accounts"), int):
+            facts = [("Online now", st.get("online")), ("Drivers", st.get("accounts")), ("Car clubs", st.get("clubs")),
+                     ("Rivals times", st.get("runs")), ("Shared designs", st.get("designs"))]
+            out.append(card("community", "COMMUNITY", f"{st['accounts']:,} drivers",
+                            " · ".join(f"{v:,} {k.lower()}" for k, v in facts[2:4] if isinstance(v, int)), self.links["website"], "Open the website",
+                            facts=[(k, f"{v:,}") for k, v in facts if isinstance(v, int)]))
+        return out + events[1:]
 
     def builds(self):
         return list((self.server or {}).get("supportedAzimuth") or []) + BUILTIN_AZIMUTH_BUILDS
@@ -194,18 +386,16 @@ class Launcher:
         return kind == "ours" and (bool(self.settings["pin_shim"]) or (ver or "").endswith("-debug"))
 
     def install_shim_file(self, path):
-        """Developer: installs a shim DLL (or a zip with winmm.dll) from disk, e.g. shim/build/winmm-debug.dll. Not signed, not checked
-        against a manifest: the dev launcher only."""
-        import zipfile
+        """Developer: installs a shim DLL (or a shim zip from release/build_shim_zip.sh) from disk, e.g. shim/build/FH2MP-debug.dll. Not
+        signed, not checked against a manifest: the dev launcher only."""
         if not paths.is_dev():
             raise PlayBlocked("installing a local shim is a dev launcher feature")
         if path.lower().endswith(".zip"):
-            with zipfile.ZipFile(path) as z:
-                data = z.read("winmm.dll")
+            data = read_shim_zip(path)
         else:
             with open(path, "rb") as f:
                 data = f.read()
-        did = shim.install(self.settings["azimuth_dir"], data)
+        did = shim.install(self.settings["azimuth_dir"], data, platform=self.platform_files())
         self.settings["dev_shim_path"] = path
         self.settings.save()
         return did
@@ -216,17 +406,18 @@ class Launcher:
         e = self.manifest["shim"]
         up = updater.Updater(channel=self.settings["channel"])
         zip_path = up.download(self.manifest["tag"], e, progress, cancelled)
-        import zipfile
-        with zipfile.ZipFile(zip_path) as z:
-            names = [n for n in z.namelist() if n.endswith("winmm.dll")]
-            if len(names) != 1:
-                raise updater.UpdateError("the shim package is not what was expected")
-            data = z.read(names[0])
-        expect = e.get("dllSha256")
-        did = shim.install(self.settings["azimuth_dir"], data, expect)
-        self.carry_over_mod()
+        did = shim.install(self.settings["azimuth_dir"], read_shim_zip(zip_path), e.get("dllSha256"), self.platform_files(progress, cancelled))
         did += self.ensure_extra_options(progress, cancelled)
         return did
+
+    def platform_files(self, progress=None, cancelled=lambda: False):
+        """The FH2 Mod Platform from its author's pinned GitHub release when the Azimuth folder has none (or an older one), else None."""
+        if shim.platform_ok(self.settings["azimuth_dir"]):
+            return None
+        try:
+            return upstream.fetch("platform", updater.Updater(channel=self.settings["channel"]), progress, cancelled)
+        except upstream.UpstreamError as e:
+            raise updater.UpdateError(str(e)) from None
 
     # ---- play
     def prepare_play(self, force_unsupported=False, require_game=True):
@@ -243,10 +434,13 @@ class Launcher:
         if not info.supported and not force_unsupported:
             raise PlayBlocked(f"Azimuth {info.version or '?'} is untested with FH2MP.", "azimuth_unsupported")
         kind, _v = self.shim_state()
+        if kind == "old":
+            raise PlayBlocked("The FH2MP shim needs installing again.", "no_shim")
         if kind != "ours":
             raise PlayBlocked("Shim not installed.", "no_shim")
         if self.shim_outdated():
             raise PlayBlocked("The FH2MP shim is out of date and the server would turn it away.", "shim_outdated")
+        enabled = shim.enable(s["azimuth_dir"])           # off on the in-game MODS tab: the platform would not load it
         try:
             self.ensure_extra_options()          # only when the player has no copy; never blocks playing
         except Exception:  # noqa: BLE001
@@ -257,16 +451,27 @@ class Launcher:
         if (self.server or {}).get("maintenance"):
             raise PlayBlocked(self.server["maintenance"], "maintenance")
         acct = self.sign_in()
+        cars = self.sync_gamedb()
         r = self._login_reply
         lsp = (r.get("lsp") or {}).get("url") or (self.server.get("lsp") or {}).get("url")
         if not lsp:
             raise PlayBlocked("The server sent no address.", "no_lsp")
         self.game_env = game_port_env(r.get("game") or (self.server or {}).get("game"))
         d = s["azimuth_dir"]
-        shim.write_session(d, acct["xuid"], self.token, lsp)
+        shim.write_session(d, acct["xuid"], self.token, lsp, gamedb.session_path() if self.gamedb_synced else "")
         shim.write_identity(d, acct["xuid"])
-        notes = []
-        adopted = azimuth.adopt_saves(d, acct["xuid"])
+        notes = [cars] if cars else []
+        if enabled:
+            notes.append("turned FH2MP back on in the MODS tab")
+        tcp_note = self.start_tunnel(r.get("game") or (self.server or {}).get("game"))
+        if tcp_note:
+            notes.append(tcp_note)
+        try:
+            others = [c for c in azimuth.find_candidates() if os.path.realpath(c) != os.path.realpath(d)]
+            adopted = azimuth.adopt_saves(d, acct["xuid"], others)
+            saves = adopted or "nothing to adopt"
+        except OSError as e:                     # never blocks playing; the launcher.log line says why
+            adopted, saves = "", f"adoption failed: {e}"
         if adopted:
             notes.append("kept your progress: " + adopted)
         if azimuth.set_player_name(d, acct["gamertag"]):
@@ -282,11 +487,59 @@ class Launcher:
             from .api import log_failure
             log_failure("PLAY", "gamerpic", e, str(e))
             pic = "picture not updated"
-        log_note(f"PLAY name={acct['gamertag']!r} written={'yes' if applied else 'NO'} gamerpic={pic or 'unchanged'} azimuth_dir={d}")
+        log_note(f"PLAY name={acct['gamertag']!r} written={'yes' if applied else 'NO'} gamerpic={pic or 'unchanged'} saves={saves!r} azimuth_dir={d}")
         return acct, notes
 
+    def stop_tunnel(self):
+        t, self.tunnel = getattr(self, "tunnel", None), None
+        if t is not None:
+            t.stop()
+
+    def start_tunnel(self, game):
+        """The experimental TCP fallback (Settings: Connect over TCP): a local UDP proxy that carries the game's datagrams to the server's TCP
+        carrier. The game is pointed at it with the environment (FH2MP_SERVER_PORT = the proxy's port; FH2MP_TUNNEL makes the server name
+        127.0.0.1 as the game server for this client). -> a note for the player, '' when the fallback is off."""
+        from .api import log_note
+        self.stop_tunnel()
+        if not self.settings["tcp_fallback"]:
+            return ""
+        tcp = (game or {}).get("tcp") if isinstance(game, dict) else None
+        host = (game or {}).get("host") if isinstance(game, dict) else None
+        if not (isinstance(tcp, int) and not isinstance(tcp, bool) and 1 <= tcp <= 65535 and host):
+            log_note("TCP fallback is on but the server offers none: using UDP")
+            return "the server has no TCP connection yet; using UDP"
+        port = tunnel.free_udp_port()
+        if not port:
+            log_note("TCP fallback: no free local port")
+            return "no free local port for the TCP connection; using UDP"
+        self.tunnel = tunnel.UdpOverTcp(host, tcp, port, log=log_note).start()
+        self.game_env = dict(getattr(self, "game_env", None) or {}, FH2MP_TUNNEL="1", FH2MP_SERVER_PORT=str(port))
+        log_note(f"TCP fallback on: the game's UDP goes through 127.0.0.1:{port} to {host}:{tcp}")
+        return "connecting over TCP"
+
+    def sync_gamedb(self):
+        """Every start: the server's car database goes into fh2mp\\ in the Azimuth folder, from where the shim puts it in the game's
+        mediaoverride folder (gamedb.py). -> a short note, '' when unchanged. Raises PlayBlocked when it cannot be put in place: the game
+        would load another database than everyone else."""
+        self.gamedb_synced = False
+        try:
+            api = self.api()
+            m = api.gamedb(self.token)
+            if not m:
+                return ""
+            note = "turned on Extra Options media overrides" if gamedb.ensure_media_overrides(self.settings["azimuth_dir"]) else ""
+            synced = gamedb.sync(api, self.token, m, self.settings["azimuth_dir"])
+        except gamedb.GameDbError as e:
+            raise PlayBlocked(str(e), "gamedb") from None
+        except ApiError as e:
+            raise PlayBlocked("Couldn't get the car database: " + friendly(e), "gamedb") from None
+        except OSError as e:
+            raise PlayBlocked(f"Couldn't write the car database: {e.strerror or e}", "gamedb") from None
+        self.gamedb_synced = True
+        return ", ".join(n for n in (note, synced) if n)
+
     def sync_gamerpic(self):
-        """Every start: the account's picture from the server goes into the game folder (Azimuth's Gamerpic.png and the Extra Options copy),
+        """Every start: the account's picture from the server goes into the Azimuth folder (Gamerpic.png, read by Azimuth and Extra Options),
         so the in-game picture is the player's own, not the mod's default one. The server always has one (the picture the player uploaded,
         else a generated one). `self.gamerpic_converter` (set by the UI) turns it into the 1080x1080 RGB PNG the game expects; without it
         the server's picture is written as it is. Falls back to the copy kept in the config folder. -> a short note, '' when unchanged."""
@@ -304,18 +557,12 @@ class Launcher:
                 png = f.read()
         if not png:
             return "no picture"
-        targets = [os.path.join(d, "Gamerpic.png")]
-        if os.path.isdir(os.path.join(d, "fh2extra")):
-            targets.append(os.path.join(d, "fh2extra", "Gamerpic.png"))
-        same = True
-        for t in targets:
-            try:
-                with open(t, "rb") as f:
-                    same = same and f.read() == png
-            except OSError:
-                same = False
-        if same:
-            return ""
+        try:
+            with open(os.path.join(d, "Gamerpic.png"), "rb") as f:
+                if f.read() == png:
+                    return ""
+        except OSError:
+            pass
         azimuth.write_gamerpic(d, png)
         return f"picture updated ({len(png)} bytes)"
 
@@ -355,48 +602,22 @@ class Launcher:
         _i, _v, a = shim.extra_options_installed(d)
         return True, EXTRA_OPTIONS_VERSION, a
 
-    def extra_sources(self):
-        d = self.settings["azimuth_dir"]
-        others = [c for c in azimuth.find_candidates() if os.path.realpath(c) != os.path.realpath(d or "/nonexistent")]
-        return shim.find_extra_sources(others)
-
-    def carry_over_mod(self):
-        """The player's own FH2 Extra Options, when it is in another Azimuth folder of theirs and not in this one: copied over quietly (no UI)."""
-        try:
-            if not self.extra_state()[0]:
-                found = self.extra_sources()
-                if found:
-                    self.import_extra(found[0]["path"])
-        except Exception:  # noqa: BLE001 - never blocks the install
-            pass
-
     def ensure_extra_options(self, progress=None, cancelled=lambda: False):
-        """The shim's menus (Social, Clubs, Rivals, Marketplace) and several game fixes come from FH2 Extra Options. When it is not in the
-        Azimuth folder (and not found in another of the player's folders), install the author's unchanged release from our signed assets.
-        Only 0.2.98 is supported (the shim is built against it): another version in the folder is moved aside and replaced.
-        Does nothing when 0.2.98 is there, when the player turned this off in Settings, or when the release carries no copy. -> list of things done."""
+        """The shim's menus (Social, Clubs, Rivals, Marketplace) and several game fixes come from FH2 Extra Options. When the winmm.dll next
+        to azimuth.exe is not the supported build (0.2.98, the shim is tested with it), download the author's pinned release from GitHub and
+        install it; another winmm.dll there is moved aside into fh2extra. Does nothing when 0.2.98 is there or the player turned this off in
+        Settings. -> list of things done."""
         d = self.settings["azimuth_dir"]
-        if not self.settings["extra_options"] or not d or not os.path.isdir(d) or self.extra_state()[0]:
+        if not self.settings["extra_options"] or not d or not os.path.isdir(d):
             return []
-        self.carry_over_mod()
+        shim.migrate_legacy(d)
         if self.extra_state()[0]:
-            return ["imported your FH2 Extra Options"]
-        if not self.manifest:
-            self.check_updates()
-        e = (self.manifest or {}).get("extraOptions")
-        if not e:
             return []
-        path = updater.Updater(channel=self.settings["channel"]).download(self.manifest["tag"], e, progress, cancelled)
-        return shim.install_bundled_extra(d, path, e.get("dllSha256"), e.get("version", ""))
-
-    def import_extra(self, source):
-        d = self.settings["azimuth_dir"]
-        did = shim.import_extra_options(d, source)
-        mine = os.path.join(paths.config_dir(), "gamerpic.png")          # keep the player's own picture, not the mod's default one
-        if os.path.isfile(mine):
-            with open(mine, "rb") as f:
-                azimuth.write_gamerpic(d, f.read())
-        return did
+        try:
+            files = upstream.fetch("extraOptions", updater.Updater(channel=self.settings["channel"]), progress, cancelled)
+        except upstream.UpstreamError as e:
+            raise updater.UpdateError(str(e)) from None
+        return shim.install_extra(d, files)
 
     def open_azimuth_setup(self):
         """Azimuth's own launcher window (where its game folder is chosen), started the same way the game is."""

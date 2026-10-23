@@ -1,0 +1,121 @@
+name: test-build
+
+# A Windows launcher that behaves like the final release without publishing one: same build and signing as release.yml, the production
+# server, and the shim installed from a signed release mirror packed inside the exe (real manifest signature and SHA-256 checks), so it
+# works before the GitHub release exists. Download the "windows-test" artifact from the run. Nothing is released.
+# Secrets: RELEASE_SIGNING_KEY (manifest) and the Azure ones (signing, skipped while AZURE_CLIENT_ID is not set).
+on:
+  workflow_dispatch:
+  push:
+    paths: [".github/workflows/test-build.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  shim:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: command -v x86_64-w64-mingw32-gcc || sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 install -y gcc-mingw-w64-x86-64
+        timeout-minutes: 5
+      - run: release/build_shim_zip.sh
+      - uses: actions/upload-artifact@v4
+        with: { name: shim-unsigned, path: dist/*.zip, if-no-files-found: error }
+
+  windows:
+    needs: shim
+    runs-on: windows-2022
+    env: { AZURE_CLIENT_ID: "${{ secrets.AZURE_CLIENT_ID }}" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/download-artifact@v4
+        with: { name: shim-unsigned, path: in }
+      - name: unpack the shim
+        shell: pwsh
+        run: Expand-Archive -Path (Get-Item in\*.zip).FullName -DestinationPath pkg
+      - name: sign FH2MP.dll
+        if: env.AZURE_CLIENT_ID != ''
+        uses: azure/artifact-signing-action@v2
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\pkg\fh2-mods\FH2MP.dll
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - name: signed mirror (shim zip + manifest signed with the release key)
+        shell: pwsh
+        env: { FH2MP_RELEASE_KEY: "${{ secrets.RELEASE_SIGNING_KEY }}" }
+        run: |
+          pip install cryptography
+          $v = (Get-Content shim\VERSION -Raw).Trim()
+          $rel = "$PWD\mirror\Charelene\FH2MP\releases"
+          New-Item -ItemType Directory -Force "$rel\download\v$v", "$rel\latest\download" | Out-Null
+          Compress-Archive -Path pkg\* -DestinationPath "$rel\download\v$v\fh2mp-shim-$v.zip"
+          python -I release\make_manifest.py --tag "v$v" --dist "$rel\download\v$v"
+          if ($LASTEXITCODE) { throw "make_manifest failed" }
+          Copy-Item "$rel\download\v$v\*" "$rel\latest\download\"
+          '{"update_base": "bundled"}' | Set-Content -Encoding ascii buildcfg.json
+      # PyInstaller with a bootloader compiled here: the prebuilt one is shared with a lot of malware and gets the exe ML-flagged by Defender
+      - run: pip install --no-binary pyinstaller "pyinstaller>=6.6"
+        env: { PYINSTALLER_COMPILE_BOOTLOADER: "1" }
+      - run: pip install -e ".[build]"
+        working-directory: launcher
+      - run: pyinstaller --noconfirm --clean --distpath dist packaging/fh2mp.spec
+        working-directory: launcher
+        env:
+          FH2MP_BUILDCFG: ${{ github.workspace }}\buildcfg.json
+          FH2MP_MIRROR: ${{ github.workspace }}\mirror
+      - run: dist\fh2mp-launcher\fh2mp-launcher.exe --selftest
+        working-directory: launcher
+      - name: sign the launcher
+        if: env.AZURE_CLIENT_ID != ''
+        uses: azure/artifact-signing-action@v2
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\launcher\dist\fh2mp-launcher\fh2mp-launcher.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - name: installer and portable zip
+        shell: pwsh
+        working-directory: launcher
+        run: |
+          choco install innosetup -y --no-progress
+          $v = (Select-String -Path fh2mp_launcher/version.py -Pattern '"(.+)"').Matches[0].Groups[1].Value
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" packaging\fh2mp.iss
+          Compress-Archive -Path dist\fh2mp-launcher\* -DestinationPath "dist\FH2MP-Launcher-$v-windows-x64-portable.zip"
+      - name: sign the installer
+        if: env.AZURE_CLIENT_ID != ''
+        uses: azure/artifact-signing-action@v2
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}\launcher\dist
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-test
+          path: |
+            launcher/dist/*.exe
+            launcher/dist/*.zip
+          if-no-files-found: error

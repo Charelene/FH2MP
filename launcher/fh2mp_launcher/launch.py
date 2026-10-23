@@ -8,6 +8,7 @@ import subprocess
 import sys
 
 from . import azimuth, paths, shim
+from .constants import WINE_DLL_OVERRIDES
 
 WIN = sys.platform == "win32"
 
@@ -86,7 +87,7 @@ def gpu_check_advice(settings):
         return ""
     return ("Azimuth stopped at the graphics check (\"Your graphics card or driver is not supported\"). Your GPU is probably fine: on some "
             "AMD systems the game only starts from Steam. Workaround: leave this launcher open, add Azimuth to Steam as a non-Steam game with "
-            "the launch option WINEDLLOVERRIDES=\"winmm=n,b\" %command% , and start it from Steam.")
+            "the launch option WINEDLLOVERRIDES=\"winmm,d3dcompiler_47=n,b\" %command% , and start it from Steam.")
 
 
 def resolve_proton(path):
@@ -147,7 +148,7 @@ def build_command(settings, folder, extra_args=(), skip_launcher=True):
         if not tpl:
             raise LaunchError("Set the launch command in Settings, or pick Proton/Wine.")
         argv = [a.replace("{exe}", exe).replace("{dir}", folder) for a in shlex.split(tpl)]
-        return argv, {"WINEDLLOVERRIDES": "winmm=n,b"}, folder
+        return argv, {"WINEDLLOVERRIDES": WINE_DLL_OVERRIDES}, folder
     proton = resolve_proton(settings["proton"]) if mode in ("auto", "proton") else ""
     proton = proton or (find_proton() if mode in ("auto", "proton") else "")
     if mode in ("auto", "proton") and proton:
@@ -157,12 +158,12 @@ def build_command(settings, folder, extra_args=(), skip_launcher=True):
         os.makedirs(prefix, exist_ok=True)
         roots = steam_roots()
         env = {"STEAM_COMPAT_DATA_PATH": prefix, "STEAM_COMPAT_CLIENT_INSTALL_PATH": roots[0] if roots else os.path.expanduser("~/.local/share/Steam"),
-               "WINEDLLOVERRIDES": "winmm=n,b"}
+               "WINEDLLOVERRIDES": WINE_DLL_OVERRIDES}
         return [proton, "run", exe, *args], env, folder
     if mode == "proton":
         raise LaunchError("Proton not found. In Settings, set the path to the `proton` script (for example a Proton 11 or GE-Proton folder).")
     if mode == "wine" and shutil.which("wine"):      # only when the player asks for it: distro Wine fails Azimuth (CreateDXGIFactory2, GitHub #10)
-        env = {"WINEDLLOVERRIDES": "winmm=n,b"}
+        env = {"WINEDLLOVERRIDES": WINE_DLL_OVERRIDES}
         if settings["prefix"]:
             env["WINEPREFIX"] = os.path.expanduser(settings["prefix"])
         return [shutil.which("wine"), exe, *args], env, folder

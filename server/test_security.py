@@ -51,7 +51,9 @@ def other_msg(w):
 def make_hub(auth="off"):
     os.environ["FH2MP_UDP_AUTH"] = auth
     hub = S.Hub(0, None)
-    hub.sock = hub.idle.sock = FakeSock()
+    hub.sock = FakeSock()
+    hub.mux.udp = hub.sock          # worlds send through the hub's mux (TCP fallback), which sends UDP on hub.sock
+    hub.idle.sock = hub.mux
     return hub
 
 
@@ -126,6 +128,20 @@ class Sessions(unittest.TestCase):
         for body in (b'{"members":{"111":null}}', b'{"members":{"111":{"properties":{"system":{"active":true}}}}}'):
             self.assertEqual(xbl.put_session(self.PATH, body, "222")[0], 403)
         self.assertIn("111", xbl._SESSIONS[tuple(x.lower() for x in xbl.parse_path(self.PATH))]["members"])
+
+    def test_member_gamertag_is_the_registered_name(self):
+        """GitHub #3: members came back as "Player 1"; the name comes from the server's table, not from the client."""
+        key = tuple(x.lower() for x in xbl.parse_path(self.PATH))
+        old = xbl.NAME_LOOKUP
+        try:
+            xbl.NAME_LOOKUP = lambda x: {111: "wowaka_osi"}.get(x, "")
+            tags = {m["constants"]["system"]["xuid"]: m["gamertag"] for m in xbl.session_document(xbl._SESSIONS[key])["members"].values()}
+            self.assertEqual(tags, {"111": "wowaka_osi"})
+            xbl.NAME_LOOKUP = lambda x: 1 / 0               # a failing lookup falls back instead of breaking the document
+            doc = xbl.session_document(xbl._SESSIONS[key])
+            self.assertEqual(doc["members"]["0"]["gamertag"], "Player 1")
+        finally:
+            xbl.NAME_LOOKUP = old
 
     def test_stranger_cannot_change_the_session(self):
         self.assertEqual(xbl.put_session(self.PATH, b'{"properties":{"custom":{"x":1}}}', "333")[0], 403)

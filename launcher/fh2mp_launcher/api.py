@@ -195,12 +195,12 @@ class Api:
         """IPv4-only HTTPS; the system proxy only when asked for."""
         return urllib.request.build_opener(urllib.request.ProxyHandler(None if use_proxy else {}), _V4HTTPSHandler(context=ctx or self._ctx))
 
-    def _call(self, method, path, body=None, token=None, raw=False, ctype="application/json"):
+    def _call(self, method, path, body=None, token=None, raw=False, ctype="application/json", limit=4_000_000):
         data = None
         if body is not None:
             data = body if isinstance(body, bytes) else json.dumps(body).encode()
         def make_request():                 # a fresh one per attempt: going through a proxy rewrites the request in place
-            req = urllib.request.Request(self.base + path, data=data, method=method)
+            req = urllib.request.Request(path if path.startswith("https://") else self.base + path, data=data, method=method)
             req.add_header("User-Agent", f"{USER_AGENT}/{__version__}")
             if data is not None:
                 req.add_header("Content-Type", ctype)
@@ -221,7 +221,7 @@ class Api:
             for use_proxy in ([True, False] if proxy else [False]):
                 try:
                     with self._opener(use_proxy, ctx).open(make_request(), timeout=self.timeout) as r:
-                        payload = r.read(4_000_000)
+                        payload = r.read(limit)
                     break
                 except urllib.error.HTTPError as e:
                     payload = e.read(100_000)
@@ -263,6 +263,30 @@ class Api:
         c = self._call("GET", "/v1/launcher/config")
         self.realm = c.get("env")
         return c
+
+    def home(self):
+        return self._call("GET", "/v1/home")
+
+    def asset(self, name):
+        return self._call("GET", "/v1/launcher/assets/" + urllib.parse.quote(name), raw=True)
+
+    def challenges(self, top=3):
+        return self._call("GET", f"/v1/challenges?top={int(top)}")
+
+    def leaderboards(self, limit=10):
+        return self._call("GET", f"/v1/leaderboards?limit={int(limit)}")
+
+    def get_json(self, url):
+        """JSON from another https address (the website's public stats)."""
+        if not url.startswith("https://"):
+            raise ApiError(0, "bad_url", "only https addresses are read")
+        return self._call("GET", url, limit=200_000)
+
+    def image(self, url, limit=4_000_000):
+        """A picture the server's config names (hero, news cards): https only, at most `limit` bytes."""
+        if not url.startswith("https://"):
+            raise ApiError(0, "bad_url", "pictures are only fetched over https")
+        return self._call("GET", url, raw=True, limit=limit)
 
     def check_name(self, name):
         return self._call("GET", "/v1/gamertags/check?name=" + urllib.parse.quote(name))
@@ -309,6 +333,18 @@ class Api:
 
     def clear_gamerpic(self, token):
         return self._call("DELETE", "/v1/me/gamerpic", token=token)
+
+    def gamedb(self, token):
+        """-> {name, sha256, size, xzSize, path} of the car database the server plays with, or None when it sets none."""
+        try:
+            return self._call("GET", "/v1/gamedb", token=token)
+        except ApiError as e:
+            if e.code == "no_gamedb" or e.status == 404:          # 404: a server from before car-database sync sets none
+                return None
+            raise
+
+    def gamedb_download(self, token, path, limit):
+        return self._call("GET", path, token=token, raw=True, limit=limit)
 
     def logout(self, token):
         try:

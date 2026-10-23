@@ -12,6 +12,7 @@ import random
 import struct
 import sys
 import time
+import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db  # noqa: E402
@@ -256,6 +257,17 @@ class DrivatarStore:
         w = sorted({t["wristbandLevel"] for t in self.templates})
         return w[max(0, min(int(bucket), len(w) - 1))] if w else self.DEFAULT_WRISTBAND
 
+    def _spread_wristband(self, rec):
+        """The client shows a Drivatar's wristbandLevel as the level on its name tag. Free Roam sends bucket 0, so players'
+        stored values piled up on the lowest one (46000) and every tag read the same. Such untouched records get a stable
+        value from the shipped set's own spread, picked by their id; locked or already different ones are kept."""
+        low = min((t["wristbandLevel"] for t in self.templates), default=None)
+        if low is None or rec.get("_locked") or rec["wristbandLevel"] != low:
+            return rec
+        w = sorted({t["wristbandLevel"] for t in self.templates})
+        rec["wristbandLevel"] = w[zlib.crc32(str(rec["Xuid"]).encode()) % len(w)]
+        return rec
+
     def pool(self, limit, skill=None, near_wristband=None, exclude_xuid=None, exclude_xuids=(),
              any_skill_players=True):
         """Real players' Drivatars first (whatever their skill: there are few of them), then the shipped
@@ -267,13 +279,13 @@ class DrivatarStore:
             args.append(skill)
         rows = self.db.query(f"SELECT record, locked FROM drivatars WHERE {' AND '.join(where)} ORDER BY seq LIMIT ?",
                              args + [max(0, limit)])
-        players = [self._rec(r) for r in rows]
+        players = [self._spread_wristband(self._rec(r)) for r in rows]
         tpl = [t for t in self.templates if skill is None or t["UserSkillLevel"] == skill]
         tpl = [t for t in tpl if t.get("Xuid") not in skip]
         if near_wristband is not None:
             tpl.sort(key=lambda t: abs(t["wristbandLevel"] - near_wristband))
         room = max(0, limit - len(players))
-        window = tpl[:max(room * 4, 40)]                 # nearest car values, but not always the same ones
+        window = tpl if near_wristband is None else tpl[:max(room * 4, 40)]   # nearest car values, but not always the same ones
         chosen = random.sample(window, min(room, len(window)))
         out = (players + chosen)[:limit]
         random.shuffle(out)

@@ -17,6 +17,7 @@ DEFAULTS = {
     "gamertag": "",                 # last known, for display before the server answers
     "xuid": 0,
     "extra_args": "",
+    "tcp_fallback": False,          # experimental: carry the game's UDP over TCP (for networks that drop UDP)
     "extra_options": True,          # put FH2 Extra Options (GPL-3.0, RokkuDayo) next to the shim when the player has no copy
     # developer options (the dev launcher's panel; harmless elsewhere)
     "pin_shim": False,              # never replace the installed shim automatically (local / debug builds)

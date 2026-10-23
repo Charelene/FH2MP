@@ -346,6 +346,23 @@ class ApiTests(AuthCase):
         self.assertEqual(login("launcher/1.0.0-rc4 windows")[0], 200)
         self.assertEqual(login("dev_client.py")[0], 200)           # test tools are not launchers
 
+    def test_boards_are_public_and_cached(self):
+        self.assertEqual(self.call("GET", "/v1/leaderboards")[0], 404)           # no provider: not served
+        asked = []
+        self.ctx.boards = lambda kind, n: asked.append((kind, n)) or {"kind": kind, "n": n}
+        st, obj, _ = self.call("GET", "/v1/leaderboards?limit=3")
+        self.assertEqual((st, obj), (200, {"kind": "leaderboards", "n": 3}))
+        self.call("GET", "/v1/leaderboards?limit=3")
+        self.assertEqual(self.call("GET", "/v1/challenges?top=99")[1], {"kind": "challenges", "n": 10})     # clamped
+        self.assertEqual(self.call("GET", "/v1/challenges?top=x")[1]["n"], 3)
+        self.assertEqual(asked, [("leaderboards", 3), ("challenges", 10), ("challenges", 3)])           # the repeat came from the cache
+
+    def test_config_carries_news_and_hero(self):
+        self.ctx.config.overlay = {"news": [{"tag": "PATCH NOTES", "title": "rc6", "text": "", "url": "", "image": ""}],
+                                   "heroImage": "https://img.example/h.png"}
+        _st, obj, _ = self.call("GET", "/v1/launcher/config")
+        self.assertEqual((obj["news"][0]["title"], obj["heroImage"]), ("rc6", "https://img.example/h.png"))
+
     def test_config_file_is_reloaded(self):
         import tempfile
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:

@@ -1,25 +1,26 @@
 /*
- * FH2MP shim: a winmm.dll proxy loaded by azimuth.exe (0.9.10+) from its own folder.
+ * FH2MP shim: fh2-mods\FH2MP.dll, a mod for the FH2 Mod Platform (Trinculo54, MIT; third_party/fh2-mod-platform).
  *
- * Azimuth 0.9.10 verifies azimuth-tls.dll against its own SHA-256, so the shim can no longer replace
- * that helper. azimuth.exe imports WINMM.dll (timeBeginPeriod), so a winmm.dll placed next to it is
- * loaded in-process before the game starts. This is the same mechanism FH2 Extra Options 0.2.88 uses.
+ * The platform is the d3dcompiler_47.dll next to azimuth.exe. It loads every DLL in fh2-mods and calls its fh2mod_init, so FH2MP
+ * runs next to the other FH2 mods (FH2 Extra Options keeps winmm.dll, which is its own) and changes the game through the platform's
+ * shared hooks: each change is checked against the exe on disk, Extra Options' patches and every other mod's hooks, and is listed in
+ * the platform's crash reports.
  *
  * This DLL:
- *   1. forwards every winmm export to the system winmm.dll (winmm_forward.inc, generated)
- *   2. chain-loads the FH2 Extra Options winmm proxy if it is present as fh2extra\winmm.dll
- *   3. hooks azimuth.exe's Platform::Details::GetCmdArguments so the game receives launch
- *      arguments (stock Azimuth always returns argv == [""]).
- *   4. once Azimuth has loaded its own azimuth-tls.dll (the game image is mapped by then), applies
+ *   1. hooks azimuth.exe's Platform::Details::GetCmdArguments so the game receives launch
+ *      arguments (stock Azimuth always returns argv == [""]), and patches Azimuth's fixed Xbox user id.
+ *   2. once the platform says the game's code is ready (mapped, and Extra Options done with it), applies
  *      the game patches (Winsock, matchmaking groups, traffic, STS auth) and starts the monitor.
+ *   3. once every mod has started, puts the car database the launcher synced in the game's mediaoverride folder.
  *
- * Argument sources, in order: env FH2MP_ARGS (space separated), then fh2mp-args.txt in data\bin next
- * to azimuth-tls.dll (one argument per line, '#' starts a comment). Logs and probe files live there too.
+ * Argument sources, in order: env FH2MP_ARGS (space separated), then fh2mp-args.txt in the Azimuth folder's
+ * data\bin (one argument per line, '#' starts a comment). Logs and probe files live there too.
  *
  * Only KERNEL32 is used (no CRT).
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include "fh2mod.h"
 
 #define MAX_ARGS 32
 #define MAX_ARG_CHARS 256
@@ -82,14 +83,95 @@ static wchar_t g_dir[MAX_PATH];
 #define FH2MP_WSTR(x) FH2MP_WSTR2(x)
 /* The launcher finds out which shim is installed by reading this marker out of the DLL (it cannot run it). */
 const char fh2mp_shim_marker[] __attribute__((used)) = "FH2MP-SHIM-VERSION:" FH2MP_SHIM_VERSION ":END";
-/* Session token of the player signed in through the launcher (see session_load); sent to the stand-in services as X-FH2MP-Token. */
 /*
- * Pages are made writable for a patch and then simply left that way. Restoring the old protection (read-only code) raced with Azimuth,
- * which applies its own game patches on other threads at the same moment when no other winmm proxy delays the game: whichever side
- * restored first made the other one's write fault (0xc0000005 inside memcpy). An extra writable page is harmless; the crash is not.
+ * Import slots Azimuth fills at run time (patch_game_winsock, xhr2.inc) are still written directly, and their pages are left writable:
+ * restoring the old protection raced with Azimuth, which binds the game's imports on other threads (0xc0000005 inside memcpy).
  */
 #define patch_done(addr, len, old) ((void)(addr), (void)(len), (void)(old))
 
+/*
+ * Code changes go through the FH2 Mod Platform. It refuses a change that overlaps another mod's hook or game code someone already
+ * changed outside the platform, and says why in fh2-mods\platform.log; we then log "not patched" and carry on without that change.
+ * Each change is switched on as soon as it is made: they are independent, and most are made once at start-up.
+ */
+static const FH2ModApi *g_api;
+static FH2Mod *g_mod;
+
+static int plat_patch(const char *name, void *at, const void *expect, const void *bytes, unsigned n)
+{
+    FH2Hook *h = g_api->patch_bytes(g_mod, name, at, expect, bytes, n);
+    return h && g_api->enable_hooks(g_mod, h);
+}
+
+/* Replaces the function at `target` with `detour`; `original` (may be NULL) gets what to call for the game's own code. */
+static int plat_hook(const char *name, void *target, void *detour, void **original)
+{
+    void *unused;
+    FH2Hook *h = g_api->hook_function(g_mod, name, target, detour, original ? original : &unused);
+    return h && g_api->enable_hooks(g_mod, h);
+}
+
+/* Points one `call rel32` at `detour`; `original` gets the function it called. */
+static int plat_hook_call(const char *name, void *site, void *detour, void **original)
+{
+    FH2Hook *h = g_api->hook_call(g_mod, name, site, detour, original);
+    return h && g_api->enable_hooks(g_mod, h);
+}
+
+/* Commits one page of executable memory within +-2 GB of `anchor` (so a rip-relative operand reaches it), nearest free region first,
+ * upward and downward alternately. A fixed window after the module is not enough: on some Windows address-space layouts every 64 KB
+ * slot there is taken (reported 2026-10-19). For the data our patches point game code at (a call slot, a longer path string). */
+static unsigned char *alloc_near(unsigned char *anchor)
+{
+    SYSTEM_INFO si;
+    ULONG_PTR lo, hi, up, down;
+    int step;
+
+    GetSystemInfo(&si);
+    lo = (ULONG_PTR)anchor > 0x7FF00000u ? (ULONG_PTR)anchor - 0x7FF00000u : 0;
+    if (lo < (ULONG_PTR)si.lpMinimumApplicationAddress) {
+        lo = (ULONG_PTR)si.lpMinimumApplicationAddress;
+    }
+    hi = (ULONG_PTR)anchor + 0x7FF00000u;
+    if (hi > (ULONG_PTR)si.lpMaximumApplicationAddress) {
+        hi = (ULONG_PTR)si.lpMaximumApplicationAddress;
+    }
+    up = down = (ULONG_PTR)anchor;
+    for (step = 0; step < 200000 && (up < hi || down > lo); step++) {
+        MEMORY_BASIC_INFORMATION mbi;
+        unsigned char *p;
+
+        if (up < hi) {
+            if (!VirtualQuery((void *)up, &mbi, sizeof mbi)) {
+                up = hi;
+            } else {
+                ULONG_PTR base = (ULONG_PTR)mbi.BaseAddress, end = base + mbi.RegionSize;
+                ULONG_PTR cand = (base + 0xFFFFu) & ~(ULONG_PTR)0xFFFFu;
+                if (mbi.State == MEM_FREE && cand + 0x1000 <= end && cand + 0x1000 <= hi && cand >= lo &&
+                    (p = (unsigned char *)VirtualAlloc((void *)cand, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE))) {
+                    return p;
+                }
+                up = end > up ? end : up + 0x1000;
+            }
+        }
+        if (down > lo) {
+            if (!VirtualQuery((void *)(down - 1), &mbi, sizeof mbi)) {
+                down = lo;
+            } else {
+                ULONG_PTR base = (ULONG_PTR)mbi.BaseAddress, end = base + mbi.RegionSize;
+                ULONG_PTR cand = (end - 0x1000) & ~(ULONG_PTR)0xFFFFu;
+                if (mbi.State == MEM_FREE && cand >= base && cand >= lo && cand + 0x1000 <= hi &&
+                    (p = (unsigned char *)VirtualAlloc((void *)cand, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE))) {
+                    return p;
+                }
+                down = base < down ? base : down - 0x1000;
+            }
+        }
+    }
+    return NULL;
+}
+
+/* Session token of the player signed in through the launcher (see session_load); sent to the stand-in services as X-FH2MP-Token. */
 static char g_token[96];
 static HANDLE g_log = INVALID_HANDLE_VALUE;
 static wchar_t g_args[MAX_ARGS][MAX_ARG_CHARS];
@@ -160,7 +242,7 @@ static int line_has(const char *l, int n, const char *pat)
 static int line_wanted(const char *l, int n)
 {
     static const char *const keep[] = {"attached", "session:", "identity:", "late:", "not patched", "NOT ", "unexpected", "fail", "error", "could not",
-                                       "refus", "crash", "xsbody", "bindfix", 0};
+                                       "refus", "crash", "xsbody", "bindfix", "gamedb:", "rivalsleave", 0};
     int i;
     for (i = 0; keep[i]; i++) {
         if (line_has(l, n, keep[i])) {
@@ -919,25 +1001,20 @@ static void patch_game_winsock(unsigned char *img)
 #define FH2_TRAFFIC_NETMODE_RVA 0x3b94f0u
 static int patch_traffic_local_mode(void)
 {
+    static const unsigned char zero = 0x00, one = 0x01;
     unsigned char *img = find_fh2_image();
     unsigned char *fn;
-    DWORD old;
 
     if (!img) {
         return 0;
     }
     fn = img + FH2_TRAFFIC_NETMODE_RVA;
-    if (fn[0] != 0xC6 || fn[1] != 0x41 || fn[2] != 0x20 || fn[3] != 0x00 || fn[4] != 0xC3) {
+    if (fn[0] != 0xC6 || fn[1] != 0x41 || fn[2] != 0x20 || fn[3] != 0x00 || fn[4] != 0xC3 ||
+        !plat_patch("traffic: networked mode stays local", fn + 3, &zero, &one, 1)) {
         log_begin();
-        log_raw("traffic: unexpected bytes at set-networked function, not patched\\n");
+        log_raw("traffic: unexpected bytes at set-networked function, not patched\n");
         return 0;
     }
-    if (!VirtualProtect(fn + 3, 1, PAGE_EXECUTE_READWRITE, &old)) {
-        return 0;
-    }
-    fn[3] = 0x01;
-    patch_done(fn + 3, 1, old);
-    FlushInstructionCache(GetCurrentProcess(), fn, 5);
     log_begin();
     log_raw("traffic: networked-mode switch patched; traffic stays local\n");
     return 1;
@@ -958,8 +1035,8 @@ static int patch_traffic_module_offline(void)
     unsigned char *img = find_fh2_image();
     unsigned char *fn;
     unsigned char *tgt;
-    DWORD old;
-    int i;
+    unsigned char jmp[5];
+    int i, rel32;
 
     if (!img) {
         return 0;
@@ -973,17 +1050,14 @@ static int patch_traffic_module_offline(void)
             return 0;
         }
     }
-    if (!VirtualProtect(fn, 5, PAGE_EXECUTE_READWRITE, &old)) {
+    rel32 = (int)(tgt - (fn + 5));
+    jmp[0] = 0xE9;
+    mem_copy(jmp + 1, &rel32, 4);
+    if (!plat_patch("traffic: SyncTrafficModule go-online -> go-offline", fn, on_sig, jmp, 5)) {
+        log_begin();
+        log_raw("traffic: module online/offline switch not patched\n");
         return 0;
     }
-    {
-        long long rel = (long long)(tgt - (fn + 5));
-        int rel32 = (int)rel;
-        fn[0] = 0xE9;
-        mem_copy(fn + 1, &rel32, 4);
-    }
-    patch_done(fn, 5, old);
-    FlushInstructionCache(GetCurrentProcess(), fn, 5);
     log_begin();
     log_raw("traffic: module go-online redirected to go-offline; single-player traffic stays active\n");
     return 1;
@@ -1006,7 +1080,6 @@ static int patch_matchmaking_allowed(void)
     static const unsigned char nop6[] = {0x66, 0x0F, 0x1F, 0x44, 0x00, 0x00};
     unsigned char *img = find_fh2_image();
     unsigned char *at;
-    DWORD old;
     int i;
 
     if (!img) {
@@ -1020,13 +1093,11 @@ static int patch_matchmaking_allowed(void)
             return 0;
         }
     }
-    at += 6;
-    if (!VirtualProtect(at, 6, PAGE_EXECUTE_READWRITE, &old)) {
+    if (!plat_patch("mmallow: IsMatchMakingAllowed without the CLobby flag", at + 6, want + 6, nop6, 6)) {
+        log_begin();
+        log_raw("mmallow: IsMatchMakingAllowed not patched\n");
         return 0;
     }
-    mem_copy(at, nop6, 6);
-    patch_done(at, 6, old);
-    FlushInstructionCache(GetCurrentProcess(), at, 6);
     log_begin();
     log_raw("mmallow: IsMatchMakingAllowed no longer requires the CLobby flag at +0xf0\n");
     return 1;
@@ -1049,9 +1120,9 @@ static int patch_qos_assume_success(void)
 {
     static const unsigned char want_jne[] = {0x48, 0x85, 0xFF, 0x75, 0x56, 0x48, 0x8B, 0x1E};
     static const unsigned char want_flag[] = {0xC6, 0x80, 0x78, 0x02, 0x00, 0x00, 0x00};
+    static const unsigned char nop2[] = {0x90, 0x90}, one = 0x01;
     unsigned char *img = find_fh2_image();
     unsigned char *a, *b;
-    DWORD old;
     int i;
 
     if (!img) {
@@ -1073,19 +1144,19 @@ static int patch_qos_assume_success(void)
             return 0;
         }
     }
-    if (!VirtualProtect(a + 3, 2, PAGE_EXECUTE_READWRITE, &old)) {
-        return 0;
+    {
+        /* both or neither: half of it would skip the association and still report failure */
+        FH2Hook *ha = g_api->patch_bytes(g_mod, "qosok: skip the secure association", a + 3, want_jne + 3, nop2, 2);
+        FH2Hook *hb = ha ? g_api->patch_bytes(g_mod, "qosok: report success", b + 6, want_flag + 6, &one, 1) : NULL;
+        if (!hb || !g_api->enable_hooks(g_mod, ha) || !g_api->enable_hooks(g_mod, hb)) {
+            if (ha) {
+                g_api->disable_hooks(g_mod, ha);
+            }
+            log_begin();
+            log_raw("qosok: match-request QoS lambda not patched\n");
+            return 0;
+        }
     }
-    a[3] = 0x90;
-    a[4] = 0x90;
-    patch_done(a + 3, 2, old);
-    if (!VirtualProtect(b + 6, 1, PAGE_EXECUTE_READWRITE, &old)) {
-        return 0;
-    }
-    b[6] = 0x01;
-    patch_done(b + 6, 1, old);
-    FlushInstructionCache(GetCurrentProcess(), a, 8);
-    FlushInstructionCache(GetCurrentProcess(), b, 7);
     log_begin();
     log_raw("qosok: match-request QoS step reports success without creating a secure association\n");
     return 1;
@@ -1102,7 +1173,6 @@ static int patch_qos_assume_success(void)
  * FUN_1417a0ff0 with a stub that calls the handler right away with such a result. Disable with env FH2MP_NO_SECUREIP.
  * See docs/matchmaking.md.
  */
-static void xs_write_jump(unsigned char *fn, void *target);
 #define FH2_SECURE_RESOLVE_RVA 0x17a0ff0u
 #define FH2_RESOLVED_HANDLER_RVA 0x17aec90u
 #define FH2_MATCHREQUESTER_RVA 0x36e2960u
@@ -1148,7 +1218,11 @@ static int patch_secure_association(void)
         }
     }
     g_secure_img = img;
-    xs_write_jump(img + FH2_SECURE_RESOLVE_RVA, (void *)secure_resolve_stub);
+    if (!plat_hook("secureip: SecureIPResolver", img + FH2_SECURE_RESOLVE_RVA, (void *)secure_resolve_stub, NULL)) {
+        log_begin();
+        log_raw("secureip: SecureIPResolver not patched\n");
+        return 0;
+    }
     log_begin();
     log_raw("secureip: SecureIPResolver reports success without a secure association (host from the session)\n");
     return 1;
@@ -1216,7 +1290,11 @@ static int patch_invite_type(void)
         }
     }
     g_invite_img = img;
-    xs_write_jump(img + FH2_SETSESSION_RVA, (void *)set_session_stub);
+    if (!plat_hook("invitetype: MatchRequester::SetSession", img + FH2_SETSESSION_RVA, (void *)set_session_stub, NULL)) {
+        log_begin();
+        log_raw("invitetype: MatchRequester::SetSession not patched\n");
+        return 0;
+    }
     log_begin();
     log_raw("invitetype: joining an invite session sets the lobby type from the invite\n");
     return 1;
@@ -1234,7 +1312,7 @@ static int patch_server_port(void)
     DWORD n = GetEnvironmentVariableW(L"FH2MP_SERVER_PORT", env, 8);
     unsigned char *img = find_fh2_image();
     unsigned char *at;
-    DWORD old;
+    unsigned char port[4];
     int i;
 
     if (n != 4 || !img) {
@@ -1248,14 +1326,13 @@ static int patch_server_port(void)
         if (env[i] < L'0' || env[i] > L'9') {
             return 0;
         }
+        port[i] = (unsigned char)env[i];
     }
-    if (!VirtualProtect(at, 4, PAGE_READWRITE, &old)) {
+    if (!plat_patch("serverport: game server port", at, "5000", port, 4)) {
+        log_begin();
+        log_raw("serverport: port literal not patched\n");
         return 0;
     }
-    for (i = 0; i < 4; i++) {
-        at[i] = (unsigned char)env[i];
-    }
-    patch_done(at, 4, old);
     log_begin();
     log_raw("serverport: the game connects to the port from FH2MP_SERVER_PORT\n");
     return 1;
@@ -1277,7 +1354,6 @@ static int patch_mp_difficulty(void)
     static const unsigned char now[] = {0xC5, 0xF2, 0x58, 0x05, 0xDA, 0x6F, 0x5F, 0x02};
     unsigned char *img = find_fh2_image();
     unsigned char *at;
-    DWORD old;
 
     if (!img) {
         return 0;
@@ -1286,14 +1362,11 @@ static int patch_mp_difficulty(void)
     if (memcmp(at, now, sizeof now) == 0) {
         return 1;
     }
-    if (memcmp(at, want, sizeof want) != 0 || !VirtualProtect(at, sizeof want, PAGE_EXECUTE_READWRITE, &old)) {
+    if (memcmp(at, want, sizeof want) != 0 || !plat_patch("mpdiff: online AI difficulty bonus", at, want, now, sizeof now)) {
         log_begin();
         log_raw("mpdiff: unexpected bytes in the assists bonus code, not patched\n");
         return 0;
     }
-    memcpy(at, now, sizeof now);
-    patch_done(at, sizeof want, old);
-    FlushInstructionCache(GetCurrentProcess(), at, sizeof now);
     log_begin();
     log_raw("mpdiff: online races use the maximum (Insane, +40%) AI difficulty bonus\n");
     return 1;
@@ -1311,9 +1384,9 @@ static int patch_mp_difficulty(void)
 static int patch_traffic_request_ownership(void)
 {
     static const unsigned char cmp_ctx[] = {0x80, 0xB9, 0xAA, 0x00, 0x00, 0x00, 0x00};
+    static const unsigned char je[] = {0x74, 0x7D}, nop2[] = {0x90, 0x90};
     unsigned char *img = find_fh2_image();
     unsigned char *at;
-    DWORD old;
 
     if (!img) {
         return 0;
@@ -1322,16 +1395,12 @@ static int patch_traffic_request_ownership(void)
     if (at[0] == 0x90 && at[1] == 0x90) {
         return 1;
     }
-    if (memcmp(at - sizeof cmp_ctx, cmp_ctx, sizeof cmp_ctx) != 0 || at[0] != 0x74 || at[1] != 0x7D ||
-        !VirtualProtect(at, 2, PAGE_EXECUTE_READWRITE, &old)) {
+    if (memcmp(at - sizeof cmp_ctx, cmp_ctx, sizeof cmp_ctx) != 0 ||
+        !plat_patch("trafficown: RequestOwnership on every collision", at, je, nop2, 2)) {
         log_begin();
         log_raw("trafficown: unexpected bytes in the RequestOwnership trigger, not patched\n");
         return 0;
     }
-    at[0] = 0x90;
-    at[1] = 0x90;
-    patch_done(at, 2, old);
-    FlushInstructionCache(GetCurrentProcess(), at, 2);
     log_begin();
     log_raw("trafficown: a collision with a traffic car always requests its ownership\n");
     return 1;
@@ -1352,7 +1421,6 @@ static int patch_live_gates(void)
     static const unsigned char cmp_bytes[7] = {0x80, 0xB8, 0xF0, 0x00, 0x00, 0x00, 0x00};
     unsigned char *img = find_fh2_image();
     int i, j, done = 0;
-    DWORD old;
 
     if (!img) {
         return 0;
@@ -1360,6 +1428,7 @@ static int patch_live_gates(void)
     for (i = 0; i < 3; i++) {
         unsigned char *c = img + cmp_rva[i];
         unsigned char *jne = c + 7;
+        unsigned char jmp[6];
         int rel;
         for (j = 0; j < 7; j++) {
             if (c[j] != cmp_bytes[j]) {
@@ -1377,14 +1446,14 @@ static int patch_live_gates(void)
         }
         mem_copy(&rel, jne + 2, 4);
         rel += 1;
-        if (!VirtualProtect(jne, 6, PAGE_EXECUTE_READWRITE, &old)) {
+        jmp[0] = 0xE9;
+        mem_copy(jmp + 1, &rel, 4);
+        jmp[5] = 0x90;
+        if (!plat_patch("livegate: Live-only menu entry", jne, jne, jmp, 6)) {
+            log_begin();
+            log_raw("livegate: a Live gate was not patched\n");
             continue;
         }
-        jne[0] = 0xE9;
-        mem_copy(jne + 1, &rel, 4);
-        jne[5] = 0x90;
-        patch_done(jne, 6, old);
-        FlushInstructionCache(GetCurrentProcess(), jne, 6);
         done++;
     }
     if (done) {
@@ -1406,9 +1475,9 @@ static int patch_live_gates(void)
 static int patch_home_tile(void)
 {
     static const unsigned char want[9] = {0x44, 0x38, 0xAB, 0x37, 0x05, 0x00, 0x00, 0x75, 0x2C};
+    static const unsigned char jmp = 0xEB;
     unsigned char *img = find_fh2_image();
     unsigned char *p;
-    DWORD old;
     int i;
 
     if (!img) {
@@ -1425,12 +1494,11 @@ static int patch_home_tile(void)
             return 0;
         }
     }
-    if (!VirtualProtect(p + 7, 1, PAGE_EXECUTE_READWRITE, &old)) {
+    if (!plat_patch("hometile: Online Road Trip tile", p + 7, want + 7, &jmp, 1)) {
+        log_begin();
+        log_raw("hometile: the Home tile test was not patched\n");
         return 0;
     }
-    p[7] = 0xEB;
-    patch_done(p + 7, 1, old);
-    FlushInstructionCache(GetCurrentProcess(), p + 7, 1);
     log_begin();
     log_raw("hometile: the Home page Online Road Trip tile is no longer forced off without the connected-to-Live byte\n");
     return 1;
@@ -1452,9 +1520,9 @@ static int patch_home_tile(void)
 static int patch_same_session(void)
 {
     static const unsigned char want[10] = {0x85, 0xC0, 0x75, 0x04, 0x32, 0xDB, 0xEB, 0x02, 0xB3, 0x01};
+    static const unsigned char jmp = 0xEB;
     unsigned char *img = find_fh2_image();
     unsigned char *p;
-    DWORD old;
     int i;
 
     if (!img) {
@@ -1471,12 +1539,11 @@ static int patch_same_session(void)
             return 0;
         }
     }
-    if (!VirtualProtect(p + 2, 1, PAGE_EXECUTE_READWRITE, &old)) {
+    if (!plat_patch("samesession: join a found session with the remembered name", p + 2, want + 2, &jmp, 1)) {
+        log_begin();
+        log_raw("samesession: the session validation handler was not patched\n");
         return 0;
     }
-    p[2] = 0xEB;
-    patch_done(p + 2, 1, old);
-    FlushInstructionCache(GetCurrentProcess(), p + 2, 1);
     log_begin();
     log_raw("samesession: a found session with the same name as the remembered one is joined instead of ignored\n");
     return 1;
@@ -1492,28 +1559,30 @@ static int patch_same_session(void)
  * crashes the client of everybody who loads that car: seen on prod on 2026-10-20 whenever a player joined one particular lobby, the same
  * call chain every time (call chain and registers read from three minidumps). An engine the local game does not simulate (another
  * player's car is driven by prediction) does not need its curve, so the function now returns when the result is null, leaving the output as
- * it was. Entry of the function, 7 bytes replaced by a jump to a stub near the image (the stub does the check and then runs the replaced
- * instructions):  48 8B C4 (mov rax,rsp)  48 89 50 10 (mov [rax+0x10],rdx).  Disable with env FH2MP_NO_NULLTORQUE.
+ * it was. The function is hooked through the platform with a small stub as the detour: it does the check, then jumps on to the platform's
+ * `original` (the game's first instructions, 48 8B C4 mov rax,rsp / 48 89 50 10 mov [rax+0x10],rdx, and the rest of the function).
+ * Disable with env FH2MP_NO_NULLTORQUE.
  */
 static volatile unsigned *g_nulltorque_hits;      /* counts the engines the guard skipped (read by the monitor thread, which logs changes) */
 
 static int patch_null_torque_curve(void)
 {
     static const unsigned char want[10] = {0x48, 0x8b, 0xc4, 0x48, 0x89, 0x50, 0x10, 0x55, 0x41, 0x56};
+    /* test rdx,rdx ; jz hit ; mov rax,[rdx] ; test rax,rax ; jz hit ; jmp [rip+original] ; hit: inc dword [rip+counter] ; ret */
+    static const unsigned char code[26] = {0x48, 0x85, 0xd2, 0x74, 0x0e, 0x48, 0x8b, 0x02, 0x48, 0x85, 0xc0, 0x74, 0x06,
+                                           0xff, 0x25, 56 - 19, 0, 0, 0,          /* the original lives at stub+56, the jmp ends at stub+19 */
+                                           0xff, 0x05, 64 - 25, 0, 0, 0,          /* the counter lives at stub+64, the inc ends at stub+25 */
+                                           0xc3};
     unsigned char *img = find_fh2_image();
-    unsigned char *site, *probe, *stub = NULL, *lo, *hi;
-    long long disp;
-    DWORD old;
-    int i, d32;
-    unsigned char code[32];
+    unsigned char *site, *stub;
+    void *original = NULL;
+    FH2Hook *h;
+    int i;
 
     if (!img) {
         return 0;
     }
     site = img + 0x10643b0u;
-    if (site[0] == 0xe9) {
-        return 1;                 /* already patched */
-    }
     for (i = 0; i < 10; i++) {
         if (site[i] != want[i]) {
             log_begin();
@@ -1521,65 +1590,28 @@ static int patch_null_torque_curve(void)
             return 0;
         }
     }
-    lo = site > (unsigned char *)0x70000000 ? site - 0x70000000 : (unsigned char *)0x10000;
-    hi = site + 0x70000000;
-    for (probe = (unsigned char *)((ULONG_PTR)(img + FH2_SIZE_OF_IMAGE + 0xffff) & ~(ULONG_PTR)0xffff); probe < hi; probe += 0x10000) {
-        stub = VirtualAlloc(probe, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-        if (stub) {
-            break;
-        }
-    }
-    if (!stub) {
-        for (probe = (unsigned char *)((ULONG_PTR)(img - 0x10000) & ~(ULONG_PTR)0xffff); probe > lo; probe -= 0x10000) {
-            stub = VirtualAlloc(probe, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-            if (stub) {
-                break;
-            }
-        }
-    }
+    stub = VirtualAlloc(NULL, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
     if (!stub) {
         log_begin();
-        log_raw("nulltorque: could not allocate a page near the game image, not patched\n");
+        log_raw("nulltorque: could not allocate the stub, not patched\n");
         return 0;
     }
-    /* stub: test rdx,rdx ; jz hit ; mov rax,[rdx] ; test rax,rax ; jz hit ; <replaced instructions> ; jmp site+7 ; hit: inc [counter] ; ret */
-    code[0] = 0x48; code[1] = 0x85; code[2] = 0xd2;                       /* test rdx,rdx */
-    code[3] = 0x74; code[4] = 0x14;                                       /* jz ret (+20) */
-    code[5] = 0x48; code[6] = 0x8b; code[7] = 0x02;                       /* mov rax,[rdx] */
-    code[8] = 0x48; code[9] = 0x85; code[10] = 0xc0;                      /* test rax,rax */
-    code[11] = 0x74; code[12] = 0x0c;                                     /* jz ret (+12) */
-    code[13] = 0x48; code[14] = 0x8b; code[15] = 0xc4;                    /* mov rax,rsp */
-    code[16] = 0x48; code[17] = 0x89; code[18] = 0x50; code[19] = 0x10;   /* mov [rax+0x10],rdx */
-    code[20] = 0xe9;                                                      /* jmp site+7 */
-    code[25] = 0xff; code[26] = 0x05;                                     /* hit: inc dword ptr [rip+counter] */
-    code[31] = 0xc3;                                                      /* ret */
-    disp = (long long)((site + 7) - (stub + 25));
-    if (disp > 0x7fffffffll || disp < -0x80000000ll) {
+    mem_copy(stub, code, sizeof code);
+    h = g_api->hook_function(g_mod, "nulltorque: torque curve reader", site, stub, &original);
+    if (!h) {
         log_begin();
-        log_raw("nulltorque: stub out of rel32 range, not patched\n");
+        log_raw("nulltorque: the torque curve reader was not patched\n");
         return 0;
     }
-    d32 = (int)disp;
-    mem_copy(code + 21, &d32, 4);
-    d32 = 64 - (25 + 6);                                                  /* the counter lives at stub+64, the inc instruction ends at stub+31 */
-    mem_copy(code + 27, &d32, 4);
-    mem_copy(stub, code, 32);
+    *(void **)(stub + 56) = original;
     *(unsigned *)(stub + 64) = 0;
-    g_nulltorque_hits = (volatile unsigned *)(stub + 64);
     FlushInstructionCache(GetCurrentProcess(), stub, 68);
-    disp = (long long)(stub - (site + 5));
-    if (disp > 0x7fffffffll || disp < -0x80000000ll || !VirtualProtect(site, 7, PAGE_EXECUTE_READWRITE, &old)) {
+    g_nulltorque_hits = (volatile unsigned *)(stub + 64);
+    if (!g_api->enable_hooks(g_mod, h)) {
         log_begin();
-        log_raw("nulltorque: entry out of rel32 range, not patched\n");
+        log_raw("nulltorque: the torque curve reader was not patched\n");
         return 0;
     }
-    d32 = (int)disp;
-    site[0] = 0xe9;
-    mem_copy(site + 1, &d32, 4);
-    site[5] = 0x90;
-    site[6] = 0x90;
-    patch_done(site, 7, old);
-    FlushInstructionCache(GetCurrentProcess(), site, 7);
     log_begin();
     log_raw("nulltorque: an engine whose torque curve is missing from the game database is skipped instead of crashing the game\n");
     return 1;
@@ -1648,10 +1680,10 @@ static int patch_placement_fallback(void)
 {
     static const unsigned char want[11] = {0x49, 0x8b, 0xd6, 0x41, 0xff, 0x92, 0x00, 0x02, 0x00, 0x00, 0x90};
     unsigned char *img = find_fh2_image();
-    unsigned char *site, *probe, *slot = NULL, *lo, *hi;
+    unsigned char *site, *slot;
+    unsigned char call[8] = {0xff, 0x15, 0, 0, 0, 0, 0x90, 0x90};     /* call qword ptr [rip+disp32] ; the original call was 7 bytes + nop */
     long long disp;
     wchar_t env[8];
-    DWORD old;
     int i;
 
     if (!img) {
@@ -1669,22 +1701,7 @@ static int patch_placement_fallback(void)
         }
     }
     g_place_force = GetEnvironmentVariableW(L"FH2MP_PLACEMENT_FORCE", env, 8) != 0;
-    lo = site > (unsigned char *)0x70000000 ? site - 0x70000000 : (unsigned char *)0x10000;
-    hi = site + 0x70000000;
-    for (probe = (unsigned char *)((ULONG_PTR)(img + FH2_SIZE_OF_IMAGE + 0xffff) & ~(ULONG_PTR)0xffff); probe < hi; probe += 0x10000) {
-        slot = VirtualAlloc(probe, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-        if (slot) {
-            break;
-        }
-    }
-    if (!slot) {
-        for (probe = (unsigned char *)((ULONG_PTR)(img - 0x10000) & ~(ULONG_PTR)0xffff); probe > lo; probe -= 0x10000) {
-            slot = VirtualAlloc(probe, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-            if (slot) {
-                break;
-            }
-        }
-    }
+    slot = alloc_near(site);
     if (!slot) {
         log_begin();
         log_raw("placement: could not allocate a page near the game image, not patched\n");
@@ -1692,23 +1709,123 @@ static int patch_placement_fallback(void)
     }
     *(void **)slot = (void *)placement_hook;
     disp = (long long)(slot - (site + 3 + 6));
-    if (disp > 0x7fffffffll || disp < -0x80000000ll || !VirtualProtect(site + 3, 8, PAGE_EXECUTE_READWRITE, &old)) {
+    if (disp > 0x7fffffffll || disp < -0x80000000ll) {
         log_begin();
         log_raw("placement: slot out of rel32 range, not patched\n");
         return 0;
     }
-    site[3] = 0xff;                       /* call qword ptr [rip+disp32] */
-    site[4] = 0x15;
     {
         int d32 = (int)disp;
-        mem_copy(site + 5, &d32, 4);
+        mem_copy(call + 2, &d32, 4);
     }
-    site[9] = 0x90;                       /* the original call was 7 bytes: 41 FF 92 00 02 00 00 */
-    site[10] = 0x90;
-    FlushInstructionCache(GetCurrentProcess(), site, 11);
+    if (!plat_patch("placement: CreatePlacementTexture2D fallback", site + 3, want + 3, call, sizeof call)) {
+        log_begin();
+        log_raw("placement: the CreatePlacementTexture2D call was not patched\n");
+        return 0;
+    }
     log_begin();
     log_raw(g_place_force ? "placement: textures Azimuth cannot place are created as ordinary textures (FORCED for depth-stencil, test mode)\n"
                           : "placement: textures Azimuth cannot place are created as ordinary textures instead of ending the game\n");
+    return 1;
+}
+
+/*
+ * Road Trip: a fresh lobby's first drive starts at the festival. After the destination vote and car select the client always fast-travels to
+ * the "end event grid" (stateflow network_roadtrip_states.xml: free_roam_ui -> fast_travel_to_destination_drive_grid): BuildEndEventGrid
+ * (FUN_140813080) gives the local car a grid slot (race data +0x2a8), places the grid with FUN_140627c20 (position +0x2b0, forward vector +0x2c0,
+ * from the "start_location_NNN" locators of the race in RoadTripSynced.EventRaceId) and SetFastTravelToEndEventGrid (FUN_140815360) teleports
+ * the car there. No online event starts or ends at the festival, so the server sends EventRaceId 0 for a lobby that has raced nothing yet and
+ * this patch puts that grid at the festival hub instead (the client alone would use a default locator at the Saint-Martin aerodrome).
+ * The one call at 1408131a0 (E8 rel32 to FUN_140627c20) is pointed at festival_grid_hook through the platform (hook_call).
+ * Disable with env FH2MP_NO_FESTIVALGRID.
+ */
+typedef void (*grid_place_fn)(void *arg);
+typedef void **(*rt_get_fn)(void *mgr);
+typedef int (*vint_fn)(void *self);
+typedef void *(*vptr_fn)(void *self);
+typedef void (*vout_fn)(void *self, void **out);
+typedef unsigned char *(*race_data_fn)(void *car);
+static unsigned char *g_fg_img;
+static grid_place_fn g_fg_place;          /* FUN_140627c20, or the next mod's hook on that call */
+static volatile LONG g_fg_logged;
+
+/* the hub (f10 parked there on dev, 2026-10-22) and the direction the grid faces, x/z unit vector; slots stand in rows of two */
+static const float FG_X = 6154.6f, FG_Y = 118.6f, FG_Z = -5935.6f;
+static const float FG_FX = -0.9996f, FG_FZ = -0.0266f;      /* f10 drove off the spot along this line (to 6068,-5938) */
+static const float FG_COLUMN_M = 4.5f, FG_ROW_M = 9.0f;
+
+static void festival_grid_hook(void *arg)
+{
+    unsigned char *img = g_fg_img;
+    void *mgr, **rtp, *rt, *pl, *car = 0;
+    unsigned char *rd;
+    unsigned slot;
+    float side, back;
+
+    g_fg_place(arg);
+    mgr = *(void **)(img + 0x34d6ac8u);                          /* DAT_1434d6ac8: the Road Trip manager */
+    if (!mgr) {
+        return;
+    }
+    rtp = ((rt_get_fn)(img + 0x14a8620u))(mgr);                   /* FUN_1414a8620: RoadTripSynced (as BuildRouteForDrive reads it) */
+    rt = rtp ? *rtp : 0;
+    if (!rt || ((vint_fn)(*(void ***)rt)[0xc0 / 8])(rt) != 0) {   /* vtable +0xc0: EventRaceId; 0 = nothing raced yet */
+        return;
+    }
+    pl = ((vptr_fn)(img + 0x327270u))(0);                         /* the local player -> its car, as FUN_140815360 finds it */
+    pl = pl ? ((vptr_fn)(*(void ***)pl)[0x48 / 8])(pl) : 0;
+    if (!pl) {
+        return;
+    }
+    ((vout_fn)(*(void ***)pl)[0x90 / 8])(pl, &car);
+    rd = car ? ((race_data_fn)(img + 0x1762870u))(car) : 0;
+    if (!rd) {
+        return;
+    }
+    slot = rd[0x2a8];
+    if (slot > 11) {
+        slot = 0;
+    }
+    side = (slot & 1) ? FG_COLUMN_M : -FG_COLUMN_M;
+    back = (float)(slot >> 1) * FG_ROW_M;
+    ((float *)(rd + 0x2b0))[0] = FG_X - FG_FZ * side - FG_FX * back;     /* side vector = (-fz, 0, fx) */
+    ((float *)(rd + 0x2b0))[1] = FG_Y + 0.5f;
+    ((float *)(rd + 0x2b0))[2] = FG_Z + FG_FX * side - FG_FZ * back;
+    ((float *)(rd + 0x2c0))[0] = FG_FX;
+    ((float *)(rd + 0x2c0))[1] = 0.0f;
+    ((float *)(rd + 0x2c0))[2] = FG_FZ;
+    if (InterlockedIncrement(&g_fg_logged) <= 20) {
+        log_begin();
+        log_raw("festivalgrid: fresh Road Trip lobby, drive grid slot ");
+        log_dec(slot);
+        log_raw(" placed at the festival\n");
+    }
+}
+
+static int patch_festival_grid(void)
+{
+    unsigned char *img = find_fh2_image();
+    unsigned char *site;
+    int d32;
+
+    if (!img) {
+        return 0;
+    }
+    site = img + 0x8131a0u;
+    mem_copy(&d32, site + 1, 4);
+    if (site[0] != 0xe8 || site + 5 + d32 != img + 0x627c20u) {
+        log_begin();
+        log_raw("festivalgrid: unexpected bytes at the end-event-grid call, not patched\n");
+        return 0;
+    }
+    g_fg_img = img;
+    if (!plat_hook_call("festivalgrid: end-event grid placement", site, (void *)festival_grid_hook, (void **)&g_fg_place)) {
+        log_begin();
+        log_raw("festivalgrid: the end-event-grid call was not patched\n");
+        return 0;
+    }
+    log_begin();
+    log_raw("festivalgrid: a fresh Road Trip lobby's first drive starts at the festival\n");
     return 1;
 }
 
@@ -1724,9 +1841,9 @@ static int patch_placement_fallback(void)
 static int patch_rival_gate(void)
 {
     static const unsigned char want[9] = {0x80, 0xB8, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x75, 0x07};
+    static const unsigned char jmp = 0xEB;
     unsigned char *img = find_fh2_image();
     unsigned char *at;
-    DWORD old;
     int i;
 
     if (!img) {
@@ -1743,12 +1860,11 @@ static int patch_rival_gate(void)
             return 0;
         }
     }
-    if (!VirtualProtect(at + 7, 1, PAGE_EXECUTE_READWRITE, &old)) {
+    if (!plat_patch("rivalgate: Rivals race gate", at + 7, want + 7, &jmp, 1)) {
+        log_begin();
+        log_raw("rivalgate: the Rivals race gate was not patched\n");
         return 0;
     }
-    at[7] = 0xEB;
-    patch_done(at + 7, 1, old);
-    FlushInstructionCache(GetCurrentProcess(), at + 7, 1);
     log_begin();
     log_raw("rivalgate: Rivals events no longer require the connected-to-Live byte\n");
     return 1;
@@ -1767,9 +1883,9 @@ static int patch_rival_gate(void)
 static int patch_online_meet(void)
 {
     static const unsigned char want[] = {0x84, 0xC0, 0x74, 0x05, 0x40, 0xB7, 0x01, 0xEB, 0x03, 0x40, 0x32, 0xFF};
+    static const unsigned char nop2[] = {0x90, 0x90};
     unsigned char *img = find_fh2_image();
     unsigned char *at;
-    DWORD old;
     int i;
 
     if (!img) {
@@ -1786,13 +1902,11 @@ static int patch_online_meet(void)
             return 0;
         }
     }
-    if (!VirtualProtect(at + 2, 2, PAGE_EXECUTE_READWRITE, &old)) {
+    if (!plat_patch("onlinemeet: Car Meet counts as online", at + 2, want + 2, nop2, 2)) {
+        log_begin();
+        log_raw("onlinemeet: the Car Meet view model was not patched\n");
         return 0;
     }
-    at[2] = 0x90;
-    at[3] = 0x90;
-    patch_done(at + 2, 2, old);
-    FlushInstructionCache(GetCurrentProcess(), at, 4);
     log_begin();
     log_raw("onlinemeet: the Car Meet counts as online once connected (online entries available)\n");
     return 1;
@@ -1898,21 +2012,6 @@ static void *xs_token_stub(void *a, void *b, void *c, void *d)
     return g_xs_auth;
 }
 
-static void xs_write_jump(unsigned char *fn, void *target)
-{
-    DWORD old;
-    unsigned char j[12] = {0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xE0}; /* mov rax,imm64 ; jmp rax */
-    ULONGLONG t = (ULONGLONG)(ULONG_PTR)target;
-    int i;
-    for (i = 0; i < 8; i++) {
-        j[2 + i] = (unsigned char)(t >> (8 * i));
-    }
-    VirtualProtect(fn, 12, PAGE_EXECUTE_READWRITE, &old);
-    mem_copy(fn, j, 12);
-    patch_done(fn, 12, old);
-    FlushInstructionCache(GetCurrentProcess(), fn, 12);
-}
-
 /* 0: module not there yet (retry), 1: patched, 2: unusable (do not retry) */
 /* Identity. Azimuth gives every client the same Xbox user id, 0x0009000000000000 (a movabs immediate in the code that
  * formats User.XboxUserId). Two clients (or two players on different machines) would be one person to every service, so
@@ -2006,8 +2105,12 @@ static int patch_xsapi_token(void)
         }
     }
     g_xs_auth = obj;
-    xs_write_jump(f1, (void *)xs_token_stub);
-    xs_write_jump(f2, (void *)xs_token_stub);
+    if (!plat_hook("xstoken: XSAPI GetTokenAndSignature", f1, (void *)xs_token_stub, NULL) ||
+        !plat_hook("xstoken: XSAPI GetTokenAndSignatureForAllUsers", f2, (void *)xs_token_stub, NULL)) {
+        log_begin();
+        log_raw("xstoken: the XSAPI token functions were not patched\n");
+        return 2;
+    }
     log_begin();
     log_raw("xstoken: XSAPI GetTokenAndSignature(+ForAllUsers) now return a placeholder token\n");
     return 1;
@@ -2067,7 +2170,11 @@ static int patch_sda_string(void)
         return 2;
     }
     g_sda_mkstr = (LONG(*)(const WCHAR *, unsigned, void **))mk;
-    xs_write_jump(fn, (void *)sda_string_stub);
+    if (!plat_hook("sdastr: SecureDeviceAddress string", fn, (void *)sda_string_stub, NULL)) {
+        log_begin();
+        log_raw("sdastr: the secure device address string getter was not patched\n");
+        return 2;
+    }
     log_begin();
     log_raw("sdastr: local secure device address string now returns a placeholder\n");
     return 1;
@@ -2125,8 +2232,6 @@ static int patch_sts_auth(void)
                                         0x48, 0x81, 0xEC, 0xB0, 0x02, 0x00, 0x00};
     unsigned char *img = find_fh2_image();
     unsigned char *fn;
-    unsigned long long dest = (unsigned long long)(ULONG_PTR)&sts_auth_stub;
-    DWORD old;
     int i;
 
     if (!img) {
@@ -2140,15 +2245,11 @@ static int patch_sts_auth(void)
             return 0;
         }
     }
-    if (!VirtualProtect(fn, 14, PAGE_EXECUTE_READWRITE, &old)) {
+    if (!plat_hook("sts: StsAuthTokenManager::GetAuthToken", fn, (void *)sts_auth_stub, NULL)) {
+        log_begin();
+        log_raw("sts: GetAuthToken was not patched\n");
         return 0;
     }
-    fn[0] = 0xFF; /* jmp [rip+0] ; dq dest */
-    fn[1] = 0x25;
-    fn[2] = fn[3] = fn[4] = fn[5] = 0;
-    mem_copy(fn + 6, &dest, 8);
-    patch_done(fn, 14, old);
-    FlushInstructionCache(GetCurrentProcess(), fn, 14);
     log_begin();
     log_raw("sts: GetAuthToken replaced; LSP requests no longer wait for an Xbox token\n");
     return 1;
@@ -2159,9 +2260,6 @@ static int install_cmdline_hook(void)
     unsigned char *exe = (unsigned char *)GetModuleHandleW(NULL);
     unsigned char *target = NULL;
     unsigned long long h = 0;
-    unsigned long long dest = (unsigned long long)(ULONG_PTR)&hooked_get_cmd_arguments;
-    unsigned char stub[12];
-    DWORD old;
     size_t i;
 
     for (i = 0; i < sizeof g_hook_builds / sizeof g_hook_builds[0]; i++) {
@@ -2181,21 +2279,11 @@ static int install_cmdline_hook(void)
         log_raw("), skipping; launch arguments will not be injected\n");
         return 0;
     }
-    stub[0] = 0x48; /* mov rax, imm64 ; jmp rax */
-    stub[1] = 0xB8;
-    mem_copy(stub + 2, &dest, 8);
-    stub[10] = 0xFF;
-    stub[11] = 0xE0;
-    if (!VirtualProtect(target, sizeof stub, PAGE_EXECUTE_READWRITE, &old)) {
+    if (!plat_hook("hook: Azimuth Platform::Details::GetCmdArguments", target, (void *)hooked_get_cmd_arguments, NULL)) {
         log_begin();
-        log_raw("hook: VirtualProtect failed, error ");
-        log_dec(GetLastError());
-        log_raw("\n");
+        log_raw("hook: GetCmdArguments was not patched; launch arguments will not be injected\n");
         return 0;
     }
-    mem_copy(target, stub, sizeof stub);
-    patch_done(target, sizeof stub, old);
-    FlushInstructionCache(GetCurrentProcess(), target, sizeof stub);
     log_begin();
     log_raw("hook: GetCmdArguments patched, argc=");
     log_dec((unsigned long)g_argc);
@@ -2221,38 +2309,10 @@ static int has_arg_prefix(const wchar_t *prefix)
     return 0;
 }
 
+/* The mapped game (the platform recognises it by FH2_TIMESTAMP and FH2_SIZE_OF_IMAGE, as Extra Options does), or NULL. */
 static unsigned char *find_fh2_image(void)
 {
-    SYSTEM_INFO si;
-    unsigned char *addr;
-    MEMORY_BASIC_INFORMATION mbi;
-    unsigned char *found = NULL;
-
-    GetSystemInfo(&si);
-    addr = (unsigned char *)si.lpMinimumApplicationAddress;
-    while (addr < (unsigned char *)si.lpMaximumApplicationAddress &&
-           VirtualQuery(addr, &mbi, sizeof mbi) == sizeof mbi) {
-        if (mbi.State == MEM_COMMIT && mbi.BaseAddress == mbi.AllocationBase &&
-            (mbi.Type == MEM_IMAGE || mbi.Type == MEM_PRIVATE) && mbi.RegionSize >= 0x1000) {
-            const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)mbi.AllocationBase;
-            if (!IsBadReadPtr(dos, sizeof *dos) && dos->e_magic == IMAGE_DOS_SIGNATURE &&
-                dos->e_lfanew > 0 && dos->e_lfanew < 0x1000) {
-                const IMAGE_NT_HEADERS64 *nt =
-                    (const IMAGE_NT_HEADERS64 *)((unsigned char *)dos + dos->e_lfanew);
-                if (!IsBadReadPtr(nt, sizeof *nt) && nt->Signature == IMAGE_NT_SIGNATURE &&
-                    nt->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 &&
-                    nt->FileHeader.TimeDateStamp == FH2_TIMESTAMP &&
-                    nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC &&
-                    nt->OptionalHeader.SizeOfImage == FH2_SIZE_OF_IMAGE &&
-                    !(nt->FileHeader.Characteristics & IMAGE_FILE_DLL)) {
-                    found = (unsigned char *)mbi.AllocationBase;
-                    break;
-                }
-            }
-        }
-        addr = (unsigned char *)mbi.BaseAddress + mbi.RegionSize;
-    }
-    return found;
+    return g_api ? (unsigned char *)g_api->game_base() : NULL;
 }
 
 static int str_equal(const char *a, const char *b)
@@ -2275,13 +2335,9 @@ static int redirect_group(const char *name, unsigned lea_rva, unsigned str_rva, 
 {
     unsigned char *img = find_fh2_image();
     unsigned char *lea;
-    unsigned char *newstr = NULL;
-    unsigned char *probe;
-    unsigned char *lo;
-    unsigned char *hi;
+    unsigned char *newstr;
     int oldDisp;
     long long newDisp;
-    DWORD old;
     SIZE_T i;
 
     if (!img) {
@@ -2306,24 +2362,7 @@ static int redirect_group(const char *name, unsigned lea_rva, unsigned str_rva, 
         return 0;
     }
 
-    lo = lea > (unsigned char *)0x70000000 ? lea - 0x70000000 : (unsigned char *)0x10000;
-    hi = lea + 0x70000000;
-    for (probe = (unsigned char *)((ULONG_PTR)(img + FH2_SIZE_OF_IMAGE + 0xffff) & ~(ULONG_PTR)0xffff);
-         probe < hi; probe += 0x10000) {
-        newstr = VirtualAlloc(probe, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-        if (newstr) {
-            break;
-        }
-    }
-    if (!newstr) {
-        for (probe = (unsigned char *)((ULONG_PTR)(img - 0x10000) & ~(ULONG_PTR)0xffff);
-             probe > lo; probe -= 0x10000) {
-            newstr = VirtualAlloc(probe, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-            if (newstr) {
-                break;
-            }
-        }
-    }
+    newstr = alloc_near(lea);
     if (!newstr) {
         log_begin();
         log_raw("redirect: could not allocate a page near the game image\n");
@@ -2340,14 +2379,11 @@ static int redirect_group(const char *name, unsigned lea_rva, unsigned str_rva, 
     }
     {
         int d32 = (int)newDisp;
-        if (!VirtualProtect(lea, 8, PAGE_EXECUTE_READWRITE, &old)) {
+        if (!plat_patch("redirect: matchmaking group path", lea + 3, &oldDisp, &d32, 4)) {
             log_begin();
-            log_raw("redirect: VirtualProtect failed\n");
+            log_raw("redirect: the matchmaking group entry was not patched\n");
             return 0;
         }
-        mem_copy(lea + 3, &d32, 4);
-        patch_done(lea, 8, old);
-        FlushInstructionCache(GetCurrentProcess(), lea, 8);
     }
     log_begin();
     log_raw("redirect: ");
@@ -2531,6 +2567,139 @@ static void maybe_run_connect_probe(unsigned char *img)
     log_raw("probe: begin-join returned\n");
 }
 #endif
+
+#include "sha256.inc"
+#include "inflate.inc"
+
+/*
+ * #64: a Monthly Rival started from the pause menu inside an online session loaded for ever. The menu's launch (RivalsModule
+ * RequestLaunchRivalsEventFromMenu, then the global/rivals_launcher entity and its offline race_trigger_activation flow) only works
+ * offline, and nothing on the way leaves the session. global.xml's request_launch_rivals_event_from_menu, the pause menu's last step
+ * before the launch, now first leaves the session the way "return to single player" does (broadcast NetworkSessionRequestDisconnect,
+ * then wait for the disconnect to complete). The game's own global.xml is read from media\stateflow.zip, changed in that one state and
+ * handed to the platform (set_file: mediaoverride\stateflow\global.xml, removed again when FH2MP is). pause.xml cannot carry it: the
+ * platform owns that file for its MODS page. Disable with env FH2MP_NO_RIVALSLEAVE.
+ */
+static const char RIVALS_LAUNCH_OLD[] =
+    "  <state id=\"request_launch_rivals_event_from_menu\">\r\n"
+    "    <behavior id=\"ModuleMethodCall\" module_id=\"RivalsModule\" method=\"RequestLaunchRivalsEventFromMenu\" />\r\n"
+    "  </state>";
+static const char RIVALS_LAUNCH_NEW[] =
+    "  <state id=\"request_launch_rivals_event_from_menu\">\r\n"
+    "    <node state=\"network.is_in_network_session\">\r\n"
+    "      <exit id=\"in_network_session\" target=\"_fh2mp_leave_session\" />\r\n"
+    "      <exit id=\"not_in_network_session\" target=\"_fh2mp_launch\" />\r\n"
+    "    </node>\r\n"
+    "    <node id=\"_fh2mp_leave_session\" state=\"global.broadcast_event\" event=\"NetworkSessionRequestDisconnect\" />\r\n"
+    "    <node state=\"network.wait_for_network_disconnection_complete\" />\r\n"
+    "    <node id=\"_fh2mp_launch\" state=\"request_launch_rivals_event_from_menu_now\" />\r\n"
+    "  </state>\r\n"
+    "\r\n"
+    "  <state id=\"request_launch_rivals_event_from_menu_now\">\r\n"
+    "    <behavior id=\"ModuleMethodCall\" module_id=\"RivalsModule\" method=\"RequestLaunchRivalsEventFromMenu\" />\r\n"
+    "  </state>";
+
+static int stateflow_rivals_leave_session(void)
+{
+    WCHAR zip[MAX_PATH];
+    unsigned char *orig, *out;
+    size_t size = 0, at, olen = sizeof RIVALS_LAUNCH_OLD - 1, nlen = sizeof RIVALS_LAUNCH_NEW - 1, i, hits = 0;
+    int ok;
+
+    if (!g_api->game_dir[0] || lstrlenW(g_api->game_dir) + 32 >= MAX_PATH) {
+        return 0;
+    }
+    lstrcpyW(zip, g_api->game_dir);
+    lstrcatW(zip, L"\\media\\stateflow.zip");
+    orig = zip_read_file(zip, "global.xml", &size);
+    if (!orig) {
+        log_begin();
+        log_raw("rivalsleave: could not read global.xml from the game's stateflow.zip, not changed\n");
+        return 0;
+    }
+    for (i = 0, at = 0; i + olen <= size; i++) {
+        if (orig[i] == RIVALS_LAUNCH_OLD[0] && mem_equal(orig + i, (const unsigned char *)RIVALS_LAUNCH_OLD, olen)) {
+            at = i;
+            hits++;
+        }
+    }
+    if (hits != 1 || !(out = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, size - olen + nlen))) {
+        HeapFree(GetProcessHeap(), 0, orig);
+        log_begin();
+        log_raw("rivalsleave: the Rivals launch state in global.xml is not as expected, not changed\n");
+        return 0;
+    }
+    mem_copy(out, orig, at);
+    mem_copy(out + at, RIVALS_LAUNCH_NEW, nlen);
+    mem_copy(out + at + nlen, orig + at + olen, size - at - olen);
+    ok = g_api->set_file(g_mod, "stateflow/global.xml", out, size - olen + nlen);
+    HeapFree(GetProcessHeap(), 0, out);
+    HeapFree(GetProcessHeap(), 0, orig);
+    log_begin();
+    log_raw(ok ? "rivalsleave: a Rival started inside an online session leaves the session first\n"
+               : "rivalsleave: global.xml was not changed (another mod replaces it, see fh2-mods\\platform.log)\n");
+    return ok;
+}
+
+/*
+ * The car database the game runs with (the mediaoverride copy gamedb_place keeps equal to the launcher's, session line gamedb=). Its SHA-256 goes
+ * with every request as X-FH2MP-GameDb, so the server can refuse a game that runs with another database (a car pack the others do not
+ * have crashes them). Hashed again only when the file's size or write time changes. "missing" when it cannot be read.
+ */
+static WCHAR g_gamedb_path[MAX_PATH];
+static WCHAR g_gamedb_src[MAX_PATH];      /* the launcher's copy, put at g_gamedb_path by gamedb_place */
+static volatile LONG g_gamedb_placed;
+static volatile LONG g_gamedb_started;    /* every mod has started (the platform's own database step is done) */
+static int gamedb_place(void);
+static SRWLOCK g_gamedb_lock = SRWLOCK_INIT;
+static ULONGLONG g_gamedb_size, g_gamedb_time;
+static char g_gamedb_hex[65];
+
+static void gamedb_hash(char out[65])
+{
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    ULONGLONG size, wtime;
+    int i;
+
+    AcquireSRWLockExclusive(&g_gamedb_lock);
+    if (!GetFileAttributesExW(g_gamedb_path, GetFileExInfoStandard, &fa)) {
+        lstrcpyA(g_gamedb_hex, "missing");
+        g_gamedb_size = g_gamedb_time = 0;
+    } else {
+        size = (ULONGLONG)fa.nFileSizeHigh << 32 | fa.nFileSizeLow;
+        wtime = (ULONGLONG)fa.ftLastWriteTime.dwHighDateTime << 32 | fa.ftLastWriteTime.dwLowDateTime;
+        if (!g_gamedb_hex[0] || g_gamedb_hex[0] == 'm' || size != g_gamedb_size || wtime != g_gamedb_time) {
+            HANDLE f = CreateFileW(g_gamedb_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                                   FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+            static unsigned char buf[1 << 16];
+            sha256_ctx c;
+            DWORD got;
+            int ok = f != INVALID_HANDLE_VALUE;
+
+            sha256_init(&c);
+            while (ok && (ok = ReadFile(f, buf, sizeof buf, &got, NULL)) && got) {
+                sha256_update(&c, buf, got);
+            }
+            if (f != INVALID_HANDLE_VALUE) {
+                CloseHandle(f);
+            }
+            if (ok) {
+                sha256_final_hex(&c, g_gamedb_hex);
+                g_gamedb_size = size, g_gamedb_time = wtime;
+            } else {
+                lstrcpyA(g_gamedb_hex, "missing");
+            }
+            log_begin();
+            log_raw("gamedb: ");
+            log_raw(g_gamedb_hex);
+            log_raw("\n");
+        }
+    }
+    for (i = 0; i < 65; i++) {
+        out[i] = g_gamedb_hex[i];
+    }
+    ReleaseSRWLockExclusive(&g_gamedb_lock);
+}
 
 #include "xhr2.inc"
 #ifdef FH2MP_DEBUG_BUILD
@@ -2783,6 +2952,9 @@ static DWORD WINAPI option_monitor(LPVOID unused)
         }
         if (weather_dump) {
             weather_sample(img);
+        }
+        if (g_gamedb_started && tick % 10 == 0) {
+            gamedb_place();               /* a copy that failed, or a mod's apply_database putting the platform's copy back */
         }
         if (g_nulltorque_hits) {
             static unsigned nt_seen;
@@ -3351,81 +3523,230 @@ static void install_trace(void)
 }
 #endif
 
-#include "winmm_forward.inc"
+static wchar_t g_exe_dir[MAX_PATH];     /* the Azimuth folder (the platform's azimuth_dir) */
 
 /*
- * Fills the forwarding table. When the Extra Options proxy is present, every export is forwarded to
- * *its* export of the same name (it forwards on to the system winmm itself): the mod does its
- * initialisation inside its exported timeBeginPeriod, which azimuth.exe calls, so the call must reach it.
+ * The car database. The launcher keeps the server's copy in <Azimuth>\fh2mp\gamedbRC.slt and names it in the session (gamedb=, relative
+ * to the Azimuth folder; g_gamedb_src). The game reads <Mount>\mediaoverride\Stripped\gamedbRC.slt (g_gamedb_path), which is also where
+ * the platform writes the database it builds from other mods' SQL, and which it deletes once no mod has any. So when every mod has
+ * started (the platform has written or removed its copy by then), ours is put there: online play needs exactly the server's database.
+ * Changes other mods made to it are named in the log and on the title screen, and the platform's record of its copy is deleted, so that
+ * it builds it again next time (a game started without the FH2MP launcher then gets those changes).
  */
-static void winmm_forward_init(HMODULE mod)
-{
-    wchar_t path[MAX_PATH];
-    HMODULE real;
-    int i;
+static ULONGLONG g_gamedb_placed_size, g_gamedb_placed_time;
 
-    if (GetSystemDirectoryW(path, MAX_PATH - 16) == 0) {
-        return;
+static int file_stamp(const WCHAR *path, ULONGLONG *size, ULONGLONG *wtime)
+{
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &fa)) {
+        return 0;
     }
-    lstrcatW(path, L"\\winmm.dll");
-    real = LoadLibraryW(path); /* full path: never resolves back to this proxy */
-    if (!real) {
-        log_begin();
-        log_raw("winmm: cannot load the system winmm.dll, error ");
-        log_dec(GetLastError());
-        log_raw("\n");
-        return;
-    }
-    for (i = 0; i < WINMM_FWD_COUNT; i++) {
-        void *fn = mod ? (void *)GetProcAddress(mod, g_winmm_names[i]) : NULL;
-        g_winmm_real[i] = fn ? fn : (void *)GetProcAddress(real, g_winmm_names[i]);
-    }
+    *size = (ULONGLONG)fa.nFileSizeHigh << 32 | fa.nFileSizeLow;
+    *wtime = (ULONGLONG)fa.ftLastWriteTime.dwHighDateTime << 32 | fa.ftLastWriteTime.dwLowDateTime;
+    return 1;
 }
 
-static wchar_t g_exe_dir[MAX_PATH];
-
-/* Extra Options 0.2.88 is itself a winmm proxy; it hooks Azimuth's loader import and waits for the
- * stock TLS helper, so it must be loaded before Azimuth gets that far (and before our late init). */
-static HMODULE chain_load_mod(void)
+static int files_equal(const WCHAR *a, const WCHAR *b)
 {
-    wchar_t path[MAX_PATH];
-    HMODULE m;
+    static unsigned char ba[1 << 16], bb[1 << 16];
+    HANDLE fa = CreateFileW(a, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                            FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    HANDLE fb = CreateFileW(b, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                            FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    DWORD na, nb;
+    int same = fa != INVALID_HANDLE_VALUE && fb != INVALID_HANDLE_VALUE;
 
+    while (same && ReadFile(fa, ba, sizeof ba, &na, NULL) && ReadFile(fb, bb, sizeof bb, &nb, NULL)) {
+        if (na != nb || !mem_equal(ba, bb, na)) {
+            same = 0;
+        } else if (!na) {
+            break;
+        }
+    }
+    if (fa != INVALID_HANDLE_VALUE) {
+        CloseHandle(fa);
+    }
+    if (fb != INVALID_HANDLE_VALUE) {
+        CloseHandle(fb);
+    }
+    return same;
+}
+
+/* The mods (other than FH2MP) whose database changes the platform built into its copy, from fh2-mods\platform-db.txt (line 1: its
+ * hash, then "mod<TAB>result" per mod), as "A, B"; the file is deleted so the platform builds its copy again next launch. */
+static void gamedb_drop_platform_copy(char *names, int cap)
+{
+    WCHAR path[MAX_PATH];
+    static char buf[4096];
+    DWORD got = 0, i;
+    HANDLE f;
+    int n = 0;
+
+    names[0] = 0;
     lstrcpyW(path, g_exe_dir);
-    lstrcatW(path, L"\\fh2extra\\winmm.dll");
-    log_begin();
-    if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) {
-        log_raw("chain: no fh2extra\\winmm.dll present\n");
-        return NULL;
+    lstrcatW(path, L"\\fh2-mods\\platform-db.txt");
+    f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) {
+        return;
     }
-    m = LoadLibraryW(path);
-    if (m) {
-        log_raw("chain: loaded fh2extra\\winmm.dll\n");
-    } else {
-        log_raw("chain: LoadLibrary fh2extra\\winmm.dll failed, error ");
-        log_dec(GetLastError());
+    if (!ReadFile(f, buf, sizeof buf - 1, &got, NULL)) {
+        got = 0;
+    }
+    CloseHandle(f);
+    buf[got] = 0;
+    for (i = 0; i < got && buf[i] != '\n'; i++) {
+    }
+    while (i < got) {
+        char *line = buf + ++i;
+        DWORD k = 0;
+        while (i < got && buf[i] != '\n' && buf[i] != '\t') {
+            i++;
+            k++;
+        }
+        if (k && buf[i] == '\t' && !(k == 5 && line[0] == 'F' && line[1] == 'H' && line[2] == '2' && line[3] == 'M' && line[4] == 'P')) {
+            if (n && n + 2 < cap) {
+                names[n++] = ',';
+                names[n++] = ' ';
+            }
+            while (k-- && n + 1 < cap) {
+                names[n++] = *line++;
+            }
+            names[n] = 0;
+        }
+        while (i < got && buf[i] != '\n') {
+            i++;
+        }
+    }
+    DeleteFileW(path);
+}
+
+/* Puts the launcher's copy in place when the file there is not that copy. Cheap when nothing changed since the last call. -> 1 when the
+ * copy is in place. A failure is logged once per error code and tried again by the caller. */
+static int gamedb_place(void)
+{
+    static DWORD last_err;
+    WCHAR dir[MAX_PATH];
+    ULONGLONG size, wtime;
+    char others[256];
+
+    if (!g_gamedb_src[0] || !g_gamedb_path[0]) {
+        return 0;
+    }
+    if (g_gamedb_placed && file_stamp(g_gamedb_path, &size, &wtime) && size == g_gamedb_placed_size && wtime == g_gamedb_placed_time) {
+        return 1;
+    }
+    if (!files_equal(g_gamedb_src, g_gamedb_path)) {
+        lstrcpyW(dir, g_api->game_dir);
+        lstrcatW(dir, L"\\mediaoverride");
+        CreateDirectoryW(dir, NULL);
+        lstrcatW(dir, L"\\Stripped");
+        CreateDirectoryW(dir, NULL);
+        SetFileAttributesW(g_gamedb_path, FILE_ATTRIBUTE_NORMAL);
+        if (!CopyFileW(g_gamedb_src, g_gamedb_path, FALSE)) {
+            DWORD err = GetLastError();
+            InterlockedExchange(&g_gamedb_placed, 0);
+            if (err != last_err) {
+                last_err = err;
+                log_begin();
+                log_raw("gamedb: could not put the server's car database in mediaoverride, error ");
+                log_dec(err);
+                log_raw(" (trying again)\n");
+                g_api->log(g_mod, "could not put the server's car database in mediaoverride; trying again (until it is there, "
+                                  "online play is refused)");
+            }
+            return 0;
+        }
+        last_err = 0;
+        log_begin();
+        log_raw("gamedb: the server's car database is in mediaoverride\n");
+    }
+    gamedb_drop_platform_copy(others, sizeof others);
+    if (others[0]) {
+        char line[400];
+        lstrcpyA(line, "online play uses the server's car database, so the database changes of these mods are off this time: ");
+        lstrcpynA(line + lstrlenA(line), others, (int)sizeof line - lstrlenA(line));
+        log_begin();
+        log_raw("gamedb: ");
+        log_raw(line);
         log_raw("\n");
+        g_api->log(g_mod, line);
+        g_api->set_notice(g_mod, "Online: other mods' car data is off");
+        g_api->apply_strings(g_mod);
     }
-    return m;
+    if (file_stamp(g_gamedb_path, &size, &wtime)) {
+        g_gamedb_placed_size = size, g_gamedb_placed_time = wtime;
+        InterlockedExchange(&g_gamedb_placed, 1);
+    }
+    return 1;
+}
+
+static DWORD WINAPI gamedb_thread(LPVOID unused)
+{
+    int i;
+    (void)unused;
+    g_api->wait_for_mods(0xFFFFFFFFu);
+    InterlockedExchange(&g_gamedb_started, 1);
+    for (i = 0; i < 60 && !gamedb_place(); i++) {      /* the game reads the database early: retry quickly at first, the monitor then every 10 s */
+        Sleep(1000);
+    }
+    return 0;
 }
 
 /*
- * Everything that needs the game image runs here, once Azimuth has loaded its own TLS helper
- * (it maps the game first). Same order as when the shim was the helper itself.
+ * wait_for_code gives up waiting for the game's code to be marked executable after 10 seconds and goes ahead; when Azimuth is held up
+ * (a message box while it maps the game) our patches would then read pages that are not there yet (seen 2026-10-23: 0xc0000005 at
+ * game+0x3b94f0). So also wait, without a limit, until every executable section of the mapped game is executable.
+ */
+static int page_executable(const void *p)
+{
+    MEMORY_BASIC_INFORMATION m;
+    return VirtualQuery(p, &m, sizeof m) == sizeof m && m.State == MEM_COMMIT &&
+           (m.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY));
+}
+
+static void wait_for_executable_game(void)
+{
+    unsigned char *img;
+    int logged = 0;
+
+    for (;;) {
+        const IMAGE_NT_HEADERS64 *nt;
+        const IMAGE_SECTION_HEADER *sec;
+        unsigned i, ok = 1;
+        img = find_fh2_image();
+        if (img) {
+            nt = (const IMAGE_NT_HEADERS64 *)(img + ((const IMAGE_DOS_HEADER *)img)->e_lfanew);
+            sec = IMAGE_FIRST_SECTION(nt);
+            for (i = 0; i < nt->FileHeader.NumberOfSections && ok; i++) {
+                if ((sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) && sec[i].Misc.VirtualSize &&
+                    (!page_executable(img + sec[i].VirtualAddress) ||
+                     !page_executable(img + sec[i].VirtualAddress + sec[i].Misc.VirtualSize - 1))) {
+                    ok = 0;
+                }
+            }
+            if (ok) {
+                break;
+            }
+        }
+        if (!logged++) {
+            log_begin();
+            log_raw("late: waiting for the game's code to be mapped and executable\n");
+        }
+        Sleep(50);
+    }
+}
+
+/*
+ * Everything that needs the game image runs here, once the platform says the game's code is ready.
  */
 static DWORD WINAPI late_init(LPVOID unused)
 {
-    int tick;
-
     (void)unused;
-    /* Azimuth shows its launcher first: the helper (and the game) appear only after Play is clicked,
-     * which can take arbitrarily long, so wait for it without a limit. */
-    while (!GetModuleHandleW(L"azimuth-tls.dll")) {
-        Sleep(5);
-    }
-    for (tick = 0; tick < 12000 && !find_fh2_image(); tick++) { /* up to ~60 s for the game image */
-        Sleep(5);
-    }
+    /* Azimuth shows its launcher first: the game is mapped only after Play is clicked, which can take arbitrarily long, so wait for it
+     * without a limit. wait_for_code also waits for FH2 Extra Options to finish: it checks every place it patches before it changes any,
+     * so a change of ours made first would switch all of it off. */
+    g_api->wait_for_code(0xFFFFFFFFu);
+    wait_for_executable_game();
     log_begin();
     log_raw(find_fh2_image() ? "late: game image mapped, applying patches\n"
                              : "late: game image not found, applying what is possible\n");
@@ -3516,6 +3837,12 @@ static DWORD WINAPI late_init(LPVOID unused)
             }
         }
         {
+            wchar_t fg_env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_FESTIVALGRID", fg_env, 8) == 0) {
+                patch_festival_grid();
+            }
+        }
+        {
             wchar_t rg_env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_RIVALGATE", rg_env, 8) == 0) {
                 patch_rival_gate();
@@ -3547,13 +3874,15 @@ static DWORD WINAPI late_init(LPVOID unused)
  * Session handed over by the launcher: fh2mp-session.txt next to the log, "key=value" lines:
  *   xuid=<hex>      the Xbox user id the server assigned to the account (replaces the random per-install id)
  *   token=fh2.xxxx  the session token (the server derives the player's identity from it)
+ *   gamedb=<path>   the car database the launcher synced (UTF-8, relative to the Azimuth folder or a Windows path), put in mediaoverride
+ *                   (gamedb_place) and hashed there for every request (gamedb_hash)
  * Env FH2MP_TOKEN / FH2MP_XUID override the file (tests, rigs). The file is not deleted here (Azimuth may start the game in a second
  * process that loads this DLL again); the launcher removes it when the game exits. Returns 1 when an xuid was given.
  */
 static int session_load(void)
 {
     WCHAR path[MAX_PATH], env[100];
-    char buf[512];
+    char buf[1536];
     DWORD got = 0, i, n;
     HANDLE f;
     int have_xuid = 0;
@@ -3612,6 +3941,24 @@ static int session_load(void)
                         g_token[n] = eq[n];
                     }
                     g_token[n] = 0;
+                } else if (lstrcmpA(line, "gamedb") == 0 && eq[0]) {
+                    WCHAR rel[MAX_PATH];
+                    int absolute = eq[0] == '\\' || (eq[0] && eq[1] == ':');
+                    if (!g_api->game_dir[0] || lstrlenW(g_api->game_dir) + 40 >= MAX_PATH) {
+                        /* the platform found no game folder (Azimuth's settings name none it can read): nothing can be put in place, so
+                         * say so, and send "missing" so the server refuses the game openly instead of it running another database */
+                        lstrcpyW(g_gamedb_path, L"\\\\?\\fh2mp\\no-game-folder\\gamedbRC.slt");
+                        g_api->log(g_mod, "the game folder was not found (Azimuth's game folder setting), so the server's car database "
+                                          "cannot be put in place: online play will be refused");
+                        g_api->set_notice(g_mod, "FH2MP: game files not found\nSet the game folder in Azimuth");
+                    } else if (MultiByteToWideChar(CP_UTF8, 0, eq, -1, rel, MAX_PATH) &&
+                               lstrlenW(g_exe_dir) + lstrlenW(rel) + 2 < MAX_PATH) {
+                        lstrcpyW(g_gamedb_src, absolute ? L"" : g_exe_dir);
+                        lstrcatW(g_gamedb_src, absolute ? L"" : L"\\");
+                        lstrcatW(g_gamedb_src, rel);
+                        lstrcpyW(g_gamedb_path, g_api->game_dir);
+                        lstrcatW(g_gamedb_path, L"\\mediaoverride\\Stripped\\gamedbRC.slt");
+                    }
                 }
             }
         }
@@ -3620,6 +3967,7 @@ static int session_load(void)
     log_begin();
     log_raw("session: ");
     log_raw(g_token[0] ? "token present" : "no token");
+    log_raw(g_gamedb_path[0] ? ", car database set" : "");
     log_raw(have_xuid ? ", xuid from the launcher\n" : "\n");
     return have_xuid;
 }
@@ -3707,14 +4055,9 @@ static int patch_identity(void)
             continue;
         }
         for (j = 0; j + sizeof pat <= n; j++) {
-            if (p[j] == 0x49 && p[j + 1] == 0xB8 && mem_equal(p + j, pat, sizeof pat)) {
-                DWORD old;
-                if (VirtualProtect(p + j + 2, 8, PAGE_EXECUTE_READWRITE, &old)) {
-                    mem_copy(p + j + 2, &g_xuid, 8);
-                    patch_done(p + j + 2, 8, old);
-                    FlushInstructionCache(GetCurrentProcess(), p + j, 10);
-                    hits++;
-                }
+            if (p[j] == 0x49 && p[j + 1] == 0xB8 && mem_equal(p + j, pat, sizeof pat) &&
+                plat_patch("identity: Azimuth's XboxUserId", p + j + 2, pat + 2, &g_xuid, 8)) {
+                hits++;
             }
         }
     }
@@ -3725,21 +4068,41 @@ static int patch_identity(void)
     return (int)hits;
 }
 
-static void init(HINSTANCE self)
+#ifndef FH2MOD_PLATFORM_VERSION
+#define FH2MOD_PLATFORM_VERSION "2.7.1"
+#endif
+
+/* Called by the FH2 Mod Platform on its own thread (outside the loader lock) right after it loads this DLL from fh2-mods. */
+FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
 {
+    FH2ModInfo info;
     wchar_t path[MAX_PATH];
-    DWORD n = GetModuleFileNameW(self, g_exe_dir, MAX_PATH);
     int i;
 
-    if (n == 0 || n >= MAX_PATH) {
-        return;
+    if (!api || !api->register_mod) {
+        return 1;
     }
-    while (n > 0 && g_exe_dir[n - 1] != L'\\' && g_exe_dir[n - 1] != L'/') {
-        n--;
+    info.size = sizeof info;
+    info.name = "FH2MP";
+    info.version = FH2MP_SHIM_VERSION;
+    info.github_repo = NULL;                 /* the FH2MP launcher updates this DLL */
+    info.platform_version = FH2MOD_PLATFORM_VERSION;
+    info.check_updates = 0;
+    info.description = "Forza Horizon 2 online on the FH2MP servers: Free Roam, Road Trip, Rivals, Car Clubs and more. "
+                       "Start the game from the FH2MP launcher to play online.";
+    g_mod = api->register_mod(&info);
+    if (!g_mod) {
+        return 1;
     }
-    if (n > 0) {
-        g_exe_dir[n - 1] = L'\0';
+    if (api->api_version < 7) {              /* byte patches (patch_bytes) came with platform 2.6.0 */
+        api->log(g_mod, "needs FH2 Mod Platform 2.6.0 or newer; start the game from the FH2MP launcher once to put it back");
+        return 1;
     }
+    g_api = api;
+    if (lstrlenW(api->azimuth_dir) >= MAX_PATH - 32) {
+        return 1;
+    }
+    lstrcpyW(g_exe_dir, api->azimuth_dir);
     /* logs, args and probe files live in data\bin (where the stock helper sits) when it exists */
     lstrcpyW(g_dir, g_exe_dir);
     lstrcatW(g_dir, L"\\data\\bin");
@@ -3760,7 +4123,9 @@ static void init(HINSTANCE self)
     g_log = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                         OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     log_begin();
-    log_raw("--- fh2mp winmm shim " FH2MP_SHIM_VERSION " attached, tid=");
+    log_raw("--- fh2mp shim " FH2MP_SHIM_VERSION " attached (FH2 Mod Platform ");
+    log_raw(api->platform_version);
+    log_raw("), tid=");
     log_dec(GetCurrentThreadId());
     log_raw("\n");
 
@@ -3783,20 +4148,30 @@ static void init(HINSTANCE self)
         }
     }
     install_cmdline_hook();
-    winmm_forward_init(chain_load_mod());
+    {
+        wchar_t tmp[8];
+        if (GetEnvironmentVariableW(L"FH2MP_NO_RIVALSLEAVE", tmp, 8) == 0) {
+            stateflow_rivals_leave_session();    /* now: the game reads its stateflow once, early */
+        }
+    }
     {
         HANDLE t = CreateThread(NULL, 0, late_init, NULL, 0, NULL);
         if (t) {
             CloseHandle(t);
         }
+        t = g_gamedb_src[0] ? CreateThread(NULL, 0, gamedb_thread, NULL, 0, NULL) : NULL;
+        if (t) {
+            CloseHandle(t);
+        }
     }
+    return 0;
 }
 
 BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID reserved)
 {
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
-        init(self);
+        DisableThreadLibraryCalls(self);
     }
     return TRUE;
 }

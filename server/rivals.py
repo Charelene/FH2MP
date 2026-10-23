@@ -16,6 +16,8 @@ import json
 import random
 import time
 
+import rentals
+
 CLASS_LETTERS = ("D", "C", "B", "A", "S1", "S2")
 ERAS = ((None, 1969, "Classics"), (1970, 1989, "Retro Icons"), (1990, 1999, "90s Heroes"), (2000, 2009, "2000s Icons"),
         (2010, None, "Modern Machines"))
@@ -96,6 +98,28 @@ class RivalCatalog:
         where, args = where_for(attrs or {})
         return [tuple(r) for r in self.cars.db.execute(
             f"SELECT id, class_id, pi, COALESCE(top_speed_ms, 0) FROM v_cars WHERE {where} ORDER BY pi", args)]
+
+    def rentals(self):
+        """Car ids of the game's RentalCars table (empty when the catalog has none)."""
+        if getattr(self, "_rentals", None) is None:
+            try:
+                self._rentals = {r[0] for r in self.cars.db.execute("SELECT CarId FROM RentalCars")}
+            except Exception:  # noqa: BLE001 - a catalog without the table: no rental check
+                self._rentals = set()
+        return self._rentals
+
+    def usable_themes(self):
+        """Themes a new event may use: the class can be enforced and the car selector offers a rental to anybody who owns no fitting car
+        (rentals.enough: 2 rentals, or all cars of a smaller theme). Without rentals in the catalog, or when no theme passes, every theme
+        that can be enforced (the stock 22 rentals fit almost none: tools/make_rentals_db.py adds the missing ones)."""
+        if getattr(self, "_usable", None) is None:
+            themes = [t for t in self.themes() if not t.get("avoid")]
+            rent = self.rentals()
+            if rent:
+                ok = [t for t in themes if rentals.enough({r[0] for r in self.cars_for(t["attrs"])}, rent)]
+                themes = ok or themes
+            self._usable = themes
+        return self._usable
 
     def _count(self, attrs):
         where, args = where_for(attrs)
@@ -309,7 +333,7 @@ class RivalCatalog:
             by_route.setdefault(route, (tid, length))
         tracks = list(by_route.values())
         rng.shuffle(tracks)
-        themes = [t for t in self.themes() if not t.get("avoid")]
+        themes = self.usable_themes()
         kinds = sorted({t["kind"] for t in themes})
         rng.shuffle(kinds)
         events, used = [], set()

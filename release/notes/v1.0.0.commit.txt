@@ -1,0 +1,2 @@
+Release v1.0.0: FH2MP runs on the FH2 Mod Platform next to other mods; launcher fetches the platform and Extra Options from their authors
+Rival from an online lobby leaves the session first; 10x online race XP; car DB sync, rentals, teams, lobby packing, race and Road Trip fixes

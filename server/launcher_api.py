@@ -4,7 +4,11 @@ HTTP-free like auth.py: handle() takes the request pieces and returns (status, J
 without sockets. The LSP maps its HTTP handler onto it (fh2mp_lsp.py, `_v1`).
 
     GET    /v1/status                 {env, online, auth, registration, time}                                   (public)
-    GET    /v1/launcher/config        links, motd, minimum launcher, Azimuth builds the shim supports            (public)
+    GET    /v1/launcher/config        links, motd, news cards, hero image, minimum launcher, supported Azimuth builds (public)
+    GET    /v1/challenges[?top=3]     this month's Monthly Rivals events and their best real times               (public, cached)
+    GET    /v1/leaderboards[?limit=10] XP ladder and one board per Monthly Rivals event, real players only       (public, cached)
+    GET    /v1/home                   everything the launcher's home page shows (home.py)                       (public, cached)
+    GET    /v1/launcher/assets/<file> a picture or sound the operator put in FH2MP_LAUNCHER_ASSETS               (public)
     POST   /v1/auth/challenge         {challenge, powBits, ttl}                                                  (public)
     POST   /v1/auth/register          {challenge, pubkey, gamertag, pow, sig[, invite]} -> account               (public, signed)
     POST   /v1/auth/login             {challenge, pubkey, sig[, client]} -> {token, account, ...}                (public, signed)
@@ -15,6 +19,8 @@ without sockets. The LSP maps its HTTP handler onto it (fh2mp_lsp.py, `_v1`).
     PUT    /v1/me/gamerpic            body: PNG, at most 512x512 and 1 MB; it is decoded and re-encoded here    (Bearer)
     DELETE /v1/me/gamerpic            back to the generated picture                                              (Bearer)
     GET    /v1/gamerpic/<xuid>.png    anybody's picture                                                          (public)
+    GET    /v1/gamedb                 {name, sha256, size, xzSize, path} of the car database to play with; 404 none (Bearer)
+    GET    /v1/gamedb/gamedbRC.slt.xz that database, xz-compressed (gamedb_sync.py)                               (Bearer)
 
 Errors: {"error": "<code>", "message": "..."} with the HTTP status of auth.AuthError.
 """
@@ -26,6 +32,7 @@ import time
 from urllib.parse import parse_qs, urlparse
 
 import auth
+import gamedb_sync
 import pngtool
 import social
 
@@ -43,7 +50,13 @@ DEFAULT_CONFIG = {
     # builds of azimuth.exe the shim's byte signatures were checked against: {"version", "sha256"}
     "supportedAzimuth": [],
     "maintenance": "",
+    "heroImage": "",                # https URL of the launcher's home picture; empty = the drawn background
+    # launcher home cards: {"tag": "PATCH NOTES", "title", "text", "url", "image"} (ops_api.validate_config checks them)
+    "news": [],
 }
+ASSET_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".webp": "image/webp", ".wav": "audio/wav"}
+ASSET_MAX = 4_000_000
+BOARDS_TTL = 60                     # seconds a /v1/challenges or /v1/leaderboards answer is reused: every launcher asks on refresh
 
 
 _VER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:-rc(\d+))?(-debug)?$")
@@ -101,10 +114,48 @@ class LauncherConfig:
 
 
 class Ctx:
-    def __init__(self, auth_service, social_store, config, online_count, log=lambda m: None, on_login=None, lsp_public=None, game_public=None):
+    def __init__(self, auth_service, social_store, config, online_count, log=lambda m: None, on_login=None, lsp_public=None, game_public=None,
+                 gamedb=None, boards=None, assets_dir=None):
         self.auth, self.social, self.config, self.online_count, self.log = auth_service, social_store, config, online_count, log
         self.on_login = on_login or (lambda xuid, ip: None)
         self.lsp_public, self.game_public = lsp_public or {}, game_public or {}
+        self.gamedb = gamedb or gamedb_sync.GameDb("")
+        self.boards = boards              # (kind "challenges" | "leaderboards", n) -> dict, from ops_api; None = not served
+        self._boards_cache = {}
+        self.assets_dir = os.environ.get("FH2MP_LAUNCHER_ASSETS", "") if assets_dir is None else assets_dir
+
+
+def _asset(ctx, name):
+    """A file from the operator's launcher assets folder (hero and card pictures, sounds); only plain names, known types, 4 MB."""
+    ext = os.path.splitext(name)[1].lower()
+    if not ctx.assets_dir or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}\.[a-z0-9]{3,4}", name) or ext not in ASSET_TYPES:
+        raise auth.AuthError(404, "not_found")
+    try:
+        with open(os.path.join(ctx.assets_dir, name), "rb") as f:
+            data = f.read(ASSET_MAX + 1)
+    except OSError:
+        raise auth.AuthError(404, "not_found") from None
+    if len(data) > ASSET_MAX:
+        raise auth.AuthError(404, "not_found")
+    return data, ASSET_TYPES[ext]
+
+
+def _boards(ctx, kind, n):
+    if ctx.boards is None:
+        raise auth.AuthError(404, "not_found", "no leaderboards on this server")
+    hit = ctx._boards_cache.get((kind, n))
+    if hit and time.time() - hit[0] < BOARDS_TTL:
+        return hit[1]
+    obj = ctx.boards(kind, n)
+    ctx._boards_cache[(kind, n)] = (time.time(), obj)
+    return obj
+
+
+def _qint(u, key, default, lo, hi):
+    try:
+        return max(lo, min(hi, int((parse_qs(u.query).get(key) or [default])[0])))
+    except ValueError:
+        return default
 
 
 def _json(body):
@@ -178,9 +229,19 @@ def _route(ctx, method, path, headers, body, ip):
     if p == "/v1/launcher/config" and method == "GET":
         c = ctx.config.get()
         return 200, {"env": a.env, "motd": c["motd"], "links": c["links"], "minLauncher": c["minLauncher"],
-                     "minShim": c["minShim"], "latestAzimuth": c["latestAzimuth"], "supportedAzimuth": c["supportedAzimuth"], "maintenance": c["maintenance"],
+                     "minShim": c["minShim"], "heroImage": c["heroImage"], "news": c["news"],
+                     "latestAzimuth": c["latestAzimuth"], "supportedAzimuth": c["supportedAzimuth"], "maintenance": c["maintenance"],
                      "online": ctx.online_count(), "registration": a.registration, "auth": a.mode,
                      "lsp": ctx.lsp_public, "game": ctx.game_public, "time": int(time.time())}, ok
+    if p == "/v1/challenges" and method == "GET":
+        return 200, _boards(ctx, "challenges", _qint(u, "top", 3, 0, 10)), ok
+    if p == "/v1/leaderboards" and method == "GET":
+        return 200, _boards(ctx, "leaderboards", _qint(u, "limit", 10, 1, 50)), ok
+    if p == "/v1/home" and method == "GET":
+        return 200, _boards(ctx, "home", 0), ok
+    if p.startswith("/v1/launcher/assets/") and method == "GET":
+        data, ctype = _asset(ctx, p[len("/v1/launcher/assets/"):])
+        return 200, data, ctype
     if p == "/v1/auth/challenge" and method == "POST":
         chal, bits, ttl = a.challenge(ip)
         return 200, {"challenge": chal, "powBits": bits, "ttl": int(ttl), "realm": a.env}, ok
@@ -218,6 +279,21 @@ def _route(ctx, method, path, headers, body, ip):
         a.authenticate(_bearer(headers), ip)
         a.logout(_bearer(headers))
         return 200, {"ok": True}, ok
+    if p == "/v1/gamedb" and method == "GET":
+        a.authenticate(_bearer(headers), ip)
+        m = ctx.gamedb.manifest()
+        if m is None:
+            raise auth.AuthError(404, "no_gamedb", "this server does not set a car database")
+        return 200, m, ok
+    if p == gamedb_sync.DOWNLOAD_PATH and method == "GET":
+        acct = a.authenticate(_bearer(headers), ip)
+        if not a.hit(("gamedb", acct.xuid), 10, 3600):
+            raise auth.AuthError(429, "rate_limited", "too many car database downloads, wait a while")
+        blob = ctx.gamedb.download()
+        if blob is None:
+            raise auth.AuthError(404, "no_gamedb", "this server does not set a car database")
+        ctx.log(f"  v1 gamedb download {acct.xuid:#x} {len(blob)} bytes")
+        return 200, blob, "application/x-xz"
     if p == "/v1/me" or p.startswith("/v1/me/"):
         acct = a.authenticate(_bearer(headers), ip)
         if p == "/v1/me" and method == "GET":
