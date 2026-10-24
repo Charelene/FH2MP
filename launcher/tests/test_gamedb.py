@@ -68,6 +68,36 @@ class SyncTests(unittest.TestCase):
         with self.assertRaises(gamedb.GameDbError):
             gamedb.sync(api, "t", api.manifest(), "")
 
+    def test_the_copy_it_replaces_is_remembered_for_the_shim(self):
+        placed = os.path.join(self.mount, "fh2mp", "gamedb-placed.txt")
+
+        def stamp():
+            st = os.stat(self.target)
+            return f"{st.st_size} {st.st_mtime_ns // 100 + 116444736000000000}"   # Windows' last-write time, as the shim reads it
+
+        def lines():
+            with open(placed, "rb") as f:
+                return f.read().decode().splitlines()
+
+        api = FakeApi()
+        gamedb.sync(api, "t", api.manifest(), self.mount)
+        self.assertFalse(os.path.exists(placed))                 # nothing replaced
+        first = stamp()
+        with open(placed, "wb") as f:                            # the shim's own lines, and one that isn't a stamp
+            f.write(b"1 2\n3 4\nnot a stamp\n5 6\n")
+        api = FakeApi(DB + b"newer")
+        gamedb.sync(api, "t", api.manifest(), self.mount)
+        self.assertEqual(lines(), ["1 2", "3 4", "5 6", first])
+        second = stamp()
+        api = FakeApi(DB + b"newest")
+        gamedb.sync(api, "t", api.manifest(), self.mount)
+        self.assertEqual(lines(), ["3 4", "5 6", first, second])   # the last 4
+        self.assertEqual(gamedb.sync(api, "t", api.manifest(), self.mount), "")
+        self.assertEqual(lines(), ["3 4", "5 6", first, second])   # unchanged when the copy is
+        os.makedirs(placed + ".tmp" + str(os.getpid()))            # can't be written: playing goes on
+        api = FakeApi(DB + b"again")
+        self.assertEqual(gamedb.sync(api, "t", api.manifest(), self.mount), "car database updated")
+
 
 class MediaOverrideTests(unittest.TestCase):
     def ini(self, text):
