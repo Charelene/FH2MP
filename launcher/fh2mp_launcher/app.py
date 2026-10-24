@@ -2,6 +2,15 @@
 import os
 import sys
 
+# --- WINE/CROSSOVER DLL PATH FIX ---
+# Force Python to explicitly look inside the PySide6 package folder for QtCore/ICU DLLs
+try:
+    pyside_dir = os.path.join(os.path.dirname(sys.executable), "Lib", "site-packages", "PySide6")
+    if os.path.exists(pyside_dir):
+        os.add_dll_directory(pyside_dir)
+except AttributeError:
+    pass # In case of older Python versions where add_dll_directory doesn't exist
+# -----------------------------------
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
