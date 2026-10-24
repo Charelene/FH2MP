@@ -1,12 +1,29 @@
 import math
+import sys
 
 from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPointF, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetrics, QGuiApplication, QIcon, QKeySequence, QLinearGradient, QPainter, QPainterPath,
                            QPalette, QPen, QPixmap, QRadialGradient, QShortcut)
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QLabel, QMenu, QPushButton,
-                               QSizePolicy, QTextBrowser, QVBoxLayout, QWidget)
+                               QFileDialog, QSizePolicy, QTextBrowser, QVBoxLayout, QWidget)
 
 from . import theme
+
+# Qt's native file dialog on Linux goes through GTK, which on Wayland fails to attach to a parented Qt window
+# (gdk_x11_window_get_xid assertion): the dialog never appears and the parent stays blocked. Qt's own dialog works everywhere.
+_FD = QFileDialog.Option.DontUseNativeDialog if sys.platform.startswith("linux") else QFileDialog.Option(0)
+
+
+def open_file(parent, title, start, filt):
+    return QFileDialog.getOpenFileName(parent, title, start, filt, options=_FD)[0]
+
+
+def save_file(parent, title, start, filt):
+    return QFileDialog.getSaveFileName(parent, title, start, filt, options=_FD)[0]
+
+
+def pick_dir(parent, title, start):
+    return QFileDialog.getExistingDirectory(parent, title, start, _FD)
 
 # Stroke icons on a 24-unit grid (QtSvg is not shipped): each is a list of ("line", x1, y1, ...) polylines, ("loop", ...) closed
 # polylines, ("circle", cx, cy, r), ("dot", cx, cy) and ("cog", teeth, outer r, root r, hole r).

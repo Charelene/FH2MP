@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -679,6 +680,14 @@ class AzimuthTests(unittest.TestCase):
     def test_real_azimuth_is_recognised(self):
         info = azimuth.inspect(RIG)
         self.assertEqual((info.supported, info.version), (True, "0.9.10"))
+
+    def test_find_game_installs_survives_an_unreadable_link(self):
+        """GitHub #19: a Windows junction that cannot be followed made realpath raise inside the setup wizard."""
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, "Games", "x", "Mount"))
+            with mock.patch("os.path.expanduser", lambda p: p.replace("~", home)), \
+                    mock.patch("os.path.realpath", side_effect=OSError(1920, "cannot access")):
+                self.assertEqual(azimuth.find_game_installs(), [])
 
 
 def fake_release(kind, files, dll_name):

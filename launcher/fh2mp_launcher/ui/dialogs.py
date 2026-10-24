@@ -4,14 +4,14 @@ import sys
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtCore import QUrl
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
                                QFrame, QLayout, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
 from .. import azimuth, keystore, launch, paths
 from ..api import ApiError
 from ..core import friendly
 from . import images, theme
-from .widgets import Avatar, hrule
+from .widgets import Avatar, hrule, open_file, pick_dir, save_file
 from .workers import run_async
 
 
@@ -131,7 +131,7 @@ class RecoveryDialog(QDialog):
         fixed(self, 560)
 
     def _save(self, code):
-        p, _ = QFileDialog.getSaveFileName(self, "Save recovery code", os.path.expanduser("~/fh2mp-recovery-code.txt"), "Text (*.txt)")
+        p = save_file(self, "Save recovery code", os.path.expanduser("~/fh2mp-recovery-code.txt"), "Text (*.txt)")
         if p:
             fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w") as f:
@@ -194,7 +194,7 @@ class ProfileDialog(QDialog):
         fixed(self, 440)
 
     def _pick(self):
-        p, _ = QFileDialog.getOpenFileName(self, "Choose a picture", os.path.expanduser("~"), "Images (*.png *.jpg *.jpeg *.webp *.bmp)")
+        p = open_file(self, "Choose a picture", os.path.expanduser("~"), "Images (*.png *.jpg *.jpeg *.webp *.bmp)")
         if not p:
             return
         res = images.prepare(p)
@@ -385,13 +385,12 @@ class SettingsDialog(QDialog):
         fixed(self, 560 if not dev else 620)
 
     def _browse(self):
-        d = QFileDialog.getExistingDirectory(self, "Folder with azimuth.exe", self.azdir.text() or os.path.expanduser("~"))
+        d = pick_dir(self, "Folder with azimuth.exe", self.azdir.text() or os.path.expanduser("~"))
         if d:
             self.azdir.setText(d)
 
     def _shim_from_file(self):
-        p, _ = QFileDialog.getOpenFileName(self, "Shim DLL or zip", self.lc.settings["dev_shim_path"] or _repo_shim_dir() or os.path.expanduser("~"),
-                                           "Shim (*.dll *.zip)")
+        p = open_file(self, "Shim DLL or zip", self.lc.settings["dev_shim_path"] or _repo_shim_dir() or os.path.expanduser("~"), "Shim (*.dll *.zip)")
         if p:
             self._install_local(p)
 

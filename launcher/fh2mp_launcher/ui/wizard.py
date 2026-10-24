@@ -4,7 +4,7 @@ import os
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtCore import QUrl
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QProgressBar,
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QProgressBar,
                                QPushButton, QRadioButton, QStackedWidget, QVBoxLayout, QWidget)
 
 from .. import azimuth, identity
@@ -13,7 +13,7 @@ from ..constants import AZIMUTH_PAGE
 from ..core import friendly
 from . import theme
 from .dialogs import NameCheck
-from .widgets import Banner
+from .widgets import Banner, pick_dir, save_file
 from .workers import run_async
 
 
@@ -203,8 +203,18 @@ class Wizard(QDialog):
         self.stack.setCurrentIndex(self.AZIMUTH)
         self.az_list.clear()
         cur = self.lc.settings["azimuth_dir"]
-        cands = ([cur] if cur else []) + [c for c in azimuth.find_candidates() if c != cur]
-        cands.sort(key=lambda c: not azimuth.inspect(c, self.lc.builds()).supported)          # supported builds first
+        try:
+            found = azimuth.find_candidates()
+        except Exception:  # noqa: BLE001  (an unreadable folder; Browse still works)
+            found = []
+        cands = ([cur] if cur else []) + [c for c in found if c != cur]
+
+        def untested(c):
+            try:
+                return not azimuth.inspect(c, self.lc.builds()).supported
+            except Exception:  # noqa: BLE001
+                return True
+        cands.sort(key=untested)          # supported builds first
         for c in cands:
             self.az_list.addItem(c)
         if cands:
@@ -215,7 +225,7 @@ class Wizard(QDialog):
         run_async(lambda j: self.lc.refresh_server(), lambda _r: self._az_selected(), lambda _e: None)
 
     def _az_browse(self):
-        d = QFileDialog.getExistingDirectory(self, "Select the folder that contains azimuth.exe", os.path.expanduser("~"))
+        d = pick_dir(self, "Select the folder that contains azimuth.exe", os.path.expanduser("~"))
         if d:
             self.az_list.addItem(d)
             self.az_list.setCurrentRow(self.az_list.count() - 1)
@@ -224,15 +234,24 @@ class Wizard(QDialog):
         it = self.az_list.currentItem()
         if not it:
             return
-        info = azimuth.inspect(it.text(), self.lc.builds())
-        self.az_path = it.text() if info.found else ""
+        # Next is decided first and from azimuth.exe alone: the game files are found when Play is pressed, so nothing below may keep the
+        # button off (GitHub #19: an exception or a slow scan of the drives here left Next disabled for good)
+        found = os.path.isfile(os.path.join(it.text(), azimuth.EXE))
+        self.az_path = it.text() if found else ""
+        self.az_next.setEnabled(found)
+        try:
+            info = azimuth.inspect(it.text(), self.lc.builds())
+        except Exception as e:  # noqa: BLE001  (a file that cannot be read, a bad ini)
+            from ..api import log_failure
+            log_failure("WIZARD", "azimuth", e, str(e))
+            self.az_banner.show_message("Azimuth found" if found else "No azimuth.exe in that folder.", "info" if found else "bad")
+            return
         if not info.found:
             self.az_banner.show_message("No azimuth.exe in that folder.", "bad")
         elif info.supported:
-            self.az_banner.show_message(f"Azimuth {info.version}" + (" · game found" if azimuth.find_game_installs() or info.game_folder else " · game files not found yet"), "info")
+            self.az_banner.show_message(f"Azimuth {info.version}" + (" · game found" if info.game_folder else " · game files not found yet"), "info")
         else:
             self.az_banner.show_message(f"Azimuth {info.version or '?'} is untested. 0.9.10 is supported.", "warn")
-        self.az_next.setEnabled(info.found)
 
     def _mode_changed(self, new):
         self.new_box.setEnabled(new)
@@ -300,7 +319,7 @@ class Wizard(QDialog):
             "Creating account..."))
 
     def _save_code(self):
-        p, _ = QFileDialog.getSaveFileName(self, "Save recovery code", os.path.expanduser("~/fh2mp-recovery-code.txt"), "Text (*.txt)")
+        p = save_file(self, "Save recovery code", os.path.expanduser("~/fh2mp-recovery-code.txt"), "Text (*.txt)")
         if p:
             fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w") as f:

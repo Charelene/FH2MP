@@ -219,10 +219,13 @@ def find_game_installs():
     out, seen = [], set()
 
     def add(host, win):
-        real = os.path.realpath(host)
-        if real not in seen and is_game_dir(host):
-            seen.add(real)
-            out.append((host, win))
+        try:
+            real = os.path.realpath(host)
+            if real not in seen and is_game_dir(host):
+                seen.add(real)
+                out.append((host, win))
+        except (OSError, ValueError):
+            pass            # a junction or link Windows will not let us follow (C:\Documents and Settings): not where the game is
     for root in _steam_roots():
         for pre in _subdirs(os.path.join(root, "steamapps", "compatdata")):
             c = os.path.join(pre, "pfx", "drive_c")
