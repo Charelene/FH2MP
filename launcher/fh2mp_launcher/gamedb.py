@@ -15,6 +15,7 @@ from . import azimuth, paths, shim
 from .constants import DATA_DIR
 
 LOCAL = (DATA_DIR, "gamedbRC.slt")
+PLACED = (DATA_DIR, "gamedb-placed.txt")  # the shim's list of its copies in mediaoverride ("size date", newest last)
 MAX_SIZE = 64 * 1024 * 1024
 
 
@@ -72,5 +73,28 @@ def sync(api, token, m, folder, progress=None):
     if len(data) != size or hashlib.sha256(data).hexdigest() != want:
         raise GameDbError("The car database download was damaged. Press Play to try again.")
     os.makedirs(os.path.dirname(target), exist_ok=True)
+    remember_copy(folder)
     paths.atomic_write(target, data, 0o644)
     return "car database updated"
+
+
+def remember_copy(folder):
+    """Before the copy is replaced: its size and date (100 ns ticks since 1601, as Windows keeps it) go last in fh2mp/gamedb-placed.txt,
+    which keeps the last 4. The shim copies it to mediaoverride with that date, so the copy there is still known as FH2MP's once the
+    server's database has changed, and is not kept as another mod's car database (shim/src/gamedb_keep.inc). Never blocks playing."""
+    try:
+        st = os.stat(os.path.join(folder, *LOCAL))
+    except OSError:
+        return
+    entry = f"{st.st_size} {st.st_mtime_ns // 100 + 116444736000000000}"
+    path = os.path.join(folder, *PLACED)
+    try:
+        with open(path, "rb") as f:
+            lines = [ln for ln in f.read().decode("ascii", "replace").splitlines() if re.fullmatch(r"\d+ \d+", ln)]
+    except OSError:
+        lines = []
+    lines = [ln for ln in lines if ln != entry] + [entry]
+    try:
+        paths.atomic_write(path, "".join(ln + "\n" for ln in lines[-4:]).encode("ascii"), 0o644)
+    except OSError:
+        pass

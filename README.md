@@ -139,7 +139,12 @@ release, using `release/notes/<tag>.md` as the description when that file exists
 - **[FH2 Extra Options](https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions) 0.2.98** by RokkuDayo, the only supported build. When the `winmm.dll` next to `azimuth.exe` is not that build, the launcher downloads the author's release (a setting turns that off; another `winmm.dll` is kept in `fh2extra`);
   by hand, put its `winmm.dll` and ini next to `azimuth.exe`, where the author's instructions put them.
 - Other FH2 Mod Platform mods load next to the shim; the platform refuses any hook of theirs that would overlap one of ours. Online play uses the server's car
-  database, so their **database** changes are off while you play through the launcher (`platform.log` and the title screen say so).
+  database, so their **database** changes are off while you play through the launcher (`platform.log` and the title screen say so). A
+  car database another mod put in `mediaoverride` (traffic cars, a car pack's) is kept in `fh2mp\gamedb-kept.slt` while you play online
+  and put back when you start the game without the launcher (offline); if you then remove it from `mediaoverride`, it isn't put back
+  again. With FH2MP turned off or removed, nothing puts it back: copy that file to `mediaoverride\Stripped\gamedbRC.slt` yourself. With
+  nothing kept, the server's database stays in `mediaoverride` offline too, so a car pack's database in `mediapc` isn't read. With FH2
+  Mod Platform 2.7.1, a mod's database changes are still made on the game's own database, not on the one put back.
 - Windows 10/11, or Linux with Proton/Wine.
 
 ## AI disclosure
