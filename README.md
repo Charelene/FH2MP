@@ -3,6 +3,8 @@
 > **v1.0.0-rc5, a pre-release.** It works and it is young: expect crashes, desyncs and rough edges.
 > Known problems and workarounds: [KNOWN_ISSUES.md](KNOWN_ISSUES.md). Changes per version: [Releases](https://github.com/Charelene/FH2MP/releases).
 
+[![Patreon](https://img.shields.io/badge/Patreon-Support%20FH2MP-FF424D?logo=patreon&logoColor=white)](https://www.patreon.com/fh2mp)
+
 Microsoft switched off Forza Horizon 2's online services on 2023-08-22. FH2MP brings them back: the **real game client**, speaking the
 **game's own network protocol**, to a **replacement server** written from scratch. Two or more people can find each other through a Car Meet,
 drive in the same Online Free Roam world, race, run Road Trip events, share paint jobs and tunes, join Car Clubs and climb the Rivals and
@@ -62,11 +64,15 @@ set up so the game starts in Azimuth. No game files are in this repo or the laun
    Mods you already have in `fh2-mods` keep working.
 3. Pick a gamertag and press **PLAY**. The launcher starts the game for you.
 
+**Solo play.** Turn on **Settings → Offline mode (solo play)** and press **PLAY**. A crossed-cloud icon indicates offline mode.
+The setting is saved for future starts. Online features and server sync are off; your existing account save and local progress are used
+in both modes. Turn the setting off to play online again. The Play menu also offers **Play offline** for a single run.
+
 **Account.** There is no e-mail or password. Your account is a secret key stored in the OS keyring; you get a **recovery code** to move it to
 another computer. Keep that code private.
 
 **Updates.** The launcher checks the signed release manifest and updates itself and the shim. Every release is signed; nothing unsigned is
-installed. The server refuses launchers and shims older than the minimum it announces (rc4 at the moment), so an old install shows
+installed. The server refuses launchers and shims older than the minimum it announces (rc5 at the moment), so an old install shows
 "update required" and has to update before it can play.
 
 **Linux.** Azimuth runs under Wine/Proton. The launcher picks the newest Proton it finds in the usual Steam folders and starts the game with
@@ -134,12 +140,17 @@ release, using `release/notes/<tag>.md` as the description when that file exists
 - Forza Horizon 2, Xbox One build 1.0.0.64.
 - **Azimuth 0.9.10** only. The shim checks its hooks against byte signatures of that build and skips anything that does not match; the
   launcher warns you about other builds.
-- **FH2 Mod Platform 2.7.1** (or newer) by Trinculo54, the `d3dcompiler_47.dll` next to `azimuth.exe` that loads the shim. The launcher
-  downloads the author's 2.7.1 release when your folder has none or an older one, and never replaces a newer copy another mod brought.
+- **FH2 Mod Platform 2.7.2** (or newer) by Trinculo54, the `d3dcompiler_47.dll` next to `azimuth.exe` that loads the shim. The launcher
+  downloads the author's 2.7.2 release when your folder has none or an older one, and never replaces a newer copy another mod brought.
 - **[FH2 Extra Options](https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions) 0.2.98** by RokkuDayo, the only supported build. When the `winmm.dll` next to `azimuth.exe` is not that build, the launcher downloads the author's release (a setting turns that off; another `winmm.dll` is kept in `fh2extra`);
   by hand, put its `winmm.dll` and ini next to `azimuth.exe`, where the author's instructions put them.
 - Other FH2 Mod Platform mods load next to the shim; the platform refuses any hook of theirs that would overlap one of ours. Online play uses the server's car
-  database, so their **database** changes are off while you play through the launcher (`platform.log` and the title screen say so).
+  database, so their **database** changes are off while you play through the launcher (`platform.log` and the title screen say so). A
+  car database another mod put in `mediaoverride` (traffic cars, a car pack's) is kept in `fh2mp\gamedb-kept.slt` while you play online
+  and put back when you start the game without the launcher (offline); if you then remove it from `mediaoverride`, it isn't put back
+  again. With FH2MP turned off or removed, nothing puts it back: copy that file to `mediaoverride\Stripped\gamedbRC.slt` yourself. With
+  nothing kept, the server's database stays in `mediaoverride` offline too, so a car pack's database in `mediapc` isn't read. With FH2
+  Mod Platform 2.7.1, a mod's database changes are still made on the game's own database, not on the one put back.
 - Windows 10/11, or Linux with Proton/Wine.
 
 ## AI disclosure

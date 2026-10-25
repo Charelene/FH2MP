@@ -29,12 +29,18 @@ fi
 echo "clean ($(git diff --cached --name-only | wc -l) files)"
 
 echo "== tests"
-FH2MP_NO_KEYRING=1 launcher/.venv/bin/python launcher/tests/test_core.py 2>&1 | tail -2
-echo "== server tests (no database needed)"
-for t in server/test_security.py server/test_race_end.py server/test_freeroam_tag_grant.py server/test_send_queue.py server/test_parts.py server/test_xp_audit.py; do
-  [ -f "$t" ] || continue
-  echo "$t: $(python3 -W ignore "$t" 2>&1 | tail -1)"
+# Each suite runs on its own and its exit status decides (security audit 2026-10-25 F13: `echo "$(tests | tail -1)"` always succeeded).
+failed=0
+check() {
+  local out
+  if out=$("$@" 2>&1); then echo "  ok   $*"; else echo "  FAIL $*"; echo "$out" | tail -25 | sed 's/^/       /'; failed=1; fi
+}
+check env FH2MP_NO_KEYRING=1 launcher/.venv/bin/python launcher/tests/test_core.py
+check shim/test_sha256.sh
+for t in test_security test_world_capacity test_tunnel test_lobby_packing test_race_end test_freeroam_tag_grant test_send_queue test_parts test_xp_audit; do
+  check env -C server python3 -W ignore -m unittest "$t"
 done
+if [ "$failed" != 0 ]; then git reset -q; echo "tests failed: nothing was committed or published"; exit 1; fi
 
 # The commit message comes from release/notes/<tag>.commit.txt (the old fixed text is gone). No authorship trailers: this is the maintainer's release.
 msgfile="release/notes/$tag.commit.txt"

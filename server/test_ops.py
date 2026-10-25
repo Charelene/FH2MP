@@ -26,6 +26,9 @@ CREATE TABLE accounts (xuid INTEGER PRIMARY KEY, gamertag TEXT NOT NULL, created
 CREATE TABLE score_submissions (id INTEGER PRIMARY KEY AUTOINCREMENT, xuid INTEGER, sb INTEGER, st INTEGER, gsid INTEGER, track INTEGER,
     car INTEGER, cls INTEGER, cpi REAL, score REAL, clean INTEGER, stm INTEGER, tcs INTEGER, abs INTEGER,
     autobrake INTEGER NOT NULL DEFAULT 0, autoshift INTEGER NOT NULL DEFAULT 0, clutch INTEGER NOT NULL DEFAULT 0, submitted REAL, score_id BLOB);
+CREATE TABLE score_reports (submission_id INTEGER, browser TEXT, ip TEXT, created REAL, dismissed INTEGER DEFAULT 0,
+    PRIMARY KEY(submission_id, browser), UNIQUE(submission_id, ip));
+CREATE TABLE hidden_scores (submission_id INTEGER PRIMARY KEY, hidden_at REAL);
 CREATE TABLE score_ghosts (submission_id INTEGER PRIMARY KEY, data BLOB, uploaded REAL);
 CREATE TABLE player_xp (xuid INTEGER PRIMARY KEY, xp REAL NOT NULL, updated REAL NOT NULL);
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -69,6 +72,7 @@ class FakeAuth:
 
     def __init__(self):
         self.calls, self.fails = [], 0
+        self.blocked_file, self.blocked, self.blocked_words = (), (), ()
 
     def hit(self, key, limit, window):
         self.fails += 1
@@ -296,9 +300,11 @@ class ReadTests(unittest.TestCase):
         self.assertEqual(o["events"][0]["rows"], [])
 
     def test_players_search_and_paging(self):
+        self.lsp.DB.execute("UPDATE players SET career_level=2410000 WHERE xuid=1")
         _, o = call(self.lsp, "GET", "/ops/v1/players")
         self.assertEqual([p["gamertag"] for p in o["players"]], ["Alice", "Bob", "Cara"])      # most recently active first
         self.assertTrue(o["players"][0]["online"])
+        self.assertEqual(o["players"][0]["level"], 125)
         _, o = call(self.lsp, "GET", "/ops/v1/players?q=ob")
         self.assertEqual((o["total"], o["players"][0]["gamertag"]), (1, "Bob"))
         _, o = call(self.lsp, "GET", "/ops/v1/players?q=3")                                      # an xuid
@@ -380,6 +386,19 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(call(self.lsp, "PUT", "/ops/v1/config", bad)[0], 400, bad)
         self.assertEqual(self.lsp.AUTH.registration, "open")
         self.assertIsNone(self.lsp.DB.one("SELECT value FROM meta WHERE key='ops_config'"))
+
+    def test_gamertag_blocklist(self):
+        st, o = call(self.lsp, "PUT", "/ops/v1/config", {"blockedNames": [" Foo Bar ", "foobar", "b4d"], "blockedWords": ["Zed"]})
+        self.assertEqual((st, o["blockedNames"], o["blockedWords"]), (200, ["b4d", "foo bar", "foobar"], ["zed"]))
+        self.assertEqual(self.lsp.AUTH.blocked, ("bad", "foobar", "foobar"))
+        self.assertEqual(self.lsp.AUTH.blocked_words, ("zed",))
+        fresh = make_lsp()
+        fresh.DB = self.lsp.DB
+        ops_api.load_saved(fresh)
+        self.assertEqual(fresh.AUTH.blocked_words, ("zed",))
+        for bad in ({"blockedNames": "foo"}, {"blockedNames": ["x"]}, {"blockedWords": [5]}, {"blockedNames": ["a" * 41]},
+                    {"blockedNames": ["word"] * 501}):
+            self.assertEqual(call(self.lsp, "PUT", "/ops/v1/config", bad)[0], 400, bad)
 
     def test_news_and_hero_image(self):
         card = {"tag": "PATCH NOTES", "title": "Launcher rc6", "text": "Cuter.", "url": "https://github.com/x/y"}

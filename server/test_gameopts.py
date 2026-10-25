@@ -83,5 +83,181 @@ class FreeRoamTeams(unittest.TestCase):
         self.assertEqual(writes, [(2, 0)])
 
 
+class LapLimits(unittest.TestCase):
+    @staticmethod
+    def laps(value):
+        return 42, gameopts.NUM_LAPS_ID | (value << 10)
+
+    def test_real_payloads(self):
+        from test_freeroam_tag_grant import options
+        for name, expected in (("FR_CIRCUIT", 3), ("FR_SPRINT", 1), ("RT_LAPS", 2)):
+            size, payload = options(name)
+            self.assertEqual(gameopts.lap_field(size, payload)[1], expected)
+            self.assertEqual(gameopts.bounded_laps(size, payload), (size, payload, expected))
+        self.assertEqual(gameopts.lap_field(*parsed(NORMAL))[1], 3)
+        self.assertEqual(gameopts.lap_field(*parsed(TEAM))[1], 1)
+
+    def test_zero_huge_and_valid_counts(self):
+        for raw, expected in ((0, 1), (1, 1), (3, 3), (10, 10), (11, 10), (999999, 10), (0xFFFFFFFF, 10)):
+            size, payload, laps = gameopts.bounded_laps(*self.laps(raw))
+            self.assertEqual(laps, expected)
+            self.assertEqual(gameopts.lap_field(size, payload)[1], expected)
+
+    def test_missing_count_is_inserted_before_the_suffix(self):
+        size, payload = 12, gameopts.NUM_TEAMS_ID | (2 << 10)
+        n, v, laps = gameopts.bounded_laps(size, payload, default=7)
+        self.assertEqual((n, laps), (67, 7))
+        self.assertEqual(v >> 55, payload)
+        self.assertEqual(gameopts.bounded_laps(n, v, default=1), (n, v, 7))
+
+    def test_other_fields_are_unchanged(self):
+        size, payload, _ = gameopts.bounded_laps(*parsed(NORMAL))
+        offset, _ = gameopts.lap_field(size, payload)
+        mask = 0xFFFFFFFF << (offset + 10)
+        oversized = (payload & ~mask) | (1000 << (offset + 10))
+        n, v, _ = gameopts.bounded_laps(size, oversized)
+        self.assertEqual(n, size)
+        self.assertEqual(v & ~mask, payload & ~mask)
+        self.assertEqual(gameopts.num_teams(n, v), 0)
+
+    def test_a_lap_id_inside_a_track_value_is_not_modified(self):
+        fake = gameopts.NUM_LAPS_ID | (500000 << 10)
+        size, payload = 42, 4 | ((fake & 0xFFFFFFFF) << 10)
+        n, v, _ = gameopts.bounded_laps(size, payload)
+        self.assertEqual(v & ((1 << size) - 1), payload)
+        self.assertEqual(gameopts.lap_field(n, v)[1], 1)
+
+    def test_bucket_names_and_restriction_lists_are_skipped_by_their_native_sizes(self):
+        w = S.BitWriter()
+        w.bits(22, 10)  # first bucket name
+        w.bits(2, 5)
+        w.bits(ord('A'), 16)
+        w.bits(ord('B'), 16)
+        w.bits(67, 10)  # blacklist (50 u16s)
+        w.bits((1 << 800) - 1, 800)
+        w.bits(419, 10)
+        w.bits(100, 32)
+        n, v, laps = gameopts.bounded_laps(w.pos, w.value)
+        self.assertEqual(laps, 10)
+        self.assertEqual(v & ((1 << (w.pos - 42)) - 1), w.value & ((1 << (w.pos - 42)) - 1))
+
+    def test_none_end_condition_is_replaced_even_with_a_positive_lap_count(self):
+        payload = 418 | ((419 | (5 << 10)) << 13)
+        n, v, laps = gameopts.bounded_laps(55, payload)
+        self.assertEqual(gameopts.end_condition_type(n, v), 1)
+        self.assertEqual(laps, 5)
+
+    def test_timed_and_other_native_end_conditions_are_preserved(self):
+        for condition in range(2, 7):
+            payload = 418 | (condition << 10) | ((419 | (3 << 10)) << 13)
+            n, v, laps = gameopts.bounded_laps(55, payload)
+            self.assertEqual((n, v, laps), (55, payload, 3))
+
+    def test_truncated_or_out_of_order_prefix_is_rejected(self):
+        for size, payload in ((9, 419), (41, 419), (15, 22 | (25 << 10)), (20, 4 | (3 << 10))):
+            with self.assertRaises(ValueError):
+                gameopts.bounded_laps(size, payload)
+
+
+class LapSync(unittest.TestCase):
+    def setUp(self):
+        from test_freeroam_tag_grant import world
+        self.w, (self.host, self.guest) = world()
+        self.w.log = lambda *a: None
+        for q in (self.host, self.guest):
+            q.entered = True
+
+    def write_options(self, size, payload, seq=20):
+        msg = S.transfer_update_message(S.ROUTER_LOBBY, 0, S.LOBBY_ID_BITS, seq, size, payload)
+        self.w.handle(S.build_packet([msg]), self.host.addr)
+
+    def read_options(self, q):
+        value, bits = q.outbox[-1]
+        r = S.BitReader(value.to_bytes((bits + 7) // 8, 'little'))
+        self.assertEqual(r.bits(7), S.MSG_OBJECT_UPDATE)
+        self.assertEqual(r.bits(4), S.ROUTER_LOBBY)
+        self.assertEqual((r.bits(1), r.bits(1), r.bits(S.LOBBY_ID_BITS)), (1, 0, 0))
+        seq = r.bits(8)
+        size = r.bits(14)
+        return seq, size, r.bits(size)
+
+    def test_host_and_guest_receive_the_same_capped_options(self):
+        self.write_options(*LapLimits.laps(1000))
+        host_seq, size, payload = self.read_options(self.host)
+        self.assertEqual(host_seq, 21)  # follows the host's own write, so it accepts the correction
+        self.assertEqual(self.read_options(self.guest)[1:], (size, payload))
+        self.assertEqual(gameopts.lap_field(size, payload)[1], 10)
+        self.assertEqual(self.w.free_roam_laps, 10)
+        self.w.start_event(self.host)
+        self.assertEqual(self.w.event['numlaps'], 10)
+
+    def test_zero_is_corrected_on_the_host_as_well(self):
+        self.write_options(*LapLimits.laps(0))
+        self.assertEqual(gameopts.lap_field(*self.read_options(self.host)[1:])[1], 1)
+
+    def test_echo_stops_and_a_sparse_update_retains_the_count(self):
+        self.write_options(*LapLimits.laps(100))
+        options = self.w.game_options
+        guest_count = len(self.guest.outbox)
+        self.host.outbox.clear()
+        self.write_options(*options, seq=22)
+        self.assertEqual(self.w.game_options, options)
+        self.assertEqual(len(self.guest.outbox), guest_count)
+        self.assertEqual(self.host.outbox, [])
+        self.write_options(18, 6 | (3 << 10), seq=23)  # TimeOfDayIndex only
+        self.assertEqual(gameopts.lap_field(*self.w.game_options)[1], 10)
+        self.assertEqual(self.read_options(self.host)[1:], self.read_options(self.guest)[1:])
+
+    def test_default_is_explicit_before_the_start_flags(self):
+        self.w.set_console_bool = lambda *a: self.assertTrue(self.host.outbox and self.guest.outbox)
+        self.w.set_session_host_bool = lambda *a: None
+        self.w.start_event(self.host)
+        self.assertEqual(self.w.event['numlaps'], 1)
+        self.assertEqual(gameopts.lap_field(*self.w.game_options)[1], 1)
+
+    def test_road_trip_count_is_not_clamped(self):
+        self.w.roadtrip = True
+        self.write_options(*LapLimits.laps(25))
+        self.assertEqual(gameopts.lap_field(*self.w.game_options)[1], 25)
+        self.assertFalse(self.host.outbox)
+
+    def test_lap_zero_and_early_keyframes_do_not_finish_a_circuit(self):
+        self.w.game_options = parsed(NORMAL)
+        self.w.start_event(self.host)
+        ev = self.w.event
+        ev.update(racing=True, finished={})
+        def score(lap):
+            val = lambda t: int.from_bytes(S.struct.pack('<d', t), 'little')
+            self.w.note_lap_score(self.host, lap, [val(60), val(60), val(60 * max(1, lap))])
+        score(0)
+        score(1)
+        self.w.note_score_keyframe(self.host)
+        self.assertNotIn(self.host, ev['finished'])
+        score(2)
+        self.assertNotIn(self.host, ev['finished'])
+        score(3)
+        self.assertIn(self.host, ev['finished'])
+
+    def test_options_edits_cannot_change_a_race_that_is_loading_or_running(self):
+        self.write_options(*LapLimits.laps(3))
+        self.w.start_event(self.host)
+        for racing in (False, True):
+            self.w.event['racing'] = racing
+            self.write_options(*LapLimits.laps(9), seq=30 + racing)
+            self.assertEqual(self.w.free_roam_laps, 3)
+            self.assertEqual(gameopts.lap_field(*self.w.game_options)[1], 3)
+            self.assertEqual(gameopts.lap_field(*self.read_options(self.host)[1:])[1], 3)
+        self.w.event['over'] = True
+        self.write_options(*LapLimits.laps(9), seq=32)
+        self.assertEqual(self.w.free_roam_laps, 9)
+
+    def test_timed_mode_survives_a_sparse_update_and_does_not_use_lap_completion(self):
+        self.write_options(13, 418 | (2 << 10))
+        self.write_options(18, 6 | (3 << 10), seq=22)
+        self.assertEqual(gameopts.end_condition_type(*self.w.game_options), 2)
+        self.w.start_event(self.host)
+        self.assertIsNone(self.w.event['numlaps'])
+
+
 if __name__ == "__main__":
     unittest.main()

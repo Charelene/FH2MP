@@ -183,6 +183,12 @@ def start(settings, folder, extra_args=(), skip_launcher=True, extra_env=None):
         k, eq, v = line.strip().partition("=")
         if eq and k and not k.startswith("#") and k != "FH2MP_TOKEN":
             env[k.strip()] = v.strip()
+    # The chosen mode and save ID take precedence over inherited/developer environment settings.
+    env.pop("FH2MP_OFFLINE", None)
+    if (extra_env or {}).get("FH2MP_OFFLINE"):
+        env["FH2MP_OFFLINE"] = "1"
+        if extra_env.get("FH2MP_XUID"):
+            env["FH2MP_XUID"] = extra_env["FH2MP_XUID"]
     # the shim must find the session in its own folder, never in the environment of an unrelated process
     env.pop("FH2MP_TOKEN", None)
     try:

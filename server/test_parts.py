@@ -174,6 +174,95 @@ class CarFromParts(unittest.TestCase):
         self.assertIsNone(a.kick_reason)
         self.assertEqual(parts.find_parts(size, v2)[1][0], 368000)
 
+    # The part list of the object that wiped a prod lobby on 2026-10-23 (11 clients in one second): car 2179 with 14 ids the game does not have
+    # (engine row 3104018, 2503088, 2632208, 91001005 ...). 26 of 41 ids known, so find_parts (34 needed) did not see it and it was relayed as it was.
+    WIPING_LIST = [3104018, 2179000, 2179000, -1, 2503088, 2501596, 2179003, 2179003, 2503189, 2179000, 2179001, 2179001, 679003, 2632208, 679000,
+                   2632147, 2632182, 2632180, 2632170, 2632183, 679003, -1, 91001005, 679003, 2596593, -1, -1, -1, -1, 679003, 2256003, 2256003,
+                   2256003, 2256003, 2179000, 2179000, 2179000, 2179000, 2514043, 2514043, 2179003, 2179002, 92001010]
+
+    def wiping_object(self, body=None):
+        words = [w & 0xFFFFFFFF for w in self.WIPING_LIST]
+        if body is not None:
+            words[2] = body
+        return player_object(dict(enumerate(words)), 842, size=3641, seed=7)
+
+    def test_a_list_with_many_unknown_ids_is_found_by_its_shape_and_cleaned(self):
+        w, (a, b) = self.world()
+        w.log = lambda *_: None
+        size, v = self.wiping_object()
+        self.assertIsNone(parts.find_parts(size, v))        # the hole: the strict finder gives up
+        self.assertEqual(parts.find_shaped(size, v)[0], 842)
+        bad, hide, v2 = w.check_parts(a, size, v)
+        self.assertTrue(bad)
+        self.assertFalse(hide)
+        self.assertNotEqual(v2, v)
+        found = parts.find_parts(size, v2)                  # what the others get is a list every client can build
+        self.assertEqual(found[0], 842)
+        self.assertEqual(found[1][2], 2179000)              # the car itself stays
+        self.assertEqual([x for x in found[1] if x != P.PART_NONE and x not in P.ALL_IDS], [])
+        self.assertEqual(v2 & ~(((1 << (32 * P.PART_SLOTS)) - 1) << 842), v & ~(((1 << (32 * P.PART_SLOTS)) - 1) << 842))   # nothing else touched
+
+    def test_a_list_with_ids_in_the_slots_without_a_part_type_is_found_and_cleaned(self):
+        """Prod 2026-10-24 19:36:31: a mixed car (body 2287, rim / tire width / restrictor plate / motor ids in no catalog table, 9x ids in
+        slots 3, 22, 26 and 42) was "no part list found" and relayed untouched; three clients and a rig died within a second."""
+        w, (a, b) = self.world()
+        w.log = lambda *_: None
+        words = [P.PART_NONE] * P.PART_SLOTS
+        for k, t in P.SLOT_TABLE.items():
+            words[k] = min(P.TABLE_IDS[t])
+        words[2] = 2179000
+        for k, x in ((3, 94001010), (11, 900228713), (22, 91000980), (26, 93001005), (38, 1228700018), (39, 1228700039), (42, 92000995)):
+            words[k] = x
+        size, v = player_object(dict(enumerate(words)), 760, size=3799, seed=11)
+        self.assertIsNone(parts.find_parts(size, v))
+        self.assertIsNone(parts.find_shaped(size, v))
+        self.assertEqual(parts.find_loose(size, v)[0], 760)
+        bad, hide, v2 = w.check_parts(a, size, v)
+        self.assertTrue(bad)
+        self.assertFalse(hide)
+        found = parts.find_parts(size, v2)                  # what the others get: a list every client can build
+        self.assertEqual(found[0], 760)
+        self.assertEqual(found[1][2], 2179000)
+        self.assertEqual([x for x in found[1] if x != P.PART_NONE and x not in P.ALL_IDS], [])
+        self.assertEqual((found[1][3], found[1][26]), (P.PART_NONE, P.PART_NONE))
+
+    def test_noise_is_not_taken_for_a_loose_list(self):
+        size, v = player_object({}, 0, size=3799, seed=5)
+        self.assertIsNone(parts.find_loose(size, v))
+
+    def test_a_list_whose_body_is_no_car_of_the_game_gets_the_stand_in_parts(self):
+        import fh2mp_server as S
+        w, (a, b) = self.world()
+        w.log = lambda *_: None
+        size, v = self.wiping_object(body=7777000)
+        bad, hide, v2 = w.check_parts(a, size, v)
+        self.assertTrue(bad)
+        self.assertFalse(hide)
+        found = parts.find_parts(size, v2)
+        self.assertEqual(found[1][2], S.STANDIN_CAR * 1000)
+
+    def test_noise_without_the_shape_is_not_taken_for_a_part_list(self):
+        import random
+        random.seed(11)
+        for size in (1502, 2629, 3641):
+            self.assertIsNone(parts.find_shaped(size, random.getrandbits(size)))
+
+    def test_an_unreadable_object_is_dumped_whole_to_the_log_at_most_four_times_per_player(self):
+        import random
+        w, (a, b) = self.world()
+        logged = []
+        w.log = logged.append
+        random.seed(5)
+        size = 3641
+        v = random.getrandbits(size)                        # no part list in noise (the shape needs two -1 words 800 bits apart)
+        for _ in range(6):
+            bad, hide, v2 = w.check_parts(a, size, v)
+            self.assertEqual((bad, hide, v2), (False, False, v))        # still relayed as it came: this is a probe, not a rule
+        odd = [l for l in logged if "ODD OBJECT" in l]
+        self.assertEqual(len(odd), 4)
+        self.assertIn(f"{size} bits hex={v.to_bytes((size + 7) // 8, 'little').hex()}", odd[0])
+        self.assertIn(f"owner {a.owner_id} xuid {a.xuid:#x}", odd[0])
+
     def test_a_normal_car_is_left_alone(self):
         w, (a, b) = self.world()
         size, v = self.object_for(1110)                     # 1994 Mazda Miata
@@ -252,6 +341,25 @@ class RentalChoices(unittest.TestCase):
         self.assertAlmostEqual(pi, S.CAR_CHOICES[self.JAG][1], places=4)
         w.check_parts(a, size, v)                                # the same car again: nothing more to say
         self.assertEqual(len(relayed), 1)
+
+    def test_the_short_class_R_update_after_a_rentals_parts_is_corrected(self):
+        """Dev 2026-10-25, Road Trip car select: [81..87] with the real class, then the part list, then an 80-bit [81]=7 [82]=1.0 from the
+        rental's own game; the standings of the others showed "R 999"."""
+        import fh2mp_server as S
+        w, (a, b) = self.world()
+        w.remember_and_relay = lambda *x: None
+        bits, ch = choices_bits(*S.CAR_CHOICES[self.JAG])
+        w.note_choices(a, bits, ch)
+        size, v = player_object(dict(enumerate(stock_car(self.JAG))), 48, size=1502)
+        w.check_parts(a, size, v)
+        nbits, short = parts.choices_update(7, 1.0)
+        out = w.short_rental_choices(a, nbits, short)
+        cls, pi = parts.read_short_choices(out, parts.find_short_choices(nbits, out))
+        self.assertEqual(cls, 3)
+        self.assertAlmostEqual(pi, S.CAR_CHOICES[self.JAG][1], places=4)
+        w2, (c, _d) = self.world()                                 # a car that is not a rental keeps what its game sent
+        self.assertEqual(w2.short_rental_choices(c, nbits, short), short)
+        self.assertIsNone(parts.find_short_choices(40, 27 | (722772 << 8)))      # other 40-bit vars (id 27) are not choices
 
     def test_a_later_choices_update_of_a_rental_is_corrected_too(self):
         import fh2mp_server as S

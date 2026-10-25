@@ -1,16 +1,37 @@
 import math
+import sys
 
 from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPointF, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetrics, QGuiApplication, QIcon, QKeySequence, QLinearGradient, QPainter, QPainterPath,
                            QPalette, QPen, QPixmap, QRadialGradient, QShortcut)
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QLabel, QMenu, QPushButton,
-                               QSizePolicy, QTextBrowser, QVBoxLayout, QWidget)
+                               QFileDialog, QSizePolicy, QTextBrowser, QVBoxLayout, QWidget)
 
 from . import theme
+
+# Qt's native file dialog on Linux goes through GTK, which on Wayland fails to attach to a parented Qt window
+# (gdk_x11_window_get_xid assertion): the dialog never appears and the parent stays blocked. Qt's own dialog works everywhere.
+_FD = QFileDialog.Option.DontUseNativeDialog if sys.platform.startswith("linux") else QFileDialog.Option(0)
+
+
+def open_file(parent, title, start, filt):
+    return QFileDialog.getOpenFileName(parent, title, start, filt, options=_FD)[0]
+
+
+def save_file(parent, title, start, filt):
+    return QFileDialog.getSaveFileName(parent, title, start, filt, options=_FD)[0]
+
+
+def pick_dir(parent, title, start):
+    return QFileDialog.getExistingDirectory(parent, title, start, _FD)
 
 # Stroke icons on a 24-unit grid (QtSvg is not shipped): each is a list of ("line", x1, y1, ...) polylines, ("loop", ...) closed
 # polylines, ("circle", cx, cy, r), ("dot", cx, cy) and ("cog", teeth, outer r, root r, hole r).
 ICONS = {
+    "pc": [("loop", 3, 4, 21, 4, 21, 16, 3, 16), ("line", 12, 16, 12, 21), ("line", 7, 21, 17, 21)],
+    "globe": [("circle", 12, 12, 9), ("ellipse", 12, 12, 4.5, 9), ("line", 3, 12, 21, 12)],
+    "arrow-right": [("line", 4, 12, 20, 12), ("line", 14, 6, 20, 12, 14, 18)],
+    "arrow-left": [("line", 20, 12, 4, 12), ("line", 10, 6, 4, 12, 10, 18)],
     "gear": [("cog", 8, 10.2, 7.6, 3.2)],
     "down": [("line", 5, 9, 12, 16, 19, 9)],
     "up": [("line", 5, 15, 12, 8, 19, 15)],
@@ -46,6 +67,44 @@ def _cog(teeth, outer, root):
     return path
 
 
+def _cloud_off():
+    # Google Material Icons, Apache-2.0 (assets/LICENSE-Material-Icons.txt).
+    # https://github.com/google/material-design-icons/blob/master/src/file/cloud_off/materialicons/24px.svg
+    path = QPainterPath()
+    path.moveTo(19.35, 10.04)
+    path.cubicTo(18.67, 6.59, 15.64, 4, 12, 4)
+    path.cubicTo(10.52, 4, 9.15, 4.43, 7.99, 5.17)
+    path.lineTo(9.45, 6.63)
+    path.cubicTo(10.21, 6.23, 11.08, 6, 12, 6)
+    path.cubicTo(15.04, 6, 17.5, 8.46, 17.5, 11.5)
+    path.lineTo(17.5, 12)
+    path.lineTo(19, 12)
+    path.cubicTo(20.66, 12, 22, 13.34, 22, 15)
+    path.cubicTo(22, 16.13, 21.36, 17.11, 20.44, 17.62)
+    path.lineTo(21.89, 19.07)
+    path.cubicTo(23.16, 18.16, 24, 16.68, 24, 15)
+    path.cubicTo(24, 12.36, 21.95, 10.22, 19.35, 10.04)
+    path.closeSubpath()
+    path.moveTo(3, 5.27)
+    path.lineTo(5.75, 8.01)
+    path.cubicTo(2.56, 8.15, 0, 10.77, 0, 14)
+    path.cubicTo(0, 17.31, 2.69, 20, 6, 20)
+    path.lineTo(17.73, 20)
+    path.lineTo(19.73, 22)
+    path.lineTo(21, 20.73)
+    path.lineTo(4.27, 4)
+    path.lineTo(3, 5.27)
+    path.closeSubpath()
+    path.moveTo(7.73, 10)
+    path.lineTo(15.73, 18)
+    path.lineTo(6, 18)
+    path.cubicTo(3.79, 18, 2, 16.21, 2, 14)
+    path.cubicTo(2, 11.79, 3.79, 10, 6, 10)
+    path.lineTo(7.73, 10)
+    path.closeSubpath()
+    return path
+
+
 def paint_icon(p, name, rect, colour, width=1.8, angle=0.0):
     s = min(rect.width(), rect.height()) / 24.0
     ox, oy = rect.x() + (rect.width() - 24 * s) / 2, rect.y() + (rect.height() - 24 * s) / 2
@@ -58,11 +117,19 @@ def paint_icon(p, name, rect, colour, width=1.8, angle=0.0):
         p.translate(12, 12)
         p.rotate(angle)
         p.translate(-12, -12)
+    if name == "cloud_off":
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(colour))
+        p.drawPath(_cloud_off())
+        p.restore()
+        return
     p.setPen(pen)
     p.setBrush(Qt.BrushStyle.NoBrush)
     for kind, *v in ICONS[name]:
         if kind == "circle":
             p.drawEllipse(QPointF(v[0], v[1]), v[2], v[2])
+        elif kind == "ellipse":
+            p.drawEllipse(QPointF(v[0], v[1]), v[2], v[3])
         elif kind == "cog":
             p.drawPath(_cog(v[0], v[1], v[2]))
             p.drawEllipse(QPointF(12, 12), v[3], v[3])
@@ -257,6 +324,8 @@ class IconButton(HoverButton):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         bg = mix(mix(theme.SURFACE0, theme.SURFACE1, self.h.v), theme.MANTLE, self.d.v * 0.5)
+        if not self.isEnabled():
+            p.setOpacity(0.35)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(bg)
         p.drawRoundedRect(QRectF(self.rect()), self.radius, self.radius)

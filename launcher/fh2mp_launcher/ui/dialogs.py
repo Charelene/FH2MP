@@ -4,14 +4,14 @@ import sys
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtCore import QUrl
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-                               QFrame, QLayout, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+                               QFrame, QLayout, QPlainTextEdit, QPushButton, QScrollArea, QToolButton, QVBoxLayout, QWidget)
 
-from .. import azimuth, keystore, launch, paths
+from .. import azimuth, crashreport, keystore, launch, paths, saves
 from ..api import ApiError
 from ..core import friendly
 from . import images, theme
-from .widgets import Avatar, hrule
+from .widgets import Avatar, Icon, IconButton, hrule, open_file, pick_dir, save_file
 from .workers import run_async
 
 
@@ -62,7 +62,7 @@ class NameCheck:
         self.ok = False
         name = self.edit.text().strip()
         if not name:
-            self._set(False, "3 to 15 characters: letters, digits, space . _ -")
+            self._set(False, "3 to 15 characters: letters, digits and spaces, starting with a letter")
             return
         self._set(False, "checking...")
         self.timer.start(400)
@@ -131,11 +131,135 @@ class RecoveryDialog(QDialog):
         fixed(self, 560)
 
     def _save(self, code):
-        p, _ = QFileDialog.getSaveFileName(self, "Save recovery code", os.path.expanduser("~/fh2mp-recovery-code.txt"), "Text (*.txt)")
+        p = save_file(self, "Save recovery code", os.path.expanduser("~/fh2mp-recovery-code.txt"), "Text (*.txt)")
         if p:
             fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w") as f:
                 f.write("FH2MP recovery code. Keep it private.\n\n" + code + "\n")
+
+
+class CrashReportDialog(QDialog):
+    """"Looks like the game crashed. Would you like to send a report?" with the exact data listed (fold-out) and files that open on click.
+    Closes with accept() when the player answered (Yes sent, or No), reject() on the window's close button; `ask_again` says what to remember."""
+
+    def __init__(self, lc, report, parent=None):
+        super().__init__(parent)
+        self.lc, self.report = lc, report
+        self.setWindowTitle("Crash report")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(28, 26, 28, 26)
+        lay.setSpacing(14)
+        t = QLabel("Looks like the game crashed. Would you like to send a report?")
+        t.setObjectName("h2")
+        t.setWordWrap(True)
+        lay.addWidget(t)
+        m = QLabel("This will help identify the cause and fix the issue. A short summary (the details below, the crash line and the end of "
+                   "azimuth.log) becomes a public issue on GitHub; the logs and the crash dump stay private on the FH2MP server.")
+        m.setObjectName("muted")
+        m.setWordWrap(True)
+        lay.addWidget(m)
+
+        self.fold = QToolButton()
+        self.fold.setText("Here's the data that will be sent")
+        self.fold.setCheckable(True)
+        self.fold.setArrowType(Qt.ArrowType.RightArrow)
+        self.fold.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.fold.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.fold.setStyleSheet(f"QToolButton {{ border: none; background: transparent; color: {theme.MUTED}; padding: 4px 0; }}"
+                                f"QToolButton:hover {{ color: {theme.WHITE}; }}")
+        self.fold.toggled.connect(self._toggle)
+        lay.addWidget(self.fold, 0, Qt.AlignmentFlag.AlignLeft)
+        self.details = QFrame()                  # the data, in monospace on a darker panel
+        self.details.setObjectName("crashdata")
+        self.details.setStyleSheet(f"QFrame#crashdata {{ background: {theme.CRUST}; border: 1px solid {theme.BORDER}; border-radius: 10px; }}"
+                                   f"QFrame#crashdata QLabel {{ background: transparent; font-family: monospace; font-size: 14px; padding: 0; }}"
+                                   f"QFrame#crashdata QLabel#small {{ color: {theme.MUTED}; font-size: 12px; }}")
+        dl = QVBoxLayout(self.details)
+        dl.setContentsMargins(24, 16, 24, 16)
+        dl.setSpacing(12)
+        form = QFormLayout()
+        form.setHorizontalSpacing(52)
+        form.setVerticalSpacing(4)
+        for label, value in report.fields:
+            v = QLabel(value)
+            v.setWordWrap(True)
+            v.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            name = QLabel(label + ":")
+            name.setObjectName("muted")                   # the name dim, the value bright
+            form.addRow(name, v)
+        dl.addLayout(form)
+        dl.addWidget(hrule())
+        files = QVBoxLayout()
+        files.setSpacing(3)
+        files.addWidget(QLabel("Files:"))
+        dl.addLayout(files)
+        for name, path, size in report.sizes(os.path.join(paths.cache_dir(), "crash-report-preview")):
+            label = f'<a href="{QUrl.fromLocalFile(path).toString()}">{name}</a>' if path else name
+            link = QLabel(f'{label} <span style="color:{theme.MUTED}">{crashreport.human_size(size)}</span>')
+            link.setTextFormat(Qt.TextFormat.RichText)
+            link.setOpenExternalLinks(True)
+            files.addWidget(link)
+        dl.addWidget(hrule())
+        note = QLabel("The files open as they will be sent: folder names with your user name, e-mail and IP addresses and anything that looks "
+                      "like a password or key are blanked. Public on GitHub: the details above, the crash line, the Mod Platform crash report "
+                      "and the last 40 lines of azimuth.log. Kept private on the server for 90 days: the full logs and the crash dump.")
+        note.setObjectName("small")
+        note.setWordWrap(True)
+        dl.addWidget(note)
+        self.details.hide()                      # opens collapsed
+        lay.addWidget(self.details)
+
+        self.never = QCheckBox("Do not ask me again")
+        lay.addWidget(self.never)
+        self.msg = QLabel("")
+        self.msg.setWordWrap(True)
+        self.msg.hide()
+        lay.addWidget(self.msg)
+        bottom = QHBoxLayout()
+        bottom.addStretch(1)
+        self.no = QPushButton("No")
+        self.no.setMinimumWidth(120)
+        self.no.clicked.connect(self.accept)
+        self.yes = QPushButton("Yes")
+        self.yes.setMinimumWidth(120)
+        self.yes.setObjectName("primary")
+        self.yes.clicked.connect(self._send)
+        bottom.addWidget(self.no)
+        bottom.addWidget(self.yes)
+        lay.addLayout(bottom)
+        fixed(self, 640)
+
+    @property
+    def ask_again(self):
+        return not self.never.isChecked()
+
+    def _toggle(self, on):
+        self.fold.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)
+        self.details.setVisible(on)
+
+    def _say(self, text, colour):
+        self.msg.setText(text)
+        self.msg.setStyleSheet(f"color: {colour};")
+        self.msg.setVisible(bool(text))
+
+    def _send(self):
+        self.yes.setEnabled(False)
+        self.no.setEnabled(False)
+        self._say("Sending...", theme.MUTED)
+
+        def done(_r):
+            self._say("Report sent. Thank you!", theme.GOOD)
+            self.no.setText("Close")
+            self.no.setEnabled(True)
+            self.yes.hide()
+            self.never.setEnabled(False)       # the question is over; the box still counts
+
+        def failed(e):
+            self._say(f"Could not send the report: {friendly(e)}", theme.BAD)
+            self.yes.setText("Try again")
+            self.yes.setEnabled(True)
+            self.no.setEnabled(True)
+        run_async(lambda j: self.lc.api().crash_report(self.report.payload()), done, failed)
 
 
 class ProfileDialog(QDialog):
@@ -194,7 +318,7 @@ class ProfileDialog(QDialog):
         fixed(self, 440)
 
     def _pick(self):
-        p, _ = QFileDialog.getOpenFileName(self, "Choose a picture", os.path.expanduser("~"), "Images (*.png *.jpg *.jpeg *.webp *.bmp)")
+        p = open_file(self, "Choose a picture", os.path.expanduser("~"), "Images (*.png *.jpg *.jpeg *.webp *.bmp)")
         if not p:
             return
         res = images.prepare(p)
@@ -251,6 +375,277 @@ class ProfileDialog(QDialog):
         run_async(work, ok, failed)
 
 
+def offer_save_elevation(parent, error):
+    box = QMessageBox(parent)
+    box.setWindowTitle("Save copy failed")
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setText("We need permission to copy your save.")
+    box.setInformativeText("Try again with administrator access? Your saves will be backed up first.")
+    box.setDetailedText(str(error))
+    retry = box.addButton("Retry as administrator", QMessageBox.ButtonRole.AcceptRole)
+    cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+    box.setDefaultButton(cancel)
+    box.exec()
+    return box.clickedButton() == retry
+
+
+class SaveManagerDialog(QDialog):
+    def __init__(self, lc, folder, parent=None):
+        super().__init__(parent)
+        self.lc, self.folder, self.busy = lc, folder, False
+        self.default_path = azimuth.account_save_path(folder, 0x9000000000000)
+        self.account_path = azimuth.account_save_path(folder, lc.settings["xuid"]) if lc.settings["xuid"] else ""
+        self.default_source = self.default_path
+        self.setWindowTitle("Save manager")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(28, 26, 28, 22)
+        lay.setSpacing(16)
+        title = QLabel("Your saves")
+        title.setObjectName("title")
+        lay.addWidget(title)
+        subtitle = QLabel("FH2MP uses the same save online and offline. Import or export an Azimuth save here.")
+        subtitle.setWordWrap(True)
+        subtitle.setObjectName("muted")
+        lay.addWidget(subtitle)
+        row = QHBoxLayout()
+        row.setSpacing(18)
+        self.default_status, self.account_status = QLabel(), QLabel()
+
+        def card(icon, title, subtitle, status, colour):
+            frame = QFrame()
+            frame.setObjectName("card")
+            frame.setFixedSize(210, 254)
+            contents = QVBoxLayout(frame)
+            contents.setContentsMargins(16, 20, 16, 20)
+            contents.setSpacing(8)
+            contents.addWidget(Icon(icon, colour, 100), alignment=Qt.AlignmentFlag.AlignHCenter)
+            heading = QLabel(title)
+            heading.setObjectName("h2")
+            heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            contents.addWidget(heading)
+            detail = QLabel(subtitle)
+            detail.setObjectName("small")
+            detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            detail.setTextFormat(Qt.TextFormat.PlainText)
+            contents.addWidget(detail)
+            contents.addStretch()
+            status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            status.setObjectName("small")
+            contents.addWidget(status)
+            return frame
+
+        row.addWidget(card("pc", "Azimuth", "Default save", self.default_status, theme.BLUE))
+        arrows = QVBoxLayout()
+        arrows.setSpacing(6)
+        arrows.addStretch()
+        self.import_save = IconButton("arrow-right", size=64, radius=18, icon_px=32, label_text="Import Azimuth save into FH2MP")
+        self.import_save.setToolTip("Replace your FH2MP save, used for both online and offline play, with this Azimuth save")
+        self.import_save.clicked.connect(lambda: self._copy(self.default_source, self.account_path))
+        arrows.addWidget(self.import_save, alignment=Qt.AlignmentFlag.AlignHCenter)
+        online_label = QLabel("Import save")
+        online_label.setObjectName("small")
+        arrows.addWidget(online_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        arrows.addSpacing(16)
+        self.export_save = IconButton("arrow-left", size=64, radius=18, icon_px=32, label_text="Export FH2MP save to Azimuth")
+        self.export_save.setToolTip("Copy your FH2MP progress to Azimuth's default save")
+        self.export_save.clicked.connect(lambda: self._copy(self.account_path, self.default_path))
+        arrows.addWidget(self.export_save, alignment=Qt.AlignmentFlag.AlignHCenter)
+        offline_label = QLabel("Export save")
+        offline_label.setObjectName("small")
+        arrows.addWidget(offline_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        arrows.addStretch()
+        row.addLayout(arrows)
+        row.addWidget(card("globe", "FH2MP", "Online + offline", self.account_status, theme.ACCENT))
+        lay.addLayout(row)
+        reassurance = QLabel("A backup is kept every time you copy a save.")
+        reassurance.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        reassurance.setObjectName("small")
+        lay.addWidget(reassurance)
+        self.message = QLabel()
+        self.message.setWordWrap(True)
+        self.message.setTextFormat(Qt.TextFormat.PlainText)
+        self.message.hide()
+        lay.addWidget(self.message)
+        self.more = QPushButton("More options")
+        self.more.setFlat(True)
+        self.more.setCheckable(True)
+        lay.addWidget(self.more, alignment=Qt.AlignmentFlag.AlignLeft)
+        self.advanced = QWidget()
+        self.options = QScrollArea()
+        self.options.setWidgetResizable(True)
+        self.options.setFrameShape(QFrame.Shape.NoFrame)
+        self.options.setWidget(self.advanced)
+        self.options.setFixedHeight(180)
+        self.options.hide()
+        self.more.toggled.connect(self.options.setVisible)
+        lay.addWidget(self.options)
+        bottom = QHBoxLayout()
+        bottom.addStretch()
+        close = QPushButton("Done")
+        close.clicked.connect(self.reject)
+        bottom.addWidget(close)
+        lay.addLayout(bottom)
+        lay = QVBoxLayout(self.advanced)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(QLabel("Source profile"))
+        self.source = QComboBox()
+        self.source.setMinimumContentsLength(30)
+        self.source.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        lay.addWidget(self.source)
+        choose = QPushButton("Choose profile / backup folder...")
+        choose.clicked.connect(self._browse_source)
+        lay.addWidget(choose)
+        self.info = QLabel()
+        self.info.setWordWrap(True)
+        self.info.setTextFormat(Qt.TextFormat.PlainText)
+        lay.addWidget(self.info)
+        lay.addWidget(QLabel("Destination"))
+        self.target = QComboBox()
+        if lc.settings["xuid"]:
+            self.target.addItem("FH2MP account", azimuth.account_save_path(folder, lc.settings["xuid"]))
+        self.target.addItem("Azimuth default (User_9000000000000)", azimuth.account_save_path(folder, 0x9000000000000))
+        lay.addWidget(self.target)
+        self.target_info = QLabel()
+        self.target_info.setWordWrap(True)
+        self.target_info.setTextFormat(Qt.TextFormat.PlainText)
+        lay.addWidget(self.target_info)
+        self.copy = QPushButton("Back up and copy save")
+        self.copy.setObjectName("primary")
+        self.copy.clicked.connect(self._copy)
+        lay.addWidget(self.copy)
+        backups = QPushButton("Open backups")
+        backups.clicked.connect(lambda: open_folder(os.path.join(os.path.dirname(self.target.currentData()), "fh2mp-save-backups")))
+        lay.addWidget(backups)
+        self.source.currentIndexChanged.connect(self._details)
+        self.target.currentIndexChanged.connect(self._details)
+        try:
+            folders = [folder, *[p for p in azimuth.find_candidates() if os.path.realpath(p) != os.path.realpath(folder)]]
+            for f in folders:
+                for p in azimuth.save_profiles(f):
+                    self.source.addItem(p, p)
+        except OSError as e:
+            self.message.setText("Some saves couldn't be found. You can choose one in More options.")
+            self.message.setToolTip(str(e))
+            self.message.show()
+        if not os.path.isdir(self.default_path):
+            defaults = [self.source.itemData(i) for i in range(self.source.count())
+                        if os.path.basename(self.source.itemData(i)) == azimuth.LEGACY_SAVE_DIR]
+            if defaults:
+                self.default_source = defaults[0]
+        self._details()
+        fixed(self, 640)
+
+    def reject(self):
+        if not self.busy:
+            super().reject()
+
+    def _describe(self, path):
+        from datetime import datetime
+        try:
+            st = os.stat(path)
+            created = getattr(st, "st_birthtime", None)
+            birth = datetime.fromtimestamp(created).strftime("%Y-%m-%d %H:%M:%S") if created else "unavailable"
+            saved = azimuth._saved_at(path)
+            modified = datetime.fromtimestamp(saved).strftime("%Y-%m-%d %H:%M:%S") if saved else "unavailable"
+            return f"{path}\nCreated: {birth} · Last saved: {modified}"
+        except FileNotFoundError:
+            return f"{path}\nNo profile yet"
+        except OSError as e:
+            return f"{path}\nCannot read profile: {e}"
+
+    def _details(self, *_args):
+        source, target = self.source.currentData(), self.target.currentData()
+        self.info.setText(self._describe(source) if source else "Choose a User_<HEX> folder containing revisions.")
+        self.target_info.setText(self._describe(target) if target else "")
+        self.copy.setEnabled(bool(source and target and os.path.realpath(source) != os.path.realpath(target)) and not self.busy)
+        if os.path.isdir(self.default_path):
+            self.default_source = self.default_path
+        self.default_status.setText(self._save_status(self.default_source))
+        self.account_status.setText(self._save_status(self.account_path) if self.account_path else "Sign in to use this save")
+        self.import_save.setEnabled(bool(self.account_path and self._has_save(self.default_source)) and not self.busy)
+        self.export_save.setEnabled(bool(self.account_path and self._has_save(self.account_path)) and not self.busy)
+
+    def _has_save(self, path):
+        return bool(path and os.path.isdir(os.path.join(path, "revisions")))
+
+    def _save_status(self, path):
+        from datetime import datetime
+        try:
+            if not self._has_save(path):
+                return "No save yet"
+            saved = azimuth._saved_at(path)
+            return "Last played\n" + datetime.fromtimestamp(saved).strftime("%d %b %Y · %H:%M") if saved else "Save found"
+        except OSError:
+            return "Unable to read save"
+
+    def _browse_source(self):
+        if self.busy:
+            return
+        p = pick_dir(self, "Choose User_<HEX> or a backup's source / destination folder", self.folder)
+        if p:
+            self.source.addItem(p, p)
+            self.source.setCurrentIndex(self.source.count() - 1)
+
+    def _copy(self, source=None, target=None):
+        if self.busy:
+            return
+        if self.lc.game_running():
+            QMessageBox.warning(self, "Game running", "Close the game and Azimuth before copying saves.")
+            return
+        source = source or self.source.currentData()
+        target = target or self.target.currentData()
+        if not source or not target:
+            return
+        destination = "FH2MP" if target == self.account_path else "Azimuth default"
+        title = f"Replace your {destination} save?"
+        if QMessageBox.question(self, "Replace destination save?",
+                               f"{title}\n\n"
+                               + ("This replaces your progress for both online and offline FH2MP play. "
+                                  if target == self.account_path else "This replaces your Azimuth default progress. ")
+                               + "A backup of both saves will be kept.\n\n"
+                               "Close the game and Azimuth before continuing.",
+                               QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                               QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        self._transfer(source, target)
+
+    def _transfer(self, source, target, elevated=False):
+        self.busy = True
+        self.more.setEnabled(False)
+        self.source.setEnabled(False)
+        self.target.setEnabled(False)
+        self._details()
+        self.message.setText("Backing up and copying saves...")
+        self.message.show()
+
+        def finished():
+            self.busy = False
+            self.more.setEnabled(True)
+            self.source.setEnabled(True)
+            self.target.setEnabled(True)
+            self._details()
+
+        def ok(backup):
+            finished()
+            destination = "FH2MP" if target == self.account_path else "Azimuth default"
+            self.message.setText(f"Your {destination} save has been updated. A backup has been kept.")
+
+        def fail(e):
+            finished()
+            self.message.setText("We couldn't copy your save. Please try again.")
+            self.message.setToolTip(str(e))
+            if isinstance(e, saves.SaveCopyError) and e.permission and offer_save_elevation(self, e):
+                self._transfer(source, target, elevated=True)
+            elif not isinstance(e, saves.SaveCopyError) or not e.permission:
+                box = QMessageBox(self)
+                box.setWindowTitle("Couldn't copy save")
+                box.setText("We couldn't copy your save. Close the game and Azimuth, then try again.")
+                box.setDetailedText(str(e))
+                box.exec()
+
+        run_async(lambda j: saves.elevated_copy(source, target) if elevated else saves.copy_profile(source, target), ok, fail)
+
+
 class SettingsDialog(QDialog):
     def __init__(self, lc, parent=None):
         super().__init__(parent)
@@ -270,6 +665,10 @@ class SettingsDialog(QDialog):
         row.addWidget(self.azdir, 1)
         row.addWidget(b)
         lay.addLayout(row)
+        self.offline = QCheckBox("Offline mode (solo play)")
+        self.offline.setToolTip("Play solo without connecting to FH2MP, using the same local save as online play.")
+        self.offline.setChecked(s["offline_mode"])
+        lay.addWidget(self.offline)
         self.extra_opts = QCheckBox("Install FH2 Extra Options if it is missing (by RokkuDayo, GPL-3.0)")
         self.extra_opts.setToolTip("The Social, Clubs, Rivals and Marketplace menus and several game fixes come from this free mod. "
                                    "The launcher downloads the author's release from GitHub (a pinned build) and puts it next to azimuth.exe as winmm.dll. "
@@ -281,6 +680,9 @@ class SettingsDialog(QDialog):
                             "TCP to the server, which adds delay. Needs the server to offer it.")
         self.tcp.setChecked(s["tcp_fallback"])
         lay.addWidget(self.tcp)
+        self.crash_ask = QCheckBox("Offer to send a report when the game crashes")
+        self.crash_ask.setChecked(s["crash_report_ask"])
+        lay.addWidget(self.crash_ask)
 
         if sys.platform != "win32":
             lay.addWidget(hrule())
@@ -365,7 +767,8 @@ class SettingsDialog(QDialog):
 
         lay.addWidget(hrule())
         tools = QHBoxLayout()
-        for text, fn in (("Data folder", lambda: open_folder(paths.config_dir())), ("Recovery code", self._recovery)):
+        for text, fn in (("Data folder", lambda: open_folder(paths.config_dir())), ("Recovery code", self._recovery),
+                         ("Save manager", self._saves)):
             bt = QPushButton(text)
             bt.clicked.connect(fn)
             tools.addWidget(bt)
@@ -385,13 +788,12 @@ class SettingsDialog(QDialog):
         fixed(self, 560 if not dev else 620)
 
     def _browse(self):
-        d = QFileDialog.getExistingDirectory(self, "Folder with azimuth.exe", self.azdir.text() or os.path.expanduser("~"))
+        d = pick_dir(self, "Folder with azimuth.exe", self.azdir.text() or os.path.expanduser("~"))
         if d:
             self.azdir.setText(d)
 
     def _shim_from_file(self):
-        p, _ = QFileDialog.getOpenFileName(self, "Shim DLL or zip", self.lc.settings["dev_shim_path"] or _repo_shim_dir() or os.path.expanduser("~"),
-                                           "Shim (*.dll *.zip)")
+        p = open_file(self, "Shim DLL or zip", self.lc.settings["dev_shim_path"] or _repo_shim_dir() or os.path.expanduser("~"), "Shim (*.dll *.zip)")
         if p:
             self._install_local(p)
 
@@ -413,6 +815,13 @@ class SettingsDialog(QDialog):
         if self.lc.identity:
             RecoveryDialog(self.lc, self).exec()
 
+    def _saves(self):
+        folder = self.azdir.text().strip()
+        if not folder or not os.path.isfile(os.path.join(folder, "azimuth.exe")):
+            QMessageBox.warning(self, "Azimuth folder", "Choose a folder containing azimuth.exe first.")
+            return
+        SaveManagerDialog(self.lc, os.path.abspath(folder), self).exec()
+
     def _save(self):
         s = self.lc.settings
         d = self.azdir.text().strip()
@@ -426,8 +835,10 @@ class SettingsDialog(QDialog):
                 QMessageBox.warning(self, "Proton", str(e))
                 return
         s["azimuth_dir"] = d
+        s["offline_mode"] = self.offline.isChecked()
         s["extra_options"] = self.extra_opts.isChecked()
         s["tcp_fallback"] = self.tcp.isChecked()
+        s["crash_report_ask"] = self.crash_ask.isChecked()
         if paths.is_dev():                          # players cannot change the channel or the server
             s["channel"] = self.channel.currentData()
             s["check_updates"] = self.check_updates.isChecked()

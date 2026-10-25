@@ -5,6 +5,13 @@ import sys
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] in (["--save-copy"], ["--save-adopt"]):
+        from .saves import helper_dispatch
+        try:
+            return helper_dispatch(argv)
+        except (OSError, ValueError) as e:
+            print(str(e), file=sys.stderr)
+            return 1
     if "--dev" in argv:                            # the developer launcher: same program, own settings/key/cache (see paths.is_dev)
         argv.remove("--dev")
         os.environ["FH2MP_DEV"] = "1"

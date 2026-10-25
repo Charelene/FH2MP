@@ -54,7 +54,8 @@ body:
     id: launcher
     attributes:
       label: Launcher version
-      placeholder: "1.0.0-rc2"
+      description: Look it up in the launcher; do not copy the example.
+      placeholder: "e.g. 1.2.3"
     validations:
       required: true
   - type: input

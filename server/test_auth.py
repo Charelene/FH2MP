@@ -155,15 +155,16 @@ class RegisterTests(AuthCase):
 
     def test_gamertag_rules(self):
         for bad in ("ab", "x" * 16, "two  spaces", "emoji\U0001F600x", "semi;colon", "Admin", "Adm1n", "ADM-IN", "moderator1",
-                    "xX_Staff_Xx", "Player123", "Turn_10", "hitler", "H1tler"):
+                    "xX Staff Xx", "Player123", "Turn 10",
+                    "4K", "9VOLT", "Drift_King", "A.B.C", "Max-L"):
             self.assertEqual(self.code(auth.validate_gamertag, bad), "bad_gamertag", bad)
-        for good in ("abc", "Speedy Gonzo", "Drift-King_99", "x" * 15, "A.B.C", "Spicy Pepper", "Mike"):
+        for good in ("abc", "Speedy Gonzo", "DriftKing99", "x" * 15, "Spicy Pepper", "Mike", "K47"):
             self.assertEqual(auth.validate_gamertag(good), good)
         self.assertEqual(auth.validate_gamertag("  padded  "), "padded")
 
     def test_gamertags_are_unique_after_folding(self):
         self.svc.register(**Device().register_args(self.svc, "Fast Eddie"))
-        for dup in ("fast eddie", "FASTEDDIE", "Fast_Eddie", "F4st Eddie", "Fa5t.Edd1e"):
+        for dup in ("fast eddie", "FASTEDDIE", "F4st Eddie", "Fa5t Edd1e"):
             self.assertEqual(self.code(self.svc.register, **Device().register_args(self.svc, dup)), "gamertag_taken", dup)
 
     def test_one_account_per_key(self):

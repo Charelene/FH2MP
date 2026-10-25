@@ -11,7 +11,8 @@
  *      arguments (stock Azimuth always returns argv == [""]), and patches Azimuth's fixed Xbox user id.
  *   2. once the platform says the game's code is ready (mapped, and Extra Options done with it), applies
  *      the game patches (Winsock, matchmaking groups, traffic, STS auth) and starts the monitor.
- *   3. once every mod has started, puts the car database the launcher synced in the game's mediaoverride folder.
+ *   3. once every mod has started, puts the car database the launcher synced in the game's mediaoverride folder, keeping the one
+ *      another mod had there, which it puts back when the game starts without the server's database (offline).
  *
  * Argument sources, in order: env FH2MP_ARGS (space separated), then fh2mp-args.txt in the Azimuth folder's
  * data\bin (one argument per line, '#' starts a comment). Logs and probe files live there too.
@@ -242,7 +243,7 @@ static int line_has(const char *l, int n, const char *pat)
 static int line_wanted(const char *l, int n)
 {
     static const char *const keep[] = {"attached", "session:", "identity:", "late:", "not patched", "NOT ", "unexpected", "fail", "error", "could not",
-                                       "refus", "crash", "xsbody", "bindfix", "gamedb:", "rivalsleave", 0};
+                                       "refus", "crash", "xsbody", "bindfix", "gamedb:", "rivalsleave", "probe:", 0};
     int i;
     for (i = 0; keep[i]; i++) {
         if (line_has(l, n, keep[i])) {
@@ -532,6 +533,11 @@ static void fh_ensure_bound(fh_sock s)
     SetLastError(err);
 }
 
+/* The game sends with WSASendTo; its slot points at fh_wsasendto in every build so that udp_ticket_send can go first (see there). */
+typedef int(WINAPI *fh_f_wsasendto)(fh_sock, void *, DWORD, DWORD *, DWORD, const void *, int, void *, void *);
+static fh_f_wsasendto g_r_wsasendto;
+static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *to, int tolen);
+
 #ifdef FH2MP_DEBUG_BUILD
 /*
  * Winsock tracer (debug builds only). The game's WS2_32 slots are pointed at these wrappers, which log the calls that decide whether the
@@ -544,14 +550,12 @@ typedef int(WINAPI *fh_f_startup)(WORD, void *);
 typedef fh_sock(WINAPI *fh_f_socketw)(int, int, int, void *, unsigned, DWORD);
 typedef int(WINAPI *fh_f_setsockopt)(fh_sock, int, int, const char *, int);
 typedef int(WINAPI *fh_f_getsockopt)(fh_sock, int, int, char *, int *);
-typedef int(WINAPI *fh_f_wsasendto)(fh_sock, void *, DWORD, DWORD *, DWORD, const void *, int, void *, void *);
 typedef int(WINAPI *fh_f_sendto)(fh_sock, const char *, int, int, const void *, int);
 typedef int(WINAPI *fh_f_getaddrinfo)(const char *, const char *, const void *, void **);
 
 static fh_f_startup g_r_startup;
 static fh_f_socketw g_r_socketw;
 static fh_f_setsockopt g_r_setsockopt;
-static fh_f_wsasendto g_r_wsasendto;
 static fh_f_sendto g_r_sendto;
 static fh_f_getaddrinfo g_r_getaddrinfo;
 static volatile LONG g_n_sock, g_n_sockopt, g_n_gai, g_n_send, g_n_sendfail, g_n_recv, g_n_recvfail, g_n_start;
@@ -759,9 +763,13 @@ static int WINAPI fh_getaddrinfo(const char *node, const char *service, const vo
 
 static int WINAPI fh_wsasendto(fh_sock s, void *bufs, DWORD cnt, DWORD *sent, DWORD flags, const void *to, int tolen, void *ov, void *cr)
 {
-    int r = g_r_wsasendto(s, bufs, cnt, sent, flags, to, tolen, ov, cr);
-    DWORD err = GetLastError();
+    int r;
+    DWORD err;
     LONG n = InterlockedIncrement(&g_n_send);
+
+    udp_ticket_send(s, bufs, cnt, to, tolen);
+    r = g_r_wsasendto(s, bufs, cnt, sent, flags, to, tolen, ov, cr);
+    err = GetLastError();
 
     if (n <= 25 || (r && InterlockedIncrement(&g_n_sendfail) <= 80)) {
         log_begin();
@@ -881,7 +889,13 @@ static void *ws2_target(unsigned i, void *real)
     }
 }
 #else
-/* release build: only the two receive slots are wrapped (implicit bind, see fh_ensure_bound) */
+/* release build: the two receive slots (implicit bind, see fh_ensure_bound) and WSASendTo (udp_ticket_send) are wrapped */
+static int WINAPI fh_wsasendto(fh_sock s, void *bufs, DWORD cnt, DWORD *sent, DWORD flags, const void *to, int tolen, void *ov, void *cr)
+{
+    udp_ticket_send(s, bufs, cnt, to, tolen);
+    return g_r_wsasendto(s, bufs, cnt, sent, flags, to, tolen, ov, cr);
+}
+
 static int WINAPI fh_wsarecvfrom(fh_sock s, void *bufs, DWORD cnt, DWORD *got, DWORD *flags, void *from, int *fromlen, void *ov, void *cr)
 {
     fh_ensure_bound(s);
@@ -899,6 +913,7 @@ static void *ws2_target(unsigned i, void *real)
     switch (i) {
     case 0: g_r_recvfrom = (fh_f_recvfrom)real; return (void *)fh_recvfrom;
     case 10: g_r_wsarecvfrom = (fh_f_wsarecvfrom)real; return (void *)fh_wsarecvfrom;
+    case 12: g_r_wsasendto = (fh_f_wsasendto)real; return (void *)fh_wsasendto;
     default: return real;
     }
 }
@@ -2572,6 +2587,104 @@ static void maybe_run_connect_probe(unsigned char *img)
 #include "inflate.inc"
 
 /*
+ * UDP connection ticket (security audit 2026-10-25, F01). The game's OpenConnection only names an xuid, so the game server could tell
+ * players apart by source address alone, and two players behind one NAT could claim each other's id. Before every datagram that starts
+ * with an OpenConnection, the same socket sends this 84-byte ticket to the same address; the server binds that address to the xuid when
+ * the MAC checks out (fh2mp_server.Hub.ticket). Layout:
+ *   0..10  a NerdLib packet header with no messages (ack id 0xFFFF, remote ack 0xFFFE, count 0): servers without tickets drop it unread
+ *   11..18 "FH2MPTK1", 19 version 1, 20..27 xuid (LE), 28..35 unix time (LE), 36..51 nonce (single use), 52..83 HMAC-SHA256 of 0..51
+ * The key is HMAC-SHA256(session token, "fh2mp udp ticket v1"); the LSP derives the same from the token it sees and hands it to the game
+ * server with the sign-in announcement (auth.udp_ticket_key). No token (offline, rigs without a launcher) = no ticket.
+ */
+static unsigned char g_ticket_key[32];
+static int g_ticket_ready;
+static volatile LONG g_ticket_n;
+
+static void udp_ticket_key(void)
+{
+    static const char label[] = "fh2mp udp ticket v1";
+
+    if (g_token[0]) {
+        hmac_sha256((const unsigned char *)g_token, (unsigned long long)lstrlenA(g_token), (const unsigned char *)label, sizeof label - 1,
+                    g_ticket_key);
+        g_ticket_ready = 1;
+    }
+}
+
+static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *to, int tolen)
+{
+    static const unsigned char head[19] = {0xFF, 0xFF, 0xFE, 0xFF, 0, 0, 0, 0, 0, 84, 0, 'F', 'H', '2', 'M', 'P', 'T', 'K', '1'};
+    const unsigned char *d;
+    unsigned char t[84], seed[40], h[32];
+    unsigned long long now, v;
+    LARGE_INTEGER qpc;
+    FILETIME ft;
+    sha256_ctx c;
+    DWORD sent = 0, x;
+    struct {
+        ULONG len;
+        unsigned char *buf;
+    } wb;
+    LONG n;
+    int i;
+
+    if (!g_ticket_ready || !bufs || cnt < 1 || !g_r_wsasendto) {
+        return;
+    }
+    d = *(unsigned char *const *)((const char *)bufs + 8); /* WSABUF {ULONG len; CHAR *buf} */
+    if (*(const ULONG *)bufs < 12 || !d || d[8] == 0 || (d[11] & 0x7F) != 0) {
+        return; /* not a packet whose first message is an OpenConnection (type 0) */
+    }
+    n = InterlockedIncrement(&g_ticket_n);
+    GetSystemTimeAsFileTime(&ft);
+    now = (((unsigned long long)ft.dwHighDateTime << 32 | ft.dwLowDateTime) - 116444736000000000ULL) / 10000000ULL;
+    QueryPerformanceCounter(&qpc);
+    for (i = 0; i < 19; i++) {
+        t[i] = head[i];
+    }
+    t[19] = 1;
+    for (i = 0, v = g_xuid; i < 8; i++, v >>= 8) {
+        t[20 + i] = (unsigned char)v;
+    }
+    for (i = 0, v = now; i < 8; i++, v >>= 8) {
+        t[28 + i] = (unsigned char)v;
+    }
+    /* the nonce only has to be unique, the MAC makes it unforgeable: hash of the clock, the counter and the process/thread ids */
+    for (i = 0, v = (unsigned long long)qpc.QuadPart; i < 8; i++, v >>= 8) {
+        seed[i] = (unsigned char)v;
+    }
+    for (i = 0, v = GetTickCount64(); i < 8; i++, v >>= 8) {
+        seed[8 + i] = (unsigned char)v;
+    }
+    for (i = 0, x = GetCurrentProcessId(); i < 4; i++, x >>= 8) {
+        seed[16 + i] = (unsigned char)x;
+    }
+    for (i = 0, x = GetCurrentThreadId(); i < 4; i++, x >>= 8) {
+        seed[20 + i] = (unsigned char)x;
+    }
+    for (i = 0, x = (DWORD)n; i < 4; i++, x >>= 8) {
+        seed[24 + i] = (unsigned char)x;
+    }
+    for (i = 0; i < 12; i++) {
+        seed[28 + i] = t[24 + i]; /* high xuid bytes and the time */
+    }
+    sha256_init(&c);
+    sha256_update(&c, seed, sizeof seed);
+    sha256_final(&c, h);
+    for (i = 0; i < 16; i++) {
+        t[36 + i] = h[i];
+    }
+    hmac_sha256(g_ticket_key, 32, t, 52, t + 52);
+    wb.len = sizeof t;
+    wb.buf = t;
+    g_r_wsasendto(s, &wb, 1, &sent, 0, to, tolen, NULL, NULL);
+    if (n <= 3) {
+        log_begin();
+        log_raw("ticket: sent before OpenConnection\n");
+    }
+}
+
+/*
  * #64: a Monthly Rival started from the pause menu inside an online session loaded for ever. The menu's launch (RivalsModule
  * RequestLaunchRivalsEventFromMenu, then the global/rivals_launcher entity and its offline race_trigger_activation flow) only works
  * offline, and nothing on the way leaves the session. global.xml's request_launch_rivals_event_from_menu, the pause menu's last step
@@ -3531,7 +3644,9 @@ static wchar_t g_exe_dir[MAX_PATH];     /* the Azimuth folder (the platform's az
  * the platform writes the database it builds from other mods' SQL, and which it deletes once no mod has any. So when every mod has
  * started (the platform has written or removed its copy by then), ours is put there: online play needs exactly the server's database.
  * Changes other mods made to it are named in the log and on the title screen, and the platform's record of its copy is deleted, so that
- * it builds it again next time (a game started without the FH2MP launcher then gets those changes).
+ * it builds it again next time (a game started without the FH2MP launcher then gets those changes). Another mod's database there (traffic
+ * cars, a car pack's) is kept as fh2mp\gamedb-kept.slt first, and put back when the game starts without a server database in the session
+ * (gamedb_keep.inc).
  */
 static ULONGLONG g_gamedb_placed_size, g_gamedb_placed_time;
 
@@ -3546,21 +3661,69 @@ static int file_stamp(const WCHAR *path, ULONGLONG *size, ULONGLONG *wtime)
     return 1;
 }
 
-static int files_equal(const WCHAR *a, const WCHAR *b)
+/* A file another program has open for a moment (a virus scanner, say), or is still writing (FH2MP in another process putting the
+ * server's database in place): tried again for up to a second. */
+static int file_busy(DWORD e)
+{
+    return e == ERROR_ACCESS_DENIED || e == ERROR_SHARING_VIOLATION || e == ERROR_LOCK_VIOLATION;
+}
+
+static int file_missing(DWORD e)
+{
+    return e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND;
+}
+
+/* Opens a file to read, sharing it with everyone. INVALID_HANDLE_VALUE, with *err, when it can't be. */
+static HANDLE file_open_read(const WCHAR *path, DWORD flags, DWORD *err)
+{
+    int i;
+
+    for (i = 0;; i++) {
+        HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, flags,
+                               NULL);
+        if (f != INVALID_HANDLE_VALUE) {
+            *err = 0;
+            return f;
+        }
+        *err = GetLastError();
+        if (!file_busy(*err) || i == 9) {
+            return INVALID_HANDLE_VALUE;
+        }
+        Sleep(100);
+    }
+}
+
+static DWORD read_error(void)
+{
+    DWORD e = GetLastError();
+    return e ? e : ERROR_READ_FAULT;
+}
+
+/* Whether two files have the same bytes: 1, 0 (also when one isn't there), or -1 when one can't be read (*err). A file that can't be
+ * read is never taken for a different one: FH2MP's copy, or the one kept, would then look like another mod's database. */
+static int files_compare(const WCHAR *a, const WCHAR *b, DWORD *err)
 {
     static unsigned char ba[1 << 16], bb[1 << 16];
-    HANDLE fa = CreateFileW(a, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
-                            FILE_FLAG_SEQUENTIAL_SCAN, NULL);
-    HANDLE fb = CreateFileW(b, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
-                            FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    HANDLE fa, fb = INVALID_HANDLE_VALUE;
     DWORD na, nb;
-    int same = fa != INVALID_HANDLE_VALUE && fb != INVALID_HANDLE_VALUE;
+    int same = -1;
 
-    while (same && ReadFile(fa, ba, sizeof ba, &na, NULL) && ReadFile(fb, bb, sizeof bb, &nb, NULL)) {
+    fa = file_open_read(a, FILE_FLAG_SEQUENTIAL_SCAN, err);
+    if (fa != INVALID_HANDLE_VALUE) {
+        fb = file_open_read(b, FILE_FLAG_SEQUENTIAL_SCAN, err);
+    }
+    if (fb == INVALID_HANDLE_VALUE) {
+        same = file_missing(*err) ? 0 : -1;
+    }
+    while (same < 0 && fb != INVALID_HANDLE_VALUE) {
+        if (!ReadFile(fa, ba, sizeof ba, &na, NULL) || !ReadFile(fb, bb, sizeof bb, &nb, NULL)) {
+            *err = read_error();
+            break;
+        }
         if (na != nb || !mem_equal(ba, bb, na)) {
             same = 0;
         } else if (!na) {
-            break;
+            same = 1;
         }
     }
     if (fa != INVALID_HANDLE_VALUE) {
@@ -3570,6 +3733,462 @@ static int files_equal(const WCHAR *a, const WCHAR *b)
         CloseHandle(fb);
     }
     return same;
+}
+
+/* Up to n bytes from the start of a file. -> how many were read, or -1 when it can't be read (*err; file_missing when it isn't there). */
+static int file_head(const WCHAR *path, void *buf, DWORD n, DWORD *err)
+{
+    HANDLE f = file_open_read(path, FILE_ATTRIBUTE_NORMAL, err);
+    DWORD got = 0;
+    int ok;
+
+    if (f == INVALID_HANDLE_VALUE) {
+        return -1;
+    }
+    ok = ReadFile(f, buf, n, &got, NULL);
+    if (!ok) {
+        *err = read_error();
+    }
+    CloseHandle(f);
+    return ok ? (int)got : -1;
+}
+
+#include "gamedb_keep.inc"
+
+/* <Azimuth>\fh2mp\<name>: next to the launcher's copy, also when the game starts without a session. gamedb_dir makes the folder, before a
+ * file is written there. */
+static void gamedb_file(WCHAR *out, const WCHAR *name)
+{
+    lstrcpyW(out, g_exe_dir);
+    lstrcatW(out, L"\\fh2mp\\");
+    lstrcatW(out, name);
+}
+
+static void gamedb_dir(void)
+{
+    WCHAR dir[MAX_PATH];
+
+    lstrcpyW(dir, g_exe_dir);
+    lstrcatW(dir, L"\\fh2mp");
+    CreateDirectoryW(dir, NULL);
+}
+
+/* <Mount>\mediaoverride\Stripped\<name> (24 characters at most). -> 0 when the platform found no game folder. gamedb_game_dirs makes
+ * the folders, which a mod's uninstall steps may have removed. */
+static int gamedb_game_file(WCHAR *out, const WCHAR *name)
+{
+    out[0] = 0;
+    if (!g_api->game_dir[0] || lstrlenW(g_api->game_dir) + 50 >= MAX_PATH) {
+        return 0;
+    }
+    lstrcpyW(out, g_api->game_dir);
+    lstrcatW(out, L"\\mediaoverride\\Stripped\\");
+    lstrcatW(out, name);
+    return 1;
+}
+
+static void gamedb_game_dirs(void)
+{
+    WCHAR dir[MAX_PATH];
+
+    lstrcpyW(dir, g_api->game_dir);
+    lstrcatW(dir, L"\\mediaoverride");
+    CreateDirectoryW(dir, NULL);
+    lstrcatW(dir, L"\\Stripped");
+    CreateDirectoryW(dir, NULL);
+}
+
+/* Copies `from` over `to` with its date, by way of <to>.fh2mp-tmp, so `to` is never half written: the game, the platform and FH2MP in
+ * another Azimuth folder never see a copy cut short. -> 0, or the Windows error. */
+static DWORD gamedb_copy_over(const WCHAR *from, const WCHAR *to)
+{
+    WCHAR tmp[MAX_PATH];
+    DWORD err;
+
+    if (lstrlenW(to) + 11 > MAX_PATH) {
+        return ERROR_FILENAME_EXCED_RANGE;
+    }
+    lstrcpyW(tmp, to);
+    lstrcatW(tmp, L".fh2mp-tmp");
+    SetFileAttributesW(tmp, FILE_ATTRIBUTE_NORMAL);
+    if (!CopyFileW(from, tmp, FALSE)) {
+        return GetLastError();
+    }
+    SetFileAttributesW(tmp, FILE_ATTRIBUTE_NORMAL);
+    SetFileAttributesW(to, FILE_ATTRIBUTE_NORMAL);
+    if (!MoveFileExW(tmp, to, MOVEFILE_REPLACE_EXISTING)) {
+        err = GetLastError();
+        DeleteFileW(tmp);
+        return err;
+    }
+    return 0;
+}
+
+/* R's lists (gamedb_keep.inc): 0 FH2MP's own, 1 the one next to T for every Azimuth folder, 2 the platform's own (only read). -> 0 when
+ * there is none (no game folder). */
+#define GAMEDB_LISTS 3
+
+static int gamedb_list(WCHAR *out, int which)
+{
+    if (which == 1) {
+        return gamedb_game_file(out, L"platform-db-fh2mp.txt");
+    }
+    lstrcpyW(out, g_exe_dir);
+    lstrcatW(out, which ? L"\\fh2-mods\\platform-db-fh2mp.txt" : L"\\fh2mp\\gamedb-placed.txt");
+    return 1;
+}
+
+/* The "size date" lines of such a file, oldest first, GK_PLACED_MAX at most. -> how many (0 when it isn't there), or -1 when it can't be
+ * read (*err). */
+static int gamedb_read_stamps(const WCHAR *path, gk_stamp *list, DWORD *err)
+{
+    char buf[512];
+    int n = file_head(path, buf, sizeof buf, err);
+
+    if (n < 0) {
+        return file_missing(*err) ? 0 : -1;
+    }
+    return gk_placed_parse(buf, n, list);
+}
+
+/* Writes `n` stamps as such a file. -> 0, or the Windows error. */
+static DWORD gamedb_write_stamps(const WCHAR *path, const gk_stamp *list, int n)
+{
+    char text[200];
+    DWORD len = (DWORD)gk_placed_format(list, n, text), put = 0, err = 0;
+    HANDLE f = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+
+    if (f == INVALID_HANDLE_VALUE) {
+        return GetLastError();
+    }
+    if (!WriteFile(f, text, len, &put, NULL)) {
+        err = GetLastError();
+    } else if (put != len) {
+        err = ERROR_WRITE_FAULT;
+    }
+    CloseHandle(f);
+    return err;
+}
+
+/* T is the server's copy now: its stamp goes last in FH2MP's list and in the one next to T, so it is still known as FH2MP's once the
+ * server's database changes, also by FH2MP in another Azimuth folder using this game folder. */
+static void gamedb_note_placed(void)
+{
+    gk_stamp list[GK_PLACED_MAX], t;
+    WCHAR path[MAX_PATH];
+    DWORD err;
+    int which, n;
+
+    if (!file_stamp(g_gamedb_path, &t.size, &t.time)) {
+        return;
+    }
+    gamedb_dir();
+    for (which = 0; which < 2; which++) {
+        if (!gamedb_list(path, which)) {
+            continue;
+        }
+        n = gamedb_read_stamps(path, list, &err);
+        if (n > 0 && list[n - 1].size == t.size && list[n - 1].time == t.time) {
+            continue;
+        }
+        if (n >= 0) {
+            err = gamedb_write_stamps(path, list, gk_placed_add(list, n, &t));
+        }
+        if (err) {
+            log_begin();
+            log_raw(which ? "gamedb: could not write mediaoverride\\Stripped\\platform-db-fh2mp.txt, error "
+                          : "gamedb: could not write fh2mp\\gamedb-placed.txt, error ");
+            log_dec(err);
+            log_raw("\n");
+        }
+    }
+}
+
+/* What the database at `target` (stamp t) is (gk_classify). `same`: it has the bytes of the launcher's copy. -> 0, or the error when a
+ * file it is judged by can't be read (*what is then not set). */
+static DWORD gamedb_what(const WCHAR *target, const gk_stamp *t, int same, int *what)
+{
+    gk_stamp placed[GAMEDB_LISTS * GK_PLACED_MAX];
+    unsigned char head[GK_HEAD];
+    WCHAR path[MAX_PATH];
+    ULONGLONG state_size;
+    DWORD err;
+    gk_facts f;
+    int which, n;
+
+    f.t = *t;
+    f.same_as_server = same;
+    f.nplaced = 0;
+    for (which = 0; which < GAMEDB_LISTS; which++) {
+        if (gamedb_list(path, which)) {
+            if ((n = gamedb_read_stamps(path, placed + f.nplaced, &err)) < 0) {
+                return err;
+            }
+            f.nplaced += n;
+        }
+    }
+    f.placed = placed;
+    if ((f.nhead = file_head(target, head, sizeof head, &err)) < 0) {
+        return err;
+    }
+    f.head = head;
+    lstrcpyW(path, g_exe_dir);
+    lstrcatW(path, L"\\fh2-mods\\platform-db.txt");
+    f.have_state = file_stamp(path, &state_size, &f.state_time) && state_size > 0;
+    *what = gk_classify(&f);
+    return 0;
+}
+
+/* S is there and not empty: the platform has built its copy at T since FH2MP last removed S */
+static int gamedb_platform_built(void)
+{
+    WCHAR path[MAX_PATH];
+    ULONGLONG size, wtime;
+
+    lstrcpyW(path, g_exe_dir);
+    lstrcatW(path, L"\\fh2-mods\\platform-db.txt");
+    return file_stamp(path, &size, &wtime) && size > 0;
+}
+
+/* B (gamedb_keep.inc): 1 when K, stamp k, is back at T, 0 when not, -1 when B can't be read (*err). B names K by its stamp, so one left
+ * from an earlier K counts for nothing. */
+static int gamedb_back(const gk_stamp *k, DWORD *err)
+{
+    gk_stamp s[GK_PLACED_MAX];
+    WCHAR path[MAX_PATH];
+    int n;
+
+    gamedb_file(path, L"gamedb-put-back.txt");
+    if ((n = gamedb_read_stamps(path, s, err)) < 0) {
+        return -1;
+    }
+    return n > 0 && s[n - 1].size == k->size && s[n - 1].time == k->time;
+}
+
+/* K (stamp k) is back at T: B says so (unless `back` already does), and S goes, as FH2MP's online copy removes it, so that an older
+ * platform doesn't take K for its own copy (and remove it, or keep it without its mods' changes) but builds its copy again. */
+static void gamedb_is_back(const gk_stamp *k, int back)
+{
+    WCHAR path[MAX_PATH];
+    DWORD err;
+
+    gamedb_file(path, L"gamedb-put-back.txt");
+    if (!back && (err = gamedb_write_stamps(path, k, 1)) != 0) {
+        log_begin();
+        log_raw("gamedb: could not write fh2mp\\gamedb-put-back.txt, error ");
+        log_dec(err);
+        log_raw("\n");
+    }
+    lstrcpyW(path, g_exe_dir);
+    lstrcatW(path, L"\\fh2-mods\\platform-db.txt");
+    SetFileAttributesW(path, FILE_ATTRIBUTE_NORMAL);
+    if (DeleteFileW(path)) {
+        log_begin();
+        log_raw("gamedb: removed fh2-mods\\platform-db.txt, so the platform doesn't take the car database put back for its own copy\n");
+    } else if (!file_missing(err = GetLastError())) {
+        log_begin();
+        log_raw("gamedb: could not remove fh2-mods\\platform-db.txt, error ");
+        log_dec(err);
+        log_raw("\n");
+    }
+}
+
+/* K isn't back at T (any more): B goes */
+static void gamedb_not_back(void)
+{
+    WCHAR path[MAX_PATH];
+    DWORD err;
+
+    gamedb_file(path, L"gamedb-put-back.txt");
+    SetFileAttributesW(path, FILE_ATTRIBUTE_NORMAL);
+    if (!DeleteFileW(path) && !file_missing(err = GetLastError())) {
+        log_begin();
+        log_raw("gamedb: could not remove fh2mp\\gamedb-put-back.txt, error ");
+        log_dec(err);
+        log_raw("\n");
+    }
+}
+
+/* K becomes K', replacing the one there. -> 0, or the Windows error. */
+static DWORD gamedb_retire_kept(void)
+{
+    WCHAR kept[MAX_PATH], prev[MAX_PATH];
+
+    gamedb_file(kept, L"gamedb-kept.slt");
+    gamedb_file(prev, L"gamedb-kept.previous.slt");
+    SetFileAttributesW(prev, FILE_ATTRIBUTE_NORMAL);
+    if (!MoveFileExW(kept, prev, MOVEFILE_REPLACE_EXISTING)) {
+        return GetLastError();
+    }
+    gamedb_not_back();
+    return 0;
+}
+
+static void gamedb_log(const char *line)
+{
+    log_begin();
+    log_raw("gamedb: ");
+    log_raw(line);
+    log_raw("\n");
+    g_api->log(g_mod, line);
+}
+
+/* Online, before the server's copy goes over the database in mediaoverride (it isn't that copy): another mod's database there is kept as
+ * K first, by way of K.tmp, with its date, and only then does the one kept before become K'. With T gone after K was put back, that mod
+ * is gone: K becomes K' (gk_removed). -> 0, or the Windows error that stopped it (the server's copy is then not put there, and nothing is
+ * lost); *unread when a file couldn't be read, and nothing was done. */
+static DWORD gamedb_keep_other(int *unread)
+{
+    WCHAR kept[MAX_PATH], tmp[MAX_PATH];
+    gk_stamp t, k;
+    DWORD err;
+    int have_kept, back, act, what = GK_OTHER, same = 0;
+
+    *unread = 1;
+    gamedb_file(kept, L"gamedb-kept.slt");
+    have_kept = file_stamp(kept, &k.size, &k.time);
+    if (!file_stamp(g_gamedb_path, &t.size, &t.time)) {
+        if (!have_kept) {
+            return 0;
+        }
+        if ((back = gamedb_back(&k, &err)) < 0) {
+            return err;
+        }
+        *unread = 0;
+        if (!gk_removed(back, gamedb_platform_built(), gk_platform_keeps(g_api->platform_version))) {
+            return 0;
+        }
+        if ((err = gamedb_retire_kept()) == 0) {
+            gamedb_log("the car database another mod had in mediaoverride was removed after it was put back, so it isn't put back "
+                       "again (it's kept as fh2mp\\gamedb-kept.previous.slt)");
+        }
+        return err;
+    }
+    if ((err = gamedb_what(g_gamedb_path, &t, 0, &what)) != 0 ||
+        (what == GK_OTHER && have_kept && (same = files_compare(kept, g_gamedb_path, &err)) < 0)) {
+        return err;
+    }
+    *unread = 0;
+    if (what == GK_BROKEN) {
+        gamedb_log("mediaoverride's gamedbRC.slt isn't a whole database (a copy cut short?), so it isn't kept");
+        return 0;
+    }
+    if ((act = gk_online(what, have_kept, same)) == GK_NOTHING) {
+        return 0;
+    }
+    gamedb_dir();
+    gamedb_file(tmp, L"gamedb-kept.slt.tmp");
+    SetFileAttributesW(tmp, FILE_ATTRIBUTE_NORMAL);
+    if (!CopyFileW(g_gamedb_path, tmp, FALSE)) {
+        return GetLastError();
+    }
+    /* FH2MP in another process may have put the server's copy there meanwhile */
+    if ((same = files_compare(tmp, g_gamedb_src, &err)) != 0) {
+        DeleteFileW(tmp);
+        *unread = same < 0;
+        return same < 0 ? err : 0;
+    }
+    if (act == GK_KEEP_REPLACING && (err = gamedb_retire_kept()) != 0) {
+        DeleteFileW(tmp);
+        return err;
+    }
+    SetFileAttributesW(tmp, FILE_ATTRIBUTE_NORMAL);
+    if (!MoveFileExW(tmp, kept, MOVEFILE_REPLACE_EXISTING)) {
+        err = GetLastError();
+        DeleteFileW(tmp);
+        return err;
+    }
+    gamedb_not_back();
+    gamedb_log("kept the car database another mod had in mediaoverride as fh2mp\\gamedb-kept.slt; it's put back when you play offline");
+    return 0;
+}
+
+/* The facts gk_offline needs about T (there, stamp t): what it is, and whether it has K's bytes. -> 0, or the error when a file couldn't be
+ * read. */
+static DWORD gamedb_offline_facts(const WCHAR *target, const WCHAR *kept, const gk_stamp *t, int *what, int *same_as_kept)
+{
+    WCHAR server[MAX_PATH];
+    DWORD err;
+    int same;
+
+    gamedb_file(server, L"gamedbRC.slt");
+    *same_as_kept = 0;
+    if ((same = files_compare(target, server, &err)) < 0 || (err = gamedb_what(target, t, same, what)) != 0) {
+        return err;
+    }
+    if ((*what == GK_PLATFORM || *what == GK_OTHER) && (*same_as_kept = files_compare(kept, target, &err)) < 0) {
+        return err;
+    }
+    return 0;
+}
+
+/* Offline (no server database in the session), from fh2mod_init, so before the platform's database step, which then sees what is put
+ * back here: K goes back to mediaoverride where FH2MP's copy sat (gk_offline). Nothing is done while a file it is judged by can't be read,
+ * a failure is logged, and nothing is deleted after one. */
+static void gamedb_put_back(void)
+{
+    WCHAR kept[MAX_PATH], target[MAX_PATH];
+    gk_stamp t, k;
+    int have_t, back, what = GK_OTHER, same_as_kept = 0;
+    const char *step = NULL;
+    DWORD err = 0;
+
+    gamedb_file(kept, L"gamedb-kept.slt");
+    if (!file_stamp(kept, &k.size, &k.time) || !gamedb_game_file(target, L"gamedbRC.slt")) {
+        return;
+    }
+    have_t = file_stamp(target, &t.size, &t.time);
+    if ((back = gamedb_back(&k, &err)) < 0 || (have_t && (err = gamedb_offline_facts(target, kept, &t, &what, &same_as_kept)) != 0)) {
+        log_begin();
+        log_raw("gamedb: could not read the car database in mediaoverride, or the one kept (fh2mp\\gamedb-kept.slt), error ");
+        log_dec(err);
+        log_raw(", so both are left as they are this time\n");
+        g_api->log(g_mod, "could not read the car database in mediaoverride, or the one kept (in use?), so both are left as they are "
+                          "this time");
+        return;
+    }
+    switch (gk_offline(have_t, what, same_as_kept, back, gamedb_platform_built(), gk_platform_keeps(g_api->platform_version))) {
+    case GK_PUT_BACK:
+        step = "put back the car database another mod had in mediaoverride (fh2mp\\gamedb-kept.slt)";
+        gamedb_game_dirs();
+        if ((err = gamedb_copy_over(kept, target)) != 0) {
+            break;
+        }
+        gamedb_log("put back the car database another mod had in mediaoverride (playing offline)");
+        gamedb_is_back(&k, back);
+        break;
+    case GK_IS_BACK:
+        gamedb_is_back(&k, back);
+        break;
+    case GK_RETIRE_KEPT:
+        step = "move fh2mp\\gamedb-kept.slt to fh2mp\\gamedb-kept.previous.slt";
+        if ((err = gamedb_retire_kept()) != 0) {
+            break;
+        }
+        gamedb_log(have_t ? "another car database is in mediaoverride now, so the one kept before is now fh2mp\\gamedb-kept.previous.slt"
+                          : "the car database another mod had in mediaoverride was removed after it was put back, so it isn't put "
+                            "back again (it's kept as fh2mp\\gamedb-kept.previous.slt)");
+        break;
+    case GK_NOT_BACK:
+        if (back) {
+            gamedb_not_back();
+        }
+        break;
+    default:
+        break;
+    }
+    if (err) {
+        char line[160];
+        lstrcpyA(line, "could not ");
+        lstrcatA(line, step);
+        log_begin();
+        log_raw("gamedb: ");
+        log_raw(line);
+        log_raw(", error ");
+        log_dec(err);
+        log_raw("\n");
+        g_api->log(g_mod, line);
+    }
 }
 
 /* The mods (other than FH2MP) whose database changes the platform built into its copy, from fh2-mods\platform-db.txt (line 1: its
@@ -3620,14 +4239,39 @@ static void gamedb_drop_platform_copy(char *names, int cap)
     DeleteFileW(path);
 }
 
-/* Puts the launcher's copy in place when the file there is not that copy. Cheap when nothing changed since the last call. -> 1 when the
- * copy is in place. A failure is logged once per error code and tried again by the caller. */
-static int gamedb_place(void)
+/* A step of gamedb_place that failed: logged once per error code (`last`), as the caller tries again and online play is refused until
+ * the copy is in place. */
+static void gamedb_failed(DWORD *last, DWORD err, const char *what)
 {
-    static DWORD last_err;
-    WCHAR dir[MAX_PATH];
+    char line[300];
+
+    if (err == *last) {
+        return;
+    }
+    *last = err;
+    log_begin();
+    log_raw("gamedb: ");
+    log_raw(what);
+    log_raw(", error ");
+    log_dec(err);
+    log_raw(" (trying again)\n");
+    lstrcpyA(line, what);
+    lstrcatA(line, "; trying again (until it is there, online play is refused)");
+    g_api->log(g_mod, line);
+}
+
+/* gamedb_thread and the monitor both call gamedb_place; this keeps them one at a time. */
+static SRWLOCK g_gamedb_place_lock = SRWLOCK_INIT;
+
+/* Puts the launcher's copy in place when the file there is not that copy, keeping another mod's database first. Cheap when nothing changed
+ * since the last call. -> 1 when the copy is in place. A failure is logged once per error code and tried again by the caller. */
+static int gamedb_place_locked(void)
+{
+    static DWORD last_read, last_keep, last_err;
     ULONGLONG size, wtime;
     char others[256];
+    DWORD err;
+    int same, unread;
 
     if (!g_gamedb_src[0] || !g_gamedb_path[0]) {
         return 0;
@@ -3635,31 +4279,33 @@ static int gamedb_place(void)
     if (g_gamedb_placed && file_stamp(g_gamedb_path, &size, &wtime) && size == g_gamedb_placed_size && wtime == g_gamedb_placed_time) {
         return 1;
     }
-    if (!files_equal(g_gamedb_src, g_gamedb_path)) {
-        lstrcpyW(dir, g_api->game_dir);
-        lstrcatW(dir, L"\\mediaoverride");
-        CreateDirectoryW(dir, NULL);
-        lstrcatW(dir, L"\\Stripped");
-        CreateDirectoryW(dir, NULL);
-        SetFileAttributesW(g_gamedb_path, FILE_ATTRIBUTE_NORMAL);
-        if (!CopyFileW(g_gamedb_src, g_gamedb_path, FALSE)) {
-            DWORD err = GetLastError();
+    if ((same = files_compare(g_gamedb_src, g_gamedb_path, &err)) < 0) {
+        InterlockedExchange(&g_gamedb_placed, 0);
+        gamedb_failed(&last_read, err, "could not read the car database in mediaoverride or the launcher's copy (in use?), so the "
+                                       "server's is not put there yet");
+        return 0;
+    }
+    if (!same) {
+        if ((err = gamedb_keep_other(&unread)) != 0) {
             InterlockedExchange(&g_gamedb_placed, 0);
-            if (err != last_err) {
-                last_err = err;
-                log_begin();
-                log_raw("gamedb: could not put the server's car database in mediaoverride, error ");
-                log_dec(err);
-                log_raw(" (trying again)\n");
-                g_api->log(g_mod, "could not put the server's car database in mediaoverride; trying again (until it is there, "
-                                  "online play is refused)");
-            }
+            gamedb_failed(&last_keep, err, unread ? "could not read the car database in mediaoverride, or the one kept (in use?), so "
+                                                    "the server's is not put there yet"
+                                                  : "could not keep the car database another mod had in mediaoverride "
+                                                    "(fh2mp\\gamedb-kept.slt), so the server's is not put there yet");
             return 0;
         }
-        last_err = 0;
+        gamedb_game_dirs();
+        if ((err = gamedb_copy_over(g_gamedb_src, g_gamedb_path)) != 0) {
+            InterlockedExchange(&g_gamedb_placed, 0);
+            gamedb_failed(&last_err, err, "could not put the server's car database in mediaoverride");
+            return 0;
+        }
         log_begin();
         log_raw("gamedb: the server's car database is in mediaoverride\n");
     }
+    last_read = last_keep = last_err = 0;
+    gamedb_note_placed();
+    gamedb_not_back();
     gamedb_drop_platform_copy(others, sizeof others);
     if (others[0]) {
         char line[400];
@@ -3680,6 +4326,16 @@ static int gamedb_place(void)
     return 1;
 }
 
+static int gamedb_place(void)
+{
+    int ok;
+
+    AcquireSRWLockExclusive(&g_gamedb_place_lock);
+    ok = gamedb_place_locked();
+    ReleaseSRWLockExclusive(&g_gamedb_place_lock);
+    return ok;
+}
+
 static DWORD WINAPI gamedb_thread(LPVOID unused)
 {
     int i;
@@ -3690,6 +4346,121 @@ static DWORD WINAPI gamedb_thread(LPVOID unused)
         Sleep(1000);
     }
     return 0;
+}
+
+/*
+ * Probe: what the game was told to build when it died. Crash reports of players (the platform's, Azimuth's) say where the game stopped, never
+ * which message it was working on, and a malformed player object of one client can take a whole lobby down (prod 2026-10-23: 11 clients at once,
+ * the server cannot see why from its side). The game's ObjectCreate receive handler (FUN_1417ab160(manager, id out, BitReader), the function that
+ * builds a joiner's player object, the weather, the console ...) is hooked through the platform; before it runs, the bytes it is about to parse
+ * (the datagram from the reader's position on, up to PROBE_BYTES) go into a ring of the last PROBE_ENTRIES calls. The ring lives in a file
+ * mapping, data\bin\fh2mp-creates.ring, so it survives a crash; the one of the session before is kept as fh2mp-creates.prev (attach it to a
+ * crash report; tools/decode_creates.py reads it). Nothing is sent anywhere. BitReader fields (FUN_141767100 / FUN_141767940): +4 size of the
+ * buffer in bits, +8 byte index, +0xc bit position, +0x18 -> buffer object whose data pointer is at +0x10. Disable with env FH2MP_NO_PROBE.
+ */
+#define FH2_RVA_OBJECT_CREATE_RECV 0x17ab160u
+#define PROBE_MAGIC 0x32434846u                     /* "FHC2" */
+#define PROBE_ENTRIES 64
+#define PROBE_BYTES 640
+
+typedef struct {
+    unsigned tick, seq, tid;
+    int buf_bits;                                   /* size of the datagram being parsed, in bits */
+    unsigned byte_idx, bit_pos, nbytes, reserved;
+    unsigned char data[PROBE_BYTES];                /* from byte_idx on */
+} probe_entry;
+
+typedef struct {
+    unsigned magic, version;
+    volatile LONG next;                             /* number of calls recorded so far */
+    unsigned entries, entry_size, start_tick, ft_low, ft_high;
+    probe_entry e[PROBE_ENTRIES];
+} probe_ring;
+
+typedef unsigned long long (*object_create_fn)(void *mgr, void *out, void *reader);
+static object_create_fn g_create_orig;
+static probe_ring *g_probe;
+
+static unsigned long long probe_object_create(void *mgr, void *out, void *reader)
+{
+    probe_ring *r = g_probe;
+    unsigned char *rd = (unsigned char *)reader, *buf, *data;
+
+    if (r && rd && !IsBadReadPtr(rd, 0x20) && (buf = *(unsigned char **)(rd + 0x18)) != NULL && !IsBadReadPtr(buf, 0x18) &&
+        (data = *(unsigned char **)(buf + 0x10)) != NULL) {
+        LONG n = InterlockedIncrement(&r->next) - 1;
+        probe_entry *e = &r->e[(unsigned)n % PROBE_ENTRIES];
+        int bits = *(int *)(rd + 4);
+        unsigned idx = *(unsigned *)(rd + 8), room = bits > 0 && (unsigned)bits / 8 > idx ? (unsigned)bits / 8 - idx : 0;
+        unsigned take = room < PROBE_BYTES ? room : PROBE_BYTES;
+
+        e->nbytes = 0;                              /* a reader of the ring that sees a half-written entry sees nbytes 0 */
+        e->tick = GetTickCount();
+        e->seq = (unsigned)n;
+        e->tid = GetCurrentThreadId();
+        e->buf_bits = bits;
+        e->byte_idx = idx;
+        e->bit_pos = *(unsigned *)(rd + 0xc);
+        if (take && !IsBadReadPtr(data + idx, take)) {
+            mem_copy(e->data, data + idx, take);
+            e->nbytes = take;
+        }
+    }
+    return g_create_orig(mgr, out, reader);
+}
+
+static int install_create_probe(void)
+{
+    WCHAR path[MAX_PATH], prev[MAX_PATH], prev2[MAX_PATH], prev3[MAX_PATH];
+    HANDLE f, m;
+    FILETIME ft;
+    unsigned char *img = find_fh2_image();
+
+    if (!img || lstrlenW(g_dir) + 32 >= MAX_PATH) {
+        return 0;
+    }
+    lstrcpyW(path, g_dir);
+    lstrcatW(path, L"\\fh2mp-creates.ring");
+    lstrcpyW(prev, g_dir);
+    lstrcatW(prev, L"\\fh2mp-creates.prev");
+    lstrcpyW(prev2, g_dir);
+    lstrcatW(prev2, L"\\fh2mp-creates.prev2");
+    lstrcpyW(prev3, g_dir);
+    lstrcatW(prev3, L"\\fh2mp-creates.prev3");
+    MoveFileExW(prev2, prev3, MOVEFILE_REPLACE_EXISTING);      /* the last three sessions' rings, newest first: .prev, .prev2, .prev3 */
+    MoveFileExW(prev, prev2, MOVEFILE_REPLACE_EXISTING);
+    MoveFileExW(path, prev, MOVEFILE_REPLACE_EXISTING);        /* the last session's ring, for a crash report */
+    f = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+    m = CreateFileMappingW(f, NULL, PAGE_READWRITE, 0, sizeof(probe_ring), NULL);
+    CloseHandle(f);
+    if (!m) {
+        return 0;
+    }
+    g_probe = (probe_ring *)MapViewOfFile(m, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(probe_ring));
+    CloseHandle(m);
+    if (!g_probe) {
+        return 0;
+    }
+    GetSystemTimeAsFileTime(&ft);
+    g_probe->magic = PROBE_MAGIC;
+    g_probe->version = 1;
+    g_probe->entries = PROBE_ENTRIES;
+    g_probe->entry_size = sizeof(probe_entry);
+    g_probe->start_tick = GetTickCount();
+    g_probe->ft_low = ft.dwLowDateTime;
+    g_probe->ft_high = ft.dwHighDateTime;
+    if (!plat_hook("probe: ObjectCreate receive", img + FH2_RVA_OBJECT_CREATE_RECV, (void *)probe_object_create, (void **)&g_create_orig)) {
+        log_begin();
+        log_raw("probe: the ObjectCreate receive handler was not hooked\n");
+        g_probe = NULL;
+        return 0;
+    }
+    log_begin();
+    log_raw("probe: the last 64 ObjectCreate messages this client receives are kept in fh2mp-creates.ring\n");
+    return 1;
 }
 
 /*
@@ -3747,6 +4518,12 @@ static DWORD WINAPI late_init(LPVOID unused)
      * so a change of ours made first would switch all of it off. */
     g_api->wait_for_code(0xFFFFFFFFu);
     wait_for_executable_game();
+    {
+        wchar_t pr_env[8];
+        if (GetEnvironmentVariableW(L"FH2MP_NO_PROBE", pr_env, 8) == 0) {
+            install_create_probe();
+        }
+    }
     log_begin();
     log_raw(find_fh2_image() ? "late: game image mapped, applying patches\n"
                              : "late: game image not found, applying what is possible\n");
@@ -3964,6 +4741,7 @@ static int session_load(void)
         }
         CloseHandle(f);
     }
+    udp_ticket_key();
     log_begin();
     log_raw("session: ");
     log_raw(g_token[0] ? "token present" : "no token");
@@ -4129,6 +4907,17 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
     log_dec(GetCurrentThreadId());
     log_raw("\n");
 
+    /* Solo play keeps the same XboxUserId/save, without session loading, network hooks or worker threads. */
+    {
+        wchar_t offline[8];
+        if (GetEnvironmentVariableW(L"FH2MP_OFFLINE", offline, 8) != 0) {
+            identity_load();
+            patch_identity();
+            gamedb_put_back();    /* restore the player's database before the platform builds its offline overrides */
+            log_raw("offline: account save profile active; online hooks skipped\n");
+            return 0;
+        }
+    }
     load_args();
     for (i = 0; i < g_argc; i++) {
         log_begin();
@@ -4146,6 +4935,9 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
         if (GetEnvironmentVariableW(L"FH2MP_NO_IDENTITY", tmp, 8) == 0) {
             patch_identity();
         }
+    }
+    if (!g_gamedb_src[0]) {
+        gamedb_put_back();    /* offline: now, before the platform's database step, which then sees what was put back */
     }
     install_cmdline_hook();
     {

@@ -6,15 +6,15 @@ from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar,
                                QVBoxLayout, QWidget)
 
-from .. import azimuth, keystore, launch, paths, shim, updater
+from .. import azimuth, crashreport, keystore, launch, paths, saves, shim, updater
 from ..api import ApiError
 from ..constants import AZIMUTH_PAGE, GITHUB_REPO
 from ..core import Launcher, PlayBlocked, friendly
 from ..version import __version__
 from . import images, theme
-from .dialogs import ProfileDialog, RecoveryDialog, SettingsDialog, open_folder
+from .dialogs import CrashReportDialog, ProfileDialog, RecoveryDialog, SettingsDialog, offer_save_elevation, open_folder
 from . import sfx
-from .widgets import (AccountButton, Banner, Brand, Carousel, DetailSheet, GradientText, Hero, IconButton, LinkButton, OnlineCount, PlaySplit,
+from .widgets import (AccountButton, Banner, Brand, Carousel, DetailSheet, GradientText, Hero, Icon, IconButton, LinkButton, OnlineCount, PlaySplit,
                       has_detail, link_colour, menu)
 from .wizard import Wizard
 from .workers import run_async
@@ -38,6 +38,7 @@ class MainWindow(QMainWindow):
         self._update_asked = False
         self._avatar_png = None
         self._launched_at = 0
+        self._crash_dialog = False
         self._build()
         link_colour()
         self.poll = QTimer(self)
@@ -118,12 +119,20 @@ class MainWindow(QMainWindow):
         self.play.clicked.connect(lambda: self.on_play())
         pm = menu(self)
         pm.addAction("Start with Azimuth settings", lambda: self.on_play(azimuth_window=True))
+        off = pm.addAction("Play offline", lambda: self.on_play_offline())
+        off.setToolTip("Start the game without FH2MP: no sign-in, no server, no online features, nothing synced")
+        pm.setToolTipsVisible(True)
         if paths.is_dev():
             sa = pm.addAction("Sign in only", self.on_session_only)
             sa.setToolTip("Sign in and write the session next to the shim without starting the game (start it yourself: rig, Steam, debugger)")
             pm.setToolTipsVisible(True)
         self.playsplit.set_menu(pm)
         foot.addWidget(self.playsplit)
+        self.offline_icon = Icon("cloud_off", theme.MUTED, 22)
+        self.offline_icon.setToolTip("Offline mode")
+        self.offline_icon.setAccessibleName("Offline mode")
+        self.offline_icon.hide()
+        foot.addWidget(self.offline_icon, 0, Qt.AlignmentFlag.AlignVCenter)
         self.status = Banner(name="pill")
         self.status.action.connect(lambda: self._status_cb and self._status_cb())
         self._status_cb = None
@@ -165,9 +174,11 @@ class MainWindow(QMainWindow):
     # ---- rendering
     def render(self):
         lc, s = self.lc, self.lc.settings
-        has_acct = lc.has_identity() and bool(s["gamertag"])
+        has_acct = bool(s["gamertag"]) and (lc.has_identity() or s["offline_mode"] or getattr(lc, "offline_run", False))
         name = (lc.account or {}).get("gamertag") or s["gamertag"]
-        if not has_acct:
+        if s["offline_mode"] or getattr(lc, "offline_run", False):
+            state = ("Offline", theme.MUTED)
+        elif not has_acct:
             state = ("Not signed up", theme.MUTED)
         elif lc.game_running():
             state = ("In game", theme.GOOD)
@@ -179,7 +190,7 @@ class MainWindow(QMainWindow):
                              else ("DEV CHANNEL" if s["channel"] == "dev" else ""))
         self.channel.setStyleSheet(f"color: {theme.WARN};")
         self.patreon.setVisible(bool(lc.links["patreon"]))
-        self.online.set_count(lc.online)
+        self.online.set_count(None if s["offline_mode"] or getattr(lc, "offline_run", False) else lc.online)
         self.version.setStyleSheet(f"color: {theme.MUTED}; font-size: 13px;")
         m = lc.motd
         if m:
@@ -197,7 +208,7 @@ class MainWindow(QMainWindow):
         """The most urgent thing in the way, as (kind, text, button, action), or None when all is well."""
         lc, s = self.lc, self.lc.settings
         up = lc.update_status()
-        if not up["minLauncherOk"]:
+        if not s["offline_mode"] and not up["minLauncherOk"]:
             return "bad", f"Launcher {__version__} is too old.", "Update", self.update_launcher
         if not s["azimuth_dir"]:
             return "bad", "Choose your Azimuth folder.", "Choose...", self.open_settings
@@ -206,6 +217,8 @@ class MainWindow(QMainWindow):
             return "bad", "azimuth.exe not found.", "Change...", self.open_settings
         if not info.game_folder:
             return "warn", "Azimuth can't find the game files.", "Azimuth setup", self._azimuth_clicked
+        if s["offline_mode"]:
+            return None
         if not (lc.has_identity() and s["gamertag"]):
             return "warn", "Set up an account to play.", "Set up", self.run_wizard
         kind, ver = lc.shim_state()
@@ -261,6 +274,8 @@ class MainWindow(QMainWindow):
         return super().eventFilter(obj, e)
 
     def _tap(self):
+        if self.lc.settings["offline_mode"] or getattr(self.lc, "offline_run", False):
+            return
         if self._taps >= 7:                         # once a run
             return
         self._taps += 1
@@ -279,13 +294,15 @@ class MainWindow(QMainWindow):
 
     def _render_play(self):
         lc = self.lc
-        ready = bool(lc.settings["azimuth_dir"]) and lc.has_identity() and bool(lc.settings["gamertag"])
+        offline = lc.settings["offline_mode"]
+        ready = bool(lc.settings["azimuth_dir"]) and (offline or (lc.has_identity() and bool(lc.settings["gamertag"])))
         running = lc.game_running()
         self.playsplit.set_state("IN GAME" if running else "PLAY", ready and not self._busy and not running)
+        self.offline_icon.setVisible(offline or getattr(lc, "offline_run", False))
 
     def _pix(self, url):
         """The picture at url (hero, news card) once it has been fetched; the first ask starts the download and re-renders after it."""
-        if not url:
+        if self.lc.settings["offline_mode"] or getattr(self.lc, "offline_run", False) or not url:
             return None
         if url not in self._images:
             self._images[url] = None
@@ -312,6 +329,10 @@ class MainWindow(QMainWindow):
     # ---- startup and refresh
     def start(self):
         lc = self.lc
+        if lc.settings["offline_mode"]:
+            lc.ensure_game()
+            self.render()
+            return
         if not lc.identity_loaded:           # the keyring may be locked and wait for the user's password: show the window first, decide about the wizard after
             self.say("Waiting for your system keyring (unlock it if a prompt appears)...", theme.WARN)
 
@@ -332,6 +353,33 @@ class MainWindow(QMainWindow):
         else:
             self.refresh_all()
             self._load_avatar()
+            self._check_crash()               # a crash while the launcher was closed (or the game was started from Steam)
+
+    def _check_crash(self):
+        """Offer to send a report when Azimuth recorded a crash since the last one was dealt with (see crashreport.check)."""
+        lc = self.lc
+        if lc.settings["offline_mode"] or lc.game_running() or self._crash_dialog:
+            return
+
+        def shown(found):
+            crash, report = found
+            if not crash or lc.game_running():
+                return
+            self._crash_dialog = True
+            try:
+                d = CrashReportDialog(lc, report, self)
+                d.exec()
+                crashreport.handled(lc.settings, crash)
+                if not d.ask_again:
+                    lc.settings["crash_report_ask"] = False
+                    lc.settings.save()
+            finally:
+                self._crash_dialog = False
+
+        def find(job):
+            crash = crashreport.check(lc.settings)
+            return crash, crash and crashreport.build(lc, crash)
+        run_async(find, shown, lambda e: None)
 
     def run_wizard(self):
         w = Wizard(self.lc, self)
@@ -344,7 +392,7 @@ class MainWindow(QMainWindow):
 
     def _require_update(self):
         """The server no longer accepts this launcher: the only ways on are to update or to quit."""
-        if self._update_asked:
+        if self.lc.settings["offline_mode"] or getattr(self.lc, "offline_run", False) or self._update_asked:
             return
         self._update_asked = True
         box = QMessageBox(self)
@@ -361,7 +409,12 @@ class MainWindow(QMainWindow):
             QApplication.quit()
 
     def refresh_server(self):
+        if self.lc.settings["offline_mode"] or getattr(self.lc, "offline_run", False):
+            return
+
         def ok(_c):
+            if self.lc.settings["offline_mode"] or getattr(self.lc, "offline_run", False):
+                return
             self._server_state = "ok"
             self.render()
             if self.lc.launcher_outdated():
@@ -369,6 +422,8 @@ class MainWindow(QMainWindow):
             run_async(lambda j: self.lc.refresh_home(), lambda _h: self.render(), lambda e: None)
 
         def fail(e):
+            if self.lc.settings["offline_mode"] or getattr(self.lc, "offline_run", False):
+                return
             self.lc.server = {}
             self._server_state = "down"
             self.render()
@@ -376,6 +431,8 @@ class MainWindow(QMainWindow):
         run_async(lambda j: self.lc.refresh_server(), ok, fail)
 
     def refresh_all(self):
+        if self.lc.settings["offline_mode"] or getattr(self.lc, "offline_run", False):
+            return
         self.refresh_server()
         if not self.lc.settings["check_updates"]:
             return
@@ -386,6 +443,8 @@ class MainWindow(QMainWindow):
         run_async(lambda j: self.lc.check_updates(), lambda _m: self.render(), fail)
 
     def _load_avatar(self):
+        if self.lc.settings["offline_mode"] or getattr(self.lc, "offline_run", False):
+            return
         xu = self.lc.settings["xuid"]
         if not xu:
             return
@@ -403,8 +462,9 @@ class MainWindow(QMainWindow):
     def open_settings(self):
         d = SettingsDialog(self.lc, self)
         if d.exec():
+            self._msg = None
             self.render()
-            self.refresh_all()
+            self.start()
 
     def _azimuth_clicked(self):
         d = self.lc.settings["azimuth_dir"]
@@ -500,8 +560,57 @@ class MainWindow(QMainWindow):
         run_async(work, ok, fail, progress=self.progress.setValue)
 
     # ---- play
+    def _save_failure(self, error, retry):
+        if not isinstance(error, saves.SaveCopyError):
+            return False
+        self.say(str(error), theme.BAD)
+        if error.permission and offer_save_elevation(self, error):
+            self.set_busy(True, "Copying save with administrator rights...")
+
+            def ok(_result):
+                self.set_busy(False)
+                retry()
+
+            def fail(e):
+                self.set_busy(False)
+                QMessageBox.warning(self, "Save copy failed", str(e))
+                self.say(str(e), theme.BAD)
+            run_async(lambda j: saves.retry_elevated(error), ok, fail)
+        elif not error.permission:
+            QMessageBox.warning(self, "Save copy failed", str(error))
+        return True
+
+    def on_play_offline(self, force=False, azimuth_window=False):
+        lc = self.lc
+        if self._busy or lc.game_running():
+            return
+        self.set_busy(True, "Starting offline...")
+
+        def work(job):
+            lc.play_offline(force_unsupported=force, azimuth_window=azimuth_window)
+
+        def ok(_r):
+            import time
+            self._launched_at = time.time()
+            self.set_busy(False, "Game started offline. Nothing is sent to the server.")
+            self.render()
+
+        def fail(e):
+            self.set_busy(False)
+            self.render()
+            if self._save_failure(e, lambda: self.on_play_offline(force, azimuth_window)):
+                return
+            if isinstance(e, PlayBlocked) and e.code == "azimuth_unsupported":
+                if QMessageBox.question(self, "Untested Azimuth", f"{e}\nStart anyway?") == QMessageBox.StandardButton.Yes:
+                    return self.on_play_offline(force=True, azimuth_window=azimuth_window)
+                return self.say("Cancelled.")
+            self.say(str(e) if isinstance(e, (PlayBlocked, launch.LaunchError)) else friendly(e), theme.BAD)
+        run_async(work, ok, fail)
+
     def on_play(self, force=False, azimuth_window=False):
         lc = self.lc
+        if lc.settings["offline_mode"]:
+            return self.on_play_offline(force, azimuth_window=azimuth_window)
         if self._busy or lc.game_running():
             return
         self.set_busy(True, "Checking everything...")
@@ -529,6 +638,8 @@ class MainWindow(QMainWindow):
         def fail(e):
             self.set_busy(False)
             self.render()
+            if self._save_failure(e, lambda: self.on_play(force, azimuth_window)):
+                return
             if isinstance(e, PlayBlocked):
                 if e.code == "no_game":
                     self.say("Couldn't find your Forza Horizon 2 files. Open Azimuth setup and pick the folder.", theme.BAD)
@@ -546,6 +657,11 @@ class MainWindow(QMainWindow):
                 return self.say(str(e), theme.BAD)
             if isinstance(e, ApiError) and e.code == "unknown_account":
                 return self._signup_existing()
+            if isinstance(e, ApiError) and e.code == "unreachable":
+                if QMessageBox.question(self, "Can't reach the server", f"{friendly(e)}\n\nPlay offline instead? Online features are off and "
+                                        "nothing is synced.") == QMessageBox.StandardButton.Yes:
+                    return self.on_play_offline(azimuth_window=azimuth_window)
+                return self.say(friendly(e), theme.BAD)
             if isinstance(e, launch.LaunchError):
                 return self.say(str(e), theme.BAD)
             if isinstance(e, ApiError) and e.code == "banned":
@@ -592,6 +708,7 @@ class MainWindow(QMainWindow):
             else:
                 self.say("")
             self.render()
+            QTimer.singleShot(0, self._check_crash)
 
     def closeEvent(self, e):
         lc = self.lc

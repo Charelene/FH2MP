@@ -46,6 +46,7 @@ import xbl  # noqa: E402
 import auth  # noqa: E402
 import gamedb_sync  # noqa: E402
 import home  # noqa: E402
+import crash_reports  # noqa: E402
 import launcher_api  # noqa: E402
 import ops_api  # noqa: E402
 import site_stats  # noqa: E402
@@ -68,7 +69,7 @@ OPS = ops_api.OpsConfig() # operator API access (token + allowed addresses), see
 # The client shows a club's level as clubXP / 100 + 1 (578 for 57713 XP, seen in game), and the club XP is what its members earned since they
 # joined: a one-member club of a level-41 player reads 480. FH2MP_CLUB_XP_DIVISOR scales the XP sent (12 puts a solo club near its member's level).
 CLUB_XP_DIVISOR = max(1, int(os.environ.get("FH2MP_CLUB_XP_DIVISOR", "1")))
-LEVELS = {}               # xuid -> currentCareerLevel as sent at Logon
+LEVELS = {}               # xuid -> currentCareerLevel as sent at Logon (career XP, NOT display level)
 TAGS = {}                 # xuid -> gamertag, learned at Logon
 
 
@@ -109,7 +110,7 @@ def logon(req):
     if getattr(CTX, "authed", False):
         lg["xuid"], lg["gamerTag"] = CTX.xuid, CTX.tag          # the account decides who this is, not what the client claims
     TAGS[lg["xuid"]] = lg["gamerTag"]
-    lg["currentCareerLevel"] = db.clean_level(lg["currentCareerLevel"])       # a number from the client's save: keep it sane
+    lg["currentCareerLevel"] = db.clean_level(lg["currentCareerLevel"])       # preserve career XP for the client's level lookup
     LEVELS[lg["xuid"]] = lg["currentCareerLevel"]
     with DB.tx() as c:
         db.touch_player(c, lg["xuid"], lg["gamerTag"], level=lg["currentCareerLevel"])
@@ -324,7 +325,7 @@ def drv_for_race(req):
 def _score_row(sc_row, rowdict):
     """Fill a ScoreboardRow (wire dict) from a scoreboard.py row."""
     user = rowdict["user"]
-    lvl = LEVELS.get(sc_row["xuid"], 100000 + scoreboard.hash_int(sc_row["tag"], "lvl") % 900000)
+    lvl = db.clean_level(LEVELS.get(sc_row["xuid"], 0))
     user.update({"qwXuid": sc_row["xuid"], "wzGamerTag": (sc_row["tag"] or TAGS.get(sc_row["xuid"], ""))[:15],
                  "currentCareerLevel": lvl})
     rowdict.update({
@@ -342,8 +343,11 @@ def sb_submit_score(req):
     s = SB.submit(xuid, tag, req["type"], d)
     if s is None:
         score = scoreboard.u64_to_dbl(d["score"])
+        required_class = SB.event_class(d["scoreboardType"], d["gameScoreboardId"])
         why = ("class X/R not allowed on a Rivals board" if (d["scoreboardType"] in scoreboard.EVENT_BOARDS and
                                                               d["carClassId"] in scoreboard.MAXED_CLASSES) else
+               f"car class {d['carClassId']} does not match event class {required_class}"
+               if required_class is not None and d["carClassId"] != required_class else
                f"speed {score:.3f} m/s is above the {scoreboard.SPEED_CAP} m/s cap" if math.isfinite(score) else "score is not a finite number")
         log(f"  SubmitScore board=({d['scoreboardType']},{req['type']}) track={d['trackId']}: ignored, {why}")
         return None
@@ -636,6 +640,11 @@ def economy_settings(req):
     all-zero default paid 0 for everything. creditPerKm 1000 matches CreditsPerKm in the race templates
     (EntityModel/Templates/templates_races.xml) [inferred]; the other values were Turn 10's and are guesses [guess]. Online races pay
     100 * xp_audit.XP_SCALE XP per km (env FH2MP_XP_SCALE, default 10); offline races and the per-finish minimum (shared by both) stay 100."""
+    if os.environ.get("FH2MP_ECONOMY", "game") != "guess":
+        # The game has its own rates (ForzaEconomyState, copied into the economy module at profile load, FUN_14055d810) and what we send
+        # overwrites them; the values below are guesses, so by default the game keeps its own (offline play is stock). FH2MP_ECONOMY=guess
+        # sends them again (online XP scale included).
+        raise XlsError("the game's own economy values apply")
     online = int(round(100 * xp_audit.XP_SCALE))
     r = xls.default_struct(SC, SC.call_struct("ForzaUserGetEconomySettings_Results"))
     r["settings"].update({
@@ -726,7 +735,7 @@ def _owner(tmpl, xuid):
     o = _clone(tmpl)
     club_id, club_tag, role = CLUBS.member_info(xuid) if CLUBS else (0, "", 0)
     o.update({"qwXuid": xuid, "wzGamerTag": (TAGS.get(xuid) or _tag_from_db(xuid))[:31],
-              "currentCareerLevel": LEVELS.get(xuid, 1), "clubId": club_id, "clubTag": club_tag[:9], "roleInClub": clubs.wire_role(role)})
+              "currentCareerLevel": db.clean_level(LEVELS.get(xuid, 0)), "clubId": club_id, "clubTag": club_tag[:9], "roleInClub": clubs.wire_role(role)})
     return o
 
 
@@ -780,7 +789,7 @@ def content_upload(req):
     xuid, _ = _me()
     data = bytes(req["uploadData"])
     try:
-        got = UGC.blob_write(req["contentId"], req["payloadOffset"], data, owner=xuid)
+        got = UGC.blob_write(UGC.content_blob(req["contentId"]), req["payloadOffset"], data, owner=xuid)
     except ugc.LimitError as e:
         raise XlsError(str(e))
     log(f"  Content.UploadContent id={req['contentId']} @{req['payloadOffset']} +{len(data)} of {req['payloadTotalSize']}: "
@@ -791,7 +800,7 @@ def content_upload(req):
 
 
 def content_download(req):
-    r = UGC.blob_read(req["contentId"], req["payloadOffset"], req["requestedSize"])
+    r = UGC.blob_read(UGC.content_blob(req["contentId"]), req["payloadOffset"], req["requestedSize"])
     if r is None:
         raise XlsError(f"no such content {req['contentId']}")
     chunk, last, total = r
@@ -1056,6 +1065,24 @@ def store_tuning_create(req):
     return {"contentFileId": fid}
 
 
+def store_photo_create(req):
+    """StorefrontPhoto.Create: lists a photo (title, keywords, preview) and returns its file id; the client then uploads the full picture
+    with UploadContent under that id (ugc.content_blob), and the photo is searchable once the upload is complete."""
+    xuid, _ = _me()
+    h, d = req["fileHeader"], req["photoDescription"]["base"]
+    try:
+        bid = UGC.blob_create(xuid, "", req["payloadSize"])
+    except ugc.LimitError as e:
+        raise XlsError(str(e))
+    fid = UGC.file_create("photo", xuid, h["Title"], h["Description"], h["Type"], None, req["payloadSize"], bytes(req["previewData"]), bid,
+                          make_id=d["MakeId"] or None, model_id=d["ModelId"] or None, kw1=h["KeywordOne"], kw2=h["KeywordTwo"],
+                          env=d["EnvironmentId"], track=d["TrackId"])
+    FILE_KIND[h["Type"]] = "photo"
+    log(f"  photo shared: file #{fid} {h['Title']!r} type={h['Type']} make={d['MakeId']} model={d['ModelId']} "
+        f"payload={req['payloadSize']} preview={len(req['previewData'])}B (upload as content {fid}, blob #{bid})")
+    return {"contentFileId": fid}
+
+
 def _search_files(kind, results_struct, label, req):
     p = req["searchParameters"]
     files = UGC.search(kind, p["MakeId"], p["ModelId"], p["ClassId"], p["KeywordOneId"], p["KeywordTwoId"], p["EnvironmentId"],
@@ -1072,6 +1099,32 @@ def store_search_liveries(req):
 
 def store_search_tunes(req):
     return _search_files("tune", "ForzaStorefrontSearchTuningFiles_Results", "SearchTuningFiles", req)
+
+
+def store_search_photos(req):
+    return _search_files("photo", "ForzaStorefrontSearchPhotoFiles_Results", "SearchPhotoFiles", req)
+
+
+PHOTO_PICKS_DAYS = 7        # "picks" tab: the most liked photos shared in the last week (all time when there are none)
+
+
+def _photo_list(results_struct, field, label, files, req):
+    tmpl = _elem_template(results_struct, field)
+    log(f"  {label} max={req['maxFiles']}: {len(files)} photos")
+    return {field: [_heavy(UGC.file_get(f["id"]), tmpl) for f in files]}        # file_get unpacks the preview
+
+
+def store_popular_photos(req):
+    """Storefront.GetPopularPhotos (the "Top Rated" tab)."""
+    files = UGC.popular("photo", min(max(req["maxFiles"], 0), 100) or 50)
+    return _photo_list("ForzaStorefrontGetPopularPhotos_Results", "PopularPhotos", "GetPopularPhotos", files, req)
+
+
+def store_featured_photos(req):
+    """Storefront.GetFeaturedPhotos (the curated tab): nobody curates, so the week's most liked photos stand in."""
+    n = min(max(req["maxFiles"], 0), 100) or 50
+    files = UGC.popular("photo", n, since=time.time() - PHOTO_PICKS_DAYS * 86400) or UGC.popular("photo", n)
+    return _photo_list("ForzaStorefrontGetFeaturedPhotos_Results", "FeaturedPhotos", "GetFeaturedPhotos", files, req)
 
 
 def store_heavy(req):
@@ -1790,7 +1843,7 @@ def social_api(method, path, body):
     parts = [p for p in path.split("?")[0].split("/") if p]
     try:
         if parts[:2] == ["api", "players"] and len(parts) == 2 and method == "GET":
-            return 200, {"players": [{"xuid": r["xuid"], "gamertag": r["gamertag"], "level": r["career_level"], "friends": r["friends"],
+            return 200, {"players": [{"xuid": r["xuid"], "gamertag": r["gamertag"], "level": db.display_level(r["career_level"]), "friends": r["friends"],
                                       "hasGamerpic": bool(r["has_gamerpic"])} for r in SOCIAL.players()]}, None
         if parts[:2] == ["api", "friends"]:
             if len(parts) == 3 and method == "GET":
@@ -1847,6 +1900,10 @@ HANDLERS = {
     ("Forza.WebServices.StorefrontTuning", "Create"): ("", store_tuning_create),
     ("Forza.WebServices.Storefront", "SearchLiveryFiles"): ("", store_search_liveries),
     ("Forza.WebServices.Storefront", "SearchTuningFiles"): ("", store_search_tunes),
+    ("Forza.WebServices.StorefrontPhoto", "Create"): ("", store_photo_create),
+    ("Forza.WebServices.Storefront", "SearchPhotoFiles"): ("", store_search_photos),
+    ("Forza.WebServices.Storefront", "GetPopularPhotos"): ("", store_popular_photos),
+    ("Forza.WebServices.Storefront", "GetFeaturedPhotos"): ("", store_featured_photos),
     ("Forza.WebServices.Storefront", "GetFileHeavyWeightData"): ("", store_heavy),
     ("Forza.WebServices.Storefront", "GetMyFileList"): ("", store_my_files),
     ("Forza.WebServices.Storefront", "GetFileDataIfShared"): ("", store_if_shared),
@@ -2136,8 +2193,25 @@ def gsms_cluster():
                        "portMappings": [{"Key": "NetV2", "Value": {"external": port, "internal": port}}]}).encode()
 
 
+def verify_strings(body):
+    """XSAPI uses `stringstoVerify` (lower-case t), with one result per input.
+    Evidence: microsoft/xbox-live-api, 1807_xdk_qfe_preview,
+    Source/Services/Misc/string_service.cpp, string_service::verify_strings.
+    Keep the old spelling accepted for clients using our earlier implementation.
+    """
+    req = json.loads(body)
+    if not isinstance(req, dict):
+        raise ValueError("expected an object")
+    strings = req.get("stringstoVerify", req.get("stringsToVerify"))
+    if not isinstance(strings, list) or any(not isinstance(s, str) for s in strings):
+        raise ValueError("expected an array of strings")
+    return {"verifyStringResult": [{"resultCode": 0, "offendingString": ""} for _ in strings]}
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    timeout = float(os.environ.get("FH2MP_LSP_READ_TIMEOUT", "30"))   # a client that sends nothing for this long (slow body, idle
+                                                                       # keep-alive) loses its connection and its thread
 
     def log_message(self, fmt, *args):
         pass
@@ -2231,7 +2305,7 @@ class Handler(BaseHTTPRequestHandler):
                 CTX.xuid, CTX.tag, CTX.authed = acct.xuid, acct.gamertag, True
                 if not self._gamedb_ok(acct):
                     return False
-                announce_auth(acct.xuid, self.client_ip())
+                announce_auth(acct.xuid, self.client_ip(), token)
                 return True
             if AUTH.mode == "required":
                 self._reply_json(401, {"error": "login_required", "message": "start the game from the FH2MP launcher"})
@@ -2245,8 +2319,12 @@ class Handler(BaseHTTPRequestHandler):
     def _handle(self):
         global SEQ
         SEQ += 1
-        n = int(self.headers.get("Content-Length") or 0)
-        if (self.path.startswith("/v1/") and n > launcher_api.MAX_BODY) or (self.path.startswith("/ops/") and n > 65536) \
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self.close_connection = True
+            return self._reply_json(400, {"error": "bad_length"})
+        if (self.path.startswith("/v1/") and n > launcher_api.body_limit(self.path)) or (self.path.startswith("/ops/") and n > 65536) \
                 or n > ugc.MAX_REQUEST_BODY or n < 0:
             self.close_connection = True
             return self._reply_json(413, {"error": "too_large"})
@@ -2296,16 +2374,13 @@ class Handler(BaseHTTPRequestHandler):
             out, ctype = gsms_cluster(), "application/json"
             log(f"  GSMS cluster -> {out.decode()}")
         elif host == "client-strings.xboxlive.com" and self.path.rstrip("/").endswith("/system/strings/validate"):
-            # XSAPI StringService.VerifyString (club names, noticeboard posts...): {"stringsToVerify": [...]} ->
-            # {"verifyStringResult": [{"resultCode": 0, "offendingString": ""}, ...]}, one entry per string; 0 = fine
-            # (keys from Microsoft.Xbox.Services.dll [inferred layout])
             try:
-                n = len(json.loads(body or b"{}").get("stringsToVerify", [])) or 1
-            except (ValueError, AttributeError):
-                n = 1
-            out = json.dumps({"verifyStringResult": [{"resultCode": 0, "offendingString": ""} for _ in range(n)]}).encode()
+                verified = verify_strings(body)
+            except ValueError:
+                return self._reply_json(400, {"error": "invalid_strings"})
+            out = json.dumps(verified).encode()
             ctype = "application/json"
-            log(f"  strings/validate: {n} string(s) accepted")
+            log(f"  strings/validate: {len(verified['verifyStringResult'])} string(s) accepted")
         elif host in ("profile.xboxlive.com", "social.xboxlive.com", "peoplehub.xboxlive.com", "userpresence.xboxlive.com") \
                 and (res := xbl_social(host, self.command, self.path, body, self.headers)) is not None:
             status, obj = res
@@ -2514,28 +2589,38 @@ def online_count():
 _AUTH_ANNOUNCED = {}
 
 
-def announce_auth(xuid, ip):
-    """Tell the game server (UDP, loopback) that this xuid is signed in from this address, so it accepts that player's OpenConnection.
-    Repeated at most every 20 s per player; the game server forgets an entry after a few minutes without news."""
+def announce_auth(xuid, ip, token=""):
+    """Tell the game server (UDP, loopback) that this xuid is signed in from this address, so it accepts that player's OpenConnection,
+    with the UDP ticket key of the session token (auth.udp_ticket_key). Repeated at most every 20 s per player and session; the game
+    server forgets an entry after a few minutes without news."""
     now = time.monotonic()
-    key = (xuid, ip)
+    tkey = auth.udp_ticket_key(token)
+    key = (xuid, ip, tkey)
     if now - _AUTH_ANNOUNCED.get(key, -1e9) < 20:
         return
     _AUTH_ANNOUNCED[key] = now
     if len(_AUTH_ANNOUNCED) > 20000:
         _AUTH_ANNOUNCED.clear()
-    xbl.announce_auth(xuid, ip)
+    xbl.announce_auth(xuid, ip, tkey)
 
 
 _OLD_REMOVED = {}
 _GAMEDB_REMOVED = {}
 
 
-def on_login(xuid, ip):
+def on_login(xuid, ip, token=""):
     """A fresh sign-in (launcher login / sign-up): lifts an earlier ban or kick on the game server, then announces the address."""
     xbl.announce_allow(xuid)
-    _AUTH_ANNOUNCED.pop((xuid, ip), None)
-    announce_auth(xuid, ip)
+    _AUTH_ANNOUNCED.pop((xuid, ip, auth.udp_ticket_key(token)), None)
+    announce_auth(xuid, ip, token)
+
+
+def on_logout(xuid, token):
+    """A launcher signed out (after the game exits, or a profile window closed): the connections that session's ticket opened end."""
+    tkey = auth.udp_ticket_key(token)
+    for key in [k for k in _AUTH_ANNOUNCED if k[0] == xuid and k[2] == tkey]:
+        del _AUTH_ANNOUNCED[key]
+    xbl.announce_logout(xuid, tkey)
 
 
 def on_revoke(xuid):
@@ -2554,9 +2639,13 @@ def setup_auth():
     dbname = DB.one("SELECT current_database()")[0]
     if (env == "prod" and dbname != "fh2mp") or (env == "dev" and dbname == "fh2mp"):
         sys.exit(f"refusing to start: FH2MP_ENV={env} but the database is {dbname!r}")
-    AUTH = auth.AuthService(DB, env=env, mode=os.environ.get("FH2MP_AUTH", "optional"),
-                            registration=os.environ.get("FH2MP_REGISTRATION", "open"),
-                            token_ip=os.environ.get("FH2MP_TOKEN_IP", "exact"))
+    try:
+        # required unless the environment says otherwise: a missing variable must not open the server (audit 2026-10-25 F08)
+        AUTH = auth.AuthService(DB, env=env, mode=os.environ.get("FH2MP_AUTH", "required"),
+                                registration=os.environ.get("FH2MP_REGISTRATION", "open"),
+                                token_ip=os.environ.get("FH2MP_TOKEN_IP", "exact"))
+    except ValueError as e:
+        raise SystemExit(f"fh2mp LSP: {e}")
 
     def changed(xuid):
         r = DB.one("SELECT gamertag FROM accounts WHERE xuid=?", (xuid,))
@@ -2572,9 +2661,9 @@ def setup_auth():
     if os.environ.get("FH2MP_GAME_TCP_PORT"):
         game_public["tcp"] = int(os.environ["FH2MP_GAME_TCP_PORT"])         # the game server's experimental TCP carrier (FH2MP_TUNNEL_PORT)
     LAUNCHER = launcher_api.Ctx(
-        AUTH, SOCIAL, launcher_api.LauncherConfig(), online_count, log=log, on_login=on_login,
+        AUTH, SOCIAL, launcher_api.LauncherConfig(), online_count, log=log, on_login=on_login, on_logout=on_logout,
         lsp_public={"url": os.environ.get("FH2MP_LSP_URL", f"http://{host}:{os.environ.get('FH2MP_LSP_PUBLIC_PORT', '5080')}")},
-        game_public=game_public, gamedb=gamedb_sync.GameDb(),
+        game_public=game_public, gamedb=gamedb_sync.GameDb(), crashes=crash_reports.CrashReports.from_env(log),
         boards=lambda kind, n: (home.build(sys.modules[__name__]) if kind == "home"
                                 else (ops_api.challenges if kind == "challenges" else ops_api.leaderboards)(sys.modules[__name__], n)))
     global OPS
@@ -2584,11 +2673,37 @@ def setup_auth():
     log(f"auth: env={env} mode={AUTH.mode} registration={AUTH.registration} accounts={AUTH.stats()['accounts']}")
 
 
+class BoundedHTTPServer(ThreadingHTTPServer):
+    """At most FH2MP_LSP_THREADS requests at once (audit 2026-10-25 F11): when they are all busy, the accept loop waits for one to end
+    instead of starting a thread per connection without limit. Handler.timeout ends connections that stall."""
+    daemon_threads = True
+
+    def __init__(self, *a, **kw):
+        self.slots = threading.BoundedSemaphore(int(os.environ.get("FH2MP_LSP_THREADS", "256")))
+        super().__init__(*a, **kw)
+
+    def process_request(self, request, client_address):
+        self.slots.acquire()
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
+
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 5080
     setup()
     bind = os.environ.get("FH2MP_LSP_BIND", "127.0.0.1")
-    srv = ThreadingHTTPServer((bind, port), Handler)
+    srv = BoundedHTTPServer((bind, port), Handler)
+    if bind not in ("127.0.0.1", "::1", "localhost"):
+        log(f"WARNING: listening on {bind}, not loopback: put the proxy in front (ops/nginx) and keep this port closed to the internet")
     site_stats.start_sampler(sys.modules[__name__])
     log(f"fh2mp LSP listening on {bind}:{port}")
     srv.serve_forever()

@@ -195,7 +195,7 @@ class Api:
         """IPv4-only HTTPS; the system proxy only when asked for."""
         return urllib.request.build_opener(urllib.request.ProxyHandler(None if use_proxy else {}), _V4HTTPSHandler(context=ctx or self._ctx))
 
-    def _call(self, method, path, body=None, token=None, raw=False, ctype="application/json", limit=4_000_000):
+    def _call(self, method, path, body=None, token=None, raw=False, ctype="application/json", limit=4_000_000, timeout=None):
         data = None
         if body is not None:
             data = body if isinstance(body, bytes) else json.dumps(body).encode()
@@ -220,7 +220,7 @@ class Api:
             details, last = [], None
             for use_proxy in ([True, False] if proxy else [False]):
                 try:
-                    with self._opener(use_proxy, ctx).open(make_request(), timeout=self.timeout) as r:
+                    with self._opener(use_proxy, ctx).open(make_request(), timeout=timeout or self.timeout) as r:
                         payload = r.read(limit)
                     break
                 except urllib.error.HTTPError as e:
@@ -320,6 +320,10 @@ class Api:
         sig = identity.sign(self.realm, "login", raw, identity.pubkey)
         return self._call("POST", "/v1/auth/login", {"challenge": ch["challenge"], "pubkey": identity.pubkey_b64, "sig": ident.b64u(sig),
                                                       "client": client})
+
+    def crash_report(self, payload):
+        """Send a crash report (crashreport.Report.payload()). No sign-in: the game has usually ended it. -> {"id": ...}"""
+        return self._call("POST", "/v1/crash-reports", payload, timeout=60)
 
     # ---- signed in
     def me(self, token):

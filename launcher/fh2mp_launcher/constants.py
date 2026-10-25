@@ -36,10 +36,10 @@ PLATFORM_FILES = ("d3dcompiler_47.dll", "LICENSE-FH2ModPlatform.txt", "LICENSE-M
 # release zip's SHA-256 and the DLL's inside it. `files` maps a file in the zip to where it goes in the Azimuth folder.
 UPSTREAM = {
     "platform": {
-        "name": "FH2 Mod Platform", "author": "Trinculo54", "license": "MIT", "version": "2.7.1",
-        "url": "https://github.com/Trinculo54/fh2-mod-platform/releases/download/v2.7.1/FH2-Mod-Platform-v2.7.1.zip",
-        "sha256": "a57a13611be79d2a42c09b70cb20f68ecc85ac7063fbe87c50760788da863179", "size": 938442,
-        "dll": "d3dcompiler_47.dll", "dllSha256": "7274e4609445de2e86ec5e9e04b8e55a12e3c85d867e95c794c7a5c07e6ca080",
+        "name": "FH2 Mod Platform", "author": "Trinculo54", "license": "MIT", "version": "2.7.2",
+        "url": "https://github.com/Trinculo54/fh2-mod-platform/releases/download/v2.7.2/FH2-Mod-Platform-v2.7.2.zip",
+        "sha256": "24315ddadb7b0f039872082e99062a79d6984bb437386f792607330c5ee502f1", "size": 955218,
+        "dll": "d3dcompiler_47.dll", "dllSha256": "65b59f88fcc96cb65c8b1b7c185e9490d1a6580e39d5947f7f1f436328e9ec67",
         "files": {"d3dcompiler_47.dll": "d3dcompiler_47.dll", "LICENSE.txt": "LICENSE-FH2ModPlatform.txt",
                   "LICENSE-MinHook.txt": "LICENSE-MinHook.txt"},
     },

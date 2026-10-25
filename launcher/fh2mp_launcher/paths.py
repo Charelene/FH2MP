@@ -32,8 +32,10 @@ def cache_dir():
     return d
 
 
-def atomic_write(path, data, mode=0o600):
-    """Write-then-rename so a crash never leaves half a file; the file is private to the user from the first byte."""
+def atomic_write(path, data, mode=0o600, busy_ok=False):
+    """Write-then-rename so a crash never leaves half a file; the file is private to the user from the first byte.
+    busy_ok: on Windows a DLL a running process has loaded cannot be replaced ("Access is denied") but can be renamed, so the old file is
+    renamed to <path>.old<pid> first and the new one takes its place (the running game keeps its copy until it restarts)."""
     tmp = f"{path}.tmp{os.getpid()}"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
     try:
@@ -41,7 +43,20 @@ def atomic_write(path, data, mode=0o600):
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        try:
+            os.replace(tmp, path)
+        except PermissionError:
+            if not (busy_ok and sys.platform == "win32" and os.path.exists(path)):
+                raise
+            aside = f"{path}.old{os.getpid()}"
+            if os.path.exists(aside):
+                os.unlink(aside)
+            os.replace(path, aside)
+            os.replace(tmp, path)
+            try:
+                os.unlink(aside)
+            except OSError:
+                pass                 # still loaded: it goes with the next install
     except BaseException:
         try:
             os.unlink(tmp)

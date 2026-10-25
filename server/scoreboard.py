@@ -14,6 +14,7 @@ import math
 import struct
 import time
 import xp_audit
+import score_reports
 
 ASCENDING = {1}          # scoreTypes where a smaller score wins (lap/race times) [guess]
 XP_BOARD = (4, 9)        # (scoreboardType, scoreType) of the XP ladder [guess from SubmitXpScore traffic]
@@ -63,16 +64,24 @@ class ScoreStore:
         return self.db.one("SELECT COUNT(*) FROM score_submissions")[0]
 
     # ---- writes
+    def event_class(self, sb, event_id):
+        """The event restriction, not its illustrative card class (open events have a card class too)."""
+        e = self.event_info(event_id) if sb in EVENT_BOARDS else None
+        return e.get("attrs", {}).get("CarClassId") if e else None
+
     def submit(self, xuid, tag, score_type, d):
         """Stores one submission and returns it as a row dict, or None if the score is not a finite number
-        (a NaN/inf time must never reach a public board) or the car is class X/R on a Rivals board (user
+        (a NaN/inf time must never reach a public board), is negative, or is a zero time or the car is class X/R on a Rivals board (user
         decision: a maxed-out car must never appear on a Rivals leaderboard, not even disguised as S2), or a speed above SPEED_CAP."""
         score = u64_to_dbl(d["score"])
-        if not math.isfinite(score):
-            return None
+        if not math.isfinite(score) or score < 0 or (score_type in ASCENDING and score == 0):
+            return None                 # no board has a negative score, and no race takes no time (audit 2026-10-25 F10)
         if d["scoreboardType"] in SPEED_BOARDS and score > SPEED_CAP:
             return None
         if d["scoreboardType"] in EVENT_BOARDS and d["carClassId"] in MAXED_CLASSES:
+            return None
+        required_class = self.event_class(d["scoreboardType"], d["gameScoreboardId"])
+        if required_class is not None and d["carClassId"] != required_class:
             return None
         now = time.time()
         score_id = os.urandom(16)
@@ -140,7 +149,7 @@ class ScoreStore:
         """Each player's best submission on a board (any track when `track` is -1/65535), as row dicts keyed by
         xuid. The XP ladder also takes the accumulated XP when that beats a submitted score."""
         asc = st in ASCENDING
-        where, args = "s.sb=? AND s.st=?", [sb, st]
+        where, args = "s.sb=? AND s.st=? AND " + score_reports.VISIBLE, [sb, st]
         if sb in EVENT_BOARDS:    # class X/R must never surface on a Rivals board, read or write (user decision); belt-and-suspenders
             where += f" AND s.cls NOT IN ({','.join(str(c) for c in MAXED_CLASSES)})"
         if sb in SPEED_BOARDS:    # impossible speeds submitted before the cap existed stay stored but never show
@@ -148,6 +157,10 @@ class ScoreStore:
         if (sb in EVENT_BOARDS or sb in GSID_BOARDS) and pivot > 0:   # one board per event / per trap or zone (the client's track field is 0, the track or 65535)
             where += " AND s.gsid=?"
             args.append(pivot)
+            required_class = self.event_class(sb, pivot)
+            if required_class is not None:
+                where += " AND s.cls=?"
+                args.append(required_class)
         elif track not in (-1, 65535):
             where += " AND s.track=?"
             args.append(track)
@@ -158,7 +171,7 @@ class ScoreStore:
             where += " AND s.cls=?"
             args.append(pivot)
         # ties go to the earlier submission (lowest id), as the in-memory scan did
-        sql = ("SELECT * FROM (SELECT s.*, COALESCE(p.gamertag, '') AS tag, "
+        sql = (f"SELECT * FROM (SELECT s.*, {score_reports.COUNTS} AS report_count, COALESCE(p.gamertag, '') AS tag, "
                "CASE WHEN g.submission_id IS NULL THEN 0 ELSE s.id END AS ghost, ROW_NUMBER() OVER "
                f"(PARTITION BY s.xuid ORDER BY s.score {'ASC' if asc else 'DESC'}, s.id) AS rn "
                "FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid "
@@ -359,7 +372,7 @@ def hash_frac(*parts):
 
 def _row(r):
     """score_submissions row (+ joined tag) -> the dict the rest of the server uses."""
-    return {"xuid": r["xuid"], "tag": r["tag"], "sb": r["sb"], "st": r["st"], "gsid": r["gsid"], "track": r["track"],
+    return {**score_reports.fields(r), "xuid": r["xuid"], "tag": r["tag"], "sb": r["sb"], "st": r["st"], "gsid": r["gsid"], "track": r["track"],
             "car": r["car"], "cls": r["cls"], "cpi": r["cpi"], "score": r["score"], "clean": bool(r["clean"]),
             "stm": bool(r["stm"]), "tcs": bool(r["tcs"]), "abs": bool(r["abs"]), "autobrake": bool(r["autobrake"]),
             "autoshift": bool(r["autoshift"]), "clutch": bool(r["clutch"]), "t": r["submitted"],
