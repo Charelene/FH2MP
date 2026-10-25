@@ -572,6 +572,9 @@ class Launcher:
 
     def play(self, force_unsupported=False, azimuth_window=False):
         """azimuth_window: start Azimuth's own launcher window (its settings) instead of going straight into the game."""
+        if self.settings["offline_mode"]:
+            self.play_offline(force_unsupported, azimuth_window=azimuth_window)
+            return None, ["offline mode: online features and progress sync are off"]
         acct, notes = self.prepare_play(force_unsupported, require_game=not azimuth_window)
         try:
             self.process = launch.start(self.settings, self.settings["azimuth_dir"], skip_launcher=not azimuth_window,
@@ -580,6 +583,47 @@ class Launcher:
             launch.cleanup(self.settings["azimuth_dir"])
             raise
         return acct, notes
+
+    def play_offline(self, force_unsupported=False, azimuth_window=False):
+        """Solo play with the account's local save. The shim only sets the save ID; online hooks stay off."""
+        s = self.settings
+        d = s["azimuth_dir"]
+        if not d or not os.path.isdir(d):
+            raise PlayBlocked("Choose your Azimuth folder.", "no_azimuth")
+        info = self.azimuth_info()
+        if not info.found:
+            raise PlayBlocked("azimuth.exe not found.", "no_azimuth")
+        if not info.supported and not force_unsupported:
+            raise PlayBlocked(f"Azimuth {info.version or '?'} is untested with FH2MP.", "azimuth_unsupported")
+        self.ensure_game()
+        if not azimuth_window and not azimuth.has_game_configured(d):
+            raise PlayBlocked("Couldn't find your Forza Horizon 2 files.", "no_game")
+        xuid = s["xuid"]
+        use_identity = bool(xuid or os.path.isfile(os.path.join(shim.bin_dir(d), "fh2mp-identity.txt")))
+        if use_identity and (self.shim_state()[0] != "ours" or not shim.supports_offline(d)):
+            raise PlayBlocked("Update the FH2MP shim to use your account save offline.", "offline_shim_outdated")
+        self.stop_tunnel()
+        self.token = ""
+        self.account = None
+        self.game_env = {"FH2MP_OFFLINE": "1"}
+        if xuid:
+            self.game_env["FH2MP_XUID"] = f"{xuid:x}"
+            shim.write_identity(d, xuid)
+        self.gamedb_synced = False
+        shim.clear_session(d)
+        self._offline_enabled = shim.enable(d) if use_identity else False
+        self._offline_disabled = shim.disable(d) if not use_identity else False
+        self.offline_run = True
+        try:
+            self.process = launch.start(s, d, skip_launcher=not azimuth_window, extra_env=self.game_env)
+        except Exception:
+            self.offline_run = False
+            launch.cleanup(d)
+            if self._offline_disabled:
+                shim.enable(d)
+            if self._offline_enabled:
+                shim.disable(d)
+            raise
 
     def ensure_game(self):
         """If Azimuth does not know the game folder yet, find the install and write it into Azimuth's settings. -> path set, or ''. """
@@ -628,6 +672,13 @@ class Launcher:
 
     def after_game(self):
         launch.cleanup(self.settings["azimuth_dir"])
+        if getattr(self, "offline_run", False):
+            self.offline_run = False
+            if self._offline_disabled:
+                shim.enable(self.settings["azimuth_dir"])
+            if self._offline_enabled:
+                shim.disable(self.settings["azimuth_dir"])
+            return
         if self.token:
             try:
                 self.sign_out()

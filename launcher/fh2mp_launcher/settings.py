@@ -14,6 +14,7 @@ DEFAULTS = {
     "prefix": "",                   # Proton prefix directory = STEAM_COMPAT_DATA_PATH (Linux)
     "custom_command": "",           # e.g. steam steam://rungameid/1234567890 ; {exe} {dir} are replaced
     "check_updates": True,
+    "offline_mode": False,          # solo play without sign-in, server checks or downloads
     "gamertag": "",                 # last known, for display before the server answers
     "xuid": 0,
     "extra_args": "",

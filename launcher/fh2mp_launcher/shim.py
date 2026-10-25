@@ -44,6 +44,15 @@ def inspect_dll(path):
     return ("ours", m.group(1).decode()) if m else ("foreign", "")
 
 
+def supports_offline(folder):
+    """The installed shim can keep the account's save ID while skipping all online hooks."""
+    try:
+        with open(_dll(folder), "rb") as f:
+            return "FH2MP_OFFLINE".encode("utf-16-le") in f.read()
+    except OSError:
+        return False
+
+
 def blob_version(data):
     m = MARKER.search(data)
     return m.group(1).decode() if m else ""
@@ -155,6 +164,22 @@ def enable(folder):
     if len(keep) == len(lines):
         return False
     paths.atomic_write(path, ("\n".join(keep) + "\n").encode("utf-8"), 0o644)
+    return True
+
+
+def disable(folder):
+    """Puts FH2MP on the platform's list of mods turned off (the in-game MODS tab), so the next game start runs without it: offline play.
+    enable() takes it off again. -> True when it was added."""
+    path = os.path.join(folder, MODS_DIR, DISABLED_LIST)
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        lines = []
+    if any(ln.strip().lower() == SHIM_DLL.lower() for ln in lines):
+        return False
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    paths.atomic_write(path, ("\n".join([ln for ln in lines if ln.strip()] + [SHIM_DLL]) + "\n").encode("utf-8"), 0o644)
     return True
 
 

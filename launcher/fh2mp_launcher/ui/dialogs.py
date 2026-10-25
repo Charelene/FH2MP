@@ -270,6 +270,10 @@ class SettingsDialog(QDialog):
         row.addWidget(self.azdir, 1)
         row.addWidget(b)
         lay.addLayout(row)
+        self.offline = QCheckBox("Offline mode (solo play)")
+        self.offline.setToolTip("Play solo without connecting to FH2MP, using the same local save as online play.")
+        self.offline.setChecked(s["offline_mode"])
+        lay.addWidget(self.offline)
         self.extra_opts = QCheckBox("Install FH2 Extra Options if it is missing (by RokkuDayo, GPL-3.0)")
         self.extra_opts.setToolTip("The Social, Clubs, Rivals and Marketplace menus and several game fixes come from this free mod. "
                                    "The launcher downloads the author's release from GitHub (a pinned build) and puts it next to azimuth.exe as winmm.dll. "
@@ -425,6 +429,7 @@ class SettingsDialog(QDialog):
                 QMessageBox.warning(self, "Proton", str(e))
                 return
         s["azimuth_dir"] = d
+        s["offline_mode"] = self.offline.isChecked()
         s["extra_options"] = self.extra_opts.isChecked()
         s["tcp_fallback"] = self.tcp.isChecked()
         if paths.is_dev():                          # players cannot change the channel or the server

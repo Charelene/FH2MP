@@ -62,6 +62,10 @@ set up so the game starts in Azimuth. No game files are in this repo or the laun
    Mods you already have in `fh2-mods` keep working.
 3. Pick a gamertag and press **PLAY**. The launcher starts the game for you.
 
+**Solo play.** Turn on **Settings → Offline mode (solo play)** and press **PLAY**. A crossed-cloud icon indicates offline mode.
+The setting is saved for future starts. Online features and server sync are off; your existing account save and local progress are used
+in both modes. Turn the setting off to play online again. The Play menu also offers **Play offline** for a single run.
+
 **Account.** There is no e-mail or password. Your account is a secret key stored in the OS keyring; you get a **recovery code** to move it to
 another computer. Keep that code private.
 

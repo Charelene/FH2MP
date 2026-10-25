@@ -4673,6 +4673,16 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
     log_dec(GetCurrentThreadId());
     log_raw("\n");
 
+    /* Solo play keeps the same XboxUserId/save, without session loading, network hooks or worker threads. */
+    {
+        wchar_t offline[8];
+        if (GetEnvironmentVariableW(L"FH2MP_OFFLINE", offline, 8) != 0) {
+            identity_load();
+            patch_identity();
+            log_raw("offline: account save profile active; online hooks skipped\n");
+            return 0;
+        }
+    }
     load_args();
     for (i = 0; i < g_argc; i++) {
         log_begin();
