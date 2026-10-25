@@ -3,10 +3,10 @@
 # main through a pull request (as every release so far), tag main, wait for the GitHub Actions build of the tag, roll it out
 # (ops/release-prod.sh: LSP + game server, minimum versions), then lift the maintenance message and go back to develop. It never re-rolls
 # the Rivals events. Stops at the first failure; nothing is deployed when the build fails.
-#   ops/ship.sh v1.0.0 <user@host> <ssh-key>
+#   ops/ship.sh v1.0.1 <user@host> <ssh-key>
 set -euo pipefail
 cd "$(dirname "$0")/.."
-tag=${1:?usage: ops/ship.sh v1.0.0 user@host ssh-key}; host=${2:?user@host}; key=${3:?ssh key}
+tag=${1:?usage: ops/ship.sh v1.0.1 user@host ssh-key}; host=${2:?user@host}; key=${3:?ssh key}
 [ "$(git rev-parse --abbrev-ref HEAD)" = develop ] || { echo "run this from the develop branch"; exit 1; }
 git rev-parse -q --verify "refs/tags/$tag" >/dev/null && { echo "tag $tag already exists"; exit 1; }
 
@@ -19,7 +19,7 @@ if [ -z "$pr" ]; then
   gh pr create --base main --head develop --title "Release $tag" ${notes:+--body-file "$notes"} >/dev/null
   pr=$(gh pr list --head develop --base main --state open --json number -q '.[0].number')
 fi
-gh pr merge "$pr" --merge
+gh pr merge "$pr" --merge --match-head-commit "$(git rev-parse HEAD)"
 git fetch -q origin
 git checkout -q main
 git merge -q --ff-only origin/main
@@ -29,7 +29,7 @@ git push origin "$tag"
 echo "== waiting for the release build of $tag"
 id=""
 for _ in $(seq 60); do
-  id=$(gh run list --workflow release.yml --branch "$tag" --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || true)
+  id=$(gh run list --workflow release.yml --branch "$tag" --event push --commit "$(git rev-parse HEAD)" --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || true)
   [ -n "$id" ] && break
   sleep 5
 done
@@ -40,7 +40,7 @@ for _ in $(seq 30); do
   sleep 10
 done
 
-ops/release-prod.sh "$tag" "$host" "$key" --yes-prod
+FH2MP_CONFIRM_TAG="$tag" ops/release-prod.sh "$tag" "$host" "$key" --yes-prod
 
 echo "== lifting the maintenance message"
 ssh -i "$key" "$host" 'T=$(sudo -n systemctl show fh2mp-lsp -p Environment --value | tr " " "\n" | sed -n "s/^FH2MP_OPS_TOKEN=//p")
