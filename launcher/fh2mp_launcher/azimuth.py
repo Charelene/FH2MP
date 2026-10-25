@@ -3,8 +3,6 @@ import glob
 import hashlib
 import os
 import re
-import shutil
-import time
 from dataclasses import dataclass, field
 
 from . import paths
@@ -311,7 +309,7 @@ PROGRESS_MIN_BYTES = 1024                  # BinarySaveState of the newest revis
 
 
 def _newest_revision(profile):
-    revs = [r for r in _listdir(os.path.join(profile, "revisions")) if re.fullmatch(r"[0-9a-fA-F]+", r)]
+    revs = [r for r in _save_listdir(os.path.join(profile, "revisions")) if re.fullmatch(r"[0-9a-fA-F]+", r)]
     return os.path.join(profile, "revisions", max(revs, key=lambda r: int(r, 16))) if revs else ""
 
 
@@ -320,26 +318,53 @@ def has_progress(profile):
     rev = _newest_revision(profile)
     try:
         return bool(rev) and os.path.getsize(os.path.join(rev, "data", "BinarySaveState")) >= PROGRESS_MIN_BYTES
-    except OSError:
+    except FileNotFoundError:
         return False
 
 
 def _saved_at(profile):
     rev = _newest_revision(profile)
     try:
-        return os.path.getmtime(rev or profile)
+        return os.path.getmtime(os.path.join(rev, "data", "BinarySaveState") if rev else profile)
     except OSError:
         return 0.0
 
 
 def save_profiles(folder):
     """Every profile folder (User_<HEX>, not our .fresh-* / .adopting copies) in an Azimuth folder, in any of the layouts above."""
-    pats = [("data", "titles", "*", "saves", "player-*"), ("data", "saves", "player-*"), ("data", "saves-backup-*", "player-*")]
+    bases = [os.path.join(folder, "data", "titles", TITLE_DIR, "saves"), os.path.join(folder, "data", "saves")]
+    bases += [os.path.join(folder, "data", n) for n in _save_listdir(os.path.join(folder, "data")) if n.startswith("saves-backup-")]
     out = []
-    for pat in pats:
-        for pdir in sorted(glob.glob(os.path.join(folder, *pat))):
-            out += [os.path.join(pdir, n) for n in _listdir(pdir) if n.startswith("User_") and "." not in n and os.path.isdir(os.path.join(pdir, n))]
+    for base in bases:
+        for player in sorted(_save_listdir(base)):
+            if not player.startswith("player-"):
+                continue
+            pdir = os.path.join(base, player)
+            out += [os.path.join(pdir, n) for n in _save_listdir(pdir) if re.fullmatch(r"User_[0-9a-fA-F]+", n) and os.path.isdir(os.path.join(pdir, n))]
     return out
+
+
+def _save_listdir(path):
+    """Absent saves are normal; unreadable saves must block launch."""
+    try:
+        return os.listdir(path)
+    except FileNotFoundError:
+        return []
+
+
+def account_save_path(folder, xuid):
+    return os.path.join(folder, "data", "titles", TITLE_DIR, "saves", "player-1", f"User_{xuid:X}")
+
+
+def _needs_adoption(profile):
+    if has_progress(profile):
+        return False
+    # Unknown layouts may contain valuable data. Only replace a recognised empty
+    # profile automatically; the manager can replace any profile explicitly.
+    rev = _newest_revision(profile)
+    if _save_listdir(profile) and (not rev or not os.path.isfile(os.path.join(rev, "data", "BinarySaveState"))):
+        return False
+    return True
 
 
 def find_progress(folder, xuid, others=()):
@@ -353,14 +378,14 @@ def find_progress(folder, xuid, others=()):
     return ""
 
 
-def adopt_saves(folder, xuid, others=()):
+def adopt_saves(folder, xuid, others=(), copier=None):
     """Gives the account's profile the player's existing progress when it has none: copies the save find_progress picks into
     data/titles/<id>/saves/player-N/User_<xuid>. A profile with progress is never touched; an empty one (the game made it when the save was not
     found) is kept as User_<xuid>.fresh-<time>. The source stays where it is. -> description of what was done or ''."""
     target_name = f"User_{xuid:X}"
-    slots = sorted(glob.glob(os.path.join(folder, "data", "titles", "*", "saves", "player-*"))) or \
-        [os.path.join(folder, "data", "titles", TITLE_DIR, "saves", "player-1")]
-    todo = [s for s in slots if not has_progress(os.path.join(s, target_name))]
+    base = os.path.join(folder, "data", "titles", TITLE_DIR, "saves")
+    slots = [os.path.join(base, n) for n in sorted(_save_listdir(base)) if n.startswith("player-")] or [os.path.join(base, "player-1")]
+    todo = [s for s in slots if _needs_adoption(os.path.join(s, target_name))]
     if not todo:
         return ""
     src = find_progress(folder, xuid, others)
@@ -371,13 +396,8 @@ def adopt_saves(folder, xuid, others=()):
         target = os.path.join(pdir, target_name)
         if os.path.realpath(src) == os.path.realpath(target):
             continue
-        os.makedirs(pdir, exist_ok=True)
-        tmp = target + ".adopting"
-        shutil.rmtree(tmp, ignore_errors=True)
-        shutil.copytree(src, tmp)
-        if os.path.exists(target):
-            os.rename(target, f"{target}.fresh-{time.strftime('%Y%m%d%H%M%S')}")
-        os.rename(tmp, target)
+        from .saves import copy_profile
+        (copier or copy_profile)(src, target)
         where = "" if os.path.realpath(src).startswith(os.path.realpath(folder) + os.sep) else f" (from {os.path.dirname(os.path.dirname(src))})"
         done.append(f"{os.path.basename(src)}{where} -> {target_name}")
     return ", ".join(done)

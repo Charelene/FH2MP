@@ -451,6 +451,7 @@ class Launcher:
         if (self.server or {}).get("maintenance"):
             raise PlayBlocked(self.server["maintenance"], "maintenance")
         acct = self.sign_in()
+        adopted = self.prepare_saves(acct["xuid"])
         cars = self.sync_gamedb()
         r = self._login_reply
         lsp = (r.get("lsp") or {}).get("url") or (self.server.get("lsp") or {}).get("url")
@@ -466,12 +467,7 @@ class Launcher:
         tcp_note = self.start_tunnel(r.get("game") or (self.server or {}).get("game"))
         if tcp_note:
             notes.append(tcp_note)
-        try:
-            others = [c for c in azimuth.find_candidates() if os.path.realpath(c) != os.path.realpath(d)]
-            adopted = azimuth.adopt_saves(d, acct["xuid"], others)
-            saves = adopted or "nothing to adopt"
-        except OSError as e:                     # never blocks playing; the launcher.log line says why
-            adopted, saves = "", f"adoption failed: {e}"
+        saves = adopted or "nothing to adopt"
         if adopted:
             notes.append("kept your progress: " + adopted)
         if azimuth.set_player_name(d, acct["gamertag"]):
@@ -489,6 +485,21 @@ class Launcher:
             pic = "picture not updated"
         log_note(f"PLAY name={acct['gamertag']!r} written={'yes' if applied else 'NO'} gamerpic={pic or 'unchanged'} saves={saves!r} azimuth_dir={d}")
         return acct, notes
+
+    def prepare_saves(self, xuid):
+        """A failed migration must never fall through to starting an empty profile."""
+        from .saves import SaveCopyError, SaveScanError
+        if self.game_running():
+            raise PlayBlocked("Close the game before copying saves.", "game_running")
+        d = self.settings["azimuth_dir"]
+        others = []
+        try:
+            others = [c for c in azimuth.find_candidates() if os.path.realpath(c) != os.path.realpath(d)]
+            return azimuth.adopt_saves(d, xuid, others)
+        except SaveCopyError:
+            raise
+        except OSError as e:
+            raise SaveScanError(d, xuid, others, e) from e
 
     def stop_tunnel(self):
         t, self.tunnel = getattr(self, "tunnel", None), None
@@ -602,6 +613,8 @@ class Launcher:
         use_identity = bool(xuid or os.path.isfile(os.path.join(shim.bin_dir(d), "fh2mp-identity.txt")))
         if use_identity and (self.shim_state()[0] != "ours" or not shim.supports_offline(d)):
             raise PlayBlocked("Update the FH2MP shim to use your account save offline.", "offline_shim_outdated")
+        if xuid:
+            self.prepare_saves(xuid)
         self.stop_tunnel()
         self.token = ""
         self.account = None

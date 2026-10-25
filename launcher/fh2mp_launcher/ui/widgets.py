@@ -28,6 +28,10 @@ def pick_dir(parent, title, start):
 # Stroke icons on a 24-unit grid (QtSvg is not shipped): each is a list of ("line", x1, y1, ...) polylines, ("loop", ...) closed
 # polylines, ("circle", cx, cy, r), ("dot", cx, cy) and ("cog", teeth, outer r, root r, hole r).
 ICONS = {
+    "pc": [("loop", 3, 4, 21, 4, 21, 16, 3, 16), ("line", 12, 16, 12, 21), ("line", 7, 21, 17, 21)],
+    "globe": [("circle", 12, 12, 9), ("ellipse", 12, 12, 4.5, 9), ("line", 3, 12, 21, 12)],
+    "arrow-right": [("line", 4, 12, 20, 12), ("line", 14, 6, 20, 12, 14, 18)],
+    "arrow-left": [("line", 20, 12, 4, 12), ("line", 10, 6, 4, 12, 10, 18)],
     "gear": [("cog", 8, 10.2, 7.6, 3.2)],
     "down": [("line", 5, 9, 12, 16, 19, 9)],
     "up": [("line", 5, 15, 12, 8, 19, 15)],
@@ -124,6 +128,8 @@ def paint_icon(p, name, rect, colour, width=1.8, angle=0.0):
     for kind, *v in ICONS[name]:
         if kind == "circle":
             p.drawEllipse(QPointF(v[0], v[1]), v[2], v[2])
+        elif kind == "ellipse":
+            p.drawEllipse(QPointF(v[0], v[1]), v[2], v[3])
         elif kind == "cog":
             p.drawPath(_cog(v[0], v[1], v[2]))
             p.drawEllipse(QPointF(12, 12), v[3], v[3])
@@ -318,6 +324,8 @@ class IconButton(HoverButton):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         bg = mix(mix(theme.SURFACE0, theme.SURFACE1, self.h.v), theme.MANTLE, self.d.v * 0.5)
+        if not self.isEnabled():
+            p.setOpacity(0.35)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(bg)
         p.drawRoundedRect(QRectF(self.rect()), self.radius, self.radius)

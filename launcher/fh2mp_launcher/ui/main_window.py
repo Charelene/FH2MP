@@ -6,13 +6,13 @@ from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar,
                                QVBoxLayout, QWidget)
 
-from .. import azimuth, keystore, launch, paths, shim, updater
+from .. import azimuth, keystore, launch, paths, saves, shim, updater
 from ..api import ApiError
 from ..constants import AZIMUTH_PAGE, GITHUB_REPO
 from ..core import Launcher, PlayBlocked, friendly
 from ..version import __version__
 from . import images, theme
-from .dialogs import ProfileDialog, RecoveryDialog, SettingsDialog, open_folder
+from .dialogs import ProfileDialog, RecoveryDialog, SettingsDialog, offer_save_elevation, open_folder
 from . import sfx
 from .widgets import (AccountButton, Banner, Brand, Carousel, DetailSheet, GradientText, Hero, Icon, IconButton, LinkButton, OnlineCount, PlaySplit,
                       has_detail, link_colour, menu)
@@ -532,6 +532,26 @@ class MainWindow(QMainWindow):
         run_async(work, ok, fail, progress=self.progress.setValue)
 
     # ---- play
+    def _save_failure(self, error, retry):
+        if not isinstance(error, saves.SaveCopyError):
+            return False
+        self.say(str(error), theme.BAD)
+        if error.permission and offer_save_elevation(self, error):
+            self.set_busy(True, "Copying save with administrator rights...")
+
+            def ok(_result):
+                self.set_busy(False)
+                retry()
+
+            def fail(e):
+                self.set_busy(False)
+                QMessageBox.warning(self, "Save copy failed", str(e))
+                self.say(str(e), theme.BAD)
+            run_async(lambda j: saves.retry_elevated(error), ok, fail)
+        elif not error.permission:
+            QMessageBox.warning(self, "Save copy failed", str(error))
+        return True
+
     def on_play_offline(self, force=False, azimuth_window=False):
         lc = self.lc
         if self._busy or lc.game_running():
@@ -550,6 +570,8 @@ class MainWindow(QMainWindow):
         def fail(e):
             self.set_busy(False)
             self.render()
+            if self._save_failure(e, lambda: self.on_play_offline(force, azimuth_window)):
+                return
             if isinstance(e, PlayBlocked) and e.code == "azimuth_unsupported":
                 if QMessageBox.question(self, "Untested Azimuth", f"{e}\nStart anyway?") == QMessageBox.StandardButton.Yes:
                     return self.on_play_offline(force=True, azimuth_window=azimuth_window)
@@ -588,6 +610,8 @@ class MainWindow(QMainWindow):
         def fail(e):
             self.set_busy(False)
             self.render()
+            if self._save_failure(e, lambda: self.on_play(force, azimuth_window)):
+                return
             if isinstance(e, PlayBlocked):
                 if e.code == "no_game":
                     self.say("Couldn't find your Forza Horizon 2 files. Open Azimuth setup and pick the folder.", theme.BAD)

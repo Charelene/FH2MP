@@ -7,11 +7,11 @@ from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
                                QFrame, QLayout, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
-from .. import azimuth, keystore, launch, paths
+from .. import azimuth, keystore, launch, paths, saves
 from ..api import ApiError
 from ..core import friendly
 from . import images, theme
-from .widgets import Avatar, hrule, open_file, pick_dir, save_file
+from .widgets import Avatar, Icon, IconButton, hrule, open_file, pick_dir, save_file
 from .workers import run_async
 
 
@@ -251,6 +251,273 @@ class ProfileDialog(QDialog):
         run_async(work, ok, failed)
 
 
+def offer_save_elevation(parent, error):
+    box = QMessageBox(parent)
+    box.setWindowTitle("Save copy failed")
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setText("We need permission to copy your save.")
+    box.setInformativeText("Try again with administrator access? Your saves will be backed up first.")
+    box.setDetailedText(str(error))
+    retry = box.addButton("Retry as administrator", QMessageBox.ButtonRole.AcceptRole)
+    cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+    box.setDefaultButton(cancel)
+    box.exec()
+    return box.clickedButton() == retry
+
+
+class SaveManagerDialog(QDialog):
+    def __init__(self, lc, folder, parent=None):
+        super().__init__(parent)
+        self.lc, self.folder, self.busy = lc, folder, False
+        self.offline_path = azimuth.account_save_path(folder, 0x9000000000000)
+        self.online_path = azimuth.account_save_path(folder, lc.settings["xuid"]) if lc.settings["xuid"] else ""
+        self.offline_source = self.offline_path
+        self.setWindowTitle("Save manager")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(28, 26, 28, 22)
+        lay.setSpacing(16)
+        title = QLabel("Your saves")
+        title.setObjectName("title")
+        lay.addWidget(title)
+        subtitle = QLabel("Choose where to use your progress.")
+        subtitle.setObjectName("muted")
+        lay.addWidget(subtitle)
+        row = QHBoxLayout()
+        row.setSpacing(18)
+        self.offline_status, self.online_status = QLabel(), QLabel()
+
+        def card(icon, title, subtitle, status, colour):
+            frame = QFrame()
+            frame.setObjectName("card")
+            frame.setFixedSize(210, 254)
+            contents = QVBoxLayout(frame)
+            contents.setContentsMargins(16, 20, 16, 20)
+            contents.setSpacing(8)
+            contents.addWidget(Icon(icon, colour, 100), alignment=Qt.AlignmentFlag.AlignHCenter)
+            heading = QLabel(title)
+            heading.setObjectName("h2")
+            heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            contents.addWidget(heading)
+            detail = QLabel(subtitle)
+            detail.setObjectName("small")
+            detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            detail.setTextFormat(Qt.TextFormat.PlainText)
+            contents.addWidget(detail)
+            contents.addStretch()
+            status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            status.setObjectName("small")
+            contents.addWidget(status)
+            return frame
+
+        row.addWidget(card("pc", "Offline", "Azimuth", self.offline_status, theme.BLUE))
+        arrows = QVBoxLayout()
+        arrows.setSpacing(6)
+        arrows.addStretch()
+        self.to_online = IconButton("arrow-right", size=64, radius=18, icon_px=32, label_text="Use offline save online")
+        self.to_online.setToolTip("Copy your offline progress to online play")
+        self.to_online.clicked.connect(lambda: self._copy(self.offline_source, self.online_path))
+        arrows.addWidget(self.to_online, alignment=Qt.AlignmentFlag.AlignHCenter)
+        online_label = QLabel("Use online")
+        online_label.setObjectName("small")
+        arrows.addWidget(online_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        arrows.addSpacing(16)
+        self.to_offline = IconButton("arrow-left", size=64, radius=18, icon_px=32, label_text="Use online save offline")
+        self.to_offline.setToolTip("Copy your online progress to offline play")
+        self.to_offline.clicked.connect(lambda: self._copy(self.online_path, self.offline_path))
+        arrows.addWidget(self.to_offline, alignment=Qt.AlignmentFlag.AlignHCenter)
+        offline_label = QLabel("Use offline")
+        offline_label.setObjectName("small")
+        arrows.addWidget(offline_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        arrows.addStretch()
+        row.addLayout(arrows)
+        row.addWidget(card("globe", "Online", "FH2MP", self.online_status, theme.ACCENT))
+        lay.addLayout(row)
+        reassurance = QLabel("A backup is kept every time you copy a save.")
+        reassurance.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        reassurance.setObjectName("small")
+        lay.addWidget(reassurance)
+        self.message = QLabel()
+        self.message.setWordWrap(True)
+        self.message.setTextFormat(Qt.TextFormat.PlainText)
+        self.message.hide()
+        lay.addWidget(self.message)
+        self.more = QPushButton("More options")
+        self.more.setFlat(True)
+        self.more.setCheckable(True)
+        lay.addWidget(self.more, alignment=Qt.AlignmentFlag.AlignLeft)
+        self.advanced = QWidget()
+        self.options = QScrollArea()
+        self.options.setWidgetResizable(True)
+        self.options.setFrameShape(QFrame.Shape.NoFrame)
+        self.options.setWidget(self.advanced)
+        self.options.setFixedHeight(180)
+        self.options.hide()
+        self.more.toggled.connect(self.options.setVisible)
+        lay.addWidget(self.options)
+        bottom = QHBoxLayout()
+        bottom.addStretch()
+        close = QPushButton("Done")
+        close.clicked.connect(self.reject)
+        bottom.addWidget(close)
+        lay.addLayout(bottom)
+        lay = QVBoxLayout(self.advanced)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(QLabel("Source profile"))
+        self.source = QComboBox()
+        self.source.setMinimumContentsLength(30)
+        self.source.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        lay.addWidget(self.source)
+        choose = QPushButton("Choose profile / backup folder...")
+        choose.clicked.connect(self._browse_source)
+        lay.addWidget(choose)
+        self.info = QLabel()
+        self.info.setWordWrap(True)
+        self.info.setTextFormat(Qt.TextFormat.PlainText)
+        lay.addWidget(self.info)
+        lay.addWidget(QLabel("Destination"))
+        self.target = QComboBox()
+        if lc.settings["xuid"]:
+            self.target.addItem("FH2MP account", azimuth.account_save_path(folder, lc.settings["xuid"]))
+        self.target.addItem("Azimuth default (User_9000000000000)", azimuth.account_save_path(folder, 0x9000000000000))
+        lay.addWidget(self.target)
+        self.target_info = QLabel()
+        self.target_info.setWordWrap(True)
+        self.target_info.setTextFormat(Qt.TextFormat.PlainText)
+        lay.addWidget(self.target_info)
+        self.copy = QPushButton("Back up and copy save")
+        self.copy.setObjectName("primary")
+        self.copy.clicked.connect(self._copy)
+        lay.addWidget(self.copy)
+        backups = QPushButton("Open backups")
+        backups.clicked.connect(lambda: open_folder(os.path.join(os.path.dirname(self.target.currentData()), "fh2mp-save-backups")))
+        lay.addWidget(backups)
+        self.source.currentIndexChanged.connect(self._details)
+        self.target.currentIndexChanged.connect(self._details)
+        try:
+            folders = [folder, *[p for p in azimuth.find_candidates() if os.path.realpath(p) != os.path.realpath(folder)]]
+            for f in folders:
+                for p in azimuth.save_profiles(f):
+                    self.source.addItem(p, p)
+        except OSError as e:
+            self.message.setText("Some saves couldn't be found. You can choose one in More options.")
+            self.message.setToolTip(str(e))
+            self.message.show()
+        if not os.path.isdir(self.offline_path):
+            defaults = [self.source.itemData(i) for i in range(self.source.count())
+                        if os.path.basename(self.source.itemData(i)) == azimuth.LEGACY_SAVE_DIR]
+            if defaults:
+                self.offline_source = defaults[0]
+        self._details()
+        fixed(self, 640)
+
+    def reject(self):
+        if not self.busy:
+            super().reject()
+
+    def _describe(self, path):
+        from datetime import datetime
+        try:
+            st = os.stat(path)
+            created = getattr(st, "st_birthtime", None)
+            birth = datetime.fromtimestamp(created).strftime("%Y-%m-%d %H:%M:%S") if created else "unavailable"
+            saved = azimuth._saved_at(path)
+            modified = datetime.fromtimestamp(saved).strftime("%Y-%m-%d %H:%M:%S") if saved else "unavailable"
+            return f"{path}\nCreated: {birth} · Last saved: {modified}"
+        except FileNotFoundError:
+            return f"{path}\nNo profile yet"
+        except OSError as e:
+            return f"{path}\nCannot read profile: {e}"
+
+    def _details(self, *_args):
+        source, target = self.source.currentData(), self.target.currentData()
+        self.info.setText(self._describe(source) if source else "Choose a User_<HEX> folder containing revisions.")
+        self.target_info.setText(self._describe(target) if target else "")
+        self.copy.setEnabled(bool(source and target and os.path.realpath(source) != os.path.realpath(target)) and not self.busy)
+        if os.path.isdir(self.offline_path):
+            self.offline_source = self.offline_path
+        self.offline_status.setText(self._save_status(self.offline_source))
+        self.online_status.setText(self._save_status(self.online_path) if self.online_path else "Sign in to use this save")
+        self.to_online.setEnabled(bool(self.online_path and self._has_save(self.offline_source)) and not self.busy)
+        self.to_offline.setEnabled(bool(self.online_path and self._has_save(self.online_path)) and not self.busy)
+
+    def _has_save(self, path):
+        return bool(path and os.path.isdir(os.path.join(path, "revisions")))
+
+    def _save_status(self, path):
+        from datetime import datetime
+        try:
+            if not self._has_save(path):
+                return "No save yet"
+            saved = azimuth._saved_at(path)
+            return "Last played\n" + datetime.fromtimestamp(saved).strftime("%d %b %Y · %H:%M") if saved else "Save found"
+        except OSError:
+            return "Unable to read save"
+
+    def _browse_source(self):
+        if self.busy:
+            return
+        p = pick_dir(self, "Choose User_<HEX> or a backup's source / destination folder", self.folder)
+        if p:
+            self.source.addItem(p, p)
+            self.source.setCurrentIndex(self.source.count() - 1)
+
+    def _copy(self, source=None, target=None):
+        if self.busy:
+            return
+        if self.lc.game_running():
+            QMessageBox.warning(self, "Game running", "Close the game and Azimuth before copying saves.")
+            return
+        source = source or self.source.currentData()
+        target = target or self.target.currentData()
+        if not source or not target:
+            return
+        destination = "online" if target == self.online_path else "offline"
+        title = f"Use this save {destination}?"
+        if QMessageBox.question(self, "Replace destination save?",
+                               f"{title}\n\nThis replaces your {destination} progress. A backup of both saves will be kept.\n\n"
+                               "Close the game and Azimuth before continuing.",
+                               QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                               QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        self._transfer(source, target)
+
+    def _transfer(self, source, target, elevated=False):
+        self.busy = True
+        self.more.setEnabled(False)
+        self.source.setEnabled(False)
+        self.target.setEnabled(False)
+        self._details()
+        self.message.setText("Backing up and copying saves...")
+        self.message.show()
+
+        def finished():
+            self.busy = False
+            self.more.setEnabled(True)
+            self.source.setEnabled(True)
+            self.target.setEnabled(True)
+            self._details()
+
+        def ok(backup):
+            finished()
+            destination = "online" if target == self.online_path else "offline"
+            self.message.setText(f"Your save is ready for {destination} play. A backup has been kept.")
+
+        def fail(e):
+            finished()
+            self.message.setText("We couldn't copy your save. Please try again.")
+            self.message.setToolTip(str(e))
+            if isinstance(e, saves.SaveCopyError) and e.permission and offer_save_elevation(self, e):
+                self._transfer(source, target, elevated=True)
+            elif not isinstance(e, saves.SaveCopyError) or not e.permission:
+                box = QMessageBox(self)
+                box.setWindowTitle("Couldn't copy save")
+                box.setText("We couldn't copy your save. Close the game and Azimuth, then try again.")
+                box.setDetailedText(str(e))
+                box.exec()
+
+        run_async(lambda j: saves.elevated_copy(source, target) if elevated else saves.copy_profile(source, target), ok, fail)
+
+
 class SettingsDialog(QDialog):
     def __init__(self, lc, parent=None):
         super().__init__(parent)
@@ -369,7 +636,8 @@ class SettingsDialog(QDialog):
 
         lay.addWidget(hrule())
         tools = QHBoxLayout()
-        for text, fn in (("Data folder", lambda: open_folder(paths.config_dir())), ("Recovery code", self._recovery)):
+        for text, fn in (("Data folder", lambda: open_folder(paths.config_dir())), ("Recovery code", self._recovery),
+                         ("Save manager", self._saves)):
             bt = QPushButton(text)
             bt.clicked.connect(fn)
             tools.addWidget(bt)
@@ -415,6 +683,13 @@ class SettingsDialog(QDialog):
     def _recovery(self):
         if self.lc.identity:
             RecoveryDialog(self.lc, self).exec()
+
+    def _saves(self):
+        folder = self.azdir.text().strip()
+        if not folder or not os.path.isfile(os.path.join(folder, "azimuth.exe")):
+            QMessageBox.warning(self, "Azimuth folder", "Choose a folder containing azimuth.exe first.")
+            return
+        SaveManagerDialog(self.lc, os.path.abspath(folder), self).exec()
 
     def _save(self):
         s = self.lc.settings
