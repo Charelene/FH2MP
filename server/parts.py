@@ -172,6 +172,40 @@ def find_choices(size, payload):
     return None
 
 
+def find_short_choices(size, payload):
+    """A short PlayerChoices update that is only [81 class][82 PI] (either may be missing), every var an 8-bit id + 32-bit value from bit 0:
+    what a game sends right after the part list of a rental, with class R and PI 1.0 (dev 2026-10-25, Road Trip car select: the standings
+    showed "R 999" for an S2 rental). -> find_choices' (PI offset, class offset or None), or None. The PI offset is None too when only the
+    class is carried; read_short_choices / write_short_choices take that form."""
+    if size not in (40, 80):
+        return None
+    ids = [(payload >> (40 * k)) & 0xFF for k in range(size // 40)]
+    if ids not in ([CHOICE_CLASS_VAR, 82], [CHOICE_CLASS_VAR], [82]):
+        return None
+    cls_at = 8 if ids[0] == CHOICE_CLASS_VAR else None
+    pi_at = 8 + 40 * ids.index(82) if 82 in ids else None
+    return pi_at, cls_at
+
+
+def read_short_choices(payload, found):
+    """(class or None, PI or None) of a find_short_choices result."""
+    import struct
+    pi_at, cls_at = found
+    pi = struct.unpack("<f", ((payload >> pi_at) & 0xFFFFFFFF).to_bytes(4, "little"))[0] if pi_at is not None else None
+    cls = (payload >> cls_at) & 0xFFFFFFFF if cls_at is not None else None
+    return cls, pi
+
+
+def write_short_choices(payload, found, cls, pi):
+    import struct
+    pi_at, cls_at = found
+    if pi_at is not None:
+        payload = (payload & ~(0xFFFFFFFF << pi_at)) | (struct.unpack("<I", struct.pack("<f", pi))[0] << pi_at)
+    if cls_at is not None:
+        payload = (payload & ~(0xFFFFFFFF << cls_at)) | ((cls & 0xFFFFFFFF) << cls_at)
+    return payload
+
+
 def read_choices(payload, found):
     """(class or None, performance index) at what find_choices returned."""
     import struct

@@ -253,6 +253,25 @@ class RentalChoices(unittest.TestCase):
         w.check_parts(a, size, v)                                # the same car again: nothing more to say
         self.assertEqual(len(relayed), 1)
 
+    def test_the_short_class_R_update_after_a_rentals_parts_is_corrected(self):
+        """Dev 2026-10-25, Road Trip car select: [81..87] with the real class, then the part list, then an 80-bit [81]=7 [82]=1.0 from the
+        rental's own game; the standings of the others showed "R 999"."""
+        import fh2mp_server as S
+        w, (a, b) = self.world()
+        w.remember_and_relay = lambda *x: None
+        bits, ch = choices_bits(*S.CAR_CHOICES[self.JAG])
+        w.note_choices(a, bits, ch)
+        size, v = player_object(dict(enumerate(stock_car(self.JAG))), 48, size=1502)
+        w.check_parts(a, size, v)
+        nbits, short = parts.choices_update(7, 1.0)
+        out = w.short_rental_choices(a, nbits, short)
+        cls, pi = parts.read_short_choices(out, parts.find_short_choices(nbits, out))
+        self.assertEqual(cls, 3)
+        self.assertAlmostEqual(pi, S.CAR_CHOICES[self.JAG][1], places=4)
+        w2, (c, _d) = self.world()                                 # a car that is not a rental keeps what its game sent
+        self.assertEqual(w2.short_rental_choices(c, nbits, short), short)
+        self.assertIsNone(parts.find_short_choices(40, 27 | (722772 << 8)))      # other 40-bit vars (id 27) are not choices
+
     def test_a_later_choices_update_of_a_rental_is_corrected_too(self):
         import fh2mp_server as S
         w, (a, b) = self.world()

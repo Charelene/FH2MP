@@ -1501,6 +1501,23 @@ class Server:
             peer.choices = want
         return payload
 
+    def short_rental_choices(self, peer: Peer, size: int, payload: int) -> int:
+        """Right after a rental's part list its game sends a short [81 class][82 PI] update with class R and PI 1.0: the others' standings
+        and grid showed "R 999" (dev 2026-10-25, Road Trip, an S2 Aventador). For a rental the catalog's class and PI go out instead."""
+        found = parts_check.find_short_choices(size, payload)
+        if not found:
+            return payload
+        cls, pi = parts_check.read_short_choices(payload, found)
+        want = CAR_CHOICES.get(peer.rental_car) if peer.rental_car is not None else None
+        if want and (cls == RENTAL_CLASS_ID or (cls is None and pi is not None and pi >= 0.999)):
+            self.log(f"{peer.addr[1]} RENTAL: owner {peer.owner_id} car {peer.rental_car} sent class {cls} PI {pi}, shown as class {want[0]} "
+                     f"PI {want[1]:.3f}")
+            payload = parts_check.write_short_choices(payload, found, want[0], want[1])
+            cls, pi = want
+        prev = peer.choices or (None, 0.0)
+        peer.choices = (cls if cls is not None else prev[0], pi if pi is not None else prev[1])
+        return payload
+
     def rental_choices(self, peer: Peer, car, size: int, payload: int) -> int:
         """The player's car is known (part list): a rental shows its real class and PI to the others. Same object carries the PlayerChoices
         (join): fixed in place; a car change sends them just before the parts, so a corrected update follows (applied in order)."""
@@ -2609,6 +2626,8 @@ class Server:
                              f"xuid={peer.xuid:#x} hex={payload.to_bytes((size + 7) // 8, 'little').hex()}")
                 if router == 1 and parts_check is not None and size >= 240:
                     payload = self.note_choices(peer, size, payload)
+                elif router == 1 and parts_check is not None and size in (40, 80):
+                    payload = self.short_rental_choices(peer, size, payload)
                 if router == 1 and parts_check is not None and size >= parts_check.MIN_BITS:   # the join-time object, and later updates that carry the whole car
                     bad_parts, hide_car, payload = self.check_parts(peer, size, payload)
                     if hide_car or (bad_parts and PART_POLICY == "kick"):
