@@ -17,6 +17,9 @@
 #include <winhttp.h>
 
 #define XHR_MAX_HDR 32
+/* Largest response body taken (security audit 2026-10-25, F12): the biggest the services send are UGC downloads, which the server caps
+ * at 32 MiB unpacked. A longer body fails the request instead of growing the buffer until the game runs out of memory. */
+#define XHR_MAX_RESPONSE (64u << 20)
 
 typedef struct {
     const void *const *vtbl;
@@ -630,6 +633,11 @@ static DWORD WINAPI xhr_thread(LPVOID param)
         if (lstrlenW(x->hname[i]) > 100 || lstrlenW(x->hval[i]) > 480) {
             continue;
         }
+        if (lstrcmpiW(x->hname[i], L"Host") == 0) {
+            /* the game's Xls client sends "Host: 127.0.0.1"; passed on, nginx picked its default site (production) for a request meant
+             * for dev-api, so dev sign-ins got 401 there (2026-10-25). WinHTTP writes the right Host from the connection. */
+            continue;
+        }
         lstrcpyW(hdrline, x->hname[i]);
         lstrcatW(hdrline, L": ");
         lstrcatW(hdrline, x->hval[i]);
@@ -692,7 +700,8 @@ static DWORD WINAPI xhr_thread(LPVOID param)
     for (;;) {
         DWORD got = 0;
         if (cap - ndata < 4096) {
-            unsigned char *nd = (unsigned char *)xhr_alloc((SIZE_T)cap * 2 + 65536);
+            DWORD ncap = cap < XHR_MAX_RESPONSE / 2 ? cap * 2 + 65536 : XHR_MAX_RESPONSE + 65536;
+            unsigned char *nd = (unsigned char *)xhr_alloc((SIZE_T)ncap);
             if (!nd) {
                 hr = E_OUTOFMEMORY;
                 goto fail;
@@ -702,7 +711,7 @@ static DWORD WINAPI xhr_thread(LPVOID param)
             }
             xhr_free(data);
             data = nd;
-            cap = cap * 2 + 65536;
+            cap = ncap;
         }
         if (!g_wh.read(req, data + ndata, cap - ndata, &got)) {
             hr = HRESULT_FROM_WIN32(GetLastError());
@@ -712,6 +721,11 @@ static DWORD WINAPI xhr_thread(LPVOID param)
             break;
         }
         ndata += got;
+        if (ndata > XHR_MAX_RESPONSE) {
+            stage = "read body (response too large)";
+            hr = HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW);
+            goto fail;
+        }
     }
     log_begin();
     log_raw("xhr#");

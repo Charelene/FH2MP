@@ -44,6 +44,11 @@ def inspect_dll(path):
     return ("ours", m.group(1).decode()) if m else ("foreign", "")
 
 
+def blob_version(data):
+    m = MARKER.search(data)
+    return m.group(1).decode() if m else ""
+
+
 def supports_offline(folder):
     """The installed shim can keep the account's save ID while skipping all online hooks."""
     try:
@@ -51,11 +56,6 @@ def supports_offline(folder):
             return "FH2MP_OFFLINE".encode("utf-16-le") in f.read()
     except OSError:
         return False
-
-
-def blob_version(data):
-    m = MARKER.search(data)
-    return m.group(1).decode() if m else ""
 
 
 _U16 = lambda s: s.encode("utf-16-le")  # noqa: E731
@@ -69,15 +69,28 @@ def platform_version_of(data):
     return m.group(1).decode("utf-16-le") if m else ""
 
 
-def platform_installed(folder):
-    """-> ("platform", version) | ("foreign", "") | ("none", "") for the d3dcompiler_47.dll next to azimuth.exe."""
+def _ci_paths(folder, name):
+    """Every file in `folder` named `name` in any letter case. Windows sees one file; Linux can hold D3DCompiler_47.dll next to
+    d3dcompiler_47.dll, and Wine then loads whichever it finds first (a radio mod's loader hid the platform that way, 2026-10-23)."""
     try:
-        with open(os.path.join(folder, PLATFORM_DLL), "rb") as f:
-            data = f.read()
+        return [os.path.join(folder, n) for n in sorted(os.listdir(folder)) if n.lower() == name.lower()]
     except OSError:
+        return []
+
+
+def platform_installed(folder):
+    """-> ("platform", version) | ("foreign", "") | ("none", "") for the d3dcompiler_47.dll next to azimuth.exe (any letter case; when
+    there are several, "foreign" unless every one is the platform)."""
+    found = []
+    for path in _ci_paths(folder, PLATFORM_DLL):
+        try:
+            with open(path, "rb") as f:
+                found.append(platform_version_of(f.read()))
+        except OSError:
+            found.append("")
+    if not found:
         return "none", ""
-    v = platform_version_of(data)
-    return ("platform", v) if v else ("foreign", "")
+    return ("platform", min(found, key=_vkey)) if all(found) else ("foreign", "")
 
 
 def platform_ok(folder):
@@ -142,12 +155,16 @@ def _install_platform(folder, files):
         return []
     pk, pv = platform_installed(folder)
     did = []
-    target = os.path.join(folder, PLATFORM_DLL)
-    if pk == "foreign":
-        moved = _move_aside(target, "old")
-        did.append(f"kept the other {PLATFORM_DLL} as {os.path.basename(moved)} (the platform loads fh2wheel.dll itself)")
+    for path in _ci_paths(folder, PLATFORM_DLL):        # another mod's loader (fh2wheel's, a radio mod's) or an older platform
+        with open(path, "rb") as f:
+            if platform_version_of(f.read()):
+                os.unlink(path)
+                continue
+        moved = _move_aside(path, "old")
+        did.append(f"kept the other {os.path.basename(path)} as {os.path.basename(moved)}: only one d3dcompiler_47.dll can load, and "
+                   "the platform loads fh2wheel.dll itself; another mod must go in fh2-mods")
     for name in PLATFORM_FILES:
-        paths.atomic_write(os.path.join(folder, name), files[name], 0o755 if name == PLATFORM_DLL else 0o644)
+        paths.atomic_write(os.path.join(folder, name), files[name], 0o755 if name == PLATFORM_DLL else 0o644, busy_ok=True)
     did.append(f"installed FH2 Mod Platform {PLATFORM_VERSION}" + (f" (was {pv})" if pv else ""))
     return did
 
@@ -201,9 +218,12 @@ def install(folder, dll_bytes, expect_sha256=None, platform=None):
         os.makedirs(os.path.dirname(target), exist_ok=True)
         if inspect_dll(target)[0] == "ours":
             shutil.copy2(target, target + ".prev")
-        paths.atomic_write(target, dll_bytes, 0o755)
+        paths.atomic_write(target, dll_bytes, 0o755, busy_ok=True)
     except OSError as e:
-        raise ShimError(f"could not install the shim: {e.strerror or e}. Close the game and try again.") from None
+        where = getattr(e, "filename2", None) or getattr(e, "filename", None) or ""
+        raise ShimError(f"could not install the shim: {e.strerror or e}" + (f" ({os.path.basename(where)} in {os.path.dirname(where)})" if where else "")
+                        + ". Close the game and try again; if it keeps happening the folder may be protected (Program Files, OneDrive, "
+                        "antivirus) and Azimuth should be moved elsewhere.") from None
     if enable(folder):
         did.append("turned FH2MP back on (it was off on the in-game MODS tab)")
     did.append(f"installed shim {blob_version(dll_bytes)}")
@@ -260,9 +280,11 @@ def _ini_info(text):
 
 
 def _extra_dll(folder):
-    """Extra Options' winmm.dll next to azimuth.exe, or None when what is there is missing or our old shim."""
-    path = os.path.join(folder, EXTRA_OPTIONS_DLL)
-    return path if inspect_dll(path)[0] == "foreign" else None
+    """Extra Options' winmm.dll next to azimuth.exe (any letter case), or None when what is there is missing or our old shim."""
+    for path in _ci_paths(folder, EXTRA_OPTIONS_DLL):
+        if inspect_dll(path)[0] == "foreign":
+            return path
+    return None
 
 
 def extra_options_installed(folder):
@@ -274,6 +296,47 @@ def extra_options_installed(folder):
             return (True, *_ini_info(f.read()))
     except OSError:
         return True, "", ""
+
+
+TLS_HELPER = os.path.join("data", "bin", "azimuth-tls.dll")
+
+
+def _tls_stock(folder, path):
+    """True when `path` is the helper Azimuth ships: azimuth.exe carries the SHA-256 of it (as hex text) and checks the file against it."""
+    try:
+        with open(path, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest().encode()
+        with open(os.path.join(folder, "azimuth.exe"), "rb") as f:
+            return digest in f.read()
+    except OSError:
+        return True               # nothing to judge by: leave it alone
+
+
+def tls_helper_modified(folder):
+    """True when data\\bin\\azimuth-tls.dll is not Azimuth's own. FH2 Extra Options up to 0.2.7x was installed by replacing it (a 284 KB
+    patch DLL); left in place next to 0.2.98 it patches the same game code and the same loader import a second time, and 0.2.98 stops with
+    "another mod owns Azimuth's LoadLibraryExW import" or "unexpected loaded bytes at garage_xml_parse_hook" (GitHub #20)."""
+    path = os.path.join(folder, TLS_HELPER)
+    return os.path.isfile(path) and not _tls_stock(folder, path)
+
+
+def restore_tls_helper(folder):
+    """Puts Azimuth's own azimuth-tls.dll back when an old Extra Options replaced it: the mod's installer keeps the original as
+    azimuth-tls.dll.old. The replaced file is kept as azimuth-tls.dll.replaced[-n]. -> list of things done; raises ShimError when there is
+    no original to put back."""
+    if not tls_helper_modified(folder):
+        return []
+    path = os.path.join(folder, TLS_HELPER)
+    backup = path + ".old"
+    if not (os.path.isfile(backup) and _tls_stock(folder, backup)):
+        raise ShimError("data\\bin\\azimuth-tls.dll in your Azimuth folder is an old FH2 Extra Options file, not Azimuth's own, and no copy of "
+                        "the original is there. Copy azimuth-tls.dll from a fresh Azimuth download over it and press Play again.")
+    try:
+        moved = _move_aside(path, "replaced")
+        shutil.copy2(backup, path)
+    except OSError as e:
+        raise ShimError(f"could not restore Azimuth's azimuth-tls.dll: {e.strerror or e}. Is the game still running?") from None
+    return [f"put Azimuth's own azimuth-tls.dll back (the old Extra Options one is kept as {os.path.basename(moved)})"]
 
 
 SUPPORTED_EXTRA_SHA256 = {EXTRA_OPTIONS_DLL_SHA256}      # the only build FH2MP works with (tests may add their own)
@@ -293,13 +356,21 @@ def extra_options_supported(folder):
         return False
 
 
+def extra_options_complete(folder):
+    """The supported build is next to azimuth.exe with its settings file (the ini is where the launcher turns the media overrides on)."""
+    return extra_options_supported(folder) and os.path.isfile(os.path.join(folder, EXTRA_INI))
+
+
 def install_extra(folder, files):
     """Installs FH2 Extra Options from its release (`files` = upstream.fetch("extraOptions"): winmm.dll and its default ini) unless the
     supported build is there already. Moves the rc5 layout over first; another winmm.dll there is kept as fh2extra\\winmm.dll.unsupported-N;
     settings that exist are kept. -> list of things done."""
     try:
         did = migrate_legacy(folder)
-        if extra_options_supported(folder):            # it was in fh2extra (rc5 layout)
+        if extra_options_supported(folder):            # it was in fh2extra (rc5 layout), or only its settings file is missing
+            if EXTRA_INI in files and not os.path.exists(os.path.join(folder, EXTRA_INI)):
+                paths.atomic_write(os.path.join(folder, EXTRA_INI), files[EXTRA_INI], 0o644)
+                did.append("restored the FH2 Extra Options settings file")
             return did
         dll = files[EXTRA_OPTIONS_DLL]
         if MARKER.search(dll) or dll[:2] != b"MZ" or not is_supported_extra(dll):

@@ -72,6 +72,7 @@ class FakeAuth:
 
     def __init__(self):
         self.calls, self.fails = [], 0
+        self.blocked_file, self.blocked, self.blocked_words = (), (), ()
 
     def hit(self, key, limit, window):
         self.fails += 1
@@ -385,6 +386,19 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(call(self.lsp, "PUT", "/ops/v1/config", bad)[0], 400, bad)
         self.assertEqual(self.lsp.AUTH.registration, "open")
         self.assertIsNone(self.lsp.DB.one("SELECT value FROM meta WHERE key='ops_config'"))
+
+    def test_gamertag_blocklist(self):
+        st, o = call(self.lsp, "PUT", "/ops/v1/config", {"blockedNames": [" Foo Bar ", "foobar", "b4d"], "blockedWords": ["Zed"]})
+        self.assertEqual((st, o["blockedNames"], o["blockedWords"]), (200, ["b4d", "foo bar", "foobar"], ["zed"]))
+        self.assertEqual(self.lsp.AUTH.blocked, ("bad", "foobar", "foobar"))
+        self.assertEqual(self.lsp.AUTH.blocked_words, ("zed",))
+        fresh = make_lsp()
+        fresh.DB = self.lsp.DB
+        ops_api.load_saved(fresh)
+        self.assertEqual(fresh.AUTH.blocked_words, ("zed",))
+        for bad in ({"blockedNames": "foo"}, {"blockedNames": ["x"]}, {"blockedWords": [5]}, {"blockedNames": ["a" * 41]},
+                    {"blockedNames": ["word"] * 501}):
+            self.assertEqual(call(self.lsp, "PUT", "/ops/v1/config", bad)[0], 400, bad)
 
     def test_news_and_hero_image(self):
         card = {"tag": "PATCH NOTES", "title": "Launcher rc6", "text": "Cuter.", "url": "https://github.com/x/y"}

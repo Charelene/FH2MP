@@ -30,6 +30,7 @@ not carry proxy headers, so nothing reachable through the public reverse proxy c
     GET    /ops/v1/config                      launcher settings and registration mode
     PUT    /ops/v1/config                      {"motd", "maintenance", "minLauncher", "minShim", "links": {...}, "registration": open|invite|closed,
                                                 "heroImage": "https://...", "news": [{"tag", "title", "text", "url", "image"}, ...]}
+                                               blockedNames = gamertag blocklist (blocked anywhere in a name), blockedWords = whole words only
     POST   /ops/v1/invites                     {"code"?, "uses", "note"} -> {"code"}   (only a hash is stored, so codes cannot be listed)
     GET    /ops/v1/auth-events[?limit=]        recent sign-ups, logins, bans, rate-limit hits
     GET    /ops/v1/records, hall-of-fame, traps, cars[/<id>], garage[/<id>/preview.png], history, totals   website statistics (site_stats.py)
@@ -46,6 +47,7 @@ import secrets
 import time
 from urllib.parse import parse_qs, urlparse
 
+import auth
 import rivals
 import scoreboard
 import score_reports
@@ -54,6 +56,7 @@ import social
 import db
 
 STARTED = time.time()
+BLOCKLIST_MAX = 500
 MONTHLY_BOARD = (3, 1)                  # (scoreboardType, scoreType) of a Monthly Rivals event; the pivot is the event id
 FESTIVAL_BOARD = (1, 1)                 # (scoreboardType, scoreType) of a Festival Route; the track id is the route, the pivot the car class
 DESTINATIONS = ("Castelletto", "Montellino", "Nice", "Saint-Martin", "San Giovanni", "Sisteron")      # the route names start with one
@@ -471,7 +474,20 @@ def get_config(lsp):
     c = lsp.LAUNCHER.config.get()
     return {"env": lsp.AUTH.env, "auth": lsp.AUTH.mode, "registration": lsp.AUTH.registration,
             "motd": c["motd"], "maintenance": c["maintenance"], "minLauncher": c["minLauncher"], "minShim": c["minShim"], "links": c["links"],
-            "heroImage": c.get("heroImage", ""), "news": c.get("news", [])}
+            "heroImage": c.get("heroImage", ""), "news": c.get("news", []),
+            "blockedNames": list(saved_blocklist(lsp, "blockedNames")), "blockedWords": list(saved_blocklist(lsp, "blockedWords"))}
+
+
+def saved_blocklist(lsp, key):
+    row = lsp.DB.one("SELECT value FROM meta WHERE key='ops_config'")
+    return (json.loads(row["value"]) if row else {}).get(key, [])
+
+
+def _words(d, key):
+    v = d[key]
+    if not isinstance(v, list) or len(v) > BLOCKLIST_MAX or not all(isinstance(x, str) and 2 <= len(x.strip()) <= 40 for x in v):
+        raise OpsError(400, "bad_request", f"{key} must be a list of at most {BLOCKLIST_MAX} words of 2 to 40 characters")
+    return sorted({x.strip().lower() for x in v})
 
 
 def _text(d, key, limit):
@@ -492,7 +508,7 @@ def _url(d, key, limit, https_only=False):
 def validate_config(d):
     """-> the settings to keep (unknown keys are errors, so a typo cannot silently do nothing)."""
     out = {}
-    unknown = set(d) - {"motd", "maintenance", "minLauncher", "minShim", "links", "registration", "heroImage", "news"}
+    unknown = set(d) - {"motd", "maintenance", "minLauncher", "minShim", "links", "registration", "heroImage", "news", "blockedNames", "blockedWords"}
     if unknown:
         raise OpsError(400, "bad_request", f"unknown setting(s): {', '.join(sorted(unknown))}")
     for key, limit in (("motd", 500), ("maintenance", 300)):
@@ -523,6 +539,9 @@ def validate_config(d):
             card = {k: card.get(k, "") for k in NEWS_FIELDS}
             out["news"].append({k: _url(card, k, NEWS_FIELDS[k], https_only=k == "image") if k in ("url", "image") else _text(card, k, NEWS_FIELDS[k])
                                 for k in NEWS_FIELDS})
+    for key in ("blockedNames", "blockedWords"):
+        if key in d:
+            out[key] = _words(d, key)
     if "registration" in d:
         if d["registration"] not in REGISTRATION_MODES:
             raise OpsError(400, "bad_request", f"registration must be one of {', '.join(REGISTRATION_MODES)}")
@@ -531,10 +550,12 @@ def validate_config(d):
 
 
 def apply_config(lsp, saved):
-    overlay = {k: v for k, v in saved.items() if k != "registration"}
+    overlay = {k: v for k, v in saved.items() if k not in ("registration", "blockedNames", "blockedWords")}
     lsp.LAUNCHER.config.overlay = overlay
     if "registration" in saved:
         lsp.AUTH.registration = saved["registration"]
+    lsp.AUTH.blocked = lsp.AUTH.blocked_file + tuple(auth.fold_tag(x) for x in saved.get("blockedNames", ()))
+    lsp.AUTH.blocked_words = tuple(auth.fold_tag(x) for x in saved.get("blockedWords", ()))
 
 
 def set_config(lsp, d):

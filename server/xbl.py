@@ -23,6 +23,15 @@ SESSION_PATH = re.compile(
     re.IGNORECASE)
 
 _SESSIONS = {}   # (scid, template, name) lowercase -> record
+_SESSIONS_LOCK = threading.RLock()     # PUTs come from several handler threads: an update is built on a copy and swapped in under this
+MAX_SESSIONS_PER_OWNER = 32      # live sessions one player may have created; the game makes a few per mode change and they expire
+MAX_SESSIONS = 20000
+MAX_SESSION_BYTES = 256 * 1024   # a stored record as JSON (constants, properties, members, servers)
+SESSION_IDLE_SECONDS = 6 * 3600.0   # a session nobody read, wrote or matched into for this long is forgotten (players in a world
+EMPTY_SESSION_IDLE_SECONDS = 900.0  # do not poll it); one without members goes sooner
+TICKET_SECONDS = 900.0
+MAX_TICKETS_PER_PLAYER = 8
+_last_sweep = 0.0
 NAME_LOOKUP = lambda xuid: ""   # xuid -> gamertag, set by fh2mp_lsp; the real MPSD fills a member's gamertag itself, the game never sends it
 
 
@@ -91,8 +100,7 @@ def session_document(rec):
     system = copy.deepcopy(rec["constants"].get("system", {}))
     system.setdefault("version", 1)
     system.setdefault("visibility", "open")
-    max_players = (rec["constants"].get("custom", {}).get("gameServerPlatform", {}) or {}).get("maxAllowedPlayers", 100)
-    system.setdefault("maxMembersCount", int(max_players))
+    system.setdefault("maxMembersCount", _max_players(rec, 100))
     system.setdefault("capabilities", {})
     props_system = copy.deepcopy(rec["properties"].get("system", {}))
     props_system.setdefault("joinRestriction", "none")
@@ -117,6 +125,60 @@ def session_document(rec):
     }
 
 
+def _int_or_none(v):
+    """An int from a JSON number or a numeric string ("12" is what the GSDS reply hands the game), else None."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str) and v.strip().isdigit():
+        return int(v.strip())
+    return None
+
+
+def _max_players(rec, default):
+    """constants.custom.gameServerPlatform.maxAllowedPlayers of a record, or `default` when it is missing or not a sane number (a
+    record stored before validation existed must stay readable)."""
+    gsp = ((rec.get("constants") or {}).get("custom") or {}).get("gameServerPlatform")
+    n = _int_or_none(gsp.get("maxAllowedPlayers")) if isinstance(gsp, dict) else None
+    return n if n is not None and 1 <= n <= 100 else default
+
+
+def _valid_shape(req):
+    """Types the document builder relies on: constants / properties / servers are objects, their system and custom parts too, and
+    maxAllowedPlayers is a number from 1 to 100."""
+    for part in ("constants", "properties", "servers"):
+        v = req.get(part, {})
+        if not isinstance(v, dict):
+            return False
+        if part != "servers" and any(not isinstance(v.get(sub, {}), dict) for sub in ("system", "custom")):
+            return False
+    gsp = req.get("constants", {}).get("custom", {}).get("gameServerPlatform", {})
+    if not isinstance(gsp, dict):
+        return False
+    if "maxAllowedPlayers" in gsp:
+        n = _int_or_none(gsp["maxAllowedPlayers"])
+        if n is None or not 1 <= n <= 100:
+            return False
+    return True
+
+
+def sweep(now=None):
+    """Forgets sessions nobody used for SESSION_IDLE_SECONDS (EMPTY_SESSION_IDLE_SECONDS without members) and matchmaking tickets
+    older than TICKET_SECONDS. Called from the session calls at most once a minute."""
+    global _last_sweep
+    now = time.time() if now is None else now
+    if now - _last_sweep < 60.0:
+        return
+    _last_sweep = now
+    with _SESSIONS_LOCK:
+        for k in [k for k, rec in _SESSIONS.items()
+                  if now - rec.get("used", now) > (SESSION_IDLE_SECONDS if rec["members"] else EMPTY_SESSION_IDLE_SECONDS)]:
+            del _SESSIONS[k]
+    for tid in [t for t, rec in list(_TICKETS.items()) if now - rec.get("at", now) > TICKET_SECONDS]:
+        _TICKETS.pop(tid, None)
+
+
 def _own_member_key(name, xuid):
     """The member entry a caller may write: "me" (XSAPI's spelling) or its own xuid."""
     return name == "me" or name == xuid
@@ -137,73 +199,89 @@ def put_session(path, body, xuid=None):
         return 400, None
     if not isinstance(req, dict):
         return 400, None
-    k = tuple(x.lower() for x in key)
-    rec = _SESSIONS.get(k)
-    created = rec is None
-    members_req = req.get("members") or {}
-    if not isinstance(members_req, dict):
+    if not _valid_shape(req):
         return 400, None
-    if xuid:
-        # decide everything before changing anything, so a refused request leaves the session as it was
-        if any(not _own_member_key(name, xuid) for name in members_req):
-            return 403, None                    # nobody writes or removes somebody else's member entry
-        if not created:
-            is_member = xuid in rec["members"] or rec.get("owner") == xuid
-            joining = any(_own_member_key(name, xuid) and m is not None for name, m in members_req.items())
-            if not is_member and not joining:
-                return 403, None
-            if not is_member and ("constants" in req or "properties" in req or "servers" in req):
-                return 403, None                # joining does not let a stranger rewrite the session
-    if created:
-        rec = {"scid": key[0], "template": key[1], "name": key[2], "corr": str(uuid.uuid4()),
-               "branch": str(uuid.uuid4()), "start": _now(), "change": 0, "owner": xuid or None,
-               "constants": {}, "properties": {}, "members": {}, "servers": {}}
-        _SESSIONS[k] = rec
-    if "constants" in req:
-        _merge(rec["constants"], req["constants"])
-    if "properties" in req:
-        _merge(rec["properties"], req["properties"])
-    for name, m in members_req.items():
-        if name == "me" and xuid:     # "me" is the caller: key members by xuid so several clients can share a session
-            name = xuid
-        if m is not None and not isinstance(m, dict):
+    members_req = req.get("members") or {}
+    if not isinstance(members_req, dict) or any(m is not None and not isinstance(m, dict) for m in members_req.values()):
+        return 400, None
+    for m in members_req.values():
+        if m is not None and any(not isinstance(m.get(part, {}), dict) or not isinstance(m.get(part, {}).get("system", {}), dict)
+                                 for part in ("constants", "properties")):
             return 400, None
-    for name, m in members_req.items():
-        if name == "me" and xuid:
-            name = xuid
-        if m is not None and xuid:
-            # the advertised identity comes from the authenticated caller, for "me" and for an explicit own entry alike
-            consts = m.setdefault("constants", {})
-            if not isinstance(consts, dict) or not isinstance(consts.get("system", {}), dict):
-                return 400, None
-            consts.setdefault("system", {})["xuid"] = xuid
-        if m is None:
-            rec["members"].pop(name, None)
-            continue
-        cur = rec["members"].setdefault(name, {})
-        _merge(cur, m)
-    rec["change"] += 1
-    _touch(rec, xuid)
+    sweep()
+    k = tuple(x.lower() for x in key)
+    with _SESSIONS_LOCK:
+        cur = _SESSIONS.get(k)
+        created = cur is None
+        if xuid:
+            # decide everything before changing anything, so a refused request leaves the session as it was
+            if any(not _own_member_key(name, xuid) for name in members_req):
+                return 403, None                    # nobody writes or removes somebody else's member entry
+            if not created:
+                is_member = xuid in cur["members"] or cur.get("owner") == xuid
+                joining = any(_own_member_key(name, xuid) and m is not None for name, m in members_req.items())
+                if not is_member and not joining:
+                    return 403, None
+                if not is_member and ("constants" in req or "properties" in req or "servers" in req):
+                    return 403, None                # joining does not let a stranger rewrite the session
+            elif sum(1 for r in _SESSIONS.values() if r.get("owner") == xuid) >= MAX_SESSIONS_PER_OWNER:
+                return 429, None
+        if created and len(_SESSIONS) >= MAX_SESSIONS:
+            return 503, None
+        if created:
+            rec = {"scid": key[0], "template": key[1], "name": key[2], "corr": str(uuid.uuid4()),
+                   "branch": str(uuid.uuid4()), "start": _now(), "change": 0, "owner": xuid or None,
+                   "constants": {}, "properties": {}, "members": {}, "servers": {}}
+        else:
+            rec = copy.deepcopy(cur)                # the update is built on a copy and only stored when it is valid
+        if "constants" in req:
+            _merge(rec["constants"], req["constants"])
+        if "properties" in req:
+            _merge(rec["properties"], req["properties"])
+        for name, m in members_req.items():
+            if name == "me" and xuid:     # "me" is the caller: key members by xuid so several clients can share a session
+                name = xuid
+            if m is None:
+                rec["members"].pop(name, None)
+                continue
+            m = copy.deepcopy(m)
+            if xuid:
+                # the advertised identity comes from the authenticated caller, for "me" and for an explicit own entry alike
+                m.setdefault("constants", {}).setdefault("system", {})["xuid"] = xuid
+            _merge(rec["members"].setdefault(name, {}), m)
+        rec["change"] += 1
+        rec["used"] = time.time()
+        _touch(rec, xuid)
+        if "qos" not in key[1].lower():
+            # A game-mode session the game created itself (Car Meet -> Free Roam / Road Trip): it asks the game-server platform
+            # for a server and reads the address from the session, so list ours; and put its members into this session's world.
+            if not rec.get("servers"):
+                rec["servers"] = servers_block()
+        try:
+            doc = session_document(rec)
+            if len(json.dumps(rec)) > MAX_SESSION_BYTES:
+                return 413, None
+        except (TypeError, ValueError, AttributeError):
+            return 400, None
+        _SESSIONS[k] = rec
     if "qos" not in key[1].lower():
-        # A game-mode session the game created itself (Car Meet -> Free Roam / Road Trip): it asks the game-server platform
-        # for a server and reads the address from the session, so list ours; and put its members into this session's world.
-        if not rec.get("servers"):
-            rec["servers"] = servers_block()
-        for k in rec["members"]:
-            if k.isdigit() and k == xuid:
-                announce_player(k, key[2])
+        for mk in rec["members"]:
+            if mk.isdigit() and mk == xuid:
+                announce_player(mk, key[2])
     # The real service answers 201 for a new session; XSAPI's REST layer in this build returns a null session for it,
     # so create and update both answer 200 (docs/matchmaking.md).
-    return 200, session_document(rec)
+    return 200, doc
 
 
 def get_session(path, xuid=None):
     key = parse_path(path)
     if key is None:
         return 404, None
+    sweep()
     rec = _SESSIONS.get(tuple(x.lower() for x in key))
     if rec is None:
         return 404, None
+    rec["used"] = time.time()
     _touch(rec, xuid)
     _prune(rec)
     return 200, session_document(rec)
@@ -283,11 +361,18 @@ def _control(text):
         pass
 
 
-def announce_auth(xuid, ip):
-    """Tell the game server that `xuid` is signed in from `ip` (the UDP OpenConnection must come from there), see fh2mp_server.Hub.control."""
+def announce_auth(xuid, ip, key=""):
+    """Tell the game server that `xuid` is signed in from `ip` (the UDP OpenConnection must come from there) with a session whose UDP
+    ticket key is `key` (hex, auth.udp_ticket_key), see fh2mp_server.Hub.control."""
     if not xuid or not ip:
         return
-    _control("auth %x %s" % (int(xuid), ip))
+    _control("auth %x %s %s" % (int(xuid), ip, key) if key else "auth %x %s" % (int(xuid), ip))
+
+
+def announce_logout(xuid, key):
+    """A session signed out: the game server forgets its ticket key and ends the connections that key opened (not a ban)."""
+    if xuid and key:
+        _control("logout %x %s" % (int(xuid), key))
 
 
 def announce_allow(xuid):
@@ -453,7 +538,7 @@ def _lobby_for(scid, hopper, attrs, ref, xuid=None):
                 _RESERVED.pop(name, None)
                 continue
             _prune(rec)
-            cap = int(rec.get("constants", {}).get("custom", {}).get("gameServerPlatform", {}).get("maxAllowedPlayers", LOBBY_CAPACITY))
+            cap = min(_max_players(rec, LOBBY_CAPACITY), LOBBY_CAPACITY)
             n = lobby_occupancy(name, rec, pops)
             if flagged and not pool_fits(name, pops, flagged, mine):
                 continue
@@ -463,6 +548,9 @@ def _lobby_for(scid, hopper, attrs, ref, xuid=None):
         if name is None:
             name = _new_lobby(scid, attrs, ref)
             names.append(name)
+        rec = _SESSIONS.get((scid.lower(), TARGET_TEMPLATE.lower(), name.lower()))
+        if rec is not None:
+            rec["used"] = time.time()
         if xuid:
             for res in _RESERVED.values():
                 res.pop(str(xuid), None)        # one seat per player: a new match replaces the one it made before
@@ -483,7 +571,9 @@ def _new_lobby(scid, attrs, ref):
     gsp = custom.setdefault("gameServerPlatform", {})
     gsp.setdefault("gameVariantId", "00000000-0000-0000-0000-000000000001")
     gsp.setdefault("gsiSetId", attrs.get("gsiSetId", "00000000-0000-0000-0000-000000000102"))
-    gsp.setdefault("maxAllowedPlayers", LOBBY_CAPACITY)
+    if not isinstance(gsp, dict):
+        gsp = custom["gameServerPlatform"] = {}
+    gsp["maxAllowedPlayers"] = LOBBY_CAPACITY      # server-owned: the ticket session the client wrote does not set the lobby size
     custom.setdefault("hopperId", attrs.get("hopperId", 0))
     body = {"constants": {"system": {"version": 1, "visibility": "open"}, "custom": custom},
             "properties": {"system": {"joinRestriction": "none", "readRestriction": "none"}, "custom": {}}}
@@ -513,10 +603,18 @@ def create_ticket(path, body, xuid=None):
                              str(ref.get("name", "")).lower())) if isinstance(ref, dict) else None
         if src is None or (xuid not in src["members"] and src.get("owner") != xuid):
             return 403, None
+    attrs = req.get("ticketAttributes") or {}
+    if not isinstance(attrs, dict) or (ref is not None and not isinstance(ref, dict)):
+        return 400, None
+    sweep()
+    if xuid:
+        mine = sorted((rec.get("at", 0), t) for t, rec in list(_TICKETS.items()) if rec.get("xuid") == xuid)
+        for _at, t in mine[:max(0, len(mine) - MAX_TICKETS_PER_PLAYER + 1)]:
+            _TICKETS.pop(t, None)                  # the caller's own oldest tickets make room; nobody else's
     tid = str(uuid.uuid4())
-    _TICKETS[tid] = {"scid": scid, "hopper": hopper, "ref": req.get("ticketSessionRef"),
-                     "attrs": req.get("ticketAttributes") or {}, "preserve": req.get("preserveSession", "never"),
-                     "xuid": xuid}
+    _TICKETS[tid] = {"scid": scid, "hopper": hopper, "ref": ref,
+                     "attrs": attrs, "preserve": req.get("preserveSession", "never"),
+                     "xuid": xuid, "at": time.time()}
     return 200, {"ticketId": tid, "waitTime": 1}
 
 

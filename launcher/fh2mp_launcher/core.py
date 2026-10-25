@@ -407,6 +407,7 @@ class Launcher:
         up = updater.Updater(channel=self.settings["channel"])
         zip_path = up.download(self.manifest["tag"], e, progress, cancelled)
         did = shim.install(self.settings["azimuth_dir"], read_shim_zip(zip_path), e.get("dllSha256"), self.platform_files(progress, cancelled))
+        did += self.repair_tls_helper()
         did += self.ensure_extra_options(progress, cancelled)
         return did
 
@@ -442,9 +443,20 @@ class Launcher:
             raise PlayBlocked("The FH2MP shim is out of date and the server would turn it away.", "shim_outdated")
         enabled = shim.enable(s["azimuth_dir"])           # off on the in-game MODS tab: the platform would not load it
         try:
-            self.ensure_extra_options()          # only when the player has no copy; never blocks playing
-        except Exception:  # noqa: BLE001
-            pass
+            self.repair_tls_helper()
+        except shim.ShimError as e:
+            raise PlayBlocked(str(e), "tls_helper") from None
+        try:
+            self.ensure_extra_options()          # only when the player has no copy of the supported build
+        except Exception as e:  # noqa: BLE001
+            from .api import log_failure
+            log_failure("PLAY", "extra_options", e, str(e))
+            if not self.extra_state()[0]:         # the car database cannot be put in play without it (gamedb.py): say why, now
+                raise PlayBlocked(f"FH2 Extra Options {EXTRA_OPTIONS_VERSION} could not be installed: {e}", "extra_options") from None
+        if not self.extra_state()[0]:
+            raise PlayBlocked(f"FH2MP needs FH2 Extra Options {EXTRA_OPTIONS_VERSION} (winmm.dll next to azimuth.exe) and yours is another version. "
+                              "Turn on \"Install FH2 Extra Options\" in Settings and press Play: the launcher installs it and keeps your "
+                              "old winmm.dll in the fh2extra folder.", "extra_options")
         self.ensure_game()
         if require_game and not azimuth.has_game_configured(s["azimuth_dir"]):
             raise PlayBlocked("Couldn't find your Forza Horizon 2 files.", "no_game")
@@ -470,10 +482,11 @@ class Launcher:
         saves = adopted or "nothing to adopt"
         if adopted:
             notes.append("kept your progress: " + adopted)
-        if azimuth.set_player_name(d, acct["gamertag"]):
-            notes.append(f"set the in-game name to {acct['gamertag']}")
+        shown = azimuth.ingame_name(acct["gamertag"])       # Azimuth shows "Player 1" for a name it does not accept
+        if azimuth.set_player_name(d, shown):
+            notes.append(f"set the in-game name to {shown}")
         from .api import log_note
-        applied = azimuth.read_ini(d).get("launcher", {}).get("player_name") == acct["gamertag"]
+        applied = azimuth.read_ini(d).get("launcher", {}).get("player_name") == shown
         if not applied:
             # Azimuth's own default is "Player 1"; the leaderboards show the local name from here (GitHub issue #2)
             notes.append("could not set the in-game name")
@@ -483,7 +496,7 @@ class Launcher:
             from .api import log_failure
             log_failure("PLAY", "gamerpic", e, str(e))
             pic = "picture not updated"
-        log_note(f"PLAY name={acct['gamertag']!r} written={'yes' if applied else 'NO'} gamerpic={pic or 'unchanged'} saves={saves!r} azimuth_dir={d}")
+        log_note(f"PLAY name={acct['gamertag']!r} ingame={shown!r} written={'yes' if applied else 'NO'} gamerpic={pic or 'unchanged'} saves={saves!r} azimuth_dir={d}")
         return acct, notes
 
     def prepare_saves(self, xuid):
@@ -606,6 +619,10 @@ class Launcher:
             raise PlayBlocked("azimuth.exe not found.", "no_azimuth")
         if not info.supported and not force_unsupported:
             raise PlayBlocked(f"Azimuth {info.version or '?'} is untested with FH2MP.", "azimuth_unsupported")
+        try:
+            self.repair_tls_helper()
+        except shim.ShimError as e:
+            raise PlayBlocked(str(e), "tls_helper") from None
         self.ensure_game()
         if not azimuth_window and not azimuth.has_game_configured(d):
             raise PlayBlocked("Couldn't find your Forza Horizon 2 files.", "no_game")
@@ -668,13 +685,25 @@ class Launcher:
         if not self.settings["extra_options"] or not d or not os.path.isdir(d):
             return []
         shim.migrate_legacy(d)
-        if self.extra_state()[0]:
+        if shim.extra_options_complete(d):
             return []
         try:
             files = upstream.fetch("extraOptions", updater.Updater(channel=self.settings["channel"]), progress, cancelled)
         except upstream.UpstreamError as e:
             raise updater.UpdateError(str(e)) from None
         return shim.install_extra(d, files)
+
+    def repair_tls_helper(self):
+        """An old FH2 Extra Options (0.2.7x) replaced data\\bin\\azimuth-tls.dll; next to 0.2.98 that patches the game twice and 0.2.98
+        refuses to start (GitHub #20). Puts Azimuth's own file back. -> list of things done; raises shim.ShimError when it cannot."""
+        d = self.settings["azimuth_dir"]
+        if not d or not os.path.isdir(d):
+            return []
+        did = shim.restore_tls_helper(d)
+        if did:
+            from .api import log_note
+            log_note("PLAY " + did[0])
+        return did
 
     def open_azimuth_setup(self):
         """Azimuth's own launcher window (where its game folder is chosen), started the same way the game is."""

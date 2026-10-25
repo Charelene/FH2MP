@@ -116,11 +116,12 @@ class LauncherConfig:
 
 
 class Ctx:
-    def __init__(self, auth_service, social_store, config, online_count, log=lambda m: None, on_login=None, lsp_public=None,
+    def __init__(self, auth_service, social_store, config, online_count, log=lambda m: None, on_login=None, on_logout=None, lsp_public=None,
                  game_public=None,
                  gamedb=None, boards=None, assets_dir=None, crashes=None):
         self.auth, self.social, self.config, self.online_count, self.log = auth_service, social_store, config, online_count, log
-        self.on_login = on_login or (lambda xuid, ip: None)
+        self.on_login = on_login or (lambda xuid, ip, token: None)
+        self.on_logout = on_logout or (lambda xuid, token: None)    # the game server ends what that session's UDP ticket opened
         self.lsp_public, self.game_public = lsp_public or {}, game_public or {}
         self.gamedb = gamedb or gamedb_sync.GameDb("")
         self.crashes = crashes            # crash_reports.CrashReports, or None = the endpoint is off
@@ -264,7 +265,7 @@ def _route(ctx, method, path, headers, body, ip):
         d = _json(body)
         _require_launcher(ctx, str(d.get("client", "")))
         token, acct, ttl = a.login(ip, str(d.get("challenge", "")), str(d.get("pubkey", "")), str(d.get("sig", "")), str(d.get("client", "")))
-        ctx.on_login(acct.xuid, ip)
+        ctx.on_login(acct.xuid, ip, token)
         ctx.log(f"  v1 login {acct.xuid:#x} {acct.gamertag!r}")
         return 200, {"token": token, "idleSeconds": int(ttl), "account": _account_json(acct), "lsp": ctx.lsp_public,
                      "game": ctx.game_public}, ok
@@ -291,8 +292,9 @@ def _route(ctx, method, path, headers, body, ip):
             raise auth.AuthError(429, "rate_limited", "too many crash reports, try again later")
         return 202, {"id": ctx.crashes.submit(_json(body, crash_reports.MAX_BODY))}, ok
     if p == "/v1/auth/logout" and method == "POST":
-        a.authenticate(_bearer(headers), ip)
+        acct = a.authenticate(_bearer(headers), ip)
         a.logout(_bearer(headers))
+        ctx.on_logout(acct.xuid, _bearer(headers))
         return 200, {"ok": True}, ok
     if p == "/v1/gamedb" and method == "GET":
         a.authenticate(_bearer(headers), ip)

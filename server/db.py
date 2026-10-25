@@ -541,10 +541,21 @@ def _float_numeric(conn):
     conn.adapters.register_loader("numeric", FloatLoader)
 
 
+def safe_dsn(dsn):
+    """What a log line may show of a connection string: database, host, port and user, parsed by libpq (keyword form and URIs alike), never
+    the password or anything else (audit 2026-10-25 F14: a regex missed URI passwords and quoted ones with spaces)."""
+    try:
+        from psycopg.conninfo import conninfo_to_dict
+        d = conninfo_to_dict(dsn)
+    except Exception:  # noqa: BLE001 - an unparsable string is shown as nothing at all
+        return "(connection string not shown)"
+    return " ".join(f"{k}={d[k]}" for k in ("dbname", "host", "port", "user") if d.get(k)) or "(default connection)"
+
+
 class Database:
     def __init__(self, dsn=None):
         self.dsn = dsn or os.environ.get("FH2MP_PG_DSN") or "dbname=fh2mp"
-        self.path = re.sub(r"password=\S+", "password=***", self.dsn)       # for log lines
+        self.path = safe_dsn(self.dsn)       # for log lines
         self._local = threading.local()     # .tx_conn: the connection of the transaction this thread is inside
         self._all = []                      # every pooled connection, so close() can close them all
         self._idle = queue.LifoQueue()

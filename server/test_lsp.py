@@ -11,6 +11,7 @@ from unittest import mock
 import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+os.environ.setdefault("FH2MP_AUTH", "optional")      # these tests call as legacy clients (X-UserId); the LSP default is required
 import fh2mp_lsp as L  # noqa: E402
 import test_db  # noqa: E402
 import ugc  # noqa: E402

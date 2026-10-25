@@ -11,6 +11,8 @@ Wire format (recovered from the client binary):
   * String:        varlen(len) | len*8 bits        varlen = cls:2 | value:(cls*8+6)
 """
 import collections
+import hashlib
+import hmac
 import json
 import math
 import os
@@ -283,6 +285,15 @@ PLAYER_VAR_TEAM_ID = 90
 PLAYER_VAR_PRIVATE_UNIVERSE, PRIVATE_UNIVERSE_BITS = 40, 5
 PRIVATE_UNIVERSE_FIRST, PRIVATE_UNIVERSE_COUNT = 1, 17
 AUTH_TTL_SECONDS = 600.0      # how long a sign-in announced by the LSP lets that address open a connection without further news
+# UDP connection ticket (shim udp_ticket_send, security audit 2026-10-25 F01): before each OpenConnection the shim sends, from the same
+# socket, a datagram with a NerdLib header that holds no messages (old servers drop it unread) and then "FH2MPTK1", version, xuid, unix
+# time, a nonce and an HMAC-SHA256 under the session's ticket key (auth.udp_ticket_key, announced by the LSP). A valid one binds the
+# sending address to that xuid. FH2MP_UDP_AUTH: off = anybody, required = the sign-in address or a ticket, ticket = a ticket only.
+TICKET_MAGIC = b"FH2MPTK1"
+TICKET_LEN = 84
+TICKET_SKEW_SECONDS = 86400.0    # a player's clock may be this far off (time zone set wrong); used nonces are kept twice as long
+TICKET_BIND_SECONDS = 120.0      # an address that showed a ticket may open its connection for this long (the game retries for ~10 s)
+UDP_AUTH_MODES = ("off", "required", "ticket")
 RT_INIT_SECONDS = float(os.environ.get("FH2MP_RT_INIT", "3.0"))   # dev knob: hold the state in Initialising         # Initialising -> DestinationVote delay after the connection (the client waits in Initialising
                               # and only sends its session-entry message once the state has changed)
 RT_EXCLUDED_MODES = set()        # RaceModes.id never offered (King 25 and Infection 26 are served: tag events, see TAG_MODES)
@@ -297,6 +308,7 @@ RT_TEAM_MODES = {0, 1, 2, 4, 5, 31}   # laps, street, cross country, scramble, t
 RT_TEAM_MIN_PLAYERS = int(os.environ.get("FH2MP_TEAM_MIN_PLAYERS", "4"))   # fewer players than this are not offered a team event
 RT_TEAM_EVENTS_PER_LOCATION = int(os.environ.get("FH2MP_TEAM_EVENTS", "1"))  # how many of a destination's 4 events are team events
 RT_TEAM_ONLY = os.environ.get("FH2MP_RT_TEAM_ONLY") == "1"
+RT_SPRINT_ONLY = os.environ.get("FH2MP_RT_SPRINT_ONLY") == "1"   # dev: repeat sprint / street races for finish-line testing (#21)
 # EventRaceId of a fresh lobby's first drive. After car select the client always fast-travels to the grid at the finish of EventRaceId
 # (network_roadtrip_states.xml free_roam_ui -> fast_travel_to_destination_drive_grid); sending the upcoming race put everyone next to the
 # destination instead of at the festival (dev 2026-10-22). Unset: the old behaviour. Being tested: which value means "the festival".
@@ -981,7 +993,9 @@ def pick_road_trip_candidates(gamedb_path, players=1, rng=None):
     """3 random road-trip locations, 4 events each from the game's own event table, mixing race types where the
     location has them, a different car class per location. Only race modes that can run with `players` players
     are offered (RaceModes.MinimumPlayers: King and Infection need 2, a P2P or lap race 1). With RT_TEAM_MIN_PLAYERS players or
-    more, one event per destination is offered as its team variant (id + 10000, see TEAM_EVENT_OFFSET)."""
+    more, one event per destination is offered as its team variant (id + 10000, see TEAM_EVENT_OFFSET).
+    FH2MP_RT_SPRINT_ONLY=1 limits the vote to StreetRace/P2P for finish-line testing. If a destination has fewer than four
+    eligible sprints, repeat its events to fill the four slots (also allows the first player to open the vote alone)."""
     import random
     import sqlite3
     rng = rng or random.Random()
@@ -999,17 +1013,21 @@ def pick_road_trip_candidates(gamedb_path, players=1, rng=None):
     min_players = {}
     event_mode = {}
     for ev, loc, mode, minp in rows:
+        if RT_SPRINT_ONLY and mode not in (1, 31):   # RaceModes: StreetRace, P2P (no lap races or tag modes)
+            continue
         by_loc.setdefault(loc, {}).setdefault(mode, []).append(ev)
         min_players[ev] = minp
         event_mode[ev] = mode
     eligible = [l for l, modes in by_loc.items()
-                if l not in RT_EXCLUDED_LOCATIONS and sum(len(v) for v in modes.values()) >= 4]
+                if l not in RT_EXCLUDED_LOCATIONS and sum(len(v) for v in modes.values()) >= (1 if RT_SPRINT_ONLY else 4)]
     locs = rng.sample(eligible, 3)
     events = []
     for l in locs:
         pools = {m: rng.sample(v, len(v)) for m, v in by_loc[l].items()}
         picked = []
         while len(picked) < 4:                      # round-robin over the race types, shuffled
+            if RT_SPRINT_ONLY and not any(pools.values()):
+                pools = {m: rng.sample(v, len(v)) for m, v in by_loc[l].items()}
             for m in rng.sample(list(pools), len(pools)):
                 if pools[m] and len(picked) < 4:
                     picked.append(pools[m].pop())
@@ -1176,7 +1194,8 @@ class Peer:
         self.car_payload_logs = 0
         self.kick_reason = None    # set by the car policy; acted on in tick()
         self.parts = None          # the car's 43 part ids as sent at join (parts.find_parts)
-        self.part_notes = 0        # part check log lines written for this client
+        self.part_notes = 0
+        self.odd_dumps = 0        # raw dumps of unreadable player objects logged for this client (ODD OBJECT, at most 4)
         self.part_logged = None    # (part list, policy) last reported, so one car is reported once and not on every update
         self.speed_ref = None      # (monotonic, position) the last speed was measured from
         self.top_kmh = 0.0         # highest measured speed (km/h)
@@ -1442,6 +1461,15 @@ class Server:
             if alien is not None:
                 peer.car_doubt_at = peer.car_seen_at
                 return self.unknown_car(peer, payload, *alien)
+        if found is None and (shaped := parts_check.find_shaped(size, payload)) is not None:
+            # a list the finder rejected for its unknown ids: still a part list, so it gets the same cleaning (an engine row the game does
+            # not have crashes every client that builds the car); a body that is no car of this game gets the stand-in car's list
+            if shaped[1][2] not in parts_check.P.TABLE_IDS["CarBody"]:
+                peer.car_doubt_at = peer.car_seen_at
+                return self.unknown_car(peer, payload, *shaped)
+            found = shaped
+        if found is None and (loose := parts_check.find_loose(size, payload)) is not None:
+            found = loose        # ids in the slots without a part type (a mod): same cleaning, see parts.find_loose
         if found is not None and TEST_CAR and (test := parts_check.stock_list(TEST_CAR)) is not None:
             self.log(f"{peer.addr[1]} TEST CAR: owner {peer.owner_id}'s car {found[1][2] // 1000} relayed as car {TEST_CAR}")
             return False, False, parts_check.write_parts(payload, found[0], test)
@@ -1450,6 +1478,12 @@ class Server:
             if peer.part_notes < 3:
                 peer.part_notes += 1
                 self.log(f"{peer.addr[1]} part check: no part list found in the {size}-bit player object (owner {peer.owner_id})")
+            if peer.odd_dumps < 4:
+                # probe (2026-10-23): one player's object of this kind crashed a whole lobby (11 clients, the same second) and joins with one were
+                # followed by a client death 33 % of the time, against 5 % for ordinary joins. The whole object goes into the log, in the same
+                # format as the WIPE dumps (little-endian bytes of the payload), so it can be decoded and compared
+                peer.odd_dumps += 1
+                self.log(f"{peer.addr[1]} ODD OBJECT: owner {peer.owner_id} xuid {peer.xuid:#x} {size} bits hex={payload.to_bytes((size + 7) // 8, 'little').hex()}")
             return False, False, payload
         offset, words = found
         peer.parts = words
@@ -2560,7 +2594,11 @@ class Server:
                 flag2, code = r.bits(2), r.bits(3)
                 echo, theirs = r.bits(32), r.bits(32)
                 self.log(f"{addr[1]} OpenConnectionResponse code={code} echo={echo} counter={theirs}")
-                if code == RESPONSE_ACK and not peer.connected:
+                if code == RESPONSE_ACK and not peer.connected and echo != self.server_counter:
+                    # the client echoes the counter of our OpenConnectionResponse (always, in every prod log up to 2026-10-25): a reply
+                    # that does not cannot have read it, so it does not complete the handshake (not a security check on its own)
+                    self.noise(f"{addr[1]} OpenConnectionResponse with echo {echo}, expected {self.server_counter}: ignored")
+                elif code == RESPONSE_ACK and not peer.connected:
                     peer.connected = True
                     peer.connected_at = time.monotonic()
                     peer.owner_id = self.next_owner
@@ -3389,6 +3427,11 @@ class Hub:
         self.load_flags()
         self.revoked = {}     # xuid -> until: banned / kicked by the LSP ("revoke <xuid hex>"); refused until the next sign-in announcement
         self.udp_auth = os.environ.get("FH2MP_UDP_AUTH", "off")
+        if self.udp_auth not in UDP_AUTH_MODES:
+            raise SystemExit(f"FH2MP_UDP_AUTH={self.udp_auth!r}: expected one of {', '.join(UDP_AUTH_MODES)}")
+        self.keys = {}        # xuid -> {ticket key: valid until}: the signed-in sessions of a player ("auth <xuid> <ip> <key hex>")
+        self.bound = {}       # address -> (xuid, valid until, key): the address showed a valid ticket for xuid (kept while it is routed)
+        self.nonces = {}      # (xuid, nonce) -> forget after: tickets already used
         self.auth_log = {}
         self.worlds = {}      # (lobby type, lobby name) -> Server
         self.route = {}       # client address -> Server
@@ -3411,6 +3454,8 @@ class Hub:
         self.idle.is_idle = True
         self.idle.log(f"hub listening on udp/{port}, control udp/{self.ctl.getsockname()[1] if self.ctl else '-'}"
                       + (f", tunnel tcp/{self.tunnel.port}" if self.tunnel else ""))
+        if self.udp_auth == "off":
+            self.idle.log("WARNING: FH2MP_UDP_AUTH=off: any OpenConnection is taken at its word (set ticket, or required, on a public server)")
 
     def log(self, msg: str) -> None:
         self.idle.log(msg)
@@ -3429,53 +3474,68 @@ class Hub:
         return w
 
     def control(self) -> None:
-        """Text datagrams from the matchmaking side: "assign <xuid hex> <lobby name>"."""
+        """Text datagrams from the matchmaking side (loopback), see ctl_text."""
         while self.ctl:
             try:
                 data, reply_to = self.ctl.recvfrom(1024)
             except (BlockingIOError, OSError):
                 return
-            parts = data.decode("utf-8", "replace").split()
-            if len(parts) == 1 and parts[0] == "pop":
-                try:
-                    self.ctl.sendto(self.populations_text().encode(), reply_to)
-                except OSError:
-                    pass
-            elif parts == ["lobbies"]:
-                try:
-                    self.ctl.sendto(json.dumps(self.lobby_status()).encode(), reply_to)
-                except OSError:
-                    pass
-            elif len(parts) == 3 and parts[0] == "auth":
-                try:
-                    xuid = int(parts[1], 16)
-                    if xuid in self.revoked:
-                        continue        # a ban or kick holds until the LSP says so again, i.e. until a fresh sign-in
-                    self.authed[xuid] = (parts[2], time.monotonic() + AUTH_TTL_SECONDS)
-                except ValueError:
-                    pass
-            elif len(parts) == 2 and parts[0] == "revoke":
-                try:
-                    self.revoke(int(parts[1], 16))
-                except ValueError:
-                    pass
-            elif len(parts) == 2 and parts[0] == "unflag":
-                try:
-                    if self.flagged.pop(int(parts[1], 16), None) is not None:
-                        self.save_flags()
-                except ValueError:
-                    pass
-            elif len(parts) == 2 and parts[0] == "allow":
-                try:
-                    self.revoked.pop(int(parts[1], 16), None)
-                except ValueError:
-                    pass
-            elif len(parts) == 3 and parts[0] == "assign":
-                try:
-                    self.assign[int(parts[1], 16)] = parts[2]
-                    self.log(f"control: player {parts[1]} assigned to lobby {parts[2]}")
-                except ValueError:
-                    pass
+            self.ctl_text(data.decode("utf-8", "replace"), reply_to)
+
+    def ctl_text(self, text: str, reply_to=None) -> None:
+        """One control message: "assign <xuid hex> <lobby name>", "auth <xuid hex> <ip> [ticket key hex]", "logout <xuid hex> <key hex>",
+        "revoke" / "allow" / "unflag <xuid hex>", "pop", "lobbies"."""
+        parts = text.split()
+        if len(parts) == 1 and parts[0] == "pop":
+            try:
+                self.ctl.sendto(self.populations_text().encode(), reply_to)
+            except OSError:
+                pass
+        elif parts == ["lobbies"]:
+            try:
+                self.ctl.sendto(json.dumps(self.lobby_status()).encode(), reply_to)
+            except OSError:
+                pass
+        elif len(parts) in (3, 4) and parts[0] == "auth":
+            try:
+                xuid = int(parts[1], 16)
+                if xuid in self.revoked:
+                    return          # a ban or kick holds until the LSP says so again, i.e. until a fresh sign-in
+                until = time.monotonic() + AUTH_TTL_SECONDS
+                self.authed[xuid] = (parts[2], until)
+                if len(parts) == 4:
+                    key, keys = bytes.fromhex(parts[3]), self.keys.setdefault(xuid, {})
+                    if len(keys) < 16 or key in keys:
+                        keys[key] = until
+            except ValueError:
+                pass
+        elif len(parts) == 3 and parts[0] == "logout":
+            try:
+                self.logout(int(parts[1], 16), bytes.fromhex(parts[2]))
+            except ValueError:
+                pass
+        elif len(parts) == 2 and parts[0] == "revoke":
+            try:
+                self.revoke(int(parts[1], 16))
+            except ValueError:
+                pass
+        elif len(parts) == 2 and parts[0] == "unflag":
+            try:
+                if self.flagged.pop(int(parts[1], 16), None) is not None:
+                    self.save_flags()
+            except ValueError:
+                pass
+        elif len(parts) == 2 and parts[0] == "allow":
+            try:
+                self.revoked.pop(int(parts[1], 16), None)
+            except ValueError:
+                pass
+        elif len(parts) == 3 and parts[0] == "assign":
+            try:
+                self.assign[int(parts[1], 16)] = parts[2]
+                self.log(f"control: player {parts[1]} assigned to lobby {parts[2]}")
+            except ValueError:
+                pass
 
     def lobby_status(self) -> dict:
         """Public lobby summary; produced on the game loop so world state is consistent."""
@@ -3551,9 +3611,67 @@ class Hub:
             self.save_flags()
         return list(self.flagged)
 
+    def logout(self, xuid: int, key: bytes) -> None:
+        """A session signed out (the launcher does after the game exits): its ticket key goes, and so do the connections it opened. Other
+        sessions of the player (a second launcher window) and connections admitted without a ticket are left alone; not a ban."""
+        self.keys.get(xuid, {}).pop(key, None)
+        dropped = 0
+        for addr, (bx, _until, bkey) in list(self.bound.items()):
+            if bx != xuid or bkey != key:
+                continue
+            del self.bound[addr]
+            w = self.route.pop(addr, None)
+            peer = w.peers.get(addr) if w is not None else None
+            if peer is not None:
+                try:
+                    w.send(peer, [close_connection(0)], fast=True)
+                except OSError:
+                    pass
+                w.drop_peer(peer, "signed out")
+                dropped += 1
+        self.log(f"control: {xuid:#x} signed out ({dropped} connection(s) ended)")
+
+    def ticket(self, data: bytes, addr) -> None:
+        """A UDP connection ticket (TICKET_MAGIC): binds `addr` to its xuid when the MAC is right under one of the player's announced keys,
+        the time is plausible and the nonce is new. Anything else is dropped without an answer."""
+        xuid, ts = struct.unpack_from("<QQ", data, 20)
+        nonce, mac = data[36:52], data[52:84]
+        now = time.monotonic()
+        why = None
+        if data[19] != 1:
+            why = "unknown version"
+        elif xuid in self.revoked:
+            why = "revoked"
+        elif abs(time.time() - ts) > TICKET_SKEW_SECONDS:
+            why = "clock too far off"
+        elif (xuid, nonce) in self.nonces:
+            why = "replayed"
+        else:
+            key = next((k for k, until in self.keys.get(xuid, {}).items()
+                        if until > now and hmac.compare_digest(hmac.new(k, data[:52], hashlib.sha256).digest(), mac)), None)
+            if key is None:
+                why = "bad signature or no session"
+        if why:
+            if len(self.auth_log) < 5000 and now - self.auth_log.get(("t", addr[0]), -1e9) > 10:
+                self.auth_log[("t", addr[0])] = now
+                self.log(f"auth: ticket for {xuid:#x} from {addr[0]}:{addr[1]} refused ({why})")
+            return
+        if len(self.nonces) < 500000:
+            self.nonces[(xuid, nonce)] = now + 2 * TICKET_SKEW_SECONDS
+        held = self.bound.get(addr)
+        if held is not None and held[0] != xuid and held[1] > now:
+            self.log(f"auth: ticket for {xuid:#x} from {addr[0]}:{addr[1]} refused (address bound to {held[0]:#x})")
+            return
+        if held is None or held[0] != xuid or held[2] != key:
+            self.log(f"auth: ticket for {xuid:#x} from {addr[0]}:{addr[1]} accepted")
+        self.bound[addr] = (xuid, now + TICKET_BIND_SECONDS, key)
+
     def revoke(self, xuid: int) -> None:
         """A ban or kick: forget the sign-in, the lobby assignment, and end every live connection of this player."""
         self.authed.pop(xuid, None)
+        self.keys.pop(xuid, None)
+        for addr in [a for a, b in self.bound.items() if b[0] == xuid]:
+            del self.bound[addr]
         self.assign.pop(xuid, None)
         self.revoked[xuid] = time.monotonic() + 86400.0
         dropped = 0
@@ -3585,6 +3703,9 @@ class Hub:
             return None
 
     def handle(self, data: bytes, addr) -> None:
+        if len(data) == TICKET_LEN and data[11:19] == TICKET_MAGIC:
+            self.ticket(data, addr)
+            return
         opened = self.open_connection_fields(data)
         cur = self.route.get(addr)
         if opened:
@@ -3594,11 +3715,12 @@ class Hub:
             held = cur.peers.get(addr) if cur is not None else None
             if held is not None and held.xuid and held.xuid != player_id:
                 return                      # this address already belongs to another player's connection
+            self.replace_connections(player_id, addr)
             if held is None and not self.pending_room(addr):
                 return                      # before a world is picked or made for it: a flood must not create worlds
             name = self.assign.get(player_id)
             target = self.world_for(ltype, name) if name else self.open_world_for(ltype)
-            if target is not cur and self.world_load(target, addr, player_id) >= self.WORLD_CAPACITY:
+            if target is not cur and self.world_load(target, addr) >= self.WORLD_CAPACITY:
                 # The HUD player list has exactly 12 slots (HudPartyMembersComponent ctor FUN_1407726c0); a 13th player makes every
                 # client in the world read past them and call through a CUserProfile (game+0x144661d, "exception at 0x9") [C].
                 self.log(f"{player_id:#x} assigned to full lobby {name or 'default'}: sent to another world")
@@ -3624,16 +3746,26 @@ class Hub:
         return total < MAX_PENDING_PEERS and mine < MAX_PENDING_PER_IP
 
     def open_allowed(self, player_id: int, addr) -> bool:
-        """With FH2MP_UDP_AUTH=required an OpenConnection is only accepted from the address its xuid signed in from. Called by the
-        worlds for every OpenConnection message, not just the first of a datagram."""
+        """Identity check of an OpenConnection, for every one in a datagram (the worlds call it too). An address that showed a valid
+        ticket (Hub.ticket) may open a connection for that xuid only. Without one, FH2MP_UDP_AUTH=required accepts the address the xuid
+        signed in from, and FH2MP_UDP_AUTH=ticket nothing."""
         if player_id in self.revoked:
             return False
-        if self.udp_auth != "required" or self.is_authed(player_id, addr[0]):
+        if self.udp_auth == "off":
             return True
         now = time.monotonic()
+        held = self.bound.get(addr)
+        if held is not None and held[1] > now:
+            if held[0] == player_id:
+                return True
+            why = f"this address showed a ticket for {held[0]:#x}"
+        elif self.udp_auth == "required" and self.is_authed(player_id, addr[0]):
+            return True
+        else:
+            why = "no valid ticket" if self.udp_auth == "ticket" else "not signed in from this address"
         if len(self.auth_log) < 5000 and now - self.auth_log.get(addr[0], -1e9) > 10:   # one line per address per 10 s, whatever it sends
             self.auth_log[addr[0]] = now
-            self.log(f"auth: refused OpenConnection of {player_id:#x} from {addr[0]} (not signed in from this address)")
+            self.log(f"auth: refused OpenConnection of {player_id:#x} from {addr[0]} ({why})")
         return False
 
     def tunnel_admit(self, ip: str) -> bool:
@@ -3683,14 +3815,25 @@ class Hub:
 
     WORLD_CAPACITY = 12
 
-    def world_load(self, w, addr=None, xuid=0) -> int:
-        """Players routed to world `w` (connected or still connecting), not counting `addr` or an older connection of `xuid`."""
-        n = 0
-        for a, rw in self.route.items():
-            if rw is w and a != addr:
-                peer = w.peers.get(a)
-                n += not (xuid and peer is not None and peer.xuid == xuid)
-        return n
+    def world_load(self, w, addr=None) -> int:
+        """Addresses routed to world `w` (connected or still connecting), not counting `addr`. One player holds one address at most
+        (replace_connections), so this is the number of players."""
+        return sum(1 for a, rw in self.route.items() if rw is w and a != addr)
+
+    def replace_connections(self, xuid: int, addr) -> None:
+        """One connection per player: an OpenConnection that passed the identity check ends the player's connections from other
+        addresses (a restarted game, a new NAT port) before the new one is counted. Before this, one sign-in could open a connection from
+        every port and fill a world past its 12 seats (security audit 2026-10-25, F02)."""
+        for a, w in list(self.route.items()):
+            peer = w.peers.get(a)
+            if a == addr or peer is None or peer.xuid != xuid:
+                continue
+            try:
+                w.send(peer, [close_connection(0)], fast=True)
+            except OSError:
+                pass
+            w.drop_peer(peer, "replaced by a newer connection of the same player")
+            del self.route[a]
 
     def open_world_for(self, lobby_type: int):
         """A player with no lobby assignment (joined from the menu: the matchmaking side cannot reach this hub's control port from the
@@ -3718,6 +3861,16 @@ class Hub:
         for xuid, (_ip, until) in list(self.authed.items()):
             if until < now:
                 del self.authed[xuid]
+        for xuid, keys in list(self.keys.items()):
+            for k in [k for k, until in keys.items() if until < now]:
+                del keys[k]
+            if not keys:
+                del self.keys[xuid]
+        for addr in [a for a, b in self.bound.items() if b[1] < now and a not in self.route]:
+            del self.bound[addr]        # kept while the connection lives: a sign-out ends what its key opened (Hub.logout)
+        if len(self.nonces) > 1000:
+            for k in [k for k, until in self.nonces.items() if until < now]:
+                del self.nonces[k]
         for xuid, until in list(self.revoked.items()):
             if until < now:
                 del self.revoked[xuid]

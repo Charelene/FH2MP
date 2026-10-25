@@ -60,11 +60,13 @@ def unpack(b):
     if not b:
         return b"" if b is None else bytes(b)
     b = bytes(b)
-    if b[:3] != MAGIC:
+    if b[:3] != MAGIC or len(b) < 4:
         return b
-    if b[3] != 1:
+    if b[3] == 0:
         return b[4:]
-    d = lzma.LZMADecompressor(format=lzma.FORMAT_ALONE)
+    if b[3] != 1:
+        raise LimitError(f"stored value has an unknown codec {b[3]}")
+    d = lzma.LZMADecompressor(format=lzma.FORMAT_ALONE, memlimit=128 << 20)    # pack() needs ~65 MiB (preset 9); a header asking more is not ours
     try:
         out = d.decompress(b[4:], MAX_UNPACKED + 1)
     except lzma.LZMAError as e:
@@ -190,7 +192,8 @@ class UgcStore:
         with self.db.tx() as c:
             return c.execute("INSERT INTO ugc_versioned (kind, car_id, name, creator, layers, data, thumb, thumb_small, parts, tuning, refs, created) "
                              "VALUES (?,?,?,?,?,?,?,?,?,?,1,?)",
-                             (kind, car_id, name, owner, layers, data, thumb, thumb, json.dumps(parts) if parts is not None else None,
+                             (kind, car_id, name, owner, layers, pack(data) if data is not None else None, pack(thumb), pack(thumb),
+                              json.dumps(parts) if parts is not None else None,
                               json.dumps(tuning) if tuning is not None else None, time.time())).lastrowid
 
     def versioned_get(self, vid):
@@ -199,7 +202,10 @@ class UgcStore:
             return None
         d = dict(r)
         for k in ("data", "thumb", "thumb_small"):
-            d[k] = unpack(d[k])
+            try:
+                d[k] = unpack(d[k])
+            except LimitError:
+                d[k] = b""              # a damaged row reads as empty instead of failing every listing that contains it
         return d
 
     def versioned_set_data(self, vid, data, creator=None):

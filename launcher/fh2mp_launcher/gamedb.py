@@ -35,7 +35,9 @@ def ensure_media_overrides(folder):
         with open(path, "rb") as f:
             text = f.read().decode("utf-8", "replace")
     except OSError:
-        raise GameDbError("FH2 Extra Options is missing: reinstall the shim from the launcher.") from None
+        raise GameDbError(f"FH2 Extra Options {shim.EXTRA_OPTIONS_VERSION} is not installed in your Azimuth folder (its FH2_ExtraOptions.ini is missing). "
+                          "Turn on \"Install FH2 Extra Options\" in Settings and press Play, or copy the files from the Azimuth folder of "
+                          "its release into yours.") from None
     nl = "\r\n" if "\r\n" in text else "\n"
     m = re.search(r"(?m)^[ \t]*EnableMediaOverrides[ \t]*=[ \t]*([^\r\n]*?)[ \t]*(?=\r?$)", text)
     if m:

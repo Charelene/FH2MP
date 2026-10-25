@@ -640,6 +640,11 @@ def economy_settings(req):
     all-zero default paid 0 for everything. creditPerKm 1000 matches CreditsPerKm in the race templates
     (EntityModel/Templates/templates_races.xml) [inferred]; the other values were Turn 10's and are guesses [guess]. Online races pay
     100 * xp_audit.XP_SCALE XP per km (env FH2MP_XP_SCALE, default 10); offline races and the per-finish minimum (shared by both) stay 100."""
+    if os.environ.get("FH2MP_ECONOMY", "game") != "guess":
+        # The game has its own rates (ForzaEconomyState, copied into the economy module at profile load, FUN_14055d810) and what we send
+        # overwrites them; the values below are guesses, so by default the game keeps its own (offline play is stock). FH2MP_ECONOMY=guess
+        # sends them again (online XP scale included).
+        raise XlsError("the game's own economy values apply")
     online = int(round(100 * xp_audit.XP_SCALE))
     r = xls.default_struct(SC, SC.call_struct("ForzaUserGetEconomySettings_Results"))
     r["settings"].update({
@@ -2205,6 +2210,8 @@ def verify_strings(body):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    timeout = float(os.environ.get("FH2MP_LSP_READ_TIMEOUT", "30"))   # a client that sends nothing for this long (slow body, idle
+                                                                       # keep-alive) loses its connection and its thread
 
     def log_message(self, fmt, *args):
         pass
@@ -2298,7 +2305,7 @@ class Handler(BaseHTTPRequestHandler):
                 CTX.xuid, CTX.tag, CTX.authed = acct.xuid, acct.gamertag, True
                 if not self._gamedb_ok(acct):
                     return False
-                announce_auth(acct.xuid, self.client_ip())
+                announce_auth(acct.xuid, self.client_ip(), token)
                 return True
             if AUTH.mode == "required":
                 self._reply_json(401, {"error": "login_required", "message": "start the game from the FH2MP launcher"})
@@ -2312,7 +2319,11 @@ class Handler(BaseHTTPRequestHandler):
     def _handle(self):
         global SEQ
         SEQ += 1
-        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self.close_connection = True
+            return self._reply_json(400, {"error": "bad_length"})
         if (self.path.startswith("/v1/") and n > launcher_api.body_limit(self.path)) or (self.path.startswith("/ops/") and n > 65536) \
                 or n > ugc.MAX_REQUEST_BODY or n < 0:
             self.close_connection = True
@@ -2578,28 +2589,38 @@ def online_count():
 _AUTH_ANNOUNCED = {}
 
 
-def announce_auth(xuid, ip):
-    """Tell the game server (UDP, loopback) that this xuid is signed in from this address, so it accepts that player's OpenConnection.
-    Repeated at most every 20 s per player; the game server forgets an entry after a few minutes without news."""
+def announce_auth(xuid, ip, token=""):
+    """Tell the game server (UDP, loopback) that this xuid is signed in from this address, so it accepts that player's OpenConnection,
+    with the UDP ticket key of the session token (auth.udp_ticket_key). Repeated at most every 20 s per player and session; the game
+    server forgets an entry after a few minutes without news."""
     now = time.monotonic()
-    key = (xuid, ip)
+    tkey = auth.udp_ticket_key(token)
+    key = (xuid, ip, tkey)
     if now - _AUTH_ANNOUNCED.get(key, -1e9) < 20:
         return
     _AUTH_ANNOUNCED[key] = now
     if len(_AUTH_ANNOUNCED) > 20000:
         _AUTH_ANNOUNCED.clear()
-    xbl.announce_auth(xuid, ip)
+    xbl.announce_auth(xuid, ip, tkey)
 
 
 _OLD_REMOVED = {}
 _GAMEDB_REMOVED = {}
 
 
-def on_login(xuid, ip):
+def on_login(xuid, ip, token=""):
     """A fresh sign-in (launcher login / sign-up): lifts an earlier ban or kick on the game server, then announces the address."""
     xbl.announce_allow(xuid)
-    _AUTH_ANNOUNCED.pop((xuid, ip), None)
-    announce_auth(xuid, ip)
+    _AUTH_ANNOUNCED.pop((xuid, ip, auth.udp_ticket_key(token)), None)
+    announce_auth(xuid, ip, token)
+
+
+def on_logout(xuid, token):
+    """A launcher signed out (after the game exits, or a profile window closed): the connections that session's ticket opened end."""
+    tkey = auth.udp_ticket_key(token)
+    for key in [k for k in _AUTH_ANNOUNCED if k[0] == xuid and k[2] == tkey]:
+        del _AUTH_ANNOUNCED[key]
+    xbl.announce_logout(xuid, tkey)
 
 
 def on_revoke(xuid):
@@ -2618,9 +2639,13 @@ def setup_auth():
     dbname = DB.one("SELECT current_database()")[0]
     if (env == "prod" and dbname != "fh2mp") or (env == "dev" and dbname == "fh2mp"):
         sys.exit(f"refusing to start: FH2MP_ENV={env} but the database is {dbname!r}")
-    AUTH = auth.AuthService(DB, env=env, mode=os.environ.get("FH2MP_AUTH", "optional"),
-                            registration=os.environ.get("FH2MP_REGISTRATION", "open"),
-                            token_ip=os.environ.get("FH2MP_TOKEN_IP", "exact"))
+    try:
+        # required unless the environment says otherwise: a missing variable must not open the server (audit 2026-10-25 F08)
+        AUTH = auth.AuthService(DB, env=env, mode=os.environ.get("FH2MP_AUTH", "required"),
+                                registration=os.environ.get("FH2MP_REGISTRATION", "open"),
+                                token_ip=os.environ.get("FH2MP_TOKEN_IP", "exact"))
+    except ValueError as e:
+        raise SystemExit(f"fh2mp LSP: {e}")
 
     def changed(xuid):
         r = DB.one("SELECT gamertag FROM accounts WHERE xuid=?", (xuid,))
@@ -2636,7 +2661,7 @@ def setup_auth():
     if os.environ.get("FH2MP_GAME_TCP_PORT"):
         game_public["tcp"] = int(os.environ["FH2MP_GAME_TCP_PORT"])         # the game server's experimental TCP carrier (FH2MP_TUNNEL_PORT)
     LAUNCHER = launcher_api.Ctx(
-        AUTH, SOCIAL, launcher_api.LauncherConfig(), online_count, log=log, on_login=on_login,
+        AUTH, SOCIAL, launcher_api.LauncherConfig(), online_count, log=log, on_login=on_login, on_logout=on_logout,
         lsp_public={"url": os.environ.get("FH2MP_LSP_URL", f"http://{host}:{os.environ.get('FH2MP_LSP_PUBLIC_PORT', '5080')}")},
         game_public=game_public, gamedb=gamedb_sync.GameDb(), crashes=crash_reports.CrashReports.from_env(log),
         boards=lambda kind, n: (home.build(sys.modules[__name__]) if kind == "home"
@@ -2648,11 +2673,37 @@ def setup_auth():
     log(f"auth: env={env} mode={AUTH.mode} registration={AUTH.registration} accounts={AUTH.stats()['accounts']}")
 
 
+class BoundedHTTPServer(ThreadingHTTPServer):
+    """At most FH2MP_LSP_THREADS requests at once (audit 2026-10-25 F11): when they are all busy, the accept loop waits for one to end
+    instead of starting a thread per connection without limit. Handler.timeout ends connections that stall."""
+    daemon_threads = True
+
+    def __init__(self, *a, **kw):
+        self.slots = threading.BoundedSemaphore(int(os.environ.get("FH2MP_LSP_THREADS", "256")))
+        super().__init__(*a, **kw)
+
+    def process_request(self, request, client_address):
+        self.slots.acquire()
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
+
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 5080
     setup()
     bind = os.environ.get("FH2MP_LSP_BIND", "127.0.0.1")
-    srv = ThreadingHTTPServer((bind, port), Handler)
+    srv = BoundedHTTPServer((bind, port), Handler)
+    if bind not in ("127.0.0.1", "::1", "localhost"):
+        log(f"WARNING: listening on {bind}, not loopback: put the proxy in front (ops/nginx) and keep this port closed to the internet")
     site_stats.start_sampler(sys.modules[__name__])
     log(f"fh2mp LSP listening on {bind}:{port}")
     srv.serve_forever()

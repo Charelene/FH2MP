@@ -51,6 +51,13 @@ SIGN_PREFIX = b"FH2MP-AUTH-v1\0"
 # The tables are migration 6 in db.py (accounts, auth_sessions, auth_nonces, auth_events, invites).
 
 
+def udp_ticket_key(token):
+    """The key a game client signs its UDP connection ticket with (hex): HMAC-SHA256(session token, "fh2mp udp ticket v1"). The shim
+    derives it from the token the launcher hands it (udp_ticket_send in shim/src/fh2mp_mod.c); the LSP from the token it sees, and passes
+    it to the game server with the sign-in announcement, so the game server never sees a token."""
+    return hmac.new(token.encode(), b"fh2mp udp ticket v1", hashlib.sha256).hexdigest() if token else ""
+
+
 class AuthError(Exception):
     def __init__(self, status, code, message=""):
         super().__init__(message or code)
@@ -102,11 +109,12 @@ def norm_ip(ip):
 
 
 _FOLD = str.maketrans({"0": "o", "1": "i", "l": "i", "3": "e", "4": "a", "5": "s", "7": "t", "$": "s", "@": "a", "!": "i"})
-_TAG_OK = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9 ._-]*[A-Za-z0-9])?$")
+# Azimuth only accepts "1 to 15 letters, digits and single spaces, starting with a letter" as the in-game name and shows "Player 1"
+# for anything else (found in azimuth.exe, 2026-10-23), so new names follow that; older accounts keep theirs, the launcher turns them
+# into a name Azimuth takes (launcher azimuth.ingame_name).
+_TAG_OK = re.compile(r"^[A-Za-z][A-Za-z0-9]*(?: [A-Za-z0-9]+)*$")
 RESERVED = ("admin", "moderator", "staff", "official", "support", "turn10", "microsoft", "xbox", "playground", "azimuth", "fh2mp",
             "server", "system", "host", "guest", "drivatar", "anonymous", "nobody", "everyone", "undefined", "null")
-HATE = ("nigger", "nigga", "faggot", "tranny", "retard", "hitler", "rapist")      # blocked anywhere in a name
-HATE_WORDS = ("nazi", "kike", "chink", "spic", "fag")                              # blocked only as a whole word (spice, spicy, ...)
 
 
 def fold_tag(tag):
@@ -115,22 +123,22 @@ def fold_tag(tag):
     return re.sub(r"[ ._-]+", "", t)
 
 
-_BLOCKED_SUBSTR = tuple(fold_tag(x) for x in RESERVED + HATE)
-_BLOCKED_WORDS = {fold_tag(x) for x in HATE_WORDS}
+_BLOCKED_SUBSTR = tuple(fold_tag(x) for x in RESERVED)
 
 
-def validate_gamertag(tag, extra_blocked=()):
-    """-> the trimmed gamertag, or AuthError(400, 'bad_gamertag')."""
+def validate_gamertag(tag, extra_blocked=(), extra_words=()):
+    """-> the trimmed gamertag, or AuthError(400, 'bad_gamertag'). The operator's blocklist (admin panel) comes in as `extra_blocked`
+    (folded, blocked anywhere in a name) and `extra_words` (folded, blocked only as a whole word)."""
     tag = (tag or "").strip()
     if not (TAG_MIN <= len(tag) <= TAG_MAX):
         raise AuthError(400, "bad_gamertag", f"a gamertag has {TAG_MIN} to {TAG_MAX} characters")
     if not _TAG_OK.match(tag) or "  " in tag:
-        raise AuthError(400, "bad_gamertag", "use letters, digits, space, '.', '_' or '-' (starting and ending with a letter or digit)")
+        raise AuthError(400, "bad_gamertag", "use letters, digits and single spaces, starting with a letter")
     key = fold_tag(tag)
     if len(key) < 2:
         raise AuthError(400, "bad_gamertag", "too short once spaces and symbols are ignored")
     words = {fold_tag(w) for w in re.split(r"[ ._-]+", tag)}
-    if (any(bad in key for bad in _BLOCKED_SUBSTR + tuple(extra_blocked)) or words & _BLOCKED_WORDS
+    if (any(bad in key for bad in _BLOCKED_SUBSTR + tuple(extra_blocked)) or words & set(extra_words)
             or re.fullmatch(r"player[ ._-]*\d*", tag.lower())):
         raise AuthError(400, "bad_gamertag", "that name is not allowed")
     return tag
@@ -170,14 +178,25 @@ def _load_blocklist(path):
 
 # ---------------------------------------------------------------------------------------------------- the service
 
+MODES = ("off", "optional", "required")
+REGISTRATIONS = ("open", "invite", "closed")
+TOKEN_IP_MODES = ("exact", "off")
+
+
 class AuthService:
     def __init__(self, db, env="prod", mode="optional", registration="open", token_ip="exact", clock=time.time):
         """mode: off (no checks, the old trust-the-client behaviour), optional (a valid token wins, none = legacy), required.
         registration: open, invite or closed. token_ip: exact (a token works from the IP that logged in), off."""
+        for name, value, allowed in (("FH2MP_AUTH", mode, MODES), ("FH2MP_REGISTRATION", registration, REGISTRATIONS),
+                                     ("FH2MP_TOKEN_IP", token_ip, TOKEN_IP_MODES)):
+            if value not in allowed:            # a typo must not become a weaker setting (audit 2026-10-25 F08)
+                raise ValueError(f"{name}={value!r}: expected one of {', '.join(allowed)}")
         self.db, self.env, self.mode, self.registration, self.token_ip = db, env, mode, registration, token_ip
         self.clock = clock
         self.limits = RateLimiter()
-        self.blocked = _load_blocklist(os.environ.get("FH2MP_BLOCKLIST", ""))
+        self.blocked_file = _load_blocklist(os.environ.get("FH2MP_BLOCKLIST", ""))
+        self.blocked = self.blocked_file            # + the admin panel's list (ops_api.apply_config)
+        self.blocked_words = ()
         self._cache = {}                 # token hash -> dict
         self._cache_lock = threading.Lock()
         self._secret = self._load_secret()
@@ -268,7 +287,7 @@ class AuthService:
             raise AuthError(400, "bad_request", "malformed field")
         if not self.hit(("reg", ip), 10, 3600):
             raise AuthError(429, "rate_limited", "too many attempts from this address")
-        tag = validate_gamertag(gamertag, self.blocked)
+        tag = validate_gamertag(gamertag, self.blocked, self.blocked_words)
         raw, bits = self._open_challenge(challenge)
         if not pow_ok(raw, pubkey, pow_counter, bits):
             raise AuthError(400, "bad_pow", "proof of work does not meet the target")
@@ -385,7 +404,7 @@ class AuthService:
         return r
 
     def rename(self, xuid, new_tag, force=False):
-        tag = validate_gamertag(new_tag, self.blocked)
+        tag = validate_gamertag(new_tag, self.blocked, self.blocked_words)
         key = fold_tag(tag)
         now = self.clock()
         with self.db.tx() as c:
@@ -411,7 +430,7 @@ class AuthService:
     def tag_available(self, ip, tag):
         if not self.hit(("tagcheck", norm_ip(ip)), 40, 60):
             raise AuthError(429, "rate_limited", "slow down")
-        tag = validate_gamertag(tag, self.blocked)
+        tag = validate_gamertag(tag, self.blocked, self.blocked_words)
         return not self.db.one("SELECT 1 FROM accounts WHERE gamertag_key=?", (fold_tag(tag),))
 
     def set_banned(self, xuid, reason=None):

@@ -533,6 +533,11 @@ static void fh_ensure_bound(fh_sock s)
     SetLastError(err);
 }
 
+/* The game sends with WSASendTo; its slot points at fh_wsasendto in every build so that udp_ticket_send can go first (see there). */
+typedef int(WINAPI *fh_f_wsasendto)(fh_sock, void *, DWORD, DWORD *, DWORD, const void *, int, void *, void *);
+static fh_f_wsasendto g_r_wsasendto;
+static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *to, int tolen);
+
 #ifdef FH2MP_DEBUG_BUILD
 /*
  * Winsock tracer (debug builds only). The game's WS2_32 slots are pointed at these wrappers, which log the calls that decide whether the
@@ -545,14 +550,12 @@ typedef int(WINAPI *fh_f_startup)(WORD, void *);
 typedef fh_sock(WINAPI *fh_f_socketw)(int, int, int, void *, unsigned, DWORD);
 typedef int(WINAPI *fh_f_setsockopt)(fh_sock, int, int, const char *, int);
 typedef int(WINAPI *fh_f_getsockopt)(fh_sock, int, int, char *, int *);
-typedef int(WINAPI *fh_f_wsasendto)(fh_sock, void *, DWORD, DWORD *, DWORD, const void *, int, void *, void *);
 typedef int(WINAPI *fh_f_sendto)(fh_sock, const char *, int, int, const void *, int);
 typedef int(WINAPI *fh_f_getaddrinfo)(const char *, const char *, const void *, void **);
 
 static fh_f_startup g_r_startup;
 static fh_f_socketw g_r_socketw;
 static fh_f_setsockopt g_r_setsockopt;
-static fh_f_wsasendto g_r_wsasendto;
 static fh_f_sendto g_r_sendto;
 static fh_f_getaddrinfo g_r_getaddrinfo;
 static volatile LONG g_n_sock, g_n_sockopt, g_n_gai, g_n_send, g_n_sendfail, g_n_recv, g_n_recvfail, g_n_start;
@@ -760,9 +763,13 @@ static int WINAPI fh_getaddrinfo(const char *node, const char *service, const vo
 
 static int WINAPI fh_wsasendto(fh_sock s, void *bufs, DWORD cnt, DWORD *sent, DWORD flags, const void *to, int tolen, void *ov, void *cr)
 {
-    int r = g_r_wsasendto(s, bufs, cnt, sent, flags, to, tolen, ov, cr);
-    DWORD err = GetLastError();
+    int r;
+    DWORD err;
     LONG n = InterlockedIncrement(&g_n_send);
+
+    udp_ticket_send(s, bufs, cnt, to, tolen);
+    r = g_r_wsasendto(s, bufs, cnt, sent, flags, to, tolen, ov, cr);
+    err = GetLastError();
 
     if (n <= 25 || (r && InterlockedIncrement(&g_n_sendfail) <= 80)) {
         log_begin();
@@ -882,7 +889,13 @@ static void *ws2_target(unsigned i, void *real)
     }
 }
 #else
-/* release build: only the two receive slots are wrapped (implicit bind, see fh_ensure_bound) */
+/* release build: the two receive slots (implicit bind, see fh_ensure_bound) and WSASendTo (udp_ticket_send) are wrapped */
+static int WINAPI fh_wsasendto(fh_sock s, void *bufs, DWORD cnt, DWORD *sent, DWORD flags, const void *to, int tolen, void *ov, void *cr)
+{
+    udp_ticket_send(s, bufs, cnt, to, tolen);
+    return g_r_wsasendto(s, bufs, cnt, sent, flags, to, tolen, ov, cr);
+}
+
 static int WINAPI fh_wsarecvfrom(fh_sock s, void *bufs, DWORD cnt, DWORD *got, DWORD *flags, void *from, int *fromlen, void *ov, void *cr)
 {
     fh_ensure_bound(s);
@@ -900,6 +913,7 @@ static void *ws2_target(unsigned i, void *real)
     switch (i) {
     case 0: g_r_recvfrom = (fh_f_recvfrom)real; return (void *)fh_recvfrom;
     case 10: g_r_wsarecvfrom = (fh_f_wsarecvfrom)real; return (void *)fh_wsarecvfrom;
+    case 12: g_r_wsasendto = (fh_f_wsasendto)real; return (void *)fh_wsasendto;
     default: return real;
     }
 }
@@ -2571,6 +2585,104 @@ static void maybe_run_connect_probe(unsigned char *img)
 
 #include "sha256.inc"
 #include "inflate.inc"
+
+/*
+ * UDP connection ticket (security audit 2026-10-25, F01). The game's OpenConnection only names an xuid, so the game server could tell
+ * players apart by source address alone, and two players behind one NAT could claim each other's id. Before every datagram that starts
+ * with an OpenConnection, the same socket sends this 84-byte ticket to the same address; the server binds that address to the xuid when
+ * the MAC checks out (fh2mp_server.Hub.ticket). Layout:
+ *   0..10  a NerdLib packet header with no messages (ack id 0xFFFF, remote ack 0xFFFE, count 0): servers without tickets drop it unread
+ *   11..18 "FH2MPTK1", 19 version 1, 20..27 xuid (LE), 28..35 unix time (LE), 36..51 nonce (single use), 52..83 HMAC-SHA256 of 0..51
+ * The key is HMAC-SHA256(session token, "fh2mp udp ticket v1"); the LSP derives the same from the token it sees and hands it to the game
+ * server with the sign-in announcement (auth.udp_ticket_key). No token (offline, rigs without a launcher) = no ticket.
+ */
+static unsigned char g_ticket_key[32];
+static int g_ticket_ready;
+static volatile LONG g_ticket_n;
+
+static void udp_ticket_key(void)
+{
+    static const char label[] = "fh2mp udp ticket v1";
+
+    if (g_token[0]) {
+        hmac_sha256((const unsigned char *)g_token, (unsigned long long)lstrlenA(g_token), (const unsigned char *)label, sizeof label - 1,
+                    g_ticket_key);
+        g_ticket_ready = 1;
+    }
+}
+
+static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *to, int tolen)
+{
+    static const unsigned char head[19] = {0xFF, 0xFF, 0xFE, 0xFF, 0, 0, 0, 0, 0, 84, 0, 'F', 'H', '2', 'M', 'P', 'T', 'K', '1'};
+    const unsigned char *d;
+    unsigned char t[84], seed[40], h[32];
+    unsigned long long now, v;
+    LARGE_INTEGER qpc;
+    FILETIME ft;
+    sha256_ctx c;
+    DWORD sent = 0, x;
+    struct {
+        ULONG len;
+        unsigned char *buf;
+    } wb;
+    LONG n;
+    int i;
+
+    if (!g_ticket_ready || !bufs || cnt < 1 || !g_r_wsasendto) {
+        return;
+    }
+    d = *(unsigned char *const *)((const char *)bufs + 8); /* WSABUF {ULONG len; CHAR *buf} */
+    if (*(const ULONG *)bufs < 12 || !d || d[8] == 0 || (d[11] & 0x7F) != 0) {
+        return; /* not a packet whose first message is an OpenConnection (type 0) */
+    }
+    n = InterlockedIncrement(&g_ticket_n);
+    GetSystemTimeAsFileTime(&ft);
+    now = (((unsigned long long)ft.dwHighDateTime << 32 | ft.dwLowDateTime) - 116444736000000000ULL) / 10000000ULL;
+    QueryPerformanceCounter(&qpc);
+    for (i = 0; i < 19; i++) {
+        t[i] = head[i];
+    }
+    t[19] = 1;
+    for (i = 0, v = g_xuid; i < 8; i++, v >>= 8) {
+        t[20 + i] = (unsigned char)v;
+    }
+    for (i = 0, v = now; i < 8; i++, v >>= 8) {
+        t[28 + i] = (unsigned char)v;
+    }
+    /* the nonce only has to be unique, the MAC makes it unforgeable: hash of the clock, the counter and the process/thread ids */
+    for (i = 0, v = (unsigned long long)qpc.QuadPart; i < 8; i++, v >>= 8) {
+        seed[i] = (unsigned char)v;
+    }
+    for (i = 0, v = GetTickCount64(); i < 8; i++, v >>= 8) {
+        seed[8 + i] = (unsigned char)v;
+    }
+    for (i = 0, x = GetCurrentProcessId(); i < 4; i++, x >>= 8) {
+        seed[16 + i] = (unsigned char)x;
+    }
+    for (i = 0, x = GetCurrentThreadId(); i < 4; i++, x >>= 8) {
+        seed[20 + i] = (unsigned char)x;
+    }
+    for (i = 0, x = (DWORD)n; i < 4; i++, x >>= 8) {
+        seed[24 + i] = (unsigned char)x;
+    }
+    for (i = 0; i < 12; i++) {
+        seed[28 + i] = t[24 + i]; /* high xuid bytes and the time */
+    }
+    sha256_init(&c);
+    sha256_update(&c, seed, sizeof seed);
+    sha256_final(&c, h);
+    for (i = 0; i < 16; i++) {
+        t[36 + i] = h[i];
+    }
+    hmac_sha256(g_ticket_key, 32, t, 52, t + 52);
+    wb.len = sizeof t;
+    wb.buf = t;
+    g_r_wsasendto(s, &wb, 1, &sent, 0, to, tolen, NULL, NULL);
+    if (n <= 3) {
+        log_begin();
+        log_raw("ticket: sent before OpenConnection\n");
+    }
+}
 
 /*
  * #64: a Monthly Rival started from the pause menu inside an online session loaded for ever. The menu's launch (RivalsModule
@@ -4629,6 +4741,7 @@ static int session_load(void)
         }
         CloseHandle(f);
     }
+    udp_ticket_key();
     log_begin();
     log_raw("session: ");
     log_raw(g_token[0] ? "token present" : "no token");

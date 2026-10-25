@@ -78,6 +78,24 @@ class Candidates(unittest.TestCase):
             self.assertTrue(all(S.is_team_event(e) for row in events for e in row))
             self.assertTrue(all(len(row) == 4 for row in events))
 
+    def test_sprint_only_switch_filters_every_destination(self):
+        self.addCleanup(setattr, S, "RT_SPRINT_ONLY", S.RT_SPRINT_ONLY)
+        S.RT_SPRINT_ONLY = True
+        db = sqlite3.connect(self.db)
+        try:
+            modes = dict(db.execute("SELECT AnthemOnlineEventId, RaceModeId FROM AnthemOnlineEvents"))
+        finally:
+            db.close()
+        for players in (1, 2, 4):
+            for seed in range(10):
+                locs, events, classes, mins = S.pick_road_trip_candidates(self.db, players, random.Random(seed))
+                self.assertEqual(len(locs), 3)
+                for row in events:
+                    self.assertEqual(len(row), 4)
+                    self.assertTrue(all(modes[S.base_event_id(e)] in (1, 31) for e in row))
+                    if players == 1:
+                        self.assertTrue(all(modes[S.base_event_id(e)] == 31 for e in row))
+
     def test_the_server_looks_a_team_event_up_by_its_base_row(self):
         old = os.environ.get("FH2MP_GAMEDB")
         os.environ["FH2MP_GAMEDB"] = self.db
@@ -206,8 +224,9 @@ class Legs(unittest.TestCase):
         w.road_trip_tick(1e9)                                      # raised TypeError before the fix
 
     def test_errors_name_their_line(self):
+        index = None                    # a literal [1][None] is a SyntaxWarning at compile time
         try:
-            [1][None]
+            [1][index]
         except TypeError as e:
             self.assertRegex(S.where(e), r"^test_errors_name_their_line:\d+$")
 

@@ -71,11 +71,11 @@ class ScoreStore:
 
     def submit(self, xuid, tag, score_type, d):
         """Stores one submission and returns it as a row dict, or None if the score is not a finite number
-        (a NaN/inf time must never reach a public board) or the car is class X/R on a Rivals board (user
+        (a NaN/inf time must never reach a public board), is negative, or is a zero time or the car is class X/R on a Rivals board (user
         decision: a maxed-out car must never appear on a Rivals leaderboard, not even disguised as S2), or a speed above SPEED_CAP."""
         score = u64_to_dbl(d["score"])
-        if not math.isfinite(score):
-            return None
+        if not math.isfinite(score) or score < 0 or (score_type in ASCENDING and score == 0):
+            return None                 # no board has a negative score, and no race takes no time (audit 2026-10-25 F10)
         if d["scoreboardType"] in SPEED_BOARDS and score > SPEED_CAP:
             return None
         if d["scoreboardType"] in EVENT_BOARDS and d["carClassId"] in MAXED_CLASSES:

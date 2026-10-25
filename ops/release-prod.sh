@@ -44,7 +44,8 @@ ssh_ 'systemctl is-active fh2mp-lsp fh2mp; sudo cat '"$cfg"'' || true
 echo
 echo "About to deploy $tag to PRODUCTION and set minLauncher/minShim to $ver."
 [ $skip_game = 1 ] && echo "(game server left alone)" || echo "(the game server restarts: everyone in a lobby is dropped)"
-read -r -p "Type the tag to continue: " answer
+answer=${FH2MP_CONFIRM_TAG:-}          # non-interactive runs: FH2MP_CONFIRM_TAG=<tag> (the ssh calls above would eat piped input)
+[ -n "$answer" ] || read -r -p "Type the tag to continue: " answer
 [ "$answer" = "$tag" ] || { echo "cancelled"; exit 1; }
 
 echo "== 3/6 account service (LSP)"

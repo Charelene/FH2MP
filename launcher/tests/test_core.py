@@ -511,7 +511,7 @@ def platform_dll(version):
     return b"MZ" + u("ProductName\0\0FH2 Mod Platform\0") + u("ProductVersion\0") + b"\x00\x00" + u(version + "\0")
 
 
-def platform_files(version="2.7.1"):
+def platform_files(version="2.7.2"):
     return {"d3dcompiler_47.dll": platform_dll(version), "LICENSE-FH2ModPlatform.txt": b"MIT License Trinculo54",
             "LICENSE-MinHook.txt": b"MinHook BSD"}
 
@@ -534,11 +534,41 @@ class ShimTests(unittest.TestCase):
             did = shim.install(d, self.DLL, platform=platform_files())
             self.assertEqual(shim.installed(d), ("ours", "0.1.0"))
             self.assertEqual(self.read(d, "fh2-mods", "FH2MP.dll"), self.DLL)
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.1"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.2"))
             for n in ("LICENSE-FH2ModPlatform.txt", "LICENSE-MinHook.txt"):
                 self.assertTrue(os.path.isfile(os.path.join(d, n)), n)
-            self.assertTrue(any("FH2 Mod Platform 2.7.1" in s for s in did))
+            self.assertTrue(any("FH2 Mod Platform 2.7.2" in s for s in did))
             self.assertFalse(os.path.exists(os.path.join(d, "winmm.dll")))
+
+    def locked(self, locked_path):
+        """os.replace as Windows does it for a DLL a running game has loaded: renaming it works, replacing it is "Access is denied"."""
+        real = os.replace
+
+        def replace(src, dst, *a, **k):
+            if os.path.abspath(dst) == os.path.abspath(locked_path) and os.path.exists(dst):
+                raise PermissionError(13, "Access is denied", src, None, dst)
+            return real(src, dst, *a, **k)
+        return mock.patch("os.replace", replace)
+
+    def test_a_loaded_shim_is_renamed_aside_and_replaced_on_windows(self):
+        with tempfile.TemporaryDirectory() as d:
+            shim.install(d, self.DLL, platform=platform_files())
+            new = b"MZ....FH2MP-SHIM-VERSION:0.2.0:END...."
+            with self.locked(os.path.join(d, "fh2-mods", "FH2MP.dll")), mock.patch("sys.platform", "win32"):
+                shim.install(d, new, platform=platform_files())
+            self.assertEqual(self.read(d, "fh2-mods", "FH2MP.dll"), new)
+            self.assertEqual([n for n in os.listdir(os.path.join(d, "fh2-mods")) if ".old" in n or ".tmp" in n], [])
+
+    def test_an_install_that_cannot_work_names_the_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            shim.install(d, self.DLL, platform=platform_files())
+            target = os.path.join(d, "fh2-mods", "FH2MP.dll")
+            with self.locked(target):                       # not Windows here: no way around it
+                with self.assertRaises(shim.ShimError) as cm:
+                    shim.install(d, b"MZ....FH2MP-SHIM-VERSION:0.2.0:END....", platform=platform_files())
+            self.assertIn("Access is denied", str(cm.exception))
+            self.assertIn("FH2MP.dll", str(cm.exception))
+            self.assertEqual(self.read(target), self.DLL)
 
     def test_the_winmm_layout_is_moved_over(self):
         """Up to rc5: our winmm.dll next to azimuth.exe, Extra Options (with its settings) in fh2extra."""
@@ -568,13 +598,24 @@ class ShimTests(unittest.TestCase):
             self.write(platform_dll("2.6.1"), d, "d3dcompiler_47.dll")
             self.assertEqual(shim.installed(d), ("old", "0.1.0"))                        # too old for this shim: install again
             shim.install(d, self.DLL, platform=platform_files())
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.1"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.2"))
             self.write(b"MZ fh2wheel loader", d, "d3dcompiler_47.dll")                     # fh2wheel's own loader
             self.assertEqual(shim.platform_installed(d), ("foreign", ""))
             did = shim.install(d, self.DLL, platform=platform_files())
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.1"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.2"))
             self.assertEqual(self.read(d, "d3dcompiler_47.dll.old"), b"MZ fh2wheel loader")
             self.assertTrue(any("d3dcompiler_47.dll.old" in s for s in did))
+
+    @unittest.skipIf(sys.platform in ("win32", "darwin"), "needs a case-sensitive file system")
+    def test_another_loader_in_other_letter_case_is_moved_aside(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.write(platform_dll("2.7.2"), d, "d3dcompiler_47.dll")
+            self.write(b"MZ radio mod loader", d, "D3DCompiler_47.dll")          # Wine would load this one
+            self.assertEqual(shim.platform_installed(d), ("foreign", ""))
+            shim.install(d, self.DLL, platform=platform_files())
+            self.assertEqual(sorted(n for n in os.listdir(d) if n.lower() == "d3dcompiler_47.dll"), ["d3dcompiler_47.dll"])
+            self.assertEqual(self.read(d, "D3DCompiler_47.dll.old"), b"MZ radio mod loader")
+            self.assertEqual(shim.installed(d), ("ours", "0.1.0"))
 
     def test_a_local_build_needs_the_platform_there(self):
         with tempfile.TemporaryDirectory() as d:
@@ -612,7 +653,7 @@ class ShimTests(unittest.TestCase):
             shim.uninstall(d)
             self.assertEqual(shim.installed(d), ("none", ""))
             self.assertEqual(self.read(d, "winmm.dll"), b"MZ extra options")
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.1"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.2"))
 
     def test_shim_zip(self):
         from fh2mp_launcher import core, updater
@@ -662,6 +703,16 @@ class AzimuthTests(unittest.TestCase):
             self.assertEqual(info.game_folder, "C:\\Games\\ForzaHorizon2")
         self.assertFalse(azimuth.inspect("/nonexistent").found)
 
+    def test_ingame_name_follows_azimuths_rule(self):
+        for tag, want in (("Mike", "Mike"), ("Speedy Gonzo", "Speedy Gonzo"), ("Red_Malone", "Red Malone"), ("Xx-Reiner-xX", "Xx Reiner xX"),
+                          ("OsM4n.03", "OsM4n 03"), ("a__b", "a b"), ("4K", "X4K"), ("47fox", "X47fox"), ("000", "X000"),
+                          ("2Cute4ULauCar", "X2Cute4ULauCar"), ("Mr. Sant Ana", "Mr Sant Ana"), ("KYO_YOUTUBER_BR", "KYO YOUTUBER BR"),
+                          ("Gamer_Sports_Fan_99", "Gamer Sports Fa"), ("___", "Player 1"), ("", "Player 1")):
+            got = azimuth.ingame_name(tag)
+            self.assertEqual(got, want, tag)
+            self.assertRegex(got, r"^[A-Za-z][A-Za-z0-9]*( [A-Za-z0-9]+)*$")
+            self.assertLessEqual(len(got), 15)
+
     def test_player_name_edit_preserves_the_file(self):
         with tempfile.TemporaryDirectory() as d:
             self.make(d)
@@ -703,6 +754,7 @@ def fake_release(kind, files, dll_name):
     return data, pin
 
 
+
 class UpstreamTests(unittest.TestCase):
     def test_extract_takes_only_the_pinned_build(self):
         from fh2mp_launcher import upstream
@@ -724,6 +776,26 @@ class UpstreamTests(unittest.TestCase):
         self.assertTrue(UPSTREAM["platform"]["url"].startswith("https://github.com/Trinculo54/fh2-mod-platform/releases/download/"))
         self.assertTrue(UPSTREAM["extraOptions"]["url"].startswith("https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions/releases/download/"))
         self.assertEqual(set(UPSTREAM["platform"]["files"].values()), set(shim.PLATFORM_FILES))
+
+
+class OfflineTests(unittest.TestCase):
+    def test_disable_and_enable_round_trip(self):
+        """GitHub #17: offline play switches FH2MP off on the platform's MODS list and back on afterwards; other mods' entries stay."""
+        with tempfile.TemporaryDirectory() as az:
+            lst = os.path.join(az, "fh2-mods", shim.DISABLED_LIST)
+            self.assertFalse(shim.enable(az))
+            self.assertTrue(shim.disable(az))
+            self.assertFalse(shim.disable(az))
+            with open(lst) as f:
+                self.assertEqual(f.read().split(), [shim.SHIM_DLL])
+            with open(lst, "w") as f:
+                f.write("other.dll\n" + shim.SHIM_DLL + "\n")
+            self.assertTrue(shim.enable(az))
+            with open(lst) as f:
+                self.assertEqual(f.read().split(), ["other.dll"])
+            self.assertTrue(shim.disable(az))
+            with open(lst) as f:
+                self.assertEqual(f.read().split(), ["other.dll", shim.SHIM_DLL])
 
 
 class ExtraOptionsTests(unittest.TestCase):
@@ -767,8 +839,58 @@ class ExtraOptionsTests(unittest.TestCase):
     def test_the_pinned_build_there_is_left_alone(self):
         with tempfile.TemporaryDirectory() as az:
             self.write(b"MZ-mod-dll", az, "winmm.dll")
+            self.write(self.INI + b"Mine=1\n", az, "FH2_ExtraOptions.ini")
+            self.assertTrue(shim.extra_options_complete(az))
             self.assertEqual(shim.install_extra(az, self.release()), [])
             self.assertEqual(self.read(az, "winmm.dll"), b"MZ-mod-dll")
+            self.assertIn(b"Mine=1", self.read(az, "FH2_ExtraOptions.ini"))
+
+    def test_the_pinned_build_without_its_settings_file_gets_the_default_one(self):
+        """GitHub #20: "FH2 Extra Options is missing" with the mod's DLL there but not its ini."""
+        with tempfile.TemporaryDirectory() as az:
+            self.write(b"MZ-mod-dll", az, "winmm.dll")
+            self.assertFalse(shim.extra_options_complete(az))
+            self.assertTrue(shim.install_extra(az, self.release()))
+            self.assertEqual(self.read(az, "winmm.dll"), b"MZ-mod-dll")
+            self.assertEqual(self.read(az, "FH2_ExtraOptions.ini"), self.INI)
+            self.assertTrue(shim.extra_options_complete(az))
+
+    def tls_rig(self, az, with_backup=True):
+        """azimuth.exe that names the SHA-256 of its own helper, an old Extra Options in its place, the mod's backup as .old."""
+        stock, old_mod = b"MZ-stock-helper", b"MZ-extra-options-0.2.74-patch-dll"
+        self.write(b"MZ azimuth " + hashlib.sha256(stock).hexdigest().encode() + b" end", az, "azimuth.exe")
+        self.write(old_mod, az, "data", "bin", "azimuth-tls.dll")
+        if with_backup:
+            self.write(stock, az, "data", "bin", "azimuth-tls.dll.old")
+        return stock, old_mod
+
+    def test_an_old_extra_options_helper_is_replaced_by_azimuths_own(self):
+        """GitHub #20: the 0.2.74 azimuth-tls.dll next to 0.2.98 patches the game twice (LoadLibraryExW import, garage_xml_parse_hook)."""
+        with tempfile.TemporaryDirectory() as az:
+            stock, old_mod = self.tls_rig(az)
+            self.assertTrue(shim.tls_helper_modified(az))
+            did = shim.restore_tls_helper(az)
+            self.assertTrue(did)
+            self.assertEqual(self.read(az, "data", "bin", "azimuth-tls.dll"), stock)
+            self.assertEqual(self.read(az, "data", "bin", "azimuth-tls.dll.replaced"), old_mod)
+            self.assertFalse(shim.tls_helper_modified(az))
+            self.assertEqual(shim.restore_tls_helper(az), [])                          # nothing to do the second time
+
+    def test_a_stock_or_absent_helper_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as az:
+            self.assertFalse(shim.tls_helper_modified(az))                              # no helper at all
+            stock, _ = self.tls_rig(az, with_backup=False)
+            self.write(stock, az, "data", "bin", "azimuth-tls.dll")
+            self.assertFalse(shim.tls_helper_modified(az))
+            self.assertEqual(shim.restore_tls_helper(az), [])
+
+    def test_an_old_helper_without_a_backup_is_explained(self):
+        with tempfile.TemporaryDirectory() as az:
+            _, old_mod = self.tls_rig(az, with_backup=False)
+            with self.assertRaises(shim.ShimError) as cm:
+                shim.restore_tls_helper(az)
+            self.assertIn("azimuth-tls.dll", str(cm.exception))
+            self.assertEqual(self.read(az, "data", "bin", "azimuth-tls.dll"), old_mod)  # untouched
 
     def test_the_rc5_layout_is_moved_over_first(self):
         with tempfile.TemporaryDirectory() as az:
@@ -896,7 +1018,7 @@ class DevModeTests(unittest.TestCase):
         from fh2mp_launcher import core
         from fh2mp_launcher.settings import Settings
         with tempfile.TemporaryDirectory() as d:
-            for name, body in (("azimuth.exe", b"MZ"), ("d3dcompiler_47.dll", platform_dll("2.7.1"))):     # a bare DLL needs the platform
+            for name, body in (("azimuth.exe", b"MZ"), ("d3dcompiler_47.dll", platform_dll("2.7.2"))):     # a bare DLL needs the platform
                 with open(os.path.join(d, name), "wb") as f:
                     f.write(body)
             dll = os.path.join(d, "local.dll")

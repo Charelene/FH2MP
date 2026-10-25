@@ -62,7 +62,7 @@ class NameCheck:
         self.ok = False
         name = self.edit.text().strip()
         if not name:
-            self._set(False, "3 to 15 characters: letters, digits, space . _ -")
+            self._set(False, "3 to 15 characters: letters, digits and spaces, starting with a letter")
             return
         self._set(False, "checking...")
         self.timer.start(400)

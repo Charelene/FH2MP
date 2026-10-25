@@ -153,6 +153,23 @@ def _listdir(d):
 
 # ---- configuration we write
 
+INGAME_NAME_MAX = 15
+INGAME_FALLBACK = "Player 1"          # Azimuth's own default, which it also shows for any player_name it does not accept
+
+
+def ingame_name(gamertag):
+    """The gamertag as Azimuth accepts it for `player_name`: 1 to 15 letters, digits and single spaces, starting with a letter (the
+    rule is written in azimuth.exe's default ini; anything else shows as "Player 1" in the game, 2026-10-23). Older accounts have '_', '.'
+    and '-' in their names and some start with a digit: separators become spaces, other symbols go, and a name that would start with a
+    digit gets an X in front ("4K" -> "X4K")."""
+    text = re.sub(r"[._-]+", " ", gamertag or "")
+    text = re.sub(r"[^A-Za-z0-9 ]", "", text)
+    text = re.sub(r" +", " ", text).strip()
+    if text and not text[0].isalpha():
+        text = "X" + text
+    return text[:INGAME_NAME_MAX].rstrip() or INGAME_FALLBACK
+
+
 def set_player_name(folder, name):
     """Sets player_name in [launcher] of data/azimuth.ini, keeping the file's encoding and line endings. Returns True if it changed."""
     path = os.path.join(folder, "data", "azimuth.ini")

@@ -1,6 +1,6 @@
 /*
  * SHA-256 (FIPS 180-4), plain C with no library calls (the shim links KERNEL32 only). Used for the car database check (gamedb_hash in
- * fh2mp_mod.c). Checked against Python's hashlib by shim/test_sha256.sh.
+ * fh2mp_mod.c) and the UDP connection ticket (udp_ticket_send). Checked against Python's hashlib by shim/test_sha256.sh.
  */
 typedef struct {
     unsigned int h[8];
@@ -77,8 +77,8 @@ static void sha256_update(sha256_ctx *c, const unsigned char *p, unsigned long l
     }
 }
 
-/* Writes the digest as 64 lower-case hex digits and a NUL into `hex`. */
-static void sha256_final_hex(sha256_ctx *c, char hex[65])
+/* Writes the 32-byte digest into `out`. */
+static void sha256_final(sha256_ctx *c, unsigned char out[32])
 {
     unsigned long long bits = c->len * 8;
     unsigned char pad = 0x80;
@@ -95,9 +95,56 @@ static void sha256_final_hex(sha256_ctx *c, char hex[65])
     }
     sha256_update(c, lenb, 8);
     for (i = 0; i < 32; i++) {
-        unsigned char v = (unsigned char)(c->h[i / 4] >> (24 - 8 * (i % 4)));
-        hex[2 * i] = "0123456789abcdef"[v >> 4];
-        hex[2 * i + 1] = "0123456789abcdef"[v & 15];
+        out[i] = (unsigned char)(c->h[i / 4] >> (24 - 8 * (i % 4)));
+    }
+}
+
+/* Writes the digest as 64 lower-case hex digits and a NUL into `hex`. */
+static void sha256_final_hex(sha256_ctx *c, char hex[65])
+{
+    unsigned char d[32];
+    int i;
+
+    sha256_final(c, d);
+    for (i = 0; i < 32; i++) {
+        hex[2 * i] = "0123456789abcdef"[d[i] >> 4];
+        hex[2 * i + 1] = "0123456789abcdef"[d[i] & 15];
     }
     hex[64] = 0;
+}
+
+/* HMAC-SHA256 (RFC 2104) of `msg` under `key`. */
+static void hmac_sha256(const unsigned char *key, unsigned long long klen, const unsigned char *msg, unsigned long long mlen,
+                        unsigned char out[32])
+{
+    unsigned char k[64], pad[64], inner[32];
+    sha256_ctx c;
+    int i;
+
+    for (i = 0; i < 64; i++) {
+        k[i] = 0;
+    }
+    if (klen > 64) {
+        sha256_init(&c);
+        sha256_update(&c, key, klen);
+        sha256_final(&c, k);
+    } else {
+        for (i = 0; i < (int)klen; i++) {
+            k[i] = key[i];
+        }
+    }
+    for (i = 0; i < 64; i++) {
+        pad[i] = k[i] ^ 0x36;
+    }
+    sha256_init(&c);
+    sha256_update(&c, pad, 64);
+    sha256_update(&c, msg, mlen);
+    sha256_final(&c, inner);
+    for (i = 0; i < 64; i++) {
+        pad[i] = k[i] ^ 0x5c;
+    }
+    sha256_init(&c);
+    sha256_update(&c, pad, 64);
+    sha256_update(&c, inner, 32);
+    sha256_final(&c, out);
 }
