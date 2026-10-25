@@ -243,7 +243,7 @@ static int line_has(const char *l, int n, const char *pat)
 static int line_wanted(const char *l, int n)
 {
     static const char *const keep[] = {"attached", "session:", "identity:", "late:", "not patched", "NOT ", "unexpected", "fail", "error", "could not",
-                                       "refus", "crash", "xsbody", "bindfix", "gamedb:", "rivalsleave", 0};
+                                       "refus", "crash", "xsbody", "bindfix", "gamedb:", "rivalsleave", "probe:", 0};
     int i;
     for (i = 0; keep[i]; i++) {
         if (line_has(l, n, keep[i])) {
@@ -4237,6 +4237,121 @@ static DWORD WINAPI gamedb_thread(LPVOID unused)
 }
 
 /*
+ * Probe: what the game was told to build when it died. Crash reports of players (the platform's, Azimuth's) say where the game stopped, never
+ * which message it was working on, and a malformed player object of one client can take a whole lobby down (prod 2026-10-23: 11 clients at once,
+ * the server cannot see why from its side). The game's ObjectCreate receive handler (FUN_1417ab160(manager, id out, BitReader), the function that
+ * builds a joiner's player object, the weather, the console ...) is hooked through the platform; before it runs, the bytes it is about to parse
+ * (the datagram from the reader's position on, up to PROBE_BYTES) go into a ring of the last PROBE_ENTRIES calls. The ring lives in a file
+ * mapping, data\bin\fh2mp-creates.ring, so it survives a crash; the one of the session before is kept as fh2mp-creates.prev (attach it to a
+ * crash report; tools/decode_creates.py reads it). Nothing is sent anywhere. BitReader fields (FUN_141767100 / FUN_141767940): +4 size of the
+ * buffer in bits, +8 byte index, +0xc bit position, +0x18 -> buffer object whose data pointer is at +0x10. Disable with env FH2MP_NO_PROBE.
+ */
+#define FH2_RVA_OBJECT_CREATE_RECV 0x17ab160u
+#define PROBE_MAGIC 0x32434846u                     /* "FHC2" */
+#define PROBE_ENTRIES 64
+#define PROBE_BYTES 640
+
+typedef struct {
+    unsigned tick, seq, tid;
+    int buf_bits;                                   /* size of the datagram being parsed, in bits */
+    unsigned byte_idx, bit_pos, nbytes, reserved;
+    unsigned char data[PROBE_BYTES];                /* from byte_idx on */
+} probe_entry;
+
+typedef struct {
+    unsigned magic, version;
+    volatile LONG next;                             /* number of calls recorded so far */
+    unsigned entries, entry_size, start_tick, ft_low, ft_high;
+    probe_entry e[PROBE_ENTRIES];
+} probe_ring;
+
+typedef unsigned long long (*object_create_fn)(void *mgr, void *out, void *reader);
+static object_create_fn g_create_orig;
+static probe_ring *g_probe;
+
+static unsigned long long probe_object_create(void *mgr, void *out, void *reader)
+{
+    probe_ring *r = g_probe;
+    unsigned char *rd = (unsigned char *)reader, *buf, *data;
+
+    if (r && rd && !IsBadReadPtr(rd, 0x20) && (buf = *(unsigned char **)(rd + 0x18)) != NULL && !IsBadReadPtr(buf, 0x18) &&
+        (data = *(unsigned char **)(buf + 0x10)) != NULL) {
+        LONG n = InterlockedIncrement(&r->next) - 1;
+        probe_entry *e = &r->e[(unsigned)n % PROBE_ENTRIES];
+        int bits = *(int *)(rd + 4);
+        unsigned idx = *(unsigned *)(rd + 8), room = bits > 0 && (unsigned)bits / 8 > idx ? (unsigned)bits / 8 - idx : 0;
+        unsigned take = room < PROBE_BYTES ? room : PROBE_BYTES;
+
+        e->nbytes = 0;                              /* a reader of the ring that sees a half-written entry sees nbytes 0 */
+        e->tick = GetTickCount();
+        e->seq = (unsigned)n;
+        e->tid = GetCurrentThreadId();
+        e->buf_bits = bits;
+        e->byte_idx = idx;
+        e->bit_pos = *(unsigned *)(rd + 0xc);
+        if (take && !IsBadReadPtr(data + idx, take)) {
+            mem_copy(e->data, data + idx, take);
+            e->nbytes = take;
+        }
+    }
+    return g_create_orig(mgr, out, reader);
+}
+
+static int install_create_probe(void)
+{
+    WCHAR path[MAX_PATH], prev[MAX_PATH], prev2[MAX_PATH], prev3[MAX_PATH];
+    HANDLE f, m;
+    FILETIME ft;
+    unsigned char *img = find_fh2_image();
+
+    if (!img || lstrlenW(g_dir) + 32 >= MAX_PATH) {
+        return 0;
+    }
+    lstrcpyW(path, g_dir);
+    lstrcatW(path, L"\\fh2mp-creates.ring");
+    lstrcpyW(prev, g_dir);
+    lstrcatW(prev, L"\\fh2mp-creates.prev");
+    lstrcpyW(prev2, g_dir);
+    lstrcatW(prev2, L"\\fh2mp-creates.prev2");
+    lstrcpyW(prev3, g_dir);
+    lstrcatW(prev3, L"\\fh2mp-creates.prev3");
+    MoveFileExW(prev2, prev3, MOVEFILE_REPLACE_EXISTING);      /* the last three sessions' rings, newest first: .prev, .prev2, .prev3 */
+    MoveFileExW(prev, prev2, MOVEFILE_REPLACE_EXISTING);
+    MoveFileExW(path, prev, MOVEFILE_REPLACE_EXISTING);        /* the last session's ring, for a crash report */
+    f = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+    m = CreateFileMappingW(f, NULL, PAGE_READWRITE, 0, sizeof(probe_ring), NULL);
+    CloseHandle(f);
+    if (!m) {
+        return 0;
+    }
+    g_probe = (probe_ring *)MapViewOfFile(m, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(probe_ring));
+    CloseHandle(m);
+    if (!g_probe) {
+        return 0;
+    }
+    GetSystemTimeAsFileTime(&ft);
+    g_probe->magic = PROBE_MAGIC;
+    g_probe->version = 1;
+    g_probe->entries = PROBE_ENTRIES;
+    g_probe->entry_size = sizeof(probe_entry);
+    g_probe->start_tick = GetTickCount();
+    g_probe->ft_low = ft.dwLowDateTime;
+    g_probe->ft_high = ft.dwHighDateTime;
+    if (!plat_hook("probe: ObjectCreate receive", img + FH2_RVA_OBJECT_CREATE_RECV, (void *)probe_object_create, (void **)&g_create_orig)) {
+        log_begin();
+        log_raw("probe: the ObjectCreate receive handler was not hooked\n");
+        g_probe = NULL;
+        return 0;
+    }
+    log_begin();
+    log_raw("probe: the last 64 ObjectCreate messages this client receives are kept in fh2mp-creates.ring\n");
+    return 1;
+}
+
+/*
  * wait_for_code gives up waiting for the game's code to be marked executable after 10 seconds and goes ahead; when Azimuth is held up
  * (a message box while it maps the game) our patches would then read pages that are not there yet (seen 2026-10-23: 0xc0000005 at
  * game+0x3b94f0). So also wait, without a limit, until every executable section of the mapped game is executable.
@@ -4291,6 +4406,12 @@ static DWORD WINAPI late_init(LPVOID unused)
      * so a change of ours made first would switch all of it off. */
     g_api->wait_for_code(0xFFFFFFFFu);
     wait_for_executable_game();
+    {
+        wchar_t pr_env[8];
+        if (GetEnvironmentVariableW(L"FH2MP_NO_PROBE", pr_env, 8) == 0) {
+            install_create_probe();
+        }
+    }
     log_begin();
     log_raw(find_fh2_image() ? "late: game image mapped, applying patches\n"
                              : "late: game image not found, applying what is possible\n");

@@ -6,13 +6,13 @@ from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar,
                                QVBoxLayout, QWidget)
 
-from .. import azimuth, keystore, launch, paths, saves, shim, updater
+from .. import azimuth, crashreport, keystore, launch, paths, saves, shim, updater
 from ..api import ApiError
 from ..constants import AZIMUTH_PAGE, GITHUB_REPO
 from ..core import Launcher, PlayBlocked, friendly
 from ..version import __version__
 from . import images, theme
-from .dialogs import ProfileDialog, RecoveryDialog, SettingsDialog, offer_save_elevation, open_folder
+from .dialogs import CrashReportDialog, ProfileDialog, RecoveryDialog, SettingsDialog, offer_save_elevation, open_folder
 from . import sfx
 from .widgets import (AccountButton, Banner, Brand, Carousel, DetailSheet, GradientText, Hero, Icon, IconButton, LinkButton, OnlineCount, PlaySplit,
                       has_detail, link_colour, menu)
@@ -38,6 +38,7 @@ class MainWindow(QMainWindow):
         self._update_asked = False
         self._avatar_png = None
         self._launched_at = 0
+        self._crash_dialog = False
         self._build()
         link_colour()
         self.poll = QTimer(self)
@@ -352,6 +353,33 @@ class MainWindow(QMainWindow):
         else:
             self.refresh_all()
             self._load_avatar()
+            self._check_crash()               # a crash while the launcher was closed (or the game was started from Steam)
+
+    def _check_crash(self):
+        """Offer to send a report when Azimuth recorded a crash since the last one was dealt with (see crashreport.check)."""
+        lc = self.lc
+        if lc.settings["offline_mode"] or lc.game_running() or self._crash_dialog:
+            return
+
+        def shown(found):
+            crash, report = found
+            if not crash or lc.game_running():
+                return
+            self._crash_dialog = True
+            try:
+                d = CrashReportDialog(lc, report, self)
+                d.exec()
+                crashreport.handled(lc.settings, crash)
+                if not d.ask_again:
+                    lc.settings["crash_report_ask"] = False
+                    lc.settings.save()
+            finally:
+                self._crash_dialog = False
+
+        def find(job):
+            crash = crashreport.check(lc.settings)
+            return crash, crash and crashreport.build(lc, crash)
+        run_async(find, shown, lambda e: None)
 
     def run_wizard(self):
         w = Wizard(self.lc, self)
@@ -680,6 +708,7 @@ class MainWindow(QMainWindow):
             else:
                 self.say("")
             self.render()
+            QTimer.singleShot(0, self._check_crash)
 
     def closeEvent(self, e):
         lc = self.lc

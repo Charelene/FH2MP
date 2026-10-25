@@ -21,6 +21,7 @@ without sockets. The LSP maps its HTTP handler onto it (fh2mp_lsp.py, `_v1`).
     GET    /v1/gamerpic/<xuid>.png    anybody's picture                                                          (public)
     GET    /v1/gamedb                 {name, sha256, size, xzSize, path} of the car database to play with; 404 none (Bearer)
     GET    /v1/gamedb/gamedbRC.slt.xz that database, xz-compressed (gamedb_sync.py)                               (Bearer)
+    POST   /v1/crash-reports          {v, fields, files, dump} kept on disk + a GitHub issue (crash_reports.py)    (public, rate limited)
 
 Errors: {"error": "<code>", "message": "..."} with the HTTP status of auth.AuthError.
 """
@@ -32,6 +33,7 @@ import time
 from urllib.parse import parse_qs, urlparse
 
 import auth
+import crash_reports
 import gamedb_sync
 import pngtool
 import social
@@ -114,12 +116,14 @@ class LauncherConfig:
 
 
 class Ctx:
-    def __init__(self, auth_service, social_store, config, online_count, log=lambda m: None, on_login=None, lsp_public=None, game_public=None,
-                 gamedb=None, boards=None, assets_dir=None):
+    def __init__(self, auth_service, social_store, config, online_count, log=lambda m: None, on_login=None, lsp_public=None,
+                 game_public=None,
+                 gamedb=None, boards=None, assets_dir=None, crashes=None):
         self.auth, self.social, self.config, self.online_count, self.log = auth_service, social_store, config, online_count, log
         self.on_login = on_login or (lambda xuid, ip: None)
         self.lsp_public, self.game_public = lsp_public or {}, game_public or {}
         self.gamedb = gamedb or gamedb_sync.GameDb("")
+        self.crashes = crashes            # crash_reports.CrashReports, or None = the endpoint is off
         self.boards = boards              # (kind "challenges" | "leaderboards", n) -> dict, from ops_api; None = not served
         self._boards_cache = {}
         self.assets_dir = os.environ.get("FH2MP_LAUNCHER_ASSETS", "") if assets_dir is None else assets_dir
@@ -158,8 +162,13 @@ def _qint(u, key, default, lo, hi):
         return default
 
 
-def _json(body):
-    if len(body) > 64 * 1024:
+def body_limit(path):
+    """Most bytes the HTTP server reads for a /v1 request (crash reports carry logs and a minidump)."""
+    return crash_reports.MAX_BODY if path.split("?")[0].rstrip("/") == "/v1/crash-reports" else MAX_BODY
+
+
+def _json(body, limit=64 * 1024):
+    if len(body) > limit:
         raise auth.AuthError(413, "too_large")
     try:
         d = json.loads(body or b"{}")
@@ -275,6 +284,12 @@ def _route(ctx, method, path, headers, body, ip):
             raise auth.AuthError(404, "not_found")
         return 200, ctx.social.gamerpic(xuid), "image/png"
 
+    if p == "/v1/crash-reports" and method == "POST":
+        if ctx.crashes is None:
+            raise auth.AuthError(503, "crash_reports_off", "this server does not take crash reports")
+        if not a.hit(("crash", ip), 5, 3600) or not a.hit(("crash", "all"), 300, 86400):
+            raise auth.AuthError(429, "rate_limited", "too many crash reports, try again later")
+        return 202, {"id": ctx.crashes.submit(_json(body, crash_reports.MAX_BODY))}, ok
     if p == "/v1/auth/logout" and method == "POST":
         a.authenticate(_bearer(headers), ip)
         a.logout(_bearer(headers))

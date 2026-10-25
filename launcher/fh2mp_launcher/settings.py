@@ -19,6 +19,8 @@ DEFAULTS = {
     "xuid": 0,
     "extra_args": "",
     "tcp_fallback": False,          # experimental: carry the game's UDP over TCP (for networks that drop UDP)
+    "crash_report_ask": True,       # offer to send a report when the game crashed
+    "crash_handled": 0.0,           # crashes recorded before this time (epoch) were already offered; 0 = not set up yet
     "extra_options": True,          # put FH2 Extra Options (GPL-3.0, RokkuDayo) next to the shim when the player has no copy
     # developer options (the dev launcher's panel; harmless elsewhere)
     "pin_shim": False,              # never replace the installed shim automatically (local / debug builds)

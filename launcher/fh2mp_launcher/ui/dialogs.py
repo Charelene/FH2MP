@@ -5,9 +5,9 @@ from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-                               QFrame, QLayout, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget)
+                               QFrame, QLayout, QPlainTextEdit, QPushButton, QScrollArea, QToolButton, QVBoxLayout, QWidget)
 
-from .. import azimuth, keystore, launch, paths, saves
+from .. import azimuth, crashreport, keystore, launch, paths, saves
 from ..api import ApiError
 from ..core import friendly
 from . import images, theme
@@ -136,6 +136,130 @@ class RecoveryDialog(QDialog):
             fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w") as f:
                 f.write("FH2MP recovery code. Keep it private.\n\n" + code + "\n")
+
+
+class CrashReportDialog(QDialog):
+    """"Looks like the game crashed. Would you like to send a report?" with the exact data listed (fold-out) and files that open on click.
+    Closes with accept() when the player answered (Yes sent, or No), reject() on the window's close button; `ask_again` says what to remember."""
+
+    def __init__(self, lc, report, parent=None):
+        super().__init__(parent)
+        self.lc, self.report = lc, report
+        self.setWindowTitle("Crash report")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(28, 26, 28, 26)
+        lay.setSpacing(14)
+        t = QLabel("Looks like the game crashed. Would you like to send a report?")
+        t.setObjectName("h2")
+        t.setWordWrap(True)
+        lay.addWidget(t)
+        m = QLabel("This will help identify the cause and fix the issue. A short summary (the details below, the crash line and the end of "
+                   "azimuth.log) becomes a public issue on GitHub; the logs and the crash dump stay private on the FH2MP server.")
+        m.setObjectName("muted")
+        m.setWordWrap(True)
+        lay.addWidget(m)
+
+        self.fold = QToolButton()
+        self.fold.setText("Here's the data that will be sent")
+        self.fold.setCheckable(True)
+        self.fold.setArrowType(Qt.ArrowType.RightArrow)
+        self.fold.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.fold.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.fold.setStyleSheet(f"QToolButton {{ border: none; background: transparent; color: {theme.MUTED}; padding: 4px 0; }}"
+                                f"QToolButton:hover {{ color: {theme.WHITE}; }}")
+        self.fold.toggled.connect(self._toggle)
+        lay.addWidget(self.fold, 0, Qt.AlignmentFlag.AlignLeft)
+        self.details = QFrame()                  # the data, in monospace on a darker panel
+        self.details.setObjectName("crashdata")
+        self.details.setStyleSheet(f"QFrame#crashdata {{ background: {theme.CRUST}; border: 1px solid {theme.BORDER}; border-radius: 10px; }}"
+                                   f"QFrame#crashdata QLabel {{ background: transparent; font-family: monospace; font-size: 14px; padding: 0; }}"
+                                   f"QFrame#crashdata QLabel#small {{ color: {theme.MUTED}; font-size: 12px; }}")
+        dl = QVBoxLayout(self.details)
+        dl.setContentsMargins(24, 16, 24, 16)
+        dl.setSpacing(12)
+        form = QFormLayout()
+        form.setHorizontalSpacing(52)
+        form.setVerticalSpacing(4)
+        for label, value in report.fields:
+            v = QLabel(value)
+            v.setWordWrap(True)
+            v.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            name = QLabel(label + ":")
+            name.setObjectName("muted")                   # the name dim, the value bright
+            form.addRow(name, v)
+        dl.addLayout(form)
+        dl.addWidget(hrule())
+        files = QVBoxLayout()
+        files.setSpacing(3)
+        files.addWidget(QLabel("Files:"))
+        dl.addLayout(files)
+        for name, path, size in report.sizes(os.path.join(paths.cache_dir(), "crash-report-preview")):
+            label = f'<a href="{QUrl.fromLocalFile(path).toString()}">{name}</a>' if path else name
+            link = QLabel(f'{label} <span style="color:{theme.MUTED}">{crashreport.human_size(size)}</span>')
+            link.setTextFormat(Qt.TextFormat.RichText)
+            link.setOpenExternalLinks(True)
+            files.addWidget(link)
+        dl.addWidget(hrule())
+        note = QLabel("The files open as they will be sent: folder names with your user name, e-mail and IP addresses and anything that looks "
+                      "like a password or key are blanked. Public on GitHub: the details above, the crash line, the Mod Platform crash report "
+                      "and the last 40 lines of azimuth.log. Kept private on the server for 90 days: the full logs and the crash dump.")
+        note.setObjectName("small")
+        note.setWordWrap(True)
+        dl.addWidget(note)
+        self.details.hide()                      # opens collapsed
+        lay.addWidget(self.details)
+
+        self.never = QCheckBox("Do not ask me again")
+        lay.addWidget(self.never)
+        self.msg = QLabel("")
+        self.msg.setWordWrap(True)
+        self.msg.hide()
+        lay.addWidget(self.msg)
+        bottom = QHBoxLayout()
+        bottom.addStretch(1)
+        self.no = QPushButton("No")
+        self.no.setMinimumWidth(120)
+        self.no.clicked.connect(self.accept)
+        self.yes = QPushButton("Yes")
+        self.yes.setMinimumWidth(120)
+        self.yes.setObjectName("primary")
+        self.yes.clicked.connect(self._send)
+        bottom.addWidget(self.no)
+        bottom.addWidget(self.yes)
+        lay.addLayout(bottom)
+        fixed(self, 640)
+
+    @property
+    def ask_again(self):
+        return not self.never.isChecked()
+
+    def _toggle(self, on):
+        self.fold.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)
+        self.details.setVisible(on)
+
+    def _say(self, text, colour):
+        self.msg.setText(text)
+        self.msg.setStyleSheet(f"color: {colour};")
+        self.msg.setVisible(bool(text))
+
+    def _send(self):
+        self.yes.setEnabled(False)
+        self.no.setEnabled(False)
+        self._say("Sending...", theme.MUTED)
+
+        def done(_r):
+            self._say("Report sent. Thank you!", theme.GOOD)
+            self.no.setText("Close")
+            self.no.setEnabled(True)
+            self.yes.hide()
+            self.never.setEnabled(False)       # the question is over; the box still counts
+
+        def failed(e):
+            self._say(f"Could not send the report: {friendly(e)}", theme.BAD)
+            self.yes.setText("Try again")
+            self.yes.setEnabled(True)
+            self.no.setEnabled(True)
+        run_async(lambda j: self.lc.api().crash_report(self.report.payload()), done, failed)
 
 
 class ProfileDialog(QDialog):
@@ -552,6 +676,9 @@ class SettingsDialog(QDialog):
                             "TCP to the server, which adds delay. Needs the server to offer it.")
         self.tcp.setChecked(s["tcp_fallback"])
         lay.addWidget(self.tcp)
+        self.crash_ask = QCheckBox("Offer to send a report when the game crashes")
+        self.crash_ask.setChecked(s["crash_report_ask"])
+        lay.addWidget(self.crash_ask)
 
         if sys.platform != "win32":
             lay.addWidget(hrule())
@@ -707,6 +834,7 @@ class SettingsDialog(QDialog):
         s["offline_mode"] = self.offline.isChecked()
         s["extra_options"] = self.extra_opts.isChecked()
         s["tcp_fallback"] = self.tcp.isChecked()
+        s["crash_report_ask"] = self.crash_ask.isChecked()
         if paths.is_dev():                          # players cannot change the channel or the server
             s["channel"] = self.channel.currentData()
             s["check_updates"] = self.check_updates.isChecked()

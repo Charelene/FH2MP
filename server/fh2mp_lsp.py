@@ -46,6 +46,7 @@ import xbl  # noqa: E402
 import auth  # noqa: E402
 import gamedb_sync  # noqa: E402
 import home  # noqa: E402
+import crash_reports  # noqa: E402
 import launcher_api  # noqa: E402
 import ops_api  # noqa: E402
 import site_stats  # noqa: E402
@@ -2312,7 +2313,7 @@ class Handler(BaseHTTPRequestHandler):
         global SEQ
         SEQ += 1
         n = int(self.headers.get("Content-Length") or 0)
-        if (self.path.startswith("/v1/") and n > launcher_api.MAX_BODY) or (self.path.startswith("/ops/") and n > 65536) \
+        if (self.path.startswith("/v1/") and n > launcher_api.body_limit(self.path)) or (self.path.startswith("/ops/") and n > 65536) \
                 or n > ugc.MAX_REQUEST_BODY or n < 0:
             self.close_connection = True
             return self._reply_json(413, {"error": "too_large"})
@@ -2637,7 +2638,7 @@ def setup_auth():
     LAUNCHER = launcher_api.Ctx(
         AUTH, SOCIAL, launcher_api.LauncherConfig(), online_count, log=log, on_login=on_login,
         lsp_public={"url": os.environ.get("FH2MP_LSP_URL", f"http://{host}:{os.environ.get('FH2MP_LSP_PUBLIC_PORT', '5080')}")},
-        game_public=game_public, gamedb=gamedb_sync.GameDb(),
+        game_public=game_public, gamedb=gamedb_sync.GameDb(), crashes=crash_reports.CrashReports.from_env(log),
         boards=lambda kind, n: (home.build(sys.modules[__name__]) if kind == "home"
                                 else (ops_api.challenges if kind == "challenges" else ops_api.leaderboards)(sys.modules[__name__], n)))
     global OPS
