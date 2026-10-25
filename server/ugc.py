@@ -1,4 +1,4 @@
-"""User-generated content store: paint jobs (liveries), tunes, vinyl groups, with likes and downloads.
+"""User-generated content store: paint jobs (liveries), tunes, vinyl groups, photos, with likes and downloads.
 
 The game's content services are three layers (call layouts recovered from the exe, see docs/lsp.md):
 - `Xls.WebServices.Content` + `Forza.WebServices.LargeFileUpload`: a numbered large blob (`contentFileId`), uploaded in chunks
@@ -7,6 +7,8 @@ The game's content services are three layers (call layouts recovered from the ex
   a reference count (`CreateVersioned*`, `RetrieveVersioned*ById`, `AddReferenceTo*`, `RemoveReferenceTo*`);
 - `Forza.WebServices.Storefront*`: the public listing of a versioned item (title, keywords, preview, counters) that other
   players search (`Search*Files`), fetch (`GetFileHeavyWeightData`) and like.
+Photos have no versioned item: `StorefrontPhoto.Create` returns the storefront file id and the client then uploads the full picture with
+`UploadContent{contentId = that file id}` (prod logs), so a photo's file id doubles as its content id (`content_blob`).
 Everything is stored in the state database (PostgreSQL, db.py). Which request carries a livery's layer data is still being learned from
 live traffic, so every blob and versioned row keeps whatever the client sent.
 """
@@ -35,6 +37,9 @@ MAGIC = b"\x89FZ"        # prefix of a packed value: MAGIC + codec byte (0 = sto
 MAX_UNPACKED = 32 << 20  # largest value unpack() will expand (twice the biggest legitimate blob: an inflated livery container)
 
 
+CONTENT_KINDS = ("photo", "replay")     # storefront kinds whose payload is uploaded with UploadContent under the file id
+
+
 def pack(b):
     """Compresses a stored blob as hard as it goes (LZMA, preset 9 extreme); keeps the raw bytes when that does not help.
     Always encodes: bytes that already start with MAGIC are client data, not our storage format, and get wrapped like any other."""
@@ -43,6 +48,11 @@ def pack(b):
     b = bytes(b)
     c = lzma.compress(b, format=lzma.FORMAT_ALONE, preset=9 | lzma.PRESET_EXTREME)
     return MAGIC + b"\x01" + c if len(c) + 4 < len(b) else MAGIC + b"\x00" + b
+
+
+def pack_stored(b):
+    """pack() without compressing: used for a blob that is still being uploaded, so every chunk does not re-run LZMA over the whole blob."""
+    return MAGIC + b"\x00" + bytes(b) if b else b""
 
 
 def unpack(b):
@@ -107,6 +117,10 @@ def parse_livery_upload(body):
         return None
 
 
+# a listed file whose payload is uploaded after the listing (photos) shows up once the upload is complete
+COMPLETE = (f"(f.blob_id IS NULL OR f.kind NOT IN ({', '.join(repr(k) for k in CONTENT_KINDS)}) "
+            "OR EXISTS (SELECT 1 FROM ugc_blobs b WHERE b.id = f.blob_id AND b.received >= b.total_size))")
+
 # ugc_files columns except `preview` (a packed blob): list queries never carry it, file_get / files() unpack and return it
 LIST_COLS = ("id, kind, type, owner, title, description, created, payload_size, versioned_id, blob_id, car_id, make_id, model_id, "
              "class_id, keyword1, keyword2, env, track, pi, downloads, likes, uses, views, popularity, removed")
@@ -145,8 +159,9 @@ class UgcStore:
             if offset > len(buf):
                 buf.extend(b"\0" * (offset - len(buf)))
             buf[offset:offset + len(data)] = data
+            done = len(buf) >= int(r["total_size"])
             n = c.execute("UPDATE ugc_blobs SET data=?, received=? WHERE id=? AND owner=?",
-                          (pack(bytes(buf)), len(buf), blob_id, owner)).rowcount
+                          ((pack if done else pack_stored)(bytes(buf)), len(buf), blob_id, owner)).rowcount
             return len(buf) if n else None
 
     def blob_read(self, blob_id, offset, size):
@@ -157,6 +172,13 @@ class UgcStore:
         data = unpack(r["data"])
         chunk = data[offset:offset + size] if size else data[offset:]
         return chunk, offset + len(chunk) >= len(data), len(data)
+
+    def content_blob(self, content_id):
+        """The blob behind a Content.Upload/DownloadContent id: a photo's (or replay's) storefront file id names its blob; any other id is a
+        blob id from LargeFileUpload.Create. File ids win on a clash: the game only uses UploadContent for photos (prod logs)."""
+        r = self.db.one(f"SELECT blob_id FROM ugc_files WHERE id=? AND kind IN ({','.join('?' * len(CONTENT_KINDS))}) AND blob_id IS NOT NULL",
+                        (content_id, *CONTENT_KINDS))
+        return r["blob_id"] if r else content_id
 
     def blob_by_name(self, owner, name):
         r = self.db.one("SELECT id, data FROM ugc_blobs WHERE owner=? AND user_file_name=? ORDER BY id DESC LIMIT 1", (owner, name))
@@ -235,7 +257,7 @@ class UgcStore:
 
     def search(self, kind, make=0, model=0, cls=-1, kw1=0, kw2=0, env=0, track=0, layers=0, gamertag="", text="", limit=50):
         """Public files of a kind, newest first; 0 / -1 mean "any" [guess: the client's "no filter" values are unknown]."""
-        where, args = ["f.kind=?", "f.removed=0"], [kind]
+        where, args = ["f.kind=?", "f.removed=0", COMPLETE], [kind]
         for col, val in (("make_id", make), ("model_id", model), ("keyword1", kw1), ("keyword2", kw2), ("env", env), ("track", track)):
             if val and val > 0:
                 where.append(f"f.{col}=?")
@@ -257,6 +279,16 @@ class UgcStore:
         return [dict(r) for r in self.db.query(
             f"SELECT {LIST_COLS} FROM ugc_files WHERE removed=0 AND type=? AND (?<=0 OR car_id=?) ORDER BY likes DESC, id DESC LIMIT ?",
             (ctype, car_id, car_id, limit))]
+
+    def popular(self, kind, limit, since=None):
+        """Complete public files of a kind, most liked first (then most viewed, newest); `since` keeps files shared after that time."""
+        where, args = ["f.kind=?", "f.removed=0", COMPLETE], [kind]
+        if since is not None:
+            where.append("f.created >= ?")
+            args.append(since)
+        return [dict(r) for r in self.db.query(
+            f"SELECT {', '.join('f.' + c.strip() for c in LIST_COLS.split(','))} FROM ugc_files f WHERE {' AND '.join(where)} "
+            "ORDER BY f.likes DESC, f.views DESC, f.id DESC LIMIT ?", args + [limit])]
 
     def bump(self, fid, column):
         assert column in ("views", "likes", "uses", "downloads")

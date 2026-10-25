@@ -783,7 +783,7 @@ def content_upload(req):
     xuid, _ = _me()
     data = bytes(req["uploadData"])
     try:
-        got = UGC.blob_write(req["contentId"], req["payloadOffset"], data, owner=xuid)
+        got = UGC.blob_write(UGC.content_blob(req["contentId"]), req["payloadOffset"], data, owner=xuid)
     except ugc.LimitError as e:
         raise XlsError(str(e))
     log(f"  Content.UploadContent id={req['contentId']} @{req['payloadOffset']} +{len(data)} of {req['payloadTotalSize']}: "
@@ -794,7 +794,7 @@ def content_upload(req):
 
 
 def content_download(req):
-    r = UGC.blob_read(req["contentId"], req["payloadOffset"], req["requestedSize"])
+    r = UGC.blob_read(UGC.content_blob(req["contentId"]), req["payloadOffset"], req["requestedSize"])
     if r is None:
         raise XlsError(f"no such content {req['contentId']}")
     chunk, last, total = r
@@ -1059,6 +1059,24 @@ def store_tuning_create(req):
     return {"contentFileId": fid}
 
 
+def store_photo_create(req):
+    """StorefrontPhoto.Create: lists a photo (title, keywords, preview) and returns its file id; the client then uploads the full picture
+    with UploadContent under that id (ugc.content_blob), and the photo is searchable once the upload is complete."""
+    xuid, _ = _me()
+    h, d = req["fileHeader"], req["photoDescription"]["base"]
+    try:
+        bid = UGC.blob_create(xuid, "", req["payloadSize"])
+    except ugc.LimitError as e:
+        raise XlsError(str(e))
+    fid = UGC.file_create("photo", xuid, h["Title"], h["Description"], h["Type"], None, req["payloadSize"], bytes(req["previewData"]), bid,
+                          make_id=d["MakeId"] or None, model_id=d["ModelId"] or None, kw1=h["KeywordOne"], kw2=h["KeywordTwo"],
+                          env=d["EnvironmentId"], track=d["TrackId"])
+    FILE_KIND[h["Type"]] = "photo"
+    log(f"  photo shared: file #{fid} {h['Title']!r} type={h['Type']} make={d['MakeId']} model={d['ModelId']} "
+        f"payload={req['payloadSize']} preview={len(req['previewData'])}B (upload as content {fid}, blob #{bid})")
+    return {"contentFileId": fid}
+
+
 def _search_files(kind, results_struct, label, req):
     p = req["searchParameters"]
     files = UGC.search(kind, p["MakeId"], p["ModelId"], p["ClassId"], p["KeywordOneId"], p["KeywordTwoId"], p["EnvironmentId"],
@@ -1075,6 +1093,32 @@ def store_search_liveries(req):
 
 def store_search_tunes(req):
     return _search_files("tune", "ForzaStorefrontSearchTuningFiles_Results", "SearchTuningFiles", req)
+
+
+def store_search_photos(req):
+    return _search_files("photo", "ForzaStorefrontSearchPhotoFiles_Results", "SearchPhotoFiles", req)
+
+
+PHOTO_PICKS_DAYS = 7        # "picks" tab: the most liked photos shared in the last week (all time when there are none)
+
+
+def _photo_list(results_struct, field, label, files, req):
+    tmpl = _elem_template(results_struct, field)
+    log(f"  {label} max={req['maxFiles']}: {len(files)} photos")
+    return {field: [_heavy(UGC.file_get(f["id"]), tmpl) for f in files]}        # file_get unpacks the preview
+
+
+def store_popular_photos(req):
+    """Storefront.GetPopularPhotos (the "Top Rated" tab)."""
+    files = UGC.popular("photo", min(max(req["maxFiles"], 0), 100) or 50)
+    return _photo_list("ForzaStorefrontGetPopularPhotos_Results", "PopularPhotos", "GetPopularPhotos", files, req)
+
+
+def store_featured_photos(req):
+    """Storefront.GetFeaturedPhotos (the curated tab): nobody curates, so the week's most liked photos stand in."""
+    n = min(max(req["maxFiles"], 0), 100) or 50
+    files = UGC.popular("photo", n, since=time.time() - PHOTO_PICKS_DAYS * 86400) or UGC.popular("photo", n)
+    return _photo_list("ForzaStorefrontGetFeaturedPhotos_Results", "FeaturedPhotos", "GetFeaturedPhotos", files, req)
 
 
 def store_heavy(req):
@@ -1850,6 +1894,10 @@ HANDLERS = {
     ("Forza.WebServices.StorefrontTuning", "Create"): ("", store_tuning_create),
     ("Forza.WebServices.Storefront", "SearchLiveryFiles"): ("", store_search_liveries),
     ("Forza.WebServices.Storefront", "SearchTuningFiles"): ("", store_search_tunes),
+    ("Forza.WebServices.StorefrontPhoto", "Create"): ("", store_photo_create),
+    ("Forza.WebServices.Storefront", "SearchPhotoFiles"): ("", store_search_photos),
+    ("Forza.WebServices.Storefront", "GetPopularPhotos"): ("", store_popular_photos),
+    ("Forza.WebServices.Storefront", "GetFeaturedPhotos"): ("", store_featured_photos),
     ("Forza.WebServices.Storefront", "GetFileHeavyWeightData"): ("", store_heavy),
     ("Forza.WebServices.Storefront", "GetMyFileList"): ("", store_my_files),
     ("Forza.WebServices.Storefront", "GetFileDataIfShared"): ("", store_if_shared),
@@ -2139,6 +2187,21 @@ def gsms_cluster():
                        "portMappings": [{"Key": "NetV2", "Value": {"external": port, "internal": port}}]}).encode()
 
 
+def verify_strings(body):
+    """XSAPI uses `stringstoVerify` (lower-case t), with one result per input.
+    Evidence: microsoft/xbox-live-api, 1807_xdk_qfe_preview,
+    Source/Services/Misc/string_service.cpp, string_service::verify_strings.
+    Keep the old spelling accepted for clients using our earlier implementation.
+    """
+    req = json.loads(body)
+    if not isinstance(req, dict):
+        raise ValueError("expected an object")
+    strings = req.get("stringstoVerify", req.get("stringsToVerify"))
+    if not isinstance(strings, list) or any(not isinstance(s, str) for s in strings):
+        raise ValueError("expected an array of strings")
+    return {"verifyStringResult": [{"resultCode": 0, "offendingString": ""} for _ in strings]}
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -2299,16 +2362,13 @@ class Handler(BaseHTTPRequestHandler):
             out, ctype = gsms_cluster(), "application/json"
             log(f"  GSMS cluster -> {out.decode()}")
         elif host == "client-strings.xboxlive.com" and self.path.rstrip("/").endswith("/system/strings/validate"):
-            # XSAPI StringService.VerifyString (club names, noticeboard posts...): {"stringsToVerify": [...]} ->
-            # {"verifyStringResult": [{"resultCode": 0, "offendingString": ""}, ...]}, one entry per string; 0 = fine
-            # (keys from Microsoft.Xbox.Services.dll [inferred layout])
             try:
-                n = len(json.loads(body or b"{}").get("stringsToVerify", [])) or 1
-            except (ValueError, AttributeError):
-                n = 1
-            out = json.dumps({"verifyStringResult": [{"resultCode": 0, "offendingString": ""} for _ in range(n)]}).encode()
+                verified = verify_strings(body)
+            except ValueError:
+                return self._reply_json(400, {"error": "invalid_strings"})
+            out = json.dumps(verified).encode()
             ctype = "application/json"
-            log(f"  strings/validate: {n} string(s) accepted")
+            log(f"  strings/validate: {len(verified['verifyStringResult'])} string(s) accepted")
         elif host in ("profile.xboxlive.com", "social.xboxlive.com", "peoplehub.xboxlive.com", "userpresence.xboxlive.com") \
                 and (res := xbl_social(host, self.command, self.path, body, self.headers)) is not None:
             status, obj = res

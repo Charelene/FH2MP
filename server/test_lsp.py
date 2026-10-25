@@ -2,10 +2,12 @@
 catalog schema in the scratch database; the `public` schema is dropped and recreated). Every registered handler is called once with
 default parameters (so a broken SQL statement anywhere shows up), then the main flows run end to end."""
 import json
+import io
 import os
 import struct
 import sys
 import unittest
+from unittest import mock
 import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -45,6 +47,40 @@ def call(cls, method, params=None):
     if result == 0 and rf is not None and len(out) > 12 + n:
         return result, xls.decode(L.SC, rf, out[12 + n:])[0]
     return result, None
+
+
+class StringValidationTests(unittest.TestCase):
+    def request(self, body):
+        handler = object.__new__(L.Handler)
+        handler.path, handler.command = "/system/strings/validate", "POST"
+        handler.headers = {"Content-Length": str(len(body)), "X-FH2MP-Host": "client-strings.xboxlive.com"}
+        handler.client_address = ("127.0.0.1", 1234)
+        handler.rfile, handler.wfile = io.BytesIO(body), io.BytesIO()
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        with mock.patch.object(handler, "_identify", return_value=True), mock.patch.object(L.social, "touch"), \
+                mock.patch.object(L.CTX, "xuid", 1, create=True), mock.patch.object(L, "log"):
+            handler._handle()
+        return handler.send_response.call_args.args[0], json.loads(handler.wfile.getvalue())
+
+    def test_photo_title_and_description_each_get_a_result(self):
+        # Actual XSAPI wire spelling, unlike the old handler's stringsToVerify.
+        status, response = self.request(json.dumps({"stringstoVerify": ["Sunset", "A drive by the sea"]}).encode())
+        self.assertEqual(status, 200)
+        self.assertEqual(response, {"verifyStringResult": [
+            {"resultCode": 0, "offendingString": ""}, {"resultCode": 0, "offendingString": ""}]})
+
+    def test_legacy_spelling_and_empty_lists_preserve_count(self):
+        for key in ("stringstoVerify", "stringsToVerify"):
+            for strings in ([], ["one"], ["one", "two", "three"]):
+                status, response = self.request(json.dumps({key: strings}).encode())
+                self.assertEqual((status, len(response["verifyStringResult"])), (200, len(strings)))
+
+    def test_malformed_input_does_not_fabricate_a_success(self):
+        for body in (b"{", b"null", b"{}", b"[]", b'{"stringstoVerify":"title"}', b'{"stringstoVerify":[1]}'):
+            status, _ = self.request(body)
+            self.assertEqual(status, 400, body)
 
 
 class LayerCountTests(unittest.TestCase):
@@ -265,6 +301,44 @@ class LspTests(unittest.TestCase):
         self.assertEqual((r, res["versionedTuneData"]["CarId"]), (0, 325))
         r, res = call(S, "GetFileKeywords", {"fileType": 0, "maxKeywordResults": 50})
         self.assertIn("Drift", [k["Keyword"] for k in res["keywords"]])
+
+    def test_photo_share_upload_list_and_download(self):
+        S = "Forza.WebServices.Storefront"
+        X = "Xls.WebServices.Content"
+        pic = os.urandom(600_000)
+        r, res = call("Forza.WebServices.StorefrontPhoto", "Create", {
+            "fileHeader": {"Title": "Sunset", "Description": "Nice", "Type": 1, "PayloadSize": len(pic), "KeywordOne": 2},
+            "photoDescription": {"base": {"MakeId": 21, "ModelId": 325, "EnvironmentId": 1, "TrackId": 7}},
+            "payloadSize": len(pic), "previewData": b"\x89PNGpreview"})
+        self.assertEqual(r, 0)
+        fid = res["contentFileId"]
+        self.assertNotEqual(fid, 0)
+        r, res = call(S, "GetPopularPhotos", {"maxFiles": 50})
+        self.assertNotIn(fid, [x["Id"] for x in res["PopularPhotos"]])          # hidden until the upload is complete
+        for off in range(0, len(pic), 262144):                                  # the client's chunk size, contentId = the file id
+            r, res = call(X, "UploadContent", {"contentId": fid, "payloadOffset": off, "payloadTotalSize": len(pic),
+                                                "uploadData": pic[off:off + 262144]})
+            self.assertEqual((r, res["payloadUploadedSize"]), (0, min(off + 262144, len(pic))))
+        L.CTX.xuid = 0x0009000000000043                                          # another player browses and downloads it
+        for method, key in (("GetPopularPhotos", "PopularPhotos"), ("GetFeaturedPhotos", "FeaturedPhotos")):
+            r, res = call(S, method, {"maxFiles": 50})
+            mine = [x for x in res[key] if x["Id"] == fid]
+            self.assertEqual([(x["Title"], bytes(x["PreviewPayload"]), x["PayloadSize"]) for x in mine],
+                             [("Sunset", b"\x89PNGpreview", len(pic))], method)
+        r, res = call(S, "SearchPhotoFiles", {"searchParameters": {"MakeId": 21, "ClassId": -1}, "maxFiles": 10})
+        self.assertIn(fid, [x["Id"] for x in res["searchResults"]])
+        r, res = call(S, "SearchPhotoFiles", {"searchParameters": {"MakeId": 22, "ClassId": -1}, "maxFiles": 10})
+        self.assertNotIn(fid, [x["Id"] for x in res["searchResults"]])
+        got, off = b"", 0
+        while True:
+            r, res = call(X, "DownloadContent", {"contentId": fid, "payloadOffset": off, "requestedSize": 262144})
+            got += bytes(res["downloadData"])
+            off = len(got)
+            if res["isLastBuffer"]:
+                break
+        self.assertEqual((got, res["totalSize"]), (pic, len(pic)))
+        r, _ = call(X, "UploadContent", {"contentId": fid, "payloadOffset": 0, "payloadTotalSize": len(pic), "uploadData": b"x"})
+        self.assertNotEqual(r, 0)                                                # somebody else's photo cannot be overwritten
 
     def test_car_clubs(self):
         C = "Forza.WebServices.Club"
