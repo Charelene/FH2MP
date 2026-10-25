@@ -231,7 +231,7 @@ class SaveManagerTests(unittest.TestCase):
             self.assertEqual(dlg.target.count(), 2)
             self.assertIn("Created:", dlg.info.text())
             self.assertTrue(dlg.options.isHidden())
-            self.assertFalse(dlg.to_online.isEnabled())
+            self.assertFalse(dlg.import_save.isEnabled())
             online = Path(azimuth.account_save_path(d, 123))
             for profile in (p, online):
                 data = profile / "revisions/A/data"
@@ -239,11 +239,33 @@ class SaveManagerTests(unittest.TestCase):
                 (data / "BinarySaveState").write_bytes(b"save")
             dlg._details()
             with mock.patch.object(dlg, "_copy") as copy:
-                dlg.to_online.click()
+                dlg.import_save.click()
                 copy.assert_called_once_with(str(p), str(online))
                 copy.reset_mock()
-                dlg.to_offline.click()
+                dlg.export_save.click()
                 copy.assert_called_once_with(str(online), str(p))
+            from PySide6.QtWidgets import QLabel, QMessageBox
+            labels = [label.text() for label in dlg.findChildren(QLabel)]
+            self.assertIn("Azimuth", labels)
+            self.assertIn("Online + offline", labels)
+            self.assertIn("Import save", labels)
+            self.assertIn("Export save", labels)
+            self.assertEqual(dlg.account_path, str(online))
+            self.assertEqual(dlg.default_path, str(p))
+            self.assertEqual(dlg.account_status.text(), dlg._save_status(str(online)))
+            with mock.patch.object(lc, "game_running", return_value=False), \
+                    mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No) as question, \
+                    mock.patch.object(dlg, "_transfer") as transfer:
+                dlg.import_save.click()
+                self.assertIn("both online and offline FH2MP play", question.call_args.args[2])
+                transfer.assert_not_called()
+                question.return_value = QMessageBox.StandardButton.Yes
+                dlg.import_save.click()
+                transfer.assert_called_once_with(str(p), str(online))
+                transfer.reset_mock()
+                dlg.export_save.click()
+                self.assertIn("Azimuth default progress", question.call_args.args[2])
+                transfer.assert_called_once_with(str(online), str(p))
             self.assertFalse((p.parent / "fh2mp-save-backups").exists())
             dlg.close()
 

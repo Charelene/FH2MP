@@ -293,6 +293,7 @@ TICKET_MAGIC = b"FH2MPTK1"
 TICKET_LEN = 84
 TICKET_SKEW_SECONDS = 86400.0    # a player's clock may be this far off (time zone set wrong); used nonces are kept twice as long
 TICKET_BIND_SECONDS = 120.0      # an address that showed a ticket may open its connection for this long (the game retries for ~10 s)
+MAX_TICKET_NONCES = 500000      # accepting a ticket requires retaining its nonce until its replay window closes
 UDP_AUTH_MODES = ("off", "required", "ticket")
 RT_INIT_SECONDS = float(os.environ.get("FH2MP_RT_INIT", "3.0"))   # dev knob: hold the state in Initialising         # Initialising -> DestinationVote delay after the connection (the client waits in Initialising
                               # and only sends its session-entry message once the state has changed)
@@ -3646,6 +3647,8 @@ class Hub:
             why = "clock too far off"
         elif (xuid, nonce) in self.nonces:
             why = "replayed"
+        elif len(self.nonces) >= MAX_TICKET_NONCES:
+            why = "replay protection full"
         else:
             key = next((k for k, until in self.keys.get(xuid, {}).items()
                         if until > now and hmac.compare_digest(hmac.new(k, data[:52], hashlib.sha256).digest(), mac)), None)
@@ -3656,8 +3659,7 @@ class Hub:
                 self.auth_log[("t", addr[0])] = now
                 self.log(f"auth: ticket for {xuid:#x} from {addr[0]}:{addr[1]} refused ({why})")
             return
-        if len(self.nonces) < 500000:
-            self.nonces[(xuid, nonce)] = now + 2 * TICKET_SKEW_SECONDS
+        self.nonces[(xuid, nonce)] = now + 2 * TICKET_SKEW_SECONDS
         held = self.bound.get(addr)
         if held is not None and held[0] != xuid and held[1] > now:
             self.log(f"auth: ticket for {xuid:#x} from {addr[0]}:{addr[1]} refused (address bound to {held[0]:#x})")

@@ -5,6 +5,7 @@ import struct
 import sys
 import time
 import unittest
+from unittest import mock
 import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -141,6 +142,26 @@ class UdpTickets(unittest.TestCase):
         self.assertFalse(self.connected(b))
         self.hub.handle(open_packet(0xB), a)
         self.assertTrue(self.connected(a))
+
+    def test_full_nonce_table_rejects_untracked_tickets_at_every_address(self):
+        a, b, c = ((self.ip, port) for port in (4001, 4002, 4003))
+        with mock.patch.object(S, "MAX_TICKET_NONCES", 2):
+            self.hub.handle(make_ticket(0xA, "fh2.tokA"), a)
+            self.hub.handle(open_packet(0xA), a)
+            original_binding = self.hub.bound[a]
+            self.hub.handle(make_ticket(0xB, "fh2.tokB"), c)  # final free slot is retained
+            self.assertEqual(len(self.hub.nonces), 2)
+            self.assertIn(c, self.hub.bound)
+            ticket = make_ticket(0xA, "fh2.tokA")
+            for addr in (a, b):
+                self.hub.handle(ticket, addr)
+            self.assertEqual(self.hub.bound[a], original_binding)
+            self.assertNotIn(b, self.hub.bound)
+            self.hub.handle(open_packet(0xA), b)
+            self.assertFalse(self.connected(b))
+            self.assertTrue(self.connected(a))
+            self.assertEqual(len(self.hub.nonces), 2)
+            self.assertNotIn((0xA, ticket[36:52]), self.hub.nonces)
 
     def test_old_server_drops_a_ticket_silently(self):
         idle = S.Server(0, None, sock=FakeSock())

@@ -4913,6 +4913,7 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
         if (GetEnvironmentVariableW(L"FH2MP_OFFLINE", offline, 8) != 0) {
             identity_load();
             patch_identity();
+            gamedb_put_back();    /* restore the player's database before the platform builds its offline overrides */
             log_raw("offline: account save profile active; online hooks skipped\n");
             return 0;
         }

@@ -393,9 +393,9 @@ class SaveManagerDialog(QDialog):
     def __init__(self, lc, folder, parent=None):
         super().__init__(parent)
         self.lc, self.folder, self.busy = lc, folder, False
-        self.offline_path = azimuth.account_save_path(folder, 0x9000000000000)
-        self.online_path = azimuth.account_save_path(folder, lc.settings["xuid"]) if lc.settings["xuid"] else ""
-        self.offline_source = self.offline_path
+        self.default_path = azimuth.account_save_path(folder, 0x9000000000000)
+        self.account_path = azimuth.account_save_path(folder, lc.settings["xuid"]) if lc.settings["xuid"] else ""
+        self.default_source = self.default_path
         self.setWindowTitle("Save manager")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(28, 26, 28, 22)
@@ -403,12 +403,13 @@ class SaveManagerDialog(QDialog):
         title = QLabel("Your saves")
         title.setObjectName("title")
         lay.addWidget(title)
-        subtitle = QLabel("Choose where to use your progress.")
+        subtitle = QLabel("FH2MP uses the same save online and offline. Import or export an Azimuth save here.")
+        subtitle.setWordWrap(True)
         subtitle.setObjectName("muted")
         lay.addWidget(subtitle)
         row = QHBoxLayout()
         row.setSpacing(18)
-        self.offline_status, self.online_status = QLabel(), QLabel()
+        self.default_status, self.account_status = QLabel(), QLabel()
 
         def card(icon, title, subtitle, status, colour):
             frame = QFrame()
@@ -433,28 +434,28 @@ class SaveManagerDialog(QDialog):
             contents.addWidget(status)
             return frame
 
-        row.addWidget(card("pc", "Offline", "Azimuth", self.offline_status, theme.BLUE))
+        row.addWidget(card("pc", "Azimuth", "Default save", self.default_status, theme.BLUE))
         arrows = QVBoxLayout()
         arrows.setSpacing(6)
         arrows.addStretch()
-        self.to_online = IconButton("arrow-right", size=64, radius=18, icon_px=32, label_text="Use offline save online")
-        self.to_online.setToolTip("Copy your offline progress to online play")
-        self.to_online.clicked.connect(lambda: self._copy(self.offline_source, self.online_path))
-        arrows.addWidget(self.to_online, alignment=Qt.AlignmentFlag.AlignHCenter)
-        online_label = QLabel("Use online")
+        self.import_save = IconButton("arrow-right", size=64, radius=18, icon_px=32, label_text="Import Azimuth save into FH2MP")
+        self.import_save.setToolTip("Replace your FH2MP save, used for both online and offline play, with this Azimuth save")
+        self.import_save.clicked.connect(lambda: self._copy(self.default_source, self.account_path))
+        arrows.addWidget(self.import_save, alignment=Qt.AlignmentFlag.AlignHCenter)
+        online_label = QLabel("Import save")
         online_label.setObjectName("small")
         arrows.addWidget(online_label, alignment=Qt.AlignmentFlag.AlignHCenter)
         arrows.addSpacing(16)
-        self.to_offline = IconButton("arrow-left", size=64, radius=18, icon_px=32, label_text="Use online save offline")
-        self.to_offline.setToolTip("Copy your online progress to offline play")
-        self.to_offline.clicked.connect(lambda: self._copy(self.online_path, self.offline_path))
-        arrows.addWidget(self.to_offline, alignment=Qt.AlignmentFlag.AlignHCenter)
-        offline_label = QLabel("Use offline")
+        self.export_save = IconButton("arrow-left", size=64, radius=18, icon_px=32, label_text="Export FH2MP save to Azimuth")
+        self.export_save.setToolTip("Copy your FH2MP progress to Azimuth's default save")
+        self.export_save.clicked.connect(lambda: self._copy(self.account_path, self.default_path))
+        arrows.addWidget(self.export_save, alignment=Qt.AlignmentFlag.AlignHCenter)
+        offline_label = QLabel("Export save")
         offline_label.setObjectName("small")
         arrows.addWidget(offline_label, alignment=Qt.AlignmentFlag.AlignHCenter)
         arrows.addStretch()
         row.addLayout(arrows)
-        row.addWidget(card("globe", "Online", "FH2MP", self.online_status, theme.ACCENT))
+        row.addWidget(card("globe", "FH2MP", "Online + offline", self.account_status, theme.ACCENT))
         lay.addLayout(row)
         reassurance = QLabel("A backup is kept every time you copy a save.")
         reassurance.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -526,11 +527,11 @@ class SaveManagerDialog(QDialog):
             self.message.setText("Some saves couldn't be found. You can choose one in More options.")
             self.message.setToolTip(str(e))
             self.message.show()
-        if not os.path.isdir(self.offline_path):
+        if not os.path.isdir(self.default_path):
             defaults = [self.source.itemData(i) for i in range(self.source.count())
                         if os.path.basename(self.source.itemData(i)) == azimuth.LEGACY_SAVE_DIR]
             if defaults:
-                self.offline_source = defaults[0]
+                self.default_source = defaults[0]
         self._details()
         fixed(self, 640)
 
@@ -557,12 +558,12 @@ class SaveManagerDialog(QDialog):
         self.info.setText(self._describe(source) if source else "Choose a User_<HEX> folder containing revisions.")
         self.target_info.setText(self._describe(target) if target else "")
         self.copy.setEnabled(bool(source and target and os.path.realpath(source) != os.path.realpath(target)) and not self.busy)
-        if os.path.isdir(self.offline_path):
-            self.offline_source = self.offline_path
-        self.offline_status.setText(self._save_status(self.offline_source))
-        self.online_status.setText(self._save_status(self.online_path) if self.online_path else "Sign in to use this save")
-        self.to_online.setEnabled(bool(self.online_path and self._has_save(self.offline_source)) and not self.busy)
-        self.to_offline.setEnabled(bool(self.online_path and self._has_save(self.online_path)) and not self.busy)
+        if os.path.isdir(self.default_path):
+            self.default_source = self.default_path
+        self.default_status.setText(self._save_status(self.default_source))
+        self.account_status.setText(self._save_status(self.account_path) if self.account_path else "Sign in to use this save")
+        self.import_save.setEnabled(bool(self.account_path and self._has_save(self.default_source)) and not self.busy)
+        self.export_save.setEnabled(bool(self.account_path and self._has_save(self.account_path)) and not self.busy)
 
     def _has_save(self, path):
         return bool(path and os.path.isdir(os.path.join(path, "revisions")))
@@ -595,10 +596,13 @@ class SaveManagerDialog(QDialog):
         target = target or self.target.currentData()
         if not source or not target:
             return
-        destination = "online" if target == self.online_path else "offline"
-        title = f"Use this save {destination}?"
+        destination = "FH2MP" if target == self.account_path else "Azimuth default"
+        title = f"Replace your {destination} save?"
         if QMessageBox.question(self, "Replace destination save?",
-                               f"{title}\n\nThis replaces your {destination} progress. A backup of both saves will be kept.\n\n"
+                               f"{title}\n\n"
+                               + ("This replaces your progress for both online and offline FH2MP play. "
+                                  if target == self.account_path else "This replaces your Azimuth default progress. ")
+                               + "A backup of both saves will be kept.\n\n"
                                "Close the game and Azimuth before continuing.",
                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
@@ -623,8 +627,8 @@ class SaveManagerDialog(QDialog):
 
         def ok(backup):
             finished()
-            destination = "online" if target == self.online_path else "offline"
-            self.message.setText(f"Your save is ready for {destination} play. A backup has been kept.")
+            destination = "FH2MP" if target == self.account_path else "Azimuth default"
+            self.message.setText(f"Your {destination} save has been updated. A backup has been kept.")
 
         def fail(e):
             finished()
