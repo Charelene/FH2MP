@@ -1279,6 +1279,8 @@ class Server:
         self.next_owner = 1
         self.pending_race = None   # (deadline, leader Peer)
         self.game_options = None   # (size, payload) latest GameOptionsSynced written by the leader
+        self.free_roam_laps = 1    # authoritative bounded count, retained across sparse options updates
+        self.free_roam_end_condition = 1 # explicit NumLaps by default; preserve timed/tag modes
         self.event = None          # {"people": [Peer], "begun": bool, "start_at": float|None}
         self.log(f"listening on udp/{port} version={VERSION_STRING} game={GAME_STRING} "
                  f"clock offset {self.clock_offset_ms} ms (time of day at start {(48 * (self.clock_offset_ms // 1000)) % 86400 // 3600:02d}:"
@@ -2205,15 +2207,31 @@ class Server:
 
     def start_event(self, leader: Peer) -> None:
         """Participants = the leader plus every client that reported Console.Ready."""
+        if not self.roadtrip:
+            try:
+                size, payload, laps = gameopts.bounded_laps(*(self.game_options or (0, 0)), default=self.free_roam_laps,
+                                                         default_end=self.free_roam_end_condition)
+            except ValueError:
+                self.log("event options: lap field unavailable; keeping the last accepted count")
+            else:
+                self.game_options = (size, payload)
+                self.free_roam_laps = laps
+                self.free_roam_end_condition = gameopts.end_condition_type(size, payload)
+                # Establish the same count on the host and guests BEFORE participation
+                # starts loading the event; omitted native defaults must not become zero.
+                for q in self.peers.values():
+                    if q.connected:
+                        self.send_game_options(q)
         people = [leader] + [q for q in self.peers.values()
                              if q is not leader and q.connected and q.console_vars.get(4)]
         self.log(f"event start: {len(people)} participant(s): {[q.owner_id for q in people]}")
         for q in self.peers.values():
             if q is not leader:
                 self.log(f"  other client owner {q.owner_id}: connected={q.connected} Console vars={q.console_vars}")
-        self.event = {"people": people, "begun": False, "start_at": None, "started": time.monotonic(),
-                      "numlaps": self.rt_numlaps(self.rt_race()) if self.roadtrip and self.rt_winner is not None
-                      and self.rt_gamedb else None}
+        laps = self.free_roam_laps if not self.roadtrip and self.free_roam_end_condition == 1 else None
+        if self.roadtrip and self.rt_winner is not None and self.rt_gamedb:
+            laps = self.rt_numlaps(self.rt_race())
+        self.event = {"people": people, "begun": False, "start_at": None, "started": time.monotonic(), "numlaps": laps}
         mode = self.rt_race_mode(self.rt_race()) if self.roadtrip and self.rt_winner is not None and self.rt_gamedb else None
         if self.roadtrip and self.rt_winner is not None and self.rt_candidates:
             race = self.rt_race()
@@ -2297,9 +2315,8 @@ class Server:
             self.go_race()
 
     def note_lap_score(self, peer: Peer, lap: int, blobs) -> None:
-        """MsgLapScore = (lap time, best lap, total time, lap number). The lap count is in GameOptions (not
-        decoded), so only a lap whose time equals the total time counts as the finish: a one-lap event. Circuit
-        events (a lap-0 start segment precedes lap 1) are ended by the players leaving instead."""
+        """MsgLapScore = (lap time, best lap, total time, lap number). Use the accepted GameOptions count
+        in Free Roam and the event table in Road Trip. A circuit's lap-0 start segment is not a finish."""
         ev = self.event
         if ev and ev.get("racing") and peer in ev["people"]:
             done = ev.setdefault("laps", {})
@@ -2309,7 +2326,7 @@ class Server:
         lap_t, _, total_t =(struct.unpack("<d", x.to_bytes(8, "little"))[0] for x in blobs)
         laps = ev.get("numlaps")
         if laps:
-            if lap < laps:       # Road Trip event: the lap count comes from the event table
+            if lap < laps:
                 return
         elif lap < 1 or abs(lap_t - total_t) > 1e-6:
             return
@@ -2318,9 +2335,9 @@ class Server:
 
     def note_score_keyframe(self, peer: Peer) -> None:
         """MsgScoreKeyframe is a player's final score: seen once per player at the end of a 3-lap circuit race on prod (the first finisher,
-        and again for the player whose race was ended by "race ends in"), never after laps 1 and 2. A circuit event's lap count is not
-        decoded (see note_lap_score), so for free roam events this is what tells the server that player is done; without it InRace stayed 1
-        and every client sat on the results screen for good. Road Trip events keep their lap-table logic (numlaps)."""
+        and again for the player whose race was ended by "race ends in"), never after laps 1 and 2.
+        Events with a known lap count use LapScore instead;
+        this remains the fallback for tag modes and events whose lap count is unavailable."""
         ev = self.event
         if not ev or not ev.get("racing") or ev.get("numlaps") or peer not in ev["people"] or peer in ev["finished"]:
             return
@@ -2739,6 +2756,19 @@ class Server:
                     first = (router, oid) not in peer.objs
                     peer.gopts_own_seq = seq
                     peer.gopts_written_at = time.monotonic()
+                    raw_options = (size, payload)
+                    if not self.roadtrip:
+                        fixed_laps = self.event.get("numlaps") if self.event and not self.event.get("over") else None
+                        try:
+                            size, payload, laps = gameopts.bounded_laps(size, payload, default=self.free_roam_laps,
+                                                                     fixed=fixed_laps, default_end=self.free_roam_end_condition)
+                        except ValueError as exc:
+                            self.log(f"{addr[1]} invalid GameOptions: {exc}; ignored")
+                            continue
+                        self.free_roam_laps = laps
+                        self.free_roam_end_condition = gameopts.end_condition_type(size, payload)
+                        if raw_options != (size, payload):
+                            self.log(f"{addr[1]} GameOptions NumLaps corrected to {laps} (maximum {gameopts.MAX_LAPS})")
                     self.log(f"{addr[1]} GameOptions {'create' if first else 'update'} relayed "
                              f"({size} bits, own seq {seq}, mtype {mtype})")
                     # debug: raw bits (LSB first) and where small ids (e.g. the event id 1412 = 0x584) appear
@@ -2750,6 +2780,10 @@ class Server:
                                 self.log(f"  GameOptions: value 1412 at bit offset {off} width {width}")
                     unchanged = self.game_options == (size, payload)
                     self.game_options = (size, payload)
+                    if raw_options != self.game_options:
+                        # Correct the writer too. Forwarding only to the guests would
+                        # leave the host racing its original unlimited/oversize count.
+                        self.send_game_options(peer)
                     if unchanged:
                         # A client that has accepted the forwarded options writes the same object back, which was forwarded again and
                         # written back again: with the sequence numbers right (see send_game_options) that became an endless ping-pong
