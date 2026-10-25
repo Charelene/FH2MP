@@ -3319,6 +3319,11 @@ class Hub:
                     self.ctl.sendto(self.populations_text().encode(), reply_to)
                 except OSError:
                     pass
+            elif parts == ["lobbies"]:
+                try:
+                    self.ctl.sendto(json.dumps(self.lobby_status()).encode(), reply_to)
+                except OSError:
+                    pass
             elif len(parts) == 3 and parts[0] == "auth":
                 try:
                     xuid = int(parts[1], 16)
@@ -3349,6 +3354,28 @@ class Hub:
                     self.log(f"control: player {parts[1]} assigned to lobby {parts[2]}")
                 except ValueError:
                     pass
+
+    def lobby_status(self) -> dict:
+        """Public lobby summary; produced on the game loop so world state is consistent."""
+        stages = {0: "Starting", 1: "Voting for a destination", 2: "Choosing cars", 3: "Getting ready",
+                  4: "Driving to the event", 5: "Arrived at destination", 6: "Preparing the event",
+                  7: "Racing", 8: "Event results"}
+        out = []
+        for (kind, name), world in self.worlds.items():
+            if kind not in (2, LOBBY_TYPE_ROAD_TRIP):
+                continue
+            peers = [p for p in world.peers.values() if p.connected]
+            if not peers:
+                continue
+            row = {"id": name or "default", "kind": "roadtrip" if kind == LOBBY_TYPE_ROAD_TRIP else "freeroam",
+                   "players": len(peers), "capacity": self.WORLD_CAPACITY,
+                   "memberXuids": [f"{p.xuid:x}" for p in peers if p.xuid]}
+            if kind == LOBBY_TYPE_ROAD_TRIP:
+                row.update(status=stages.get(world.rt_state, "Getting ready"), event=world.rt_idx + 1, events=4)
+            else:
+                row["status"] = "Free roaming"
+            out.append(row)
+        return {"lobbies": sorted(out, key=lambda r: (r["kind"], -r["players"], r["id"]))}
 
     def populations(self) -> dict:
         """Lobby name -> hex xuids of the players in it right now (connected or still connecting; 0 when the id is not known yet). The

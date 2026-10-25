@@ -289,5 +289,27 @@ class ModeTests(Base):
                 site_stats.add_result(self.lsp, body)
 
 
+class ModerationTests(Base):
+    def test_warning_and_hide_apply_to_all_run_surfaces(self):
+        import score_reports
+        import hashlib
+        submit(self.lsp.SB, 1, 'Alice', 80)
+        submit(self.lsp.SB, 2, 'Bob', 90)
+        sid = self.lsp.DB.one('SELECT MIN(id) FROM score_submissions')[0]
+        for i in range(10):
+            value = hashlib.sha256(str(i).encode()).hexdigest()
+            score_reports.report(self.lsp, sid, {'browser': value, 'ip': value})
+        for path, pick in [('/ops/v1/recent', lambda d: next(r for r in d['runs'] if r['submissionId'] == sid)),
+                           ('/ops/v1/records', lambda d: d['feed'][0]),
+                           ('/ops/v1/hall-of-fame', lambda d: d['months'][0]['events'][0]['podium'][0]),
+                           ('/ops/v1/cars/7', lambda d: d['best'][0])]:
+            self.assertTrue(pick(self.get(path))['suspicious'], path)
+        score_reports.moderate(self.lsp, sid, 'hide')
+        self.assertNotIn(sid, [r['submissionId'] for r in self.get('/ops/v1/recent')['runs']])
+        self.assertEqual(self.get('/ops/v1/records')['feed'][0]['gamertag'], 'Bob')
+        self.assertEqual(self.get('/ops/v1/hall-of-fame')['months'][0]['events'][0]['podium'][0]['gamertag'], 'Bob')
+        self.assertEqual(self.get('/ops/v1/cars/7')['best'][0]['gamertag'], 'Bob')
+
+
 if __name__ == "__main__":
     unittest.main()

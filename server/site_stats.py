@@ -22,6 +22,7 @@ import time
 import ops_api
 import rivals
 import scoreboard
+import score_reports
 import ugc
 
 FESTIVAL = (1, 1)            # (scoreboardType, scoreType): Festival Routes, one board per route and class
@@ -129,16 +130,16 @@ _HISTORY_LOCK = threading.Lock()
 
 def _scan(lsp):
     h = _History(_Boards(lsp))
-    rows = lsp.DB.query("SELECT s.id, s.xuid, s.sb, s.st, s.gsid, s.track, s.car, s.cls, s.score, s.submitted, COALESCE(p.gamertag, '') AS tag "
+    rows = lsp.DB.query(f"SELECT s.id, {score_reports.COUNTS} AS report_count, s.xuid, s.sb, s.st, s.gsid, s.track, s.car, s.cls, s.score, s.submitted, COALESCE(p.gamertag, '') AS tag "
                         "FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid "
-                        "WHERE (s.sb = ? AND s.st = ?) OR (s.sb = ? AND s.st = ?) OR s.sb = 9 ORDER BY s.submitted, s.id",
+                        f"WHERE {score_reports.VISIBLE} AND ((s.sb = ? AND s.st = ?) OR (s.sb = ? AND s.st = ?) OR s.sb = 9) ORDER BY s.submitted, s.id",
                         FESTIVAL + MONTHLY)
     for r in rows:
         key = h.boards.key(r)
         if key is None:
             continue
         lower = key[0] in TIME_KINDS
-        run = {"xuid": r["xuid"], "tag": r["tag"], "score": r["score"], "car": r["car"], "cls": r["cls"], "at": r["submitted"]}
+        run = {**score_reports.fields(r), "xuid": r["xuid"], "tag": r["tag"], "score": r["score"], "car": r["car"], "cls": r["cls"], "at": r["submitted"]}
         b = h.per_board.setdefault(key, {"best": {}, "record": None})
         mine = b["best"].get(r["xuid"])
         if mine is None or (run["score"] < mine["score"] if lower else run["score"] > mine["score"]):
@@ -170,7 +171,7 @@ def record_history(lsp):
 
 def _record_out(lsp, h, rec, now):
     prev = rec["prev"]
-    return {"board": h.boards.info(rec["key"]), "xuid": rec["xuid"], "gamertag": _who(lsp, rec["xuid"], rec["tag"]), "score": rec["score"],
+    return {**{k: rec[k] for k in ("submissionId", "reports", "suspicious")}, "board": h.boards.info(rec["key"]), "xuid": rec["xuid"], "gamertag": _who(lsp, rec["xuid"], rec["tag"]), "score": rec["score"],
             "car": _car_name(lsp, rec["car"]), "carId": rec["car"], "class": _letter(rec["cls"]), "at": int(rec["at"]),
             "previous": {"xuid": prev["xuid"], "gamertag": _who(lsp, prev["xuid"], prev["tag"]), "score": prev["score"]} if prev else None,
             "margin": abs(prev["score"] - rec["score"]) if prev else None,
@@ -292,7 +293,7 @@ def cars(lsp, days, cls, limit):
 
 def _car_best(lsp, h, key, r):
     rec = h.per_board.get(key, {}).get("record")
-    return {"board": h.boards.info(key), "xuid": r["xuid"], "gamertag": _who(lsp, r["xuid"], r["tag"]), "score": r["score"],
+    return {**score_reports.fields(r), "board": h.boards.info(key), "xuid": r["xuid"], "gamertag": _who(lsp, r["xuid"], r["tag"]), "score": r["score"],
             "class": _letter(r["cls"]), "at": int(r["submitted"]),
             "record": rec is not None and (rec["car"], rec["xuid"], rec["score"]) == (r["car"], r["xuid"], r["score"])}
 
@@ -311,8 +312,8 @@ def car(lsp, car_id):
         raise ops_api.OpsError(404, "not_found", "unknown car")
     h = record_history(lsp)
     best = {}
-    for r in lsp.DB.query("SELECT s.xuid, s.sb, s.st, s.gsid, s.track, s.car, s.cls, s.score, s.submitted, COALESCE(p.gamertag, '') AS tag "
-                          f"FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid WHERE s.car = ? AND s.{RUN_FILTER}", (car_id,)):
+    for r in lsp.DB.query(f"SELECT s.id, {score_reports.COUNTS} AS report_count, s.xuid, s.sb, s.st, s.gsid, s.track, s.car, s.cls, s.score, s.submitted, COALESCE(p.gamertag, '') AS tag "
+                          f"FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid WHERE s.car = ? AND {score_reports.VISIBLE} AND s.{RUN_FILTER}", (car_id,)):
         key = h.boards.key(r)
         if key is None:
             continue
@@ -520,7 +521,7 @@ def totals(lsp):
         "GROUP BY e.id, e.length, e.laps", MONTHLY))
     seconds = db.one("SELECT COALESCE(SUM(score), 0) FROM score_submissions WHERE st = 1 AND sb IN (1, 3)")[0]
     fast = db.one("SELECT s.xuid, s.score, s.car, s.gsid, COALESCE(p.gamertag, '') AS tag FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid "
-                  "WHERE s.sb = 9 AND s.score <= ? ORDER BY s.score DESC, s.id LIMIT 1", (scoreboard.SPEED_CAP,))
+                  f"WHERE s.sb = 9 AND {score_reports.VISIBLE} AND s.score <= ? ORDER BY s.score DESC, s.id LIMIT 1", (scoreboard.SPEED_CAP,))
     designs = {r["kind"]: r["n"] for r in db.query("SELECT kind, COUNT(*) AS n FROM ugc_files WHERE removed = 0 GROUP BY kind")}
     return {"runs": lsp.SB.count(), "km": round(km), "hours": round(seconds / 3600.0, 1),
             "drivers": db.one("SELECT COUNT(*) FROM players WHERE gamertag <> ''")[0],

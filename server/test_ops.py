@@ -26,6 +26,9 @@ CREATE TABLE accounts (xuid INTEGER PRIMARY KEY, gamertag TEXT NOT NULL, created
 CREATE TABLE score_submissions (id INTEGER PRIMARY KEY AUTOINCREMENT, xuid INTEGER, sb INTEGER, st INTEGER, gsid INTEGER, track INTEGER,
     car INTEGER, cls INTEGER, cpi REAL, score REAL, clean INTEGER, stm INTEGER, tcs INTEGER, abs INTEGER,
     autobrake INTEGER NOT NULL DEFAULT 0, autoshift INTEGER NOT NULL DEFAULT 0, clutch INTEGER NOT NULL DEFAULT 0, submitted REAL, score_id BLOB);
+CREATE TABLE score_reports (submission_id INTEGER, browser TEXT, ip TEXT, created REAL, dismissed INTEGER DEFAULT 0,
+    PRIMARY KEY(submission_id, browser), UNIQUE(submission_id, ip));
+CREATE TABLE hidden_scores (submission_id INTEGER PRIMARY KEY, hidden_at REAL);
 CREATE TABLE score_ghosts (submission_id INTEGER PRIMARY KEY, data BLOB, uploaded REAL);
 CREATE TABLE player_xp (xuid INTEGER PRIMARY KEY, xp REAL NOT NULL, updated REAL NOT NULL);
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);

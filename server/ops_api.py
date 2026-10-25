@@ -8,6 +8,11 @@ Access: the API is off unless FH2MP_OPS_TOKEN is set. A request needs `Authoriza
 address in FH2MP_OPS_ALLOW (comma separated CIDRs, default loopback only; the website instance's private address goes here) and must
 not carry proxy headers, so nothing reachable through the public reverse proxy can ever get in. Wrong tokens are rate limited per IP.
 
+    GET    /ops/v1/lobbies                     occupied Free Roam / Road Trip worlds and their current stages
+    GET    /ops/v1/reports[?limit=&offset=]    reports queue and permanently hidden submissions
+    POST   /ops/v1/reports/<id>               {"browser": "<hash>", "ip": "<hash>}, duplicate protected
+    POST   /ops/v1/reports/<id>/hide          permanently suppress a run; preserve its data and ghost
+    POST   /ops/v1/reports/<id>/dismiss       archive reports, clearing the public warning
     GET    /ops/v1/overview                    counters for the dashboard and the public stats
     GET    /ops/v1/online                      players who polled the LSP in the last 40 s
     GET    /ops/v1/challenges[?top=3]          this rotation's Monthly Rivals events (+ best real times)
@@ -43,6 +48,7 @@ from urllib.parse import parse_qs, urlparse
 
 import rivals
 import scoreboard
+import score_reports
 import site_stats
 import social
 
@@ -139,6 +145,31 @@ def _route(lsp, method, path, body):
         raise OpsError(404, "not_found")
     what, rest = parts[2], parts[3:]
 
+    if what == "reports":
+        if not rest and method == "GET":
+            return 200, score_reports.queue(lsp, _int(q, "limit", 50, 1, 100), _int(q, "offset", 0, 0, 10**9))
+        if rest and rest[0].isdigit():
+            sid = int(rest[0])
+            if len(rest) == 1 and method == "POST":
+                return 200, score_reports.report(lsp, sid, _json(body))
+            if len(rest) == 2 and method == "POST":
+                return 200, score_reports.moderate(lsp, sid, rest[1])
+    if what == "lobbies" and not rest and method == "GET":
+        result = lsp.xbl.hub_lobbies()
+        if result is None:
+            raise OpsError(503, "unavailable", "the game server did not answer")
+        # Resolve private protocol IDs to nicknames here; public summaries contain no player IDs.
+        for lobby in result['lobbies']:
+            members = []
+            for value in lobby.pop('memberXuids', []):
+                xuid = int(value, 16)
+                name = lsp.TAGS.get(xuid)
+                if not name:
+                    row = lsp.DB.one("SELECT gamertag FROM players WHERE xuid = ?", (xuid,))
+                    name = row['gamertag'] if row else ''
+                members.append(name or 'Connecting player')
+            lobby['members'] = sorted(members, key=str.casefold)
+        return 200, result
     if what == "overview" and method == "GET":
         return 200, overview(lsp)
     if what == "online" and method == "GET":
@@ -211,7 +242,7 @@ def _gamertag(lsp, r):
 
 def _board_row(lsp, r, car_names):
     cls = r["cls"]
-    return {"position": r["position"], "xuid": r["xuid"], "gamertag": _gamertag(lsp, r), "score": r["score"],
+    return {**{k: r[k] for k in ("submissionId", "reports", "suspicious") if k in r}, "position": r["position"], "xuid": r["xuid"], "gamertag": _gamertag(lsp, r), "score": r["score"],
             "car": car_names.get(r["car"], ""), "carId": r["car"], "class": rivals.CLASS_LETTERS[cls] if 0 <= cls < len(rivals.CLASS_LETTERS) else "",
             "clean": r["clean"], "at": int(r["t"])}
 
@@ -340,8 +371,8 @@ def recent(lsp, limit):
     track_names = {t: f"{d['name']} {r['name']}" for d in route_catalog(lsp) for r in d["routes"] for t in r["tracks"]}
     events = {e["id"]: e["name"] for e in lsp.RIV.events()}
     names = lsp.RIV.names()["car"]
-    rows = lsp.DB.query("SELECT s.xuid, s.sb, s.gsid, s.track, s.car, s.cls, s.score, s.clean, s.submitted, COALESCE(p.gamertag, '') AS tag "
-                        "FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid WHERE s.st = ? AND s.sb IN (?, ?) "
+    rows = lsp.DB.query(f"SELECT s.id, {score_reports.COUNTS} AS report_count, s.xuid, s.sb, s.gsid, s.track, s.car, s.cls, s.score, s.clean, s.submitted, COALESCE(p.gamertag, '') AS tag "
+                        f"FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid WHERE s.st = ? AND s.sb IN (?, ?) AND {score_reports.VISIBLE} "
                         "ORDER BY s.submitted DESC, s.id DESC LIMIT ?", (FESTIVAL_BOARD[1], FESTIVAL_BOARD[0], MONTHLY_BOARD[0], limit * 3))
     out = []
     for r in rows:
@@ -354,7 +385,7 @@ def recent(lsp, limit):
         if where is None:
             continue                                      # a Monthly event of an earlier rotation: nothing to name it by
         cls = r["cls"]
-        out.append({"gamertag": _gamertag(lsp, r), "xuid": r["xuid"], "kind": kind, "where": where, "score": r["score"],
+        out.append({**score_reports.fields(r), "gamertag": _gamertag(lsp, r), "xuid": r["xuid"], "kind": kind, "where": where, "score": r["score"],
                     "car": names.get(r["car"], ""), "carId": r["car"],
                     "class": rivals.CLASS_LETTERS[cls] if 0 <= cls < len(rivals.CLASS_LETTERS) else "",
                     "clean": bool(r["clean"]), "at": int(r["submitted"])})

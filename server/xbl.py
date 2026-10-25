@@ -585,3 +585,18 @@ def create_game_session(mode, xuids=()):
             rec["change"] += 1
             _touch(rec, x)
     return name, TARGET_TEMPLATE
+
+
+def hub_lobbies():
+    """Live public summaries from the UDP hub, or None when it cannot be reached."""
+    import socket
+    target = os.environ.get("FH2MP_SERVER_CONTROL", "127.0.0.1:5090").rsplit(":", 1)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as so:
+            so.settimeout(0.3)
+            so.sendto(b"lobbies", (target[0], int(target[1])))
+            data, _ = so.recvfrom(65535)
+        result = json.loads(data)
+        return result if isinstance(result, dict) and isinstance(result.get("lobbies"), list) else None
+    except (OSError, ValueError):
+        return None
