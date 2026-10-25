@@ -440,6 +440,32 @@ class LspTests(unittest.TestCase):
         self.assertEqual(mine["position"] > 0, True)
         self.assertAlmostEqual(L.SB.add_xp(x, 10.0)[0] - L.SB.add_xp(x, 0.0)[0], 0.0)
 
+    def test_leaderboard_career_xp_survives_the_wire_and_restart(self):
+        S = "Forza.WebServices.Scoreboard"
+        xuid = L.CTX.xuid
+        xp = 2410000  # stock curve: level 125, bronze wristband
+        code, _ = call("Forza.WebServices.User", "Logon", {
+            "loginData": {"xuid": xuid, "gamerTag": "Level125", "currentCareerLevel": xp}})
+        self.assertEqual(code, 0)
+        self.assertEqual(L.DB.one("SELECT career_level FROM players WHERE xuid=?", (xuid,))[0], xp)
+        # The startup path reloads this persisted value into LEVELS.
+        L.LEVELS.pop(xuid)
+        L.LEVELS[xuid] = L.DB.one("SELECT career_level FROM players WHERE xuid=?", (xuid,))[0]
+        for sb, st, pivot in ((9, 5, 27), (1, 1, 2), (3, 1, 1000)):
+            d = dict(test_db.sub(50.0, sb=sb), gameScoreboardId=pivot)
+            self.assertIsNotNone(L.SB.submit(xuid, "Level125", st, d))
+            req = {"scoreboardType": sb, "scoreType": st, "trackId": 7, "pivotId": pivot,
+                   "maxResults": 100, "startAt": 1}
+            for method in ("GetRows", "GetRowsAnthem"):
+                code, res = call(S, method, req)
+                self.assertEqual(code, 0)
+                mine = next(r for r in res["rows"] if r["user"]["qwXuid"] == xuid)
+                self.assertEqual(mine["user"]["currentCareerLevel"], xp)
+                self.assertEqual(res["userRow"]["user"]["currentCareerLevel"], xp)
+            code, res = call(S, "GetRival", dict(req, rivalXuid=xuid))
+            self.assertEqual(code, 0)
+            self.assertEqual(res["rival"]["scoreData"]["user"]["currentCareerLevel"], xp)
+
     def test_stored_events_get_the_class_they_show_enforced(self):
         with L.DB.tx() as c:
             c.execute("DELETE FROM rival_events WHERE id=999001")
@@ -464,6 +490,21 @@ class LspTests(unittest.TestCase):
         for e in L.RIV._generate(5, 0):
             if e["kind"] in L.rivals.CLASS_ENFORCED:
                 self.assertEqual(e["attrs"].get("CarClassId"), e["cls"], e["name"])
+
+    def test_legacy_jaguar_class_is_enforced_with_only_one_stock_b_car(self):
+        with L.DB.tx() as c:
+            c.execute("INSERT INTO rival_events (id, month, reroll, idx, track, laps, length, kind, attrs, cls, name, trackname, description, created) "
+                      "VALUES (999002, 999, 0, 1, 849, 1, 2000.0, 'make', ?, 2, 'Jaguar Showdown', 'Old Town Circuit', '', 0)",
+                      (json.dumps({"MakeId": 19}),))
+        try:
+            self.assertEqual(L.RIV.enforce_stored_classes(), 1)
+            e = L.RIV.by_id(999002)
+            self.assertEqual((e["cls"], e["attrs"]), (2, {"MakeId": 19, "CarClassId": 2}))
+            self.assertIn('CarClassId="2"', L.game_options_xml(e))
+            self.assertEqual(L.RIV.enforce_stored_classes(), 0)
+        finally:
+            with L.DB.tx() as c:
+                c.execute("DELETE FROM rival_events WHERE id=999002")
 
     def test_rivals_events_are_stored_once(self):
         ev = L.RIV.events()

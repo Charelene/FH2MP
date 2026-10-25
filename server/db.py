@@ -398,7 +398,8 @@ CREATE TABLE invites (
     ALTER TABLE score_submissions ADD COLUMN autoshift BIGINT NOT NULL DEFAULT 0;
     ALTER TABLE score_submissions ADD COLUMN clutch BIGINT NOT NULL DEFAULT 0
     """,
-    # 9: career levels come from the client's save and some were absurd (prod 2026-10-22: 285229462, 3567658931); see clean_level
+    # 9 (historical bug): currentCareerLevel is career XP, not a display level. This clamp lost
+    # stored XP; subsequent Logons restore it. Kept in migration history, never repeated.
     """
     UPDATE players SET career_level = 999 WHERE career_level > 999;
     UPDATE players SET career_level = 1 WHERE career_level < 0
@@ -712,14 +713,33 @@ MAX_LEVEL = 999
 
 
 def clean_level(level):
-    """The career level a client reports (Logon currentCareerLevel is a number from its save file) kept in 1..MAX_LEVEL; anything that
-    is not a number counts as 1. None stays None (= not given)."""
+    """Sanitize the wire currentCareerLevel: cumulative career XP, a u32, NOT the displayed level.
+    players.career_level retains the historical wire-field name. None means not given."""
     if level is None:
         return None
     try:
-        return min(max(int(level), 1), MAX_LEVEL)
+        return min(max(int(level), 0), 0xFFFFFFFF)
     except (TypeError, ValueError, OverflowError):
-        return 1
+        return 0
+
+
+def display_level(career_xp):
+    """Stock FH2 XP-to-level curve, for human-facing APIs only. See docs/lsp.md for binary evidence.
+    The game receives the original XP and applies its own wristband definitions."""
+    xp = clean_level(career_xp) or 0
+    if xp < 210000:
+        return 1 + xp // 15000
+    if xp < 2910000:
+        return 15 + (xp - 210000) // 20000
+    # Gold levels cost 20,000 + 300 * n each (n starts at 1).
+    lo, hi = 0, 849
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if 2910000 + 20000 * mid + 150 * mid * (mid + 1) <= xp:
+            lo = mid
+        else:
+            hi = mid - 1
+    return 150 + lo
 
 
 def touch_player(c, xuid, tag="", seen=None, level=None):

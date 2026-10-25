@@ -68,7 +68,7 @@ OPS = ops_api.OpsConfig() # operator API access (token + allowed addresses), see
 # The client shows a club's level as clubXP / 100 + 1 (578 for 57713 XP, seen in game), and the club XP is what its members earned since they
 # joined: a one-member club of a level-41 player reads 480. FH2MP_CLUB_XP_DIVISOR scales the XP sent (12 puts a solo club near its member's level).
 CLUB_XP_DIVISOR = max(1, int(os.environ.get("FH2MP_CLUB_XP_DIVISOR", "1")))
-LEVELS = {}               # xuid -> currentCareerLevel as sent at Logon
+LEVELS = {}               # xuid -> currentCareerLevel as sent at Logon (career XP, NOT display level)
 TAGS = {}                 # xuid -> gamertag, learned at Logon
 
 
@@ -109,7 +109,7 @@ def logon(req):
     if getattr(CTX, "authed", False):
         lg["xuid"], lg["gamerTag"] = CTX.xuid, CTX.tag          # the account decides who this is, not what the client claims
     TAGS[lg["xuid"]] = lg["gamerTag"]
-    lg["currentCareerLevel"] = db.clean_level(lg["currentCareerLevel"])       # a number from the client's save: keep it sane
+    lg["currentCareerLevel"] = db.clean_level(lg["currentCareerLevel"])       # preserve career XP for the client's level lookup
     LEVELS[lg["xuid"]] = lg["currentCareerLevel"]
     with DB.tx() as c:
         db.touch_player(c, lg["xuid"], lg["gamerTag"], level=lg["currentCareerLevel"])
@@ -324,7 +324,7 @@ def drv_for_race(req):
 def _score_row(sc_row, rowdict):
     """Fill a ScoreboardRow (wire dict) from a scoreboard.py row."""
     user = rowdict["user"]
-    lvl = LEVELS.get(sc_row["xuid"], 100000 + scoreboard.hash_int(sc_row["tag"], "lvl") % 900000)
+    lvl = db.clean_level(LEVELS.get(sc_row["xuid"], 0))
     user.update({"qwXuid": sc_row["xuid"], "wzGamerTag": (sc_row["tag"] or TAGS.get(sc_row["xuid"], ""))[:15],
                  "currentCareerLevel": lvl})
     rowdict.update({
@@ -342,8 +342,11 @@ def sb_submit_score(req):
     s = SB.submit(xuid, tag, req["type"], d)
     if s is None:
         score = scoreboard.u64_to_dbl(d["score"])
+        required_class = SB.event_class(d["scoreboardType"], d["gameScoreboardId"])
         why = ("class X/R not allowed on a Rivals board" if (d["scoreboardType"] in scoreboard.EVENT_BOARDS and
                                                               d["carClassId"] in scoreboard.MAXED_CLASSES) else
+               f"car class {d['carClassId']} does not match event class {required_class}"
+               if required_class is not None and d["carClassId"] != required_class else
                f"speed {score:.3f} m/s is above the {scoreboard.SPEED_CAP} m/s cap" if math.isfinite(score) else "score is not a finite number")
         log(f"  SubmitScore board=({d['scoreboardType']},{req['type']}) track={d['trackId']}: ignored, {why}")
         return None
@@ -726,7 +729,7 @@ def _owner(tmpl, xuid):
     o = _clone(tmpl)
     club_id, club_tag, role = CLUBS.member_info(xuid) if CLUBS else (0, "", 0)
     o.update({"qwXuid": xuid, "wzGamerTag": (TAGS.get(xuid) or _tag_from_db(xuid))[:31],
-              "currentCareerLevel": LEVELS.get(xuid, 1), "clubId": club_id, "clubTag": club_tag[:9], "roleInClub": clubs.wire_role(role)})
+              "currentCareerLevel": db.clean_level(LEVELS.get(xuid, 0)), "clubId": club_id, "clubTag": club_tag[:9], "roleInClub": clubs.wire_role(role)})
     return o
 
 
@@ -1790,7 +1793,7 @@ def social_api(method, path, body):
     parts = [p for p in path.split("?")[0].split("/") if p]
     try:
         if parts[:2] == ["api", "players"] and len(parts) == 2 and method == "GET":
-            return 200, {"players": [{"xuid": r["xuid"], "gamertag": r["gamertag"], "level": r["career_level"], "friends": r["friends"],
+            return 200, {"players": [{"xuid": r["xuid"], "gamertag": r["gamertag"], "level": db.display_level(r["career_level"]), "friends": r["friends"],
                                       "hasGamerpic": bool(r["has_gamerpic"])} for r in SOCIAL.players()]}, None
         if parts[:2] == ["api", "friends"]:
             if len(parts) == 3 and method == "GET":

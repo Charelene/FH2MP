@@ -299,9 +299,11 @@ class ReadTests(unittest.TestCase):
         self.assertEqual(o["events"][0]["rows"], [])
 
     def test_players_search_and_paging(self):
+        self.lsp.DB.execute("UPDATE players SET career_level=2410000 WHERE xuid=1")
         _, o = call(self.lsp, "GET", "/ops/v1/players")
         self.assertEqual([p["gamertag"] for p in o["players"]], ["Alice", "Bob", "Cara"])      # most recently active first
         self.assertTrue(o["players"][0]["online"])
+        self.assertEqual(o["players"][0]["level"], 125)
         _, o = call(self.lsp, "GET", "/ops/v1/players?q=ob")
         self.assertEqual((o["total"], o["players"][0]["gamertag"]), (1, "Bob"))
         _, o = call(self.lsp, "GET", "/ops/v1/players?q=3")                                      # an xuid

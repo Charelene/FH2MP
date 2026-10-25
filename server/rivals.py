@@ -260,10 +260,9 @@ class RivalCatalog:
         return None
 
     def enforce_stored_classes(self):
-        """Events stored before the card class was enforced (GitHub issue: "Made in Italy" shows A class but the car selector lets any Italian
-        car in). Their restriction has no CarClassId although the card shows the class; add it (the same class the card shows) when at least
-        MIN_CARS cars match (otherwise the theme's most common class, which also becomes the class on the card), so the selector agrees with the card. Times already on those boards stay. Idempotent; returns the number of
-        events changed (their text is refreshed by refresh_texts)."""
+        """Enforce the advertised class on legacy themed events. MIN_CARS only selects new themes:
+        owned cars can be upgraded, so a small stock pool must not leave an existing event unrestricted.
+        Preserve the advertised class and event id. Idempotent; texts are refreshed separately."""
         if self.database is None:
             return 0
         changed = 0
@@ -273,12 +272,6 @@ class RivalCatalog:
                 if e["kind"] not in CLASS_ENFORCED or "CarClassId" in e["attrs"] or e["cls"] is None:
                     continue
                 pick = e["cls"]
-                if self._count(dict(e["attrs"], CarClassId=pick))[0] < MIN_CARS:
-                    # the class on the card has too few cars to be enforced: use the theme's most common class instead (as new events do)
-                    counts = {k: self._count(dict(e["attrs"], CarClassId=k))[0] for k in range(len(CLASS_LETTERS))}
-                    pick = max(counts, key=counts.get)
-                    if counts[pick] < MIN_CARS:
-                        continue
                 c.execute("UPDATE rival_events SET attrs=?, cls=? WHERE id=?",
                           (json.dumps(dict(e["attrs"], CarClassId=pick)), pick, r["id"]))
                 changed += 1

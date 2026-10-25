@@ -54,19 +54,29 @@ class SchemaTests(Base):
         self.assertEqual(self.db.one("SELECT COUNT(*) FROM players")[0], 0)
 
 
+class DisplayLevelTests(unittest.TestCase):
+    def test_stock_wristband_thresholds(self):
+        for xp, level in ((0, 1), (999, 1), (14999, 1), (15000, 2), (209999, 14), (210000, 15),
+                          (2410000, 125), (2909999, 149), (2910000, 150), (2930299, 150),
+                          (2930300, 151), (128137499, 998), (128137500, 999), (0xFFFFFFFF, 999)):
+            self.assertEqual(db.display_level(xp), level, xp)
+
+
 class LevelTests(Base):
-    """A client reports its own career level: prod had 285229462 and 3567658931."""
+    """currentCareerLevel is cumulative XP; clamping it to 999 makes the client show level 1."""
 
     def level(self, reported):
         with self.db.tx() as c:
             db.touch_player(c, 7, "tag", level=reported)
         return self.db.one("SELECT career_level FROM players WHERE xuid=7")[0]
 
-    def test_levels_are_kept_in_range(self):
+    def test_career_xp_is_preserved_in_u32_range(self):
         self.assertEqual(self.level(41), 41)
-        self.assertEqual(self.level(3567658931), 999)
-        self.assertEqual(self.level(-5), 1)
-        self.assertEqual(self.level("junk"), 1)
+        self.assertEqual(self.level(2410000), 2410000)
+        self.assertEqual(self.level(3567658931), 3567658931)
+        self.assertEqual(self.level(1 << 32), 0xFFFFFFFF)
+        self.assertEqual(self.level(-5), 0)
+        self.assertEqual(self.level("junk"), 0)
 
     def test_no_level_leaves_the_stored_one(self):
         self.level(41)
@@ -79,6 +89,22 @@ class ScoreTests(Base):
     def setUp(self):
         super().setUp()
         self.sc = scoreboard.ScoreStore(self.db, ["A", "B", "C"])
+
+    def test_monthly_class_is_checked_before_best_selection(self):
+        event = {"attrs": {"MakeId": 19, "CarClassId": 2}, "cls": 2}
+        # Simulate a legacy S2 PB that predates validation and a slower valid B run.
+        self.sc.submit(10, "Jaguar", 1, dict(sub(61.410, sb=3), carClassId=5))
+        self.sc.submit(10, "Jaguar", 1, sub(70.0, sb=3))
+        self.sc.event_info = lambda event_id: event if event_id == 1 else None
+        self.assertIsNone(self.sc.submit(11, "S2", 1, dict(sub(60.0, sb=3), carClassId=5)))
+        self.assertIsNone(self.sc.submit(11, "D", 1, dict(sub(80.0, sb=3), carClassId=0)))
+        self.assertIsNotNone(self.sc.submit(11, "B", 1, sub(68.0, sb=3)))
+        self.assertEqual(self.sc.best_of(10, 3, 1, 7, 1)["score"], 70.0)
+        self.assertEqual([r["cls"] for r in self.sc.top(3, 1, 7, 1)], [2, 2])
+        self.assertEqual(self.sc.rival_for(11, 3, 1, 7, 1, 10)["score"], 70.0)
+        # Open events' illustrative card class must not become a restriction.
+        event["attrs"] = {}
+        self.assertIsNotNone(self.sc.submit(11, "S2", 1, dict(sub(60.0, sb=3), carClassId=5)))
 
     def test_best_per_player_direction(self):
         # scoreType 1 is ascending (times), 2 descending

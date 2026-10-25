@@ -51,6 +51,7 @@ import scoreboard
 import score_reports
 import site_stats
 import social
+import db
 
 STARTED = time.time()
 MONTHLY_BOARD = (3, 1)                  # (scoreboardType, scoreType) of a Monthly Rivals event; the pivot is the event id
@@ -415,7 +416,7 @@ def players(lsp, text, limit, offset):
         "LIMIT ? OFFSET ?", args + [limit, offset])
     return {"total": total, "players": [
         {"xuid": r["xuid"], "gamertag": r["gamertag"], "created": int(r["created"]), "lastLogin": int(r["last_login"]),
-         "lastSeen": int(r["last_seen"]), "level": r["level"], "xp": int(r["xp"]), "online": social.online(r["xuid"]),
+         "lastSeen": int(r["last_seen"]), "level": db.display_level(r["level"]), "xp": int(r["xp"]), "online": social.online(r["xuid"]),
          "banned": r["banned_at"] is not None, "banReason": r["ban_reason"]} for r in rows]}
 
 

@@ -64,6 +64,11 @@ class ScoreStore:
         return self.db.one("SELECT COUNT(*) FROM score_submissions")[0]
 
     # ---- writes
+    def event_class(self, sb, event_id):
+        """The event restriction, not its illustrative card class (open events have a card class too)."""
+        e = self.event_info(event_id) if sb in EVENT_BOARDS else None
+        return e.get("attrs", {}).get("CarClassId") if e else None
+
     def submit(self, xuid, tag, score_type, d):
         """Stores one submission and returns it as a row dict, or None if the score is not a finite number
         (a NaN/inf time must never reach a public board) or the car is class X/R on a Rivals board (user
@@ -74,6 +79,9 @@ class ScoreStore:
         if d["scoreboardType"] in SPEED_BOARDS and score > SPEED_CAP:
             return None
         if d["scoreboardType"] in EVENT_BOARDS and d["carClassId"] in MAXED_CLASSES:
+            return None
+        required_class = self.event_class(d["scoreboardType"], d["gameScoreboardId"])
+        if required_class is not None and d["carClassId"] != required_class:
             return None
         now = time.time()
         score_id = os.urandom(16)
@@ -149,6 +157,10 @@ class ScoreStore:
         if (sb in EVENT_BOARDS or sb in GSID_BOARDS) and pivot > 0:   # one board per event / per trap or zone (the client's track field is 0, the track or 65535)
             where += " AND s.gsid=?"
             args.append(pivot)
+            required_class = self.event_class(sb, pivot)
+            if required_class is not None:
+                where += " AND s.cls=?"
+                args.append(required_class)
         elif track not in (-1, 65535):
             where += " AND s.track=?"
             args.append(track)
