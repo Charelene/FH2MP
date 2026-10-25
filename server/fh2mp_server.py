@@ -212,6 +212,8 @@ MSG_SCORE_KEYFRAME = 45             # key | 5 x blob | u32 | 3 x u8 | 3 x bool (
 RACE_FLAGS_CLEAR_SECONDS = 4.0       # after InRace=0, drop RaceReady/ParticipantsSelected as well
 RACE_LAST_FINISHER_SECONDS = 30.0   # after the first finisher the others get this long (client UI: RACE ENDS IN)
 CAR_PREDICTION_BODY_BITS = 710      # CarPredictionFull body, see the handler
+CAR_UNIVERSE_OFFSET = 395          # CarPredictionState +0x33, five bits; confirmed chain in docs/protocol.md
+CAR_UNIVERSE_MASK = 31 << CAR_UNIVERSE_OFFSET
 CAR_POLICY = os.environ.get("FH2MP_CAR_POLICY", "kick")   # a car in BLOCKED_CARS (traffic vehicles): off = ignore, log = report it, kick = withhold it and end the account's connections
 PART_POLICY = os.environ.get("FH2MP_PART_POLICY", "fix")     # a car whose part list holds an id that is not in the game data (it crashes the other clients that build it): fix = relay it with stock parts / log / kick / off
 UNKNOWN_CAR_POLICY = os.environ.get("FH2MP_UNKNOWN_CAR_POLICY", "standin")   # a car that is in neither the game data, the synced car database nor data/dlc_cars.txt (a car pack the server does not have): standin = the others see STANDIN_CAR / off / log / kick
@@ -1157,6 +1159,9 @@ class Peer:
         self.last_time_sync = time.monotonic()    # the connect handshake sends the first TimeSync
         self.cars_relayed = 0
         self.car_id = None         # id of this client's own car object (from its CarPredictionFull keys)
+        self.car_prediction = None # last (id, body, bits), for immediate rephasing when event membership changes
+        self.car_prediction_stamp = None # newest forwarded prediction time, including synthetic rephasing updates
+        self.private_universe = None # assigned at session entry; never shared with another connected player
         self.lobby_type = 0        # OpenConnection field a: Nerd::NetworkLobbyType the client joined (1 RoadTrip, 2 FreeRoam, 3 CarMeet)
         self.xuid = 0              # the client's Xbox user id (OpenConnection playerId)
         self.cm_seq = 1            # Car Meet: seq of the last CarMeetSynced message sent to this client (create = 1)
@@ -1627,15 +1632,68 @@ class Server:
         else:
             self.flush_peer(peer)       # a stranger or a removed client (CloseConnection): nothing will flush it later
 
-    def relay(self, sender: Peer, msg) -> None:
+    def relay(self, sender: Peer, msg, *, same_event: bool = False) -> None:
         """send(fast=True) of one message to everybody else in the sender's world: the hot path (every car update)."""
         baked = bake(msg)
         due = time.monotonic() + RELAY_FLUSH_SECONDS
         for q in self.others(sender):
+            if same_event and not self.same_event(sender, q):
+                continue
             q.outbox.append(baked)
             if due < q.due:
                 q.due = due
             self.dirty.add(q)
+
+    def same_event(self, a: Peer, b: Peer) -> bool:
+        """Results/loading remain isolated until the player actually returns to free roam.
+
+        Use the server's roster, not Console.ParticipatingInRace: finished players retain
+        that flag for the results even after leaving, and clients can report stale flags.
+        """
+        people = self.event["people"] if self.event else ()
+        return (a in people) == (b in people)
+
+    def relay_prediction(self, sender: Peer, *, refresh: bool = False) -> None:
+        if sender.car_prediction is None:
+            return
+        cid, body, size = sender.car_prediction
+        if size != CAR_PREDICTION_BODY_BITS:
+            return
+        stamp_offset = CAR_PREDICTION_BODY_BITS - 32
+        stamp = body >> stamp_offset
+        previous = sender.car_prediction_stamp
+        if refresh and previous is not None:
+            # RemoteCarPrediction rejects times <= its last applied time (FUN_1409ecf00).
+            # Advance by one tick so a cached stationary car really changes universe.
+            stamp = (previous + 1) & 0xFFFFFFFF
+            body = (body & ((1 << stamp_offset) - 1)) | (stamp << stamp_offset)
+        if previous is None or 0 < ((stamp - previous) & 0xFFFFFFFF) < 0x80000000:
+            sender.car_prediction_stamp = stamp
+        visible = bake(relay_car_prediction(cid, sender.owner_id, body, size))
+        hidden = None
+        due = time.monotonic() + RELAY_FLUSH_SECONDS
+        for q in self.others(sender):
+            msg = visible
+            if not self.same_event(sender, q):
+                # Keep the object and its live physics state, but put it in its owner's
+                # unique private universe on the opposite side of the event boundary.
+                # Dropping predictions would leave a solid car at its last position.
+                private = sender.private_universe
+                if private is None:
+                    continue
+                if hidden is None:
+                    phased = (body & ~CAR_UNIVERSE_MASK) | (private << CAR_UNIVERSE_OFFSET)
+                    hidden = bake(relay_car_prediction(cid, sender.owner_id, phased, size))
+                msg = hidden
+            q.outbox.append(msg)
+            q.due = min(q.due, due)
+            self.dirty.add(q)
+
+    def refresh_car_phasing(self) -> None:
+        """Rephase stationary cars too; do not wait for another prediction after a quit."""
+        for q in self.peers.values():
+            if q.connected and q.entered and not q.kick_reason:
+                self.relay_prediction(q, refresh=True)
 
     def flush_peer(self, peer: Peer) -> None:
         out, peer.outbox = peer.outbox, []
@@ -1844,6 +1902,7 @@ class Server:
         """Back to the idle lobby: clear the SessionHost race flags so the next event starts clean."""
         self.event = None
         self.pending_race = None
+        self.refresh_car_phasing()
         for var in (SH_IN_RACE, SH_RACE_PARTICIPANTS_SELECTED, SH_RACE_READY):
             self.set_session_host_bool(var, 0, f"event over: {why}")
         for q in self.peers.values():
@@ -2101,6 +2160,7 @@ class Server:
         ev = self.event
         left_early = peer not in ev.get("finished", {})
         ev["people"].remove(peer)
+        self.refresh_car_phasing()
         if left_early and peer.connected:
             self.set_console_bool(peer, CONSOLE_VAR_PARTICIPATING_IN_RACE, 0, "left the event")
         if not ev["people"]:
@@ -2136,6 +2196,7 @@ class Server:
             ev["people"].remove(q)
             if q.connected:
                 self.set_console_bool(q, CONSOLE_VAR_PARTICIPATING_IN_RACE, 0, why)
+        self.refresh_car_phasing()
         if not any(q.connected for q in ev["people"]):
             self.end_event("nobody loaded the event in time")
         else:
@@ -2189,6 +2250,7 @@ class Server:
                 q.console_vars.pop(stale, None)
             self.set_console_bool(q, CONSOLE_VAR_PARTICIPATING_IN_RACE, 1, "participant selected")
         self.set_session_host_bool(SH_RACE_PARTICIPANTS_SELECTED, 1, "participants selected")
+        self.refresh_car_phasing()
 
     def assign_teams(self, people, what: str) -> None:
         """Two teams, red (0) and blue (1), alternating over a shuffled order; the starting grid keeps that order (odd slots red)."""
@@ -2754,7 +2816,7 @@ class Server:
                         w.pos += 192
                 else:
                     msg = relay_score_message(mtype, cid, peer.owner_id, rest, 192)
-                self.relay(peer, msg)
+                self.relay(peer, msg, same_event=True)
                 peer.collisions_relayed = getattr(peer, "collisions_relayed", 0) + 1
                 if peer.collisions_relayed <= 3 or peer.collisions_relayed % 200 == 0:
                     self.log(f"{addr[1]} car collision #{peer.collisions_relayed} relayed")
@@ -2818,8 +2880,15 @@ class Server:
                     self.note("car", peer.owner_id, f"pos=({pos[0]:.0f},{pos[1]:.0f},{pos[2]:.0f}) id={cid}")
                 if a == 0 and b == 0 and not peer.kick_reason:
                     peer.car_id = cid
-                    msg = relay_car_prediction(cid, peer.owner_id, rest, rest_bits)
-                    self.relay(peer, msg)
+                    if rest_bits == CAR_PREDICTION_BODY_BITS:
+                        old = peer.car_prediction
+                        stamp_offset = CAR_PREDICTION_BODY_BITS - 32
+                        if old is None or old[0] != cid:
+                            peer.car_prediction_stamp = None
+                        elif not 0 < (((rest >> stamp_offset) - (old[1] >> stamp_offset)) & 0xFFFFFFFF) < 0x80000000:
+                            continue  # reordered/duplicate prediction: never cache old physics for a later rephase
+                        peer.car_prediction = (cid, rest, rest_bits)
+                        self.relay_prediction(peer)
             elif mtype == MSG_REPAIR_DAMAGE:
                 kind, cid, _ = read_car_key(r)
                 if kind == "own":
