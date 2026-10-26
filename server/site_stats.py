@@ -11,7 +11,7 @@ to /admin/result). The record history is one pass over every time and speed run,
     GET /ops/v1/cars[?days=&class=&limit=]         most raced cars, makes and classes (days=0: all time)
     GET /ops/v1/cars/<id>                          one car: catalog facts, best time per board, records, drivers, runs per week
     GET /ops/v1/garage[?kind=&sort=&limit=&offset=]  shared liveries / tunes / photos, by likes, downloads or newest
-    GET /ops/v1/garage/<id>/preview.png            a design's preview picture (the PNG the creator's game uploaded)
+    GET /ops/v1/garage/<id>/preview.png            a design thumbnail or completed full-size photo upload (PNG or JPEG)
     GET /ops/v1/history[?range=24h|7d|30d]         players online over time, peaks, sign-ups / runs / racers per day
     GET /ops/v1/totals                             all-time counters and the online event tallies
 """
@@ -346,8 +346,10 @@ def garage(lsp, kind, sort, limit, offset, top=5):
     if sort not in GARAGE_SORTS:
         raise ops_api.OpsError(400, "bad_request", f"sort must be one of {', '.join(GARAGE_SORTS)}")
     rows = lsp.DB.query("SELECT f.id, f.owner, f.title, f.description, f.created, f.car_id, f.class_id, f.downloads, f.likes, f.uses, "
-                        "COALESCE(p.gamertag, '') AS tag, CASE WHEN f.preview IS NULL OR LENGTH(f.preview) = 0 THEN 0 ELSE 1 END AS has_preview "
-                        "FROM ugc_files f LEFT JOIN players p ON p.xuid = f.owner WHERE f.removed = 0 AND f.kind = ? "
+                        "COALESCE(p.gamertag, '') AS tag, CASE WHEN f.preview IS NOT NULL AND LENGTH(f.preview) > 0 THEN 1 "
+                        "WHEN f.kind = 'photo' AND b.id IS NOT NULL AND b.received >= b.total_size THEN 1 ELSE 0 END AS has_preview "
+                        "FROM ugc_files f LEFT JOIN players p ON p.xuid = f.owner LEFT JOIN ugc_blobs b ON b.id = f.blob_id "
+                        "WHERE f.removed = 0 AND f.kind = ? "
                         f"ORDER BY {GARAGE_SORTS[sort]}, f.id DESC LIMIT ? OFFSET ?", (kind, limit, offset))
     counts = {r["kind"]: r["n"] for r in lsp.DB.query("SELECT kind, COUNT(*) AS n FROM ugc_files WHERE removed = 0 GROUP BY kind")}
     creators = lsp.DB.query("SELECT f.owner, COALESCE(p.gamertag, '') AS tag, COUNT(*) AS n, SUM(f.downloads) AS downloads, SUM(f.likes) AS likes "
@@ -363,9 +365,18 @@ def garage(lsp, kind, sort, limit, offset, top=5):
 
 
 def garage_preview(lsp, file_id):
-    # Photos are stored as the JPEG the game uploaded; liveries and tunes are PNG. Serve either, as the bytes stored.
-    r = lsp.DB.one("SELECT preview FROM ugc_files WHERE id = ? AND removed = 0", (_int(file_id, "design"),))
-    data = ugc.unpack(r["preview"]) if r else b""
+    # A photo's full image is its completed content upload; previewData is only the storefront thumbnail. Prefer the original JPEG
+    # for the website's cards and larger view, and fall back to previewData for older or non-image uploads.
+    r = lsp.DB.one("SELECT f.kind, f.preview, b.data AS original, b.received, b.total_size "
+                   "FROM ugc_files f LEFT JOIN ugc_blobs b ON b.id = f.blob_id "
+                   "WHERE f.id = ? AND f.removed = 0", (_int(file_id, "design"),))
+    data = b""
+    if r and r["kind"] == "photo" and r["original"] is not None and r["received"] >= r["total_size"]:
+        original = ugc.unpack(r["original"])
+        if original.startswith(b"\xff\xd8\xff") or original.startswith(b"\x89PNG\r\n\x1a\n"):
+            data = original
+    if not data:
+        data = ugc.unpack(r["preview"]) if r else b""
     if not (data[:8] == b"\x89PNG\r\n\x1a\n" or data[:3] == b"\xff\xd8\xff"):
         raise ops_api.OpsError(404, "not_found", "no preview")
     return data
