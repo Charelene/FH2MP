@@ -105,9 +105,29 @@ class Neutralize(unittest.TestCase):
     def test_the_electric_car_keeps_its_motor_row(self):
         w = [P.PART_NONE] * P.PART_SLOTS
         w[0], w[2] = P.STOCK["Motor"][2101], P.STOCK["CarBody"][2101]   # slot 0 holding the Motor row is a guess; it must stay either way
+        w[8] = P.STOCK["TireCompound"][2101]
         w[42] = P.STOCK["MotorParts"][P.INSTALLS["Motor"][w[0]]]
         fixed, changes, _ = parts.neutralize(w)
         self.assertEqual((fixed, changes), (w, []))
+
+    def test_a_known_id_from_another_table_is_not_a_valid_tire(self):
+        # Seen on prod at 22:12:43: car 2391, slot 8 = 2391004. A known id does not make the tire query return a row.
+        w = stock_car(2391)
+        w[8] = 2391004
+        self.assertIn(w[8], P.ALL_IDS)
+        self.assertNotIn(w[8], P.TABLE_IDS["TireCompound"])
+        fixed, changes, odd = parts.neutralize(w)
+        self.assertEqual(fixed[8], P.STOCK["TireCompound"][2391])
+        self.assertEqual(changes, [(8, w[8], fixed[8], "an id of another part table")])
+        self.assertEqual(odd, [])
+
+    def test_a_missing_tire_is_replaced_too(self):
+        w = stock_car(self.INTEGRA)
+        w[8] = P.PART_NONE
+        fixed, changes, odd = parts.neutralize(w)
+        self.assertEqual(fixed, stock_car(self.INTEGRA))
+        self.assertEqual(changes, [(8, P.PART_NONE, fixed[8], "missing tire compound")])
+        self.assertEqual(odd, [])
 
     def test_a_missing_optional_part_becomes_none(self):
         w = stock_car(self.INTEGRA)
@@ -117,13 +137,38 @@ class Neutralize(unittest.TestCase):
         eng = P.INSTALLS["Engine"][w[0]]
         self.assertEqual(fixed[k], P.STOCK["EngineTurboTwin"].get(eng, P.PART_NONE))
 
-    def test_a_row_of_another_engine_is_only_reported(self):
+    def test_a_camshaft_of_another_engine_is_replaced(self):
         w = stock_car(self.INTEGRA)
         other = next(i for i, o in P.ROW_OWNER["EngineCamshaft"].items() if o != P.INSTALLS["Engine"][w[0]])
         w[12] = other
         fixed, changes, odd = parts.neutralize(w)
-        self.assertEqual((fixed, changes), (w, []))
-        self.assertEqual([s for s, _, _ in odd], [12])
+        self.assertEqual(fixed, stock_car(self.INTEGRA))
+        self.assertEqual([s for s, _, _, _ in changes], [12])
+
+        self.assertEqual(odd, [])
+
+    def test_crash_52_received_engine_fallback_keeps_matching_subparts(self):
+        # Actual list received by Charelene just before the 00:10:15 UTC lobby wipe.
+        # The old server had already replaced 2280350 with stock 2280000 (engine
+        # 2410), but retained camshaft 2592000, owned by engine 2592. Native
+        # CreateEnginePartUpgradeRecord rejects it; RedlineRPM then dereferences NULL.
+        words = [2280000, 2280001, 2280000, P.PART_NONE, 2280003, 2280004,
+                 2280000, 2280000, 2280005, 2280000, 2280000, 2280000,
+                 2592000, 2410000, 2410000, 2410000, 2410000, 2410000,
+                 2410000, 2410000, 2410000, P.PART_NONE, P.PART_NONE,
+                 2410000, P.PART_NONE, P.PART_NONE, P.PART_NONE,
+                 P.PART_NONE, P.PART_NONE, 2410000, 2102003, 2102004,
+                 2102003, 2102003, 2280000, 2280000, 2280000, 2280000,
+                 2280002, 2280005, 2280003, 2280000, P.PART_NONE]
+        fixed, changes, _ = parts.neutralize(words)
+        self.assertEqual(fixed[12], 2410000)
+        self.assertEqual(fixed[:12] + fixed[13:], words[:12] + words[13:])
+        self.assertEqual([s for s, _, _, _ in changes], [12])
+        # An unsupported engine row must be fixed before checking its sub-parts.
+        words[0] = 2280350
+        fixed, changes, _ = parts.neutralize(words)
+        self.assertEqual((fixed[0], fixed[12]), (2280000, 2410000))
+        self.assertEqual([s for s, _, _, _ in changes], [0, 12])
 
     def test_without_a_car_body_row_nothing_is_rewritten(self):
         w = stock_car(self.INTEGRA)
@@ -149,8 +194,8 @@ class CarFromParts(unittest.TestCase):
         return T.world()
 
     def object_for(self, car_id):
-        cars = stock_list()
-        cars[2] = car_id * 1000
+        stock = stock_car(car_id)
+        cars = dict(enumerate(stock)) if stock else {**stock_list(), 2: car_id * 1000}
         return player_object(cars, 910)
 
     def test_a_traffic_car_is_withheld_and_its_owner_removed(self):
@@ -292,6 +337,28 @@ class RentalChoices(unittest.TestCase):
     def world(self):
         import test_freeroam_tag_grant as T
         return T.world()
+
+    def test_class_R_repair_reaches_the_owner_as_an_authority_update(self):
+        import fh2mp_server as S
+        from unittest import mock
+        w, (a, _b) = self.world()
+        a.rental_car = self.JAG
+        with mock.patch.object(w, "send") as send:
+            bits, short = parts.choices_update(7, 1.0)
+            w.short_rental_choices(a, bits, short)
+        recipient, messages = send.call_args.args
+        self.assertIs(recipient, a)
+        value, size = S.bake(messages[0])
+        r = S.BitReader(value.to_bytes((size + 7) // 8, "little"))
+        self.assertEqual((r.bits(7), r.bits(4), r.bits(1), r.bits(1)), (S.MSG_OBJECT_UPDATE, 1, 1, 1))
+        self.assertEqual(r.bits(S.ROUTER_BITS[1][0]), 0)
+        self.assertEqual(r.bits(8), 0)
+        body_bits = r.bits(14)
+        body = r.bits(body_bits)
+        cls, pi = parts.read_short_choices(body, parts.find_short_choices(body_bits, body))
+        self.assertEqual(cls, 3)
+        self.assertAlmostEqual(pi, S.CAR_CHOICES[self.JAG][1], places=4)
+        self.assertEqual(a.player_seq, 1)
 
     def test_the_codec_round_trips(self):
         bits, v = choices_bits(7, 1.1)

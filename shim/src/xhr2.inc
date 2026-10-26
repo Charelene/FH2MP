@@ -657,6 +657,8 @@ static DWORD WINAPI xhr_thread(LPVOID param)
         g_wh.addhdr(req, hdrline, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
     }
     g_wh.addhdr(req, L"X-FH2MP-Shim: " FH2MP_WSTR(FH2MP_SHIM_VERSION), (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+    restricted_tools_header(hdrline);
+    g_wh.addhdr(req, hdrline, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
     if (g_gamedb_path[0]) { /* the car database the game runs with (gamedb_hash); the server refuses a different one */
         char hex[65];
         int k;

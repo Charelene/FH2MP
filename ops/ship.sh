@@ -43,8 +43,13 @@ done
 FH2MP_CONFIRM_TAG="$tag" ops/release-prod.sh "$tag" "$host" "$key" --yes-prod
 
 echo "== lifting the maintenance message"
-ssh -i "$key" "$host" 'T=$(sudo -n systemctl show fh2mp-lsp -p Environment --value | tr " " "\n" | sed -n "s/^FH2MP_OPS_TOKEN=//p")
-  curl -sS -o /dev/null -X PUT -H "Authorization: Bearer $T" -H "Content-Type: application/json" --data "{\"maintenance\": \"\"}" http://127.0.0.1:5080/ops/v1/config
-  curl -sS http://127.0.0.1:5080/v1/launcher/config | python3 -c "import json,sys; print(\"maintenance:\", repr(json.load(sys.stdin).get(\"maintenance\")))"'
+ssh -i "$key" "$host" 'sudo -n bash -s' <<'REMOTE'
+set -euo pipefail
+release_ops_token=$(systemctl show fh2mp-lsp -p Environment --value | tr ' ' '\n' | sed -n 's/^FH2MP_OPS_TOKEN=//p')
+[ -n "$release_ops_token" ] || { echo 'operator token unavailable; maintenance was not cleared'; exit 1; }
+printf 'header = "Authorization: Bearer %s"\n' "$release_ops_token" | curl --config - -fsS -o /dev/null -X PUT \
+  -H 'Content-Type: application/json' --data '{"maintenance":""}' http://127.0.0.1:5080/ops/v1/config
+curl -fsS http://127.0.0.1:5080/v1/launcher/config | python3 -c 'import json,sys; c=json.load(sys.stdin); assert c.get("maintenance") == "", "maintenance is still active"; print("maintenance cleared")'
+REMOTE
 git checkout -q develop
 echo "done: $tag is live (back on develop)."

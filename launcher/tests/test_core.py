@@ -570,6 +570,20 @@ class ShimTests(unittest.TestCase):
             self.assertIn("FH2MP.dll", str(cm.exception))
             self.assertEqual(self.read(target), self.DLL)
 
+    def test_loaded_platform_upgrade_uses_rename_instead_of_delete(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = self.write(platform_dll("2.7.1"), d, "d3dcompiler_47.dll")
+            target = os.path.join(d, "d3dcompiler_47.dll")
+            unlink = os.unlink
+
+            def locked_delete(path, *args, **kwargs):
+                if os.path.abspath(path) == os.path.abspath(target):
+                    raise PermissionError("DLL is loaded")
+                return unlink(path, *args, **kwargs)
+            with self.locked(target), mock.patch("sys.platform", "win32"), mock.patch("os.unlink", side_effect=locked_delete):
+                shim.install(d, self.DLL, platform=platform_files())
+            self.assertEqual(self.read(target), platform_files()["d3dcompiler_47.dll"])
+
     def test_the_winmm_layout_is_moved_over(self):
         """Up to rc5: our winmm.dll next to azimuth.exe, Extra Options (with its settings) in fh2extra."""
         with tempfile.TemporaryDirectory() as d:

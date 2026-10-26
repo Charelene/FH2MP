@@ -363,9 +363,10 @@ def garage(lsp, kind, sort, limit, offset, top=5):
 
 
 def garage_preview(lsp, file_id):
+    # Photos are stored as the JPEG the game uploaded; liveries and tunes are PNG. Serve either, as the bytes stored.
     r = lsp.DB.one("SELECT preview FROM ugc_files WHERE id = ? AND removed = 0", (_int(file_id, "design"),))
     data = ugc.unpack(r["preview"]) if r else b""
-    if data[:8] != b"\x89PNG\r\n\x1a\n":
+    if not (data[:8] == b"\x89PNG\r\n\x1a\n" or data[:3] == b"\xff\xd8\xff"):
         raise ops_api.OpsError(404, "not_found", "no preview")
     return data
 

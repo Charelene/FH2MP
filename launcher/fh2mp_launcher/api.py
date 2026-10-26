@@ -323,7 +323,7 @@ class Api:
 
     def crash_report(self, payload):
         """Send a crash report (crashreport.Report.payload()). No sign-in: the game has usually ended it. -> {"id": ...}"""
-        return self._call("POST", "/v1/crash-reports", payload, timeout=60)
+        return self._call("POST", "/v1/crash-reports", payload, timeout=120)
 
     # ---- signed in
     def me(self, token):

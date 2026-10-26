@@ -1,7 +1,7 @@
 """Reads what the leader chose in the event options (Nerd::GameOptionsSynced, the transfer object a Free Roam leader writes when an event starts).
 
-The object is a stream of [variable id: 10 bits][value] pairs with ascending ids (670 variables, registration order of the constructors:
-tools/gameopts_schema.py). Only the variables the server needs are read here; the rest is passed on untouched.
+The object is a stream of [variable id: 10 bits][value] pairs with ascending ids (10-bit ids, registration order recovered with
+tools/gameopts_schema.py). Writes are deltas: omitted values retain the previous state. The native constructor schema has 493 fields.
 
 NumTeams (ScoringOptions, 2 bits, 0..2) is variable 428 and TeamScoringType (3 bits) is 429, right behind it. Found 2026-10-22 from the
 game's constructors and checked on the logs: every Road Trip team event of the dev server (7 of 7) and 25 Free Roam payloads on prod carry
@@ -31,6 +31,82 @@ _LAP_PREFIX_WIDTHS = (
 ) + _BUCKET_WIDTHS * 8 + (
     32, 32, 2, 3, 1, 1, 1, 1, 8, 8, 32, 32, 32, 1, 8, 8, 8, 32, 32, 32, 3, 32,
 )
+
+# Remaining constructors: time/destination/tag/scoring, assist, hopper, weather
+# and top-level flags, through UseOnlineAntiGriefing (492). Array 436 is 3 floats.
+_OPTION_WIDTHS = _LAP_PREFIX_WIDTHS + (
+    32, 8, 32, 32, 4, 1, 1, 1, 2, 3, 8, 1, 1, 1, 1, 8, 96, 1, 1,
+    32, 32, 8, 8, 8, 8, 8, 1, 1, 1, 1, 1, 2, 2, 2, 3, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 3, 32, 16, 16, 32, 32, 32, 32, 1, 1, 1,
+    1, 32, 4, 1, 1, 32, 32, 32, 32, 1, 1, 4, 1, 1, 1, 1, 1, 1,
+)
+
+
+def fields(size, payload):
+    """Decode a delta into id -> (native value width, bits), including string lengths.
+
+    Omitted variables are unchanged, not reset to their constructor defaults.
+    Refuse unknown fields instead of guessing their width and corrupting restrictions.
+    """
+    if not 0 <= size < 1 << 14 or payload < 0:
+        raise ValueError("invalid GameOptions size")
+    pos, previous, out = 0, -1, {}
+    while pos < size:
+        if pos + ID_BITS > size:
+            raise ValueError("truncated GameOptions id")
+        vid = (payload >> pos) & 1023
+        pos += ID_BITS
+        if vid <= previous or vid >= len(_OPTION_WIDTHS):
+            raise ValueError("unknown or unordered GameOptions variable")
+        width = _OPTION_WIDTHS[vid]
+        if width < 0:
+            count = (payload >> pos) & 31
+            if count > -width or pos + 5 > size:
+                raise ValueError("invalid GameOptions string")
+            width = 5 + 16 * count
+        if pos + width > size:
+            raise ValueError("truncated GameOptions value")
+        out[vid] = width, (payload >> pos) & ((1 << width) - 1)
+        pos += width
+        previous = vid
+    return out
+
+
+def encode_fields(values):
+    size, payload = 0, 0
+    for vid, (width, value) in sorted(values.items()):
+        payload |= (vid | (value << ID_BITS)) << size
+        size += ID_BITS + width
+    if size >= 1 << 14:
+        raise ValueError("GameOptions snapshot too large")
+    return size, payload
+
+
+def merge(previous, size, payload):
+    """Accumulate a transfer-object delta, preserving unchanged race restrictions."""
+    values = fields(*previous) if previous else {}
+    values.update(fields(size, payload))
+    return encode_fields(values)
+
+
+def car_rule(options):
+    """Primary race bucket: CarClassId (255 = unrestricted), minimum/maximum PI."""
+    values = fields(*options) if options else {}
+    return tuple(values.get(vid, (0, default))[1] for vid, default in ((30, 255), (31, 0), (32, 0)))
+
+
+def accepts_car(rule, choices):
+    cls, minimum, maximum = rule
+    if cls == 255 and not minimum and not maximum:
+        return True
+    if choices is None:
+        return False
+    import math
+    have, pi = choices
+    if have is None or not math.isfinite(pi):
+        return False
+    display_pi = int(pi * 1000 + 0.5)
+    return (cls == 255 or have == cls) and (not minimum or display_pi >= minimum) and (not maximum or display_pi <= maximum)
 
 
 def _lap_fields(size, payload):

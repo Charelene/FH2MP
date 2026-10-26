@@ -158,7 +158,10 @@ def _install_platform(folder, files):
     for path in _ci_paths(folder, PLATFORM_DLL):        # another mod's loader (fh2wheel's, a radio mod's) or an older platform
         with open(path, "rb") as f:
             if platform_version_of(f.read()):
-                os.unlink(path)
+                # Keep the canonical DLL for atomic_write's Windows loaded-file replacement. Deleting it here fails with
+                # ERROR_SHARING_VIOLATION before busy_ok can rename the loaded copy out of the way.
+                if os.path.normcase(path) != os.path.normcase(os.path.join(folder, PLATFORM_DLL)):
+                    _move_aside(path, "old")
                 continue
         moved = _move_aside(path, "old")
         did.append(f"kept the other {os.path.basename(path)} as {os.path.basename(moved)}: only one d3dcompiler_47.dll can load, and "
@@ -221,6 +224,10 @@ def install(folder, dll_bytes, expect_sha256=None, platform=None):
         paths.atomic_write(target, dll_bytes, 0o755, busy_ok=True)
     except OSError as e:
         where = getattr(e, "filename2", None) or getattr(e, "filename", None) or ""
+        if getattr(e, "winerror", None) in (32, 33):
+            raise ShimError(f"could not install the shim: {os.path.basename(where) or 'a mod DLL'} is still in use by another process. "
+                            "Close the game and all Azimuth windows, then retry. If they are already closed, check Task Manager for a "
+                            "remaining azimuth.exe process, or restart Windows and retry before opening Azimuth.") from None
         raise ShimError(f"could not install the shim: {e.strerror or e}" + (f" ({os.path.basename(where)} in {os.path.dirname(where)})" if where else "")
                         + ". Close the game and try again; if it keeps happening the folder may be protected (Program Files, OneDrive, "
                         "antivirus) and Azimuth should be moved elsewhere.") from None

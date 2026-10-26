@@ -1180,6 +1180,7 @@ class Peer:
         self.car_id = None         # id of this client's own car object (from its CarPredictionFull keys)
         self.car_prediction = None # last (id, body, bits), for immediate rephasing when event membership changes
         self.car_prediction_stamp = None # newest forwarded prediction time, including synthetic rephasing updates
+        self.car_prediction_refreshable = True
         self.private_universe = None # assigned at session entry; never shared with another connected player
         self.lobby_type = 0        # OpenConnection field a: Nerd::NetworkLobbyType the client joined (1 RoadTrip, 2 FreeRoam, 3 CarMeet)
         self.xuid = 0              # the client's Xbox user id (OpenConnection playerId)
@@ -1299,6 +1300,7 @@ class Server:
         self.next_owner = 1
         self.pending_race = None   # (deadline, leader Peer)
         self.game_options = None   # (size, payload) latest GameOptionsSynced written by the leader
+        self.game_options_owner = None
         self.free_roam_laps = 1    # authoritative bounded count, retained across sparse options updates
         self.free_roam_end_condition = 1 # explicit NumLaps by default; preserve timed/tag modes
         self.event = None          # {"people": [Peer], "begun": bool, "start_at": float|None}
@@ -1519,6 +1521,15 @@ class Server:
         payload = self.rental_choices(peer, car, size, payload)
         return bool(changes), hide, payload
 
+    def correct_owner_choices(self, peer: Peer, cls: int, pi: float) -> None:
+        """Repair the owner's grid/results too: rewriting relays alone leaves its local rental at R 999."""
+        bits, value = parts_check.choices_update(cls, pi)
+
+        def vars_(w):
+            w.bits(value, bits)
+        self.send(peer, [server_update(1, 0, ROUTER_BITS[1][0], peer.player_seq, vars_)])
+        peer.player_seq = (peer.player_seq + 1) % 0xFF
+
     def note_choices(self, peer: Peer, size: int, payload: int) -> int:
         """The class and performance index a player's game sends with its car (Nerd::PlayerChoices vars 81/82; the other clients show
         them on the starting grid and the results). Remembered; and a rental that reports class R (7) gets its real class and PI back
@@ -1537,6 +1548,7 @@ class Server:
         peer.choices = (cls, pi)
         want = CAR_CHOICES.get(peer.rental_car) if peer.rental_car is not None else None
         if want and cls == RENTAL_CLASS_ID and (cls, round(pi, 3)) != (want[0], round(want[1], 3)):
+            self.correct_owner_choices(peer, *want)
             self.log(f"{peer.addr[1]} RENTAL: owner {peer.owner_id} car {peer.rental_car} reports class {cls} PI {pi:.3f}, shown to the others as "
                      f"class {want[0]} PI {want[1]:.3f}")
             payload = parts_check.write_choices(payload, found, want[0], want[1])
@@ -1552,6 +1564,7 @@ class Server:
         cls, pi = parts_check.read_short_choices(payload, found)
         want = CAR_CHOICES.get(peer.rental_car) if peer.rental_car is not None else None
         if want and (cls == RENTAL_CLASS_ID or (cls is None and pi is not None and pi >= 0.999)):
+            self.correct_owner_choices(peer, *want)
             self.log(f"{peer.addr[1]} RENTAL: owner {peer.owner_id} car {peer.rental_car} sent class {cls} PI {pi}, shown as class {want[0]} "
                      f"PI {want[1]:.3f}")
             payload = parts_check.write_short_choices(payload, found, want[0], want[1])
@@ -1571,12 +1584,14 @@ class Server:
         if found:
             cls, pi = parts_check.read_choices(payload, found)
             if (cls if cls is not None else want[0]) != want[0] or abs(pi - want[1]) > 0.002:
+                self.correct_owner_choices(peer, *want)
                 self.log(f"{peer.addr[1]} RENTAL: owner {peer.owner_id} car {car} sent class {cls} PI {pi:.3f}, shown as class {want[0]} PI {want[1]:.3f}")
                 payload = parts_check.write_choices(payload, found, want[0], want[1])
             peer.choices = want
             return payload
         sent = peer.choices
         if sent is None or sent[0] != want[0] or abs(sent[1] - want[1]) > 0.002:
+            self.correct_owner_choices(peer, *want)
             self.log(f"{peer.addr[1]} RENTAL: owner {peer.owner_id} car {car}: its game sent {sent}, the others are told class {want[0]} PI {want[1]:.3f}")
             bits, value = parts_check.choices_update(*want)
             self.remember_and_relay(peer, MSG_OBJECT_UPDATE, 1, 0, None, 0, bits, value)
@@ -1690,10 +1705,13 @@ class Server:
         people = self.event["people"] if self.event else ()
         return (a in people) == (b in people)
 
-    def relay_prediction(self, sender: Peer, *, refresh: bool = False) -> None:
-        if sender.car_prediction is None:
+    def relay_prediction(self, sender: Peer, *, refresh: bool = False, prediction=None) -> None:
+        if refresh and not sender.car_prediction_refreshable:
+            return  # do not inject cached physics from before an ambiguous clock/scene transition
+        prediction = prediction if prediction is not None else sender.car_prediction
+        if prediction is None:
             return
-        cid, body, size = sender.car_prediction
+        cid, body, size = prediction
         if size != CAR_PREDICTION_BODY_BITS:
             return
         stamp_offset = CAR_PREDICTION_BODY_BITS - 32
@@ -1819,26 +1837,28 @@ class Server:
     GAME_OPTIONS_TRANSFER_ID = 0   # transfer-object id of the lobby's GameOptions (router 6, type 1)
 
     def ownership_grant(self, peer: Peer, router: int, tid: int, oid: int, id_bits: int):
-        """The reply to a client's RequestOwnership. A client that was already sent the lobby's GameOptions (send_game_options, numbered
-        from 0) takes the object over from that state: a grant numbered 0 with no state looks stale to it, and on prod (2026-10-20) a
-        second player who asked for ownership of GameOptions that the first leader had written never wrote or requested anything again
-        (the old, working cases had no stored GameOptions). That player now gets the current state with the next sequence number, the
-        same content as the update it already accepted. Everybody else is answered exactly as before."""
+        """Grant at the next accepted sequence, without overwriting pending local choices.
+
+        The recipient already has our last snapshot. Re-sending its old values in
+        the grant can replace the settings it selected while requesting ownership.
+        An empty transfer keeps that state and still advances the native sequence.
+        """
+        if router == ROUTER_LOBBY and tid == TYPE_GAME_OPTIONS:
+            self.game_options_owner = peer
         if router == ROUTER_LOBBY and tid == TYPE_GAME_OPTIONS and self.game_options and peer.gopts_seq > 0:
-            size, payload = self.game_options
             seq = peer.gopts_seq
             peer.gopts_seq = (peer.gopts_seq + 1) % 0xFF
-            self.log(f"{peer.addr[1]} ownership grant carries the lobby's GameOptions ({size} bits, seq {seq})")
-            return grant_ownership(router, oid, id_bits, seq, size, payload)
+            self.log(f"{peer.addr[1]} GameOptions ownership grant (seq {seq}, preserve local selections)")
+            return grant_ownership(router, oid, id_bits, seq)
         return grant_ownership(router, oid, id_bits)
 
-    def send_game_options(self, q: Peer) -> None:
+    def send_game_options(self, q: Peer, options=None) -> None:
         """Forwards the leader's GameOptions to a client under the same transfer-object key the leader wrote
         it with (A=1,B=0,id 0). That object already exists in every client's lobby (CGameOptions); the update
         fills in its synced variables, including the selected event id the fast-travel state needs."""
         if not self.game_options:
             return
-        size, payload = self.game_options
+        size, payload = options if options is not None else self.game_options
         # A client that led an earlier event holds the GameOptions it wrote itself, numbered by its own writes, and applies updates
         # strictly in sequence order. The forward to it used to restart at 0, which looks stale: the Infection leader kept its own
         # Infection options when the other player then started King (dev 2026-10-20: one client showed Infection, the other King,
@@ -1937,6 +1957,11 @@ class Server:
 
     def end_event(self, why: str) -> None:
         """Back to the idle lobby: clear the SessionHost race flags so the next event starts clean."""
+        if self.event:
+            for q in self.event["people"]:
+                if q.connected:
+                    self.set_console_bool(q, CONSOLE_VAR_PARTICIPATING_IN_RACE, 0, why)
+                    q.console_vars[CONSOLE_VAR_PARTICIPATING_IN_RACE] = 0
         self.event = None
         self.pending_race = None
         self.refresh_car_phasing()
@@ -2240,6 +2265,26 @@ class Server:
             self.maybe_begin_race()
             self.maybe_go_race()
 
+    def eligible_for_event(self, peer: Peer, rule=None) -> bool:
+        if self.roadtrip:
+            return True  # Road Trip uses its event database and rental selection.
+        if rule is None:
+            try:
+                rule = gameopts.car_rule(self.game_options)
+            except ValueError:
+                self.log("event admission refused: invalid GameOptions")
+                return False
+        return gameopts.accepts_car(rule, peer.choices)
+
+    def validate_event_cars(self) -> bool:
+        ev = self.event
+        if not ev or ev.get("car_rule") is None:
+            return True
+        if any(not self.eligible_for_event(q, ev["car_rule"]) for q in ev["people"]):
+            self.end_event("a selected car no longer meets the event restrictions")
+            return False
+        return True
+
     def start_event(self, leader: Peer) -> None:
         """Participants = the leader plus every client that reported Console.Ready."""
         if not self.roadtrip:
@@ -2257,8 +2302,20 @@ class Server:
                 for q in self.peers.values():
                     if q.connected:
                         self.send_game_options(q)
-        people = [leader] + [q for q in self.peers.values()
-                             if q is not leader and q.connected and q.console_vars.get(4)]
+        if not self.eligible_for_event(leader):
+            self.end_event("the leader's car does not meet the event restrictions")
+            return
+        people = [leader]
+        for q in self.peers.values():
+            if q is leader or not q.connected or not q.console_vars.get(4):
+                continue
+            if self.eligible_for_event(q):
+                people.append(q)
+            else:
+                self.set_console_bool(q, 4, 0, "car does not meet the event restrictions")
+                q.console_vars[4] = 0
+                self.set_console_bool(q, CONSOLE_VAR_PARTICIPATING_IN_RACE, 0, "ineligible car")
+                q.console_vars[CONSOLE_VAR_PARTICIPATING_IN_RACE] = 0
         self.log(f"event start: {len(people)} participant(s): {[q.owner_id for q in people]}")
         for q in self.peers.values():
             if q is not leader:
@@ -2267,6 +2324,8 @@ class Server:
         if self.roadtrip and self.rt_winner is not None and self.rt_gamedb:
             laps = self.rt_numlaps(self.rt_race())
         self.event = {"people": people, "begun": False, "start_at": None, "started": time.monotonic(), "numlaps": laps}
+        if not self.roadtrip:
+            self.event["car_rule"] = gameopts.car_rule(self.game_options)
         mode = self.rt_race_mode(self.rt_race()) if self.roadtrip and self.rt_winner is not None and self.rt_gamedb else None
         if self.roadtrip and self.rt_winner is not None and self.rt_candidates:
             race = self.rt_race()
@@ -2320,6 +2379,8 @@ class Server:
         ev = self.event
         if not ev or ev["begun"]:
             return
+        if not self.validate_event_cars():
+            return
         if not all(q.connected and q.console_vars.get(5) for q in ev["people"]):
             return
         ev["begun"] = True
@@ -2350,7 +2411,7 @@ class Server:
             self.go_race()
 
     def note_lap_score(self, peer: Peer, lap: int, blobs) -> None:
-        """MsgLapScore = (lap time, best lap, total time, lap number). Use the accepted GameOptions count
+        """MsgLapScore starts with elapsed race time, followed by the lap timings and lap number. Use the accepted GameOptions count
         in Free Roam and the event table in Road Trip. A circuit's lap-0 start segment is not a finish."""
         ev = self.event
         if ev and ev.get("racing") and peer in ev["people"]:
@@ -2358,7 +2419,7 @@ class Server:
             done[peer] = max(done.get(peer, 0), lap)
         if not ev or not ev.get("racing") or peer not in ev["people"] or peer in ev["finished"]:
             return
-        lap_t, _, total_t =(struct.unpack("<d", x.to_bytes(8, "little"))[0] for x in blobs)
+        total_t, _, lap_t = (struct.unpack("<d", x.to_bytes(8, "little"))[0] for x in blobs)
         laps = ev.get("numlaps")
         if laps:
             if lap < laps:
@@ -2439,6 +2500,8 @@ class Server:
 
     def go_race(self) -> None:
         ev = self.event
+        if not self.validate_event_cars():
+            return
         ev["go_at"] = None
         ev["racing"] = True
         if self.roadtrip and self.rt_state != RT_IN_EVENT:
@@ -2460,6 +2523,8 @@ class Server:
             self.send(q, [start_race(go)])
 
     def drop_peer(self, peer: Peer, why: str) -> None:
+        if self.game_options_owner is peer:
+            self.game_options_owner = None
         self.peers.pop(peer.addr, None)
         if peer in self.dirty:
             self.flush_peer(peer)   # what was queued for it, e.g. the CloseConnection of a kick
@@ -2701,8 +2766,13 @@ class Server:
                 if a == 0 and b == 1:
                     r.bits(8)
                 ready = r.bits(1)
-                self.log(f"{addr[1]} MsgReadyRequest key={a}{b} id={oid} ready={ready} -> response 0")
-                replies.append(ready_request_response(0))
+                accepted = not ready or self.eligible_for_event(peer)
+                self.log(f"{addr[1]} MsgReadyRequest key={a}{b} id={oid} ready={ready} accepted={accepted}")
+                replies.append(ready_request_response(0 if accepted else 1))
+                if not accepted:
+                    self.set_console_bool(peer, 4, 0, "car does not meet the event restrictions")
+                    peer.console_vars[4] = 0
+                    continue
                 if ready and self.roadtrip and self.rt_state in (RT_DRIVE_TO_EVENT, RT_PREPARE_FOR_EVENT) and not self.event:
                     # a player that arrives first reports ready while the others are still driving
                     self.set_console_bool(peer, 4, 1, "ready request accepted")
@@ -2793,14 +2863,34 @@ class Server:
                     # the leader's GameOptionsSynced after ownership transfer: others see it as a
                     # relay object owned by the leader (created once, then updated)
                     first = (router, oid) not in peer.objs
+                    if self.game_options_owner is not None and self.game_options_owner is not peer:
+                        continue  # an old writer must not replace the current leader's settings
                     peer.gopts_own_seq = seq
                     peer.gopts_written_at = time.monotonic()
                     raw_options = (size, payload)
+                    correction = None
                     if not self.roadtrip:
                         fixed_laps = self.event.get("numlaps") if self.event and not self.event.get("over") else None
                         try:
+                            previous_fields = gameopts.fields(*self.game_options) if self.game_options else {}
+                            size, payload = gameopts.merge(self.game_options, size, payload)
+                            if self.event and not self.event.get("over") and self.event.get("car_rule") is not None:
+                                values = gameopts.fields(size, payload)
+                                for vid, width, value in zip((30, 31, 32), (8, 16, 16), self.event["car_rule"]):
+                                    values[vid] = (width, value)
+                                size, payload = gameopts.encode_fields(values)
                             size, payload, laps = gameopts.bounded_laps(size, payload, default=self.free_roam_laps,
                                                                      fixed=fixed_laps, default_end=self.free_roam_end_condition)
+                            incoming = gameopts.fields(*raw_options)
+                            corrected = gameopts.fields(size, payload)
+                            # Correct actual edits or establish missing lap defaults.
+                            # Omitted, already-known fields must not clobber pending UI selections.
+                            changed = {vid: corrected[vid] for vid in (30, 31, 32, 418, 419)
+                                       if vid in corrected and
+                                       ((vid in incoming and incoming[vid] != corrected[vid]) or
+                                        (vid in (418, 419) and vid not in incoming and vid not in previous_fields))}
+                            if changed:
+                                correction = gameopts.encode_fields(changed)
                         except ValueError as exc:
                             self.log(f"{addr[1]} invalid GameOptions: {exc}; ignored")
                             continue
@@ -2819,10 +2909,10 @@ class Server:
                                 self.log(f"  GameOptions: value 1412 at bit offset {off} width {width}")
                     unchanged = self.game_options == (size, payload)
                     self.game_options = (size, payload)
-                    if raw_options != self.game_options:
+                    if correction is not None:
                         # Correct the writer too. Forwarding only to the guests would
                         # leave the host racing its original unlimited/oversize count.
-                        self.send_game_options(peer)
+                        self.send_game_options(peer, correction)
                     if unchanged:
                         # A client that has accepted the forwarded options writes the same object back, which was forwarded again and
                         # written back again: with the sequence numbers right (see send_game_options) that became an endless ping-pong
@@ -2920,7 +3010,7 @@ class Server:
                 r.pos = start
                 rest = r.bits(end - start)
                 msg = relay_score_message(mtype, cid, peer.owner_id, rest, end - start)
-                self.relay(peer, msg)
+                self.relay(peer, msg, same_event=True)
                 if mtype == MSG_LAP_SCORE:
                     self.note_lap_score(peer, lap, blobs)
                 elif mtype == MSG_SCORE_KEYFRAME:
@@ -2958,8 +3048,21 @@ class Server:
                         stamp_offset = CAR_PREDICTION_BODY_BITS - 32
                         if old is None or old[0] != cid:
                             peer.car_prediction_stamp = None
+                            peer.car_prediction_refreshable = True
                         elif not 0 < (((rest >> stamp_offset) - (old[1] >> stamp_offset)) & 0xFFFFFFFF) < 0x80000000:
-                            continue  # reordered/duplicate prediction: never cache old physics for a later rephase
+                            # Freshness belongs to each receiving car instance. Its
+                            # clock baseline is reset on scene/grid transitions
+                            # (0x9ec230); the relay's old high-water mark is not that
+                            # baseline. Forward live physics unchanged and let the
+                            # native receiver (0x9ecf00) reject genuine reordering.
+                            # Keep old frames out of the cache and do not manufacture
+                            # a newer timestamp for cached pre-transition physics.
+                            if rest != old[1]:
+                                peer.car_prediction_refreshable = False
+                            self.relay_prediction(peer, prediction=(cid, rest, rest_bits))
+                            continue
+                        else:
+                            peer.car_prediction_refreshable = True
                         peer.car_prediction = (cid, rest, rest_bits)
                         self.relay_prediction(peer)
             elif mtype == MSG_REPAIR_DAMAGE:
@@ -3497,6 +3600,26 @@ class Hub:
                 self.ctl.sendto(json.dumps(self.lobby_status()).encode(), reply_to)
             except OSError:
                 pass
+        elif len(parts) == 3 and parts[0] == "tools":
+            tools = set(parts[2].split(","))
+            if not tools or not tools <= {"redline", "nitrosystem"} or CHEATER_POOL_HOURS <= 0:
+                return
+            try:
+                xuid = int(parts[1], 16)
+                if not 0 < xuid < 1 << 64:
+                    return
+            except ValueError:
+                return
+            already = xuid in self.flagged_now()
+            self.flag(xuid, "restricted tools: " + ",".join(sorted(tools)))
+            # A tool started mid-session must leave a clean world. A fresh sign-in
+            # lifts the revoke; the persisted flag sends its next match to the pool.
+            mixed = not already and any(q.xuid == xuid and not self.world_pool_fits(w, xuid)
+                                        for w in self.worlds.values() for q in w.peers.values())
+            if mixed:
+                self.revoke(xuid)
+            if reply_to is not None:
+                self.ctl.sendto(b"rejoin" if mixed else b"ok", reply_to)
         elif len(parts) in (3, 4) and parts[0] == "auth":
             try:
                 xuid = int(parts[1], 16)
@@ -3721,12 +3844,14 @@ class Hub:
             if held is None and not self.pending_room(addr):
                 return                      # before a world is picked or made for it: a flood must not create worlds
             name = self.assign.get(player_id)
-            target = self.world_for(ltype, name) if name else self.open_world_for(ltype)
+            target = self.world_for(ltype, name) if name else self.open_world_for(ltype, player_id)
+            if not self.world_pool_fits(target, player_id):
+                target = self.open_world_for(ltype, player_id)
             if target is not cur and self.world_load(target, addr) >= self.WORLD_CAPACITY:
                 # The HUD player list has exactly 12 slots (HudPartyMembersComponent ctor FUN_1407726c0); a 13th player makes every
                 # client in the world read past them and call through a CUserProfile (game+0x144661d, "exception at 0x9") [C].
                 self.log(f"{player_id:#x} assigned to full lobby {name or 'default'}: sent to another world")
-                target = self.open_world_for(ltype)
+                target = self.open_world_for(ltype, player_id)
             if cur is not None and cur is not target:
                 old = cur.peers.get(addr)
                 if old is not None:
@@ -3837,7 +3962,12 @@ class Hub:
             w.drop_peer(peer, "replaced by a newer connection of the same player")
             del self.route[a]
 
-    def open_world_for(self, lobby_type: int):
+    def world_pool_fits(self, world, xuid: int) -> bool:
+        flagged = set(self.flagged_now())
+        mine = xuid in flagged
+        return all((p.xuid in flagged) == mine for p in world.peers.values() if p.xuid and p.xuid != xuid)
+
+    def open_world_for(self, lobby_type: int, player_id: int = 0):
         """A player with no lobby assignment (joined from the menu: the matchmaking side cannot reach this hub's control port from the
         PC) goes to the busiest world of that type that has room, so menu joiners meet each other and whoever is already
         playing; a new world when every one of them is full. Players still connecting count (they are routed before their handshake
@@ -3848,12 +3978,12 @@ class Hub:
         best, best_n = None, 0
         for (ltype, _name), w in self.worlds.items():
             n = load.get(id(w), 0)
-            if ltype == lobby_type and 0 < n < self.WORLD_CAPACITY and n > best_n:
+            if ltype == lobby_type and 0 < n < self.WORLD_CAPACITY and n > best_n and self.world_pool_fits(w, player_id):
                 best, best_n = w, n
         if best is not None:
             return best
         shared = self.worlds.get((lobby_type, ""))
-        if shared is None or load.get(id(shared), 0) == 0:
+        if shared is None or (load.get(id(shared), 0) == 0 and self.world_pool_fits(shared, player_id)):
             return self.world_for(lobby_type, "")                  # nobody anywhere: the shared default world
         self.auto_worlds = getattr(self, "auto_worlds", 0) + 1
         return self.world_for(lobby_type, f"auto{self.auto_worlds}")

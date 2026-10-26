@@ -8,6 +8,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fh2mp_server as S  # noqa: E402
+import gameopts
 
 PAYLOADS = {
     "FR_KING": "001c0c7004240f000014e0bc0000e080c003cb40c08381240094989999f959626666ee87899999b99f260622eb6445136900007043a701000008a116a995ed6c01b6bd0d0000f00737000050a0dc027403d82d803780de0ccabb1e",
@@ -37,6 +38,7 @@ def world(roadtrip=False):
         p.connected = True
         p.owner_id = i + 1
         p.car_id = i
+        p.choices = (3, 0.750)
         p.console_vars[4] = 1
         w.peers[p.addr] = p
     return w, peers
@@ -67,7 +69,7 @@ class TagModeFromGameOptions(unittest.TestCase):
             q.console_vars[S.CONSOLE_VAR_HAS_LOADED_CARS] = 1      # stale: reported for the previous event
             q.console_vars[S.CONSOLE_VAR_HAS_GRID] = 1
             q.console_vars[S.CONSOLE_VAR_RENDER_READY] = 1
-        w.game_options = (453, 0x1B700C1C00)
+        w.game_options = options("FR_KING")
         w.start_event(b)
         w.maybe_begin_race()
         self.assertFalse(w.event["begun"])                           # nobody has loaded yet
@@ -81,7 +83,9 @@ class TagModeFromGameOptions(unittest.TestCase):
     def test_first_it_car_is_drawn_while_the_grid_is_up_and_the_race_end_waits_for_go(self):
         import time
         w, (a, b) = world()
-        w.game_options = (453, 0x1B600C2000)
+        values = gameopts.fields(*options("FR_KING"))
+        values.update({0: (8, 8), 3: (4, 6)})
+        w.game_options = gameopts.encode_fields(values)
         w.start_event(a)
         for q in (a, b):
             q.console_vars[S.CONSOLE_VAR_HAS_LOADED_CARS] = 1
@@ -101,7 +105,7 @@ class TagModeFromGameOptions(unittest.TestCase):
     def test_tag_event_ends_when_every_client_has_sent_its_final_keyframe(self):
         import time
         w, (a, b) = world()
-        w.game_options = (411, 0x1B700C1C00)
+        w.game_options = options("FR_KING")
         w.start_event(a)
         for q in (a, b):
             q.console_vars[S.CONSOLE_VAR_HAS_LOADED_CARS] = 1
@@ -120,7 +124,9 @@ class TagModeFromGameOptions(unittest.TestCase):
 
     def test_free_roam_infection_start_sets_up_infection_without_guessing(self):
         w, (a, b) = world()
-        w.game_options = (667, 0x04600C2000)
+        values = gameopts.fields(*options("FR_KING"))
+        values.update({0: (8, 8), 3: (4, 6)})
+        w.game_options = gameopts.encode_fields(values)
         w.start_event(a)
         tag = w.event["tag"]
         self.assertEqual(tag["mode"]["name"], "Infection")
@@ -144,6 +150,8 @@ class TagModeFromGameOptions(unittest.TestCase):
         for name in ("FR_CIRCUIT", "FR_SPRINT"):
             w, (a, b) = world()
             w.game_options = options(name)
+            for q in (a, b):
+                q.choices = (gameopts.car_rule(w.game_options)[0], 0.850)
             w.start_event(a)
             self.assertNotIn("tag", w.event, name)
 
@@ -208,12 +216,12 @@ class OwnershipGrant(unittest.TestCase):
         d, pos = self.decode(S.grant_ownership(6, 0, S.ROUTER_BITS[6][0], 3, size, payload))
         self.assertEqual((d["seq"], d["size"], d["payload"]), (3, size, payload))
 
-    def test_peer_that_was_forwarded_the_options_gets_them_back_with_the_next_seq(self):
+    def test_grant_advances_sequence_without_overwriting_pending_ui_choices(self):
         w, (a, b) = world()
         w.game_options = options("FR_KING")
         b.gopts_seq = 1                                  # send_game_options already numbered one update for it
         d, _ = self.decode(w.ownership_grant(b, S.ROUTER_LOBBY, S.TYPE_GAME_OPTIONS, 0, S.ROUTER_BITS[S.ROUTER_LOBBY][0]))
-        self.assertEqual((d["seq"], d["size"]), (1, 727))
+        self.assertEqual((d["seq"], d["size"]), (1, 0))
         self.assertEqual(b.gopts_seq, 2)
 
     def test_everybody_else_is_answered_as_before(self):

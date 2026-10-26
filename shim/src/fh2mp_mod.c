@@ -1578,6 +1578,68 @@ static int patch_same_session(void)
  * `original` (the game's first instructions, 48 8B C4 mov rax,rsp / 48 89 50 10 mov [rax+0x10],rdx, and the rest of the function).
  * Disable with env FH2MP_NO_NULLTORQUE.
  */
+#include "torque_scale.inc"
+
+static int patch_null_torque_scale(void)
+{
+    static const unsigned char want[10] = {0x4c, 0x89, 0x4c, 0x24, 0x20, 0x4c, 0x89, 0x44, 0x24, 0x18};
+    unsigned char *img = find_fh2_image();
+    unsigned i;
+    if (!img) {
+        return 0;
+    }
+    for (i = 0; i < sizeof want; i++) {
+        if (img[0x105e530u + i] != want[i]) {
+            log_begin();
+            log_raw("nulltorquescale: unexpected code at the upgrade torque reader, not patched\n");
+            return 0;
+        }
+    }
+    return plat_hook("nulltorquescale: missing upgrade torque rows", img + 0x105e530u,
+                     (void *)torque_scale_guard, (void **)&g_torque_scale_orig);
+}
+
+/* #43: startup's Cinematics directory query can return NULL. The adjacent optional-directory queries check this before calling
+ * Exists (+0xb0); this one did not (game 1.0.0.64, +0x21f44d). Preserve the existing false/skip branch for a missing directory. */
+static unsigned char cinematics_exists(void *directory)
+{
+    if (!directory) {
+        log_begin();
+        log_raw("cinematics: game media/Cinematics is unavailable; skipping its optional directory registration\n");
+        return 0;
+    }
+    return ((unsigned char (*)(void *))(*(void ***)directory)[0xb0 / 8])(directory);
+}
+
+static int patch_missing_cinematics(void)
+{
+    static const unsigned char want[] = {0x48, 0x8b, 0x01, 0xff, 0x90, 0xb0, 0, 0, 0};
+    unsigned char call[] = {0xff, 0x15, 0, 0, 0, 0, 0x90, 0x90, 0x90};
+    unsigned char *img = find_fh2_image(), *site, *slot;
+    long long delta;
+    int disp;
+    if (!img) {
+        return 0;
+    }
+    site = img + 0x21f44du;
+    if (memcmp(site, want, sizeof want) != 0 || !(slot = alloc_near(site))) {
+        return 0;
+    }
+    delta = (long long)(slot - (site + 6));
+    if (delta < -0x80000000ll || delta > 0x7fffffffll) {
+        VirtualFree(slot, 0, MEM_RELEASE);
+        return 0;
+    }
+    *(void **)slot = (void *)cinematics_exists;
+    disp = (int)delta;
+    mem_copy(call + 2, &disp, sizeof disp);
+    if (!plat_patch("cinematics: missing directory check", site, want, call, sizeof call)) {
+        VirtualFree(slot, 0, MEM_RELEASE);
+        return 0;
+    }
+    return 1;
+}
+
 static volatile unsigned *g_nulltorque_hits;      /* counts the engines the guard skipped (read by the monitor thread, which logs changes) */
 
 static int patch_null_torque_curve(void)
@@ -2324,10 +2386,14 @@ static int has_arg_prefix(const wchar_t *prefix)
     return 0;
 }
 
-/* The mapped game (the platform recognises it by FH2_TIMESTAMP and FH2_SIZE_OF_IMAGE, as Extra Options does), or NULL. */
+#include "game_image.inc"
+
+/* The platform's cached pointer must still identify the mapped game. */
 static unsigned char *find_fh2_image(void)
 {
-    return g_api ? (unsigned char *)g_api->game_base() : NULL;
+    unsigned char *img = g_api ? (unsigned char *)g_api->game_base() : NULL;
+    IMAGE_NT_HEADERS64 nt;
+    return read_game_headers(img, &nt, NULL) ? img : NULL;
 }
 
 static int str_equal(const char *a, const char *b)
@@ -2814,6 +2880,7 @@ static void gamedb_hash(char out[65])
     ReleaseSRWLockExclusive(&g_gamedb_lock);
 }
 
+#include "restricted_tools.inc"
 #include "xhr2.inc"
 #ifdef FH2MP_DEBUG_BUILD
 #include "dbg.inc"
@@ -4481,16 +4548,16 @@ static void wait_for_executable_game(void)
     int logged = 0;
 
     for (;;) {
-        const IMAGE_NT_HEADERS64 *nt;
-        const IMAGE_SECTION_HEADER *sec;
+        IMAGE_NT_HEADERS64 nt;
+        IMAGE_SECTION_HEADER sec[96];
         unsigned i, ok = 1;
         img = find_fh2_image();
-        if (img) {
-            nt = (const IMAGE_NT_HEADERS64 *)(img + ((const IMAGE_DOS_HEADER *)img)->e_lfanew);
-            sec = IMAGE_FIRST_SECTION(nt);
-            for (i = 0; i < nt->FileHeader.NumberOfSections && ok; i++) {
+        if (read_game_headers(img, &nt, sec)) {
+            for (i = 0; i < nt.FileHeader.NumberOfSections && ok; i++) {
                 if ((sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) && sec[i].Misc.VirtualSize &&
-                    (!page_executable(img + sec[i].VirtualAddress) ||
+                    (sec[i].VirtualAddress >= nt.OptionalHeader.SizeOfImage ||
+                     sec[i].Misc.VirtualSize > nt.OptionalHeader.SizeOfImage - sec[i].VirtualAddress ||
+                     !page_executable(img + sec[i].VirtualAddress) ||
                      !page_executable(img + sec[i].VirtualAddress + sec[i].Misc.VirtualSize - 1))) {
                     ok = 0;
                 }
@@ -4599,6 +4666,13 @@ static DWORD WINAPI late_init(LPVOID unused)
             wchar_t nt_env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_NULLTORQUE", nt_env, 8) == 0) {
                 patch_null_torque_curve();
+                patch_null_torque_scale();
+            }
+        }
+        {
+            wchar_t env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_CINEMATICS", env, 8) == 0) {
+                patch_missing_cinematics();
             }
         }
         {

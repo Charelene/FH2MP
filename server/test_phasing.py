@@ -145,8 +145,29 @@ class Phasing(unittest.TestCase):
         original = self.a.car_prediction
         self.server.handle(packet(99), self.a.addr)
         self.assertEqual(self.a.car_prediction, original)
+        # The new grid instance may have reset its native clock baseline to 98.
+        # 99 must reach it even though the relay cached 100 in the old scene.
+        self.assertEqual(self.last_body(self.b) >> (S.CAR_PREDICTION_BODY_BITS - 32), 99)
+        self.assertEqual((self.last_body(self.c) >> S.CAR_UNIVERSE_OFFSET) & 31, self.a.private_universe)
+        before = len(self.b.outbox)
         self.server.refresh_car_phasing()
-        self.assertEqual(self.last_body(self.b) >> (S.CAR_PREDICTION_BODY_BITS - 32), 101)
+        self.assertEqual(len(self.b.outbox), before)  # never retime old-scene physics over the new live state
+        self.server.handle(packet(101), self.a.addr)
+        self.assertEqual(self.a.car_prediction[1] >> (S.CAR_PREDICTION_BODY_BITS - 32), 101)
+        self.server.refresh_car_phasing()
+        self.assertEqual(self.last_body(self.b) >> (S.CAR_PREDICTION_BODY_BITS - 32), 102)
+
+    def test_outsider_scores_do_not_reach_race_results(self):
+        def score(w):
+            w.bits(S.MSG_IN_PROGRESS_SCORE_UPDATE, 7)
+            w.bits(0, 2)
+            w.bits(7, 7)
+            w.bits(12345, 32)
+            w.bits(0, 1)
+        self.server.handle(S.build_packet([score]), self.c.addr)
+        self.assertFalse(self.a.outbox)
+        self.assertFalse(self.b.outbox)
+        self.assertTrue(self.d.outbox)
 
 
 if __name__ == "__main__":
