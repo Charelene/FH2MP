@@ -3,7 +3,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+cleanup() { WINEPREFIX="$tmp/prefix" wineserver -w || true; rm -rf "$tmp"; }
+trap cleanup EXIT
 cat > "$tmp/test.c" <<'C'
 #include <windows.h>
 #include <stddef.h>
@@ -11,6 +12,16 @@ cat > "$tmp/test.c" <<'C'
 #include <stdio.h>
 #define FH2_TIMESTAMP 0x565501edu
 #define FH2_SIZE_OF_IMAGE 0x3a18000u
+static int reserved_reads_succeed;
+static BOOL WINAPI compatibility_read(HANDLE process, LPCVOID address, LPVOID out, SIZE_T size, SIZE_T *got)
+{
+    MEMORY_BASIC_INFORMATION info;
+    if (reserved_reads_succeed && VirtualQuery(address, &info, sizeof info) && info.State == MEM_RESERVE) {
+        ZeroMemory(out, size); *got = size; return TRUE;
+    }
+    return ReadProcessMemory(process, address, out, size, got);
+}
+#define ReadProcessMemory compatibility_read
 #include "game_image.inc"
 int main(void)
 {
@@ -41,6 +52,9 @@ int main(void)
     nt->FileHeader.SizeOfOptionalHeader = 4096;
     assert(VirtualFree(p + 4096, 4096, MEM_DECOMMIT));
     assert(!read_game_headers(p, &copy, sections));
+    reserved_reads_succeed = 1;  /* Wine 6 reports success and zero-filled bytes for this reserved section table. */
+    assert(!read_game_headers(p, &copy, sections));
+    reserved_reads_succeed = 0;
     nt->FileHeader.SizeOfOptionalHeader = sizeof nt->OptionalHeader;
     assert(VirtualProtect(p, 4096, PAGE_NOACCESS, &old));
     assert(!read_game_headers(p, &copy, NULL));

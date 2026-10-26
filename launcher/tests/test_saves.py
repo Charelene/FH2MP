@@ -139,12 +139,13 @@ class SaveTests(unittest.TestCase):
         elevate.assert_called_once_with(["--save-adopt", str(self.root), "123", "another install"])
 
     def test_appimage_elevation_avoids_the_user_fuse_mount(self):
+        appimage = str(self.root / "FH2MP Launcher.AppImage")
         with mock.patch.object(saves.sys, "platform", "linux"), mock.patch.object(saves.sys, "frozen", True, create=True), \
-                mock.patch.dict(os.environ, {"APPIMAGE": "/tmp/FH2MP Launcher.AppImage"}), \
+                mock.patch.dict(os.environ, {"APPIMAGE": appimage}), \
                 mock.patch.object(saves.shutil, "which", return_value="/usr/bin/pkexec"), \
                 mock.patch.object(saves.subprocess, "run", return_value=mock.Mock(returncode=0)) as run:
             saves.elevated_copy(self.source, self.target)
-        self.assertEqual(run.call_args.args[0][:3], ["/usr/bin/pkexec", "/tmp/FH2MP Launcher.AppImage", "--appimage-extract-and-run"])
+        self.assertEqual(run.call_args.args[0][:3], ["/usr/bin/pkexec", appimage, "--appimage-extract-and-run"])
         self.assertEqual(run.call_args.kwargs["env"]["PYINSTALLER_RESET_ENVIRONMENT"], "1")
 
     def test_windows_elevation_uses_runas_and_waits_for_helper(self):
