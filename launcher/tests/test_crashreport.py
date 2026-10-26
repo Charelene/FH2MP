@@ -39,7 +39,7 @@ class Base(unittest.TestCase):
         self.st["azimuth_dir"] = self.folder
 
     def write(self, rel, data, mtime=None):
-        p = os.path.join(self.folder, rel)
+        p = os.path.normpath(os.path.join(self.folder, rel))
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, "wb" if isinstance(data, bytes) else "w") as f:
             f.write(data)
@@ -216,7 +216,7 @@ class BuildTests(Base):
         preview = os.path.join(self.folder, "preview")
         for name, path, size in rep.sizes(preview):
             if name != "crashdump":                                   # the text files open as the exact text that is sent
-                with open(path, encoding="utf-8") as f:
+                with open(path, encoding="utf-8", newline="") as f:
                     self.assertEqual((f.read(), os.path.dirname(path)), (body["files"][name], preview))
         self.assertEqual(base64.b64decode(body["dump"]), b"MDMP" + b"\1" * 20)
         self.assertEqual(body["fields"]["gpu"], "NVIDIA GeForce RTX 3080 Ti")

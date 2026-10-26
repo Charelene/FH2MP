@@ -236,7 +236,7 @@ class Report:
                 try:
                     os.makedirs(preview_dir, exist_ok=True)
                     p = os.path.join(preview_dir, n)
-                    with open(p, "w", encoding="utf-8") as f:
+                    with open(p, "w", encoding="utf-8", newline="") as f:
                         f.write(t)
                 except OSError:
                     p = None

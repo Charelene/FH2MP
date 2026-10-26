@@ -381,7 +381,7 @@ class UpdaterTests(unittest.TestCase):
 
         class H(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
-                body = data if "ok.bin" in self.path else data[:-1] + b"X"
+                body = data if "ok.bin" in self.path else data[:-1] + bytes([data[-1] ^ 1])
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -447,9 +447,9 @@ class ProtonPathTests(unittest.TestCase):
         script = os.path.join(d, "proton")
         open(script, "w").write("#!/bin/sh\n")
         os.chmod(script, 0o644)
-        with self.assertRaises(launch.LaunchError):
-            launch.resolve_proton(d)                              # present but not executable
         if sys.platform != "win32":
+            with self.assertRaises(launch.LaunchError):
+                launch.resolve_proton(d)                          # Unix execute permissions
             os.chmod(script, 0o755)
             self.assertEqual(launch.resolve_proton(d), script)    # the folder is accepted
             self.assertEqual(launch.resolve_proton(d + "/"), script)
@@ -563,7 +563,7 @@ class ShimTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             shim.install(d, self.DLL, platform=platform_files())
             target = os.path.join(d, "fh2-mods", "FH2MP.dll")
-            with self.locked(target):                       # not Windows here: no way around it
+            with mock.patch("os.replace", side_effect=PermissionError(13, "Access is denied", target)):
                 with self.assertRaises(shim.ShimError) as cm:
                     shim.install(d, b"MZ....FH2MP-SHIM-VERSION:0.2.0:END....", platform=platform_files())
             self.assertIn("Access is denied", str(cm.exception))
@@ -935,7 +935,7 @@ class SaveAdoptionTests(unittest.TestCase):
         with open(os.path.join(p, "BinarySaveState"), "wb") as f:
             f.write(name.encode().ljust(112994 if progress else 4, b"\0"))
         if when is not None:
-            os.utime(os.path.dirname(p), (when, when))
+            os.utime(os.path.join(p, "BinarySaveState"), (when, when))
         return os.path.join(d, *base, name)
 
     def state(self, profile):
@@ -1002,10 +1002,13 @@ class SaveAdoptionTests(unittest.TestCase):
 class DevModeTests(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.TemporaryDirectory()
-        self.old = {k: os.environ.get(k) for k in ("FH2MP_DEV", "FH2MP_LAUNCHER_HOME", "XDG_CONFIG_HOME", "FH2MP_NO_KEYRING")}
+        self.old = {k: os.environ.get(k) for k in ("FH2MP_DEV", "FH2MP_LAUNCHER_HOME", "XDG_CONFIG_HOME", "FH2MP_NO_KEYRING",
+                                                  "APPDATA", "LOCALAPPDATA")}
         os.environ["FH2MP_NO_KEYRING"] = "1"
         os.environ.pop("FH2MP_LAUNCHER_HOME", None)
         os.environ["XDG_CONFIG_HOME"] = self.home.name
+        os.environ["APPDATA"] = self.home.name
+        os.environ["LOCALAPPDATA"] = self.home.name
 
     def tearDown(self):
         for k, v in self.old.items():
@@ -1020,7 +1023,7 @@ class DevModeTests(unittest.TestCase):
         os.environ["FH2MP_DEV"] = "1"
         dev = paths.config_dir()
         self.assertNotEqual(stable, dev)
-        self.assertTrue(dev.endswith("fh2mp-dev"))
+        self.assertEqual(os.path.basename(dev).lower(), "fh2mp-dev")
         s = Settings()
         self.assertEqual((s["channel"], s["allow_insecure"], s["pin_shim"]), ("dev", True, True))
         keystore.save(identity.Identity.generate())
