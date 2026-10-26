@@ -1,4 +1,4 @@
-# Database-free LSP/operator regressions, Linux x64 on Python 3.10 (CI), 3.12 or 3.14.
+# Database-free LSP/operator regressions, Linux x64 on Python 3.12 (CI) or 3.14.
 -r requirements-sign.txt
 psycopg==3.3.6 \
     --hash=sha256:a1db9f7148b06a28606767efaca51fa6f9398c5c0a3810519be69d7000bdb631
