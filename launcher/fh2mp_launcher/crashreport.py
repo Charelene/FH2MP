@@ -6,6 +6,8 @@ example a graphics call it cannot do) in its last session, or it wrote a minidum
 """
 import base64
 import datetime
+import glob
+import hashlib
 import os
 import platform
 import re
@@ -14,8 +16,11 @@ import time
 from . import azimuth, paths, shim
 from .version import __version__
 
-LIMITS = {"azimuth.log": 300_000, "fh2mp.log": 200_000, "platform.log": 100_000, "mod-crash.txt": 30_000, "launcher.log": 50_000}      # bytes sent from the end of each file
-MAX_DUMP = 1_000_000
+MAX_FILE = 2 << 20
+MAX_TEXT = 8 << 20
+MAX_FILES = 64
+LIMITS = dict.fromkeys(("azimuth.log", "fh2mp.log", "platform.log", "mod-crash.txt", "launcher.log"), MAX_FILE)
+MAX_DUMP = 32 << 20    # combined Azimuth and matching Mod Platform dumps
 
 _FAIL_RE = re.compile(r"\b(CRASHED|STOPPED)\b")
 _BEGAN_RE = re.compile(r"\bsession \S+ began \d{4}-\d\d-\d\d [\d:]+ UTC: (.*)$")
@@ -105,13 +110,26 @@ def _cut(text, limit):
     if len(data) <= limit:
         return text
     data = data[-limit:]
-    return (data.split(b"\n", 1)[1] if b"\n" in data else data).decode("utf-8", "replace")
+    return (data.split(b"\n", 1)[1] if b"\n" in data else data).decode("utf-8", "ignore")
 
 
 def _last_session(text):
     lines = text.splitlines()
     start = max((i for i, ln in enumerate(lines) if _BEGAN_RE.search(ln)), default=0)
     return lines[start:]
+
+
+def _session_start(lines):
+    for ln in lines:
+        if not _BEGAN_RE.search(ln):
+            continue
+        began = re.search(r"\bbegan (\d{4}-\d\d-\d\d [\d:]+) UTC:", ln)
+        if began:
+            try:
+                return datetime.datetime.strptime(began.group(1), "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp()
+            except ValueError:
+                pass
+    return None
 
 
 def find_crash(folder, since):
@@ -136,15 +154,33 @@ def find_crash(folder, since):
                 mod_crash, mod_t = p, os.path.getmtime(p)
     except OSError:
         pass
-    line, log_t = "", 0.0
+    line, log_t, session = "", 0.0, []
+    next_session_t = None
     log = os.path.join(d, "azimuth.log")
     try:
         log_t = os.path.getmtime(log)
     except OSError:
         pass
     if log_t > since:
-        fails = [ln for ln in _last_session(_read_tail(log, LIMITS["azimuth.log"])) if _FAIL_RE.search(ln) and "CreateDXGIFactory2" not in ln]
-        line = fails[-1] if fails else ""
+        lines = _read_tail(log, LIMITS["azimuth.log"]).splitlines()
+        session = _last_session("\n".join(lines))
+        fails = [ln for ln in session if _FAIL_RE.search(ln) and "CreateDXGIFactory2" not in ln]
+        line = fails[0] if fails else ""
+        if dump and not line:
+            marker = os.path.basename(dump)
+            end = next((i for i in range(len(lines) - 1, -1, -1)
+                        if "crash dump " in lines[i] and marker in lines[i]), None)
+            if end is not None:
+                start = max((i for i in range(end) if _BEGAN_RE.search(lines[i])), default=0)
+                session = lines[start:end]
+                next_session_t = _session_start(lines[end + 1:])
+                fails = [ln for ln in session if _FAIL_RE.search(ln) and "CreateDXGIFactory2" not in ln]
+                line = fails[0] if fails else ""
+    # A crash before the platform finishes starting cannot produce a new mod report. Do not attach a previous session's physics
+    # stack to a newer platform/audio crash (#40, #45). The session's UTC start is independent of Azimuth's uptime counter.
+    start_t = _session_start(session)
+    if mod_crash and ((start_t is not None and mod_t < start_t) or (next_session_t is not None and mod_t >= next_session_t)):
+        mod_crash, mod_t = None, 0.0
     if not dump and not line and not mod_crash:
         return None
     return Crash(folder, line, dump, dump_t or log_t or mod_t, max(dump_t, mod_t, log_t if line else 0.0), mod_crash)
@@ -180,11 +216,14 @@ def handled(settings, crash):
 
 
 class Report:
-    def __init__(self, fields, files, dump, dump_path):
+    def __init__(self, fields, files, dump, dump_path, dump_note="", attachments=(), notes=()):
         self.fields = fields                  # [(label, value)] in the order the player sees them
         self.files = files                    # [(name, path, text sent)]
         self.dump = dump                      # bytes or None
         self.dump_path = dump_path
+        self.dump_note = dump_note
+        self.attachments = attachments       # [(name, local path, bytes)] for matching secondary dumps
+        self.notes = notes
 
     def sizes(self, preview_dir=None):
         """[(label, path, bytes sent)] for the player's list of files. With `preview_dir` the text files are written there exactly as they
@@ -204,6 +243,10 @@ class Report:
             out.append((n, p, len(t.encode())))
         if self.dump is not None:
             out.insert(1, ("crashdump", self.dump_path, len(self.dump)))
+        elif self.dump_note:
+            out.insert(1, ("Crash dump not attached: " + self.dump_note, self.dump_path, 0))
+        out.extend((name, path, len(data)) for name, path, data in self.attachments)
+        out.extend((note, None, 0) for note in self.notes)
         return out
 
     def payload(self):
@@ -212,7 +255,26 @@ class Report:
         body = {"v": 1, "fields": {names[k]: v for k, v in self.fields}, "files": {n: t for n, _p, t in self.files if t}}
         if self.dump is not None:
             body["dump"] = base64.b64encode(self.dump).decode()
+        elif self.dump_note:
+            body["dumpStatus"] = self.dump_note
+        if self.attachments:
+            body["attachments"] = {name: base64.b64encode(data).decode() for name, _, data in self.attachments}
         return body
+
+
+def diagnostic_logs(folder, used):
+    """Known diagnostic folders only: no saves, session/config files, binaries, or unrelated crash sessions."""
+    root = os.path.realpath(folder)
+    for pattern in ("*.log", "data/logs/*.log", "data/bin/*.log", "fh2-mods/*.log", "fh2-mods/*/*.log", "fh2extra/*.log"):
+        for path in sorted(glob.glob(os.path.join(folder, pattern))):
+            real = os.path.realpath(path)
+            if real in used or os.path.commonpath((root, real)) != root or not os.path.isfile(path):
+                continue
+            used.add(real)
+            relative = os.path.relpath(path, folder)
+            base = re.sub(r"[^A-Za-z0-9_.-]|\.{2,}", "_", os.path.basename(path))[-70:]
+            name = "extra-" + hashlib.sha256(relative.encode()).hexdigest()[:10] + "-" + base
+            yield name, path
 
 
 def build(lc, crash):
@@ -241,17 +303,47 @@ def build(lc, crash):
     if crash.mod_crash:
         extra.append(("mod-crash.txt", crash.mod_crash))
     extra.append(("launcher.log", os.path.join(paths.cache_dir(), "launcher.log")))
-    for name, p in extra:
-        files.append((name, p, scrub(_read_tail(p, LIMITS[name]))))
-    dump = None
+    used = {os.path.realpath(p) for _, p, _ in files} | {os.path.realpath(p) for _, p in extra}
+    extra.extend(diagnostic_logs(folder, used))
+    candidates = [("azimuth.log", az_path), *extra]
+    candidates = [(name, path) for name, path in candidates if os.path.isfile(path)]
+    skipped = max(0, len(candidates) - (MAX_FILES - 2))
+    candidates = candidates[:MAX_FILES - 2]
+    per_file = min(MAX_FILE, MAX_TEXT // max(1, len(candidates)))
+    files = [(name, path, _cut(full if name == "azimuth.log" else scrub(_read_tail(path, per_file)), per_file))
+             for name, path in candidates]
+    dump, dump_note = None, "No dump file found"
     if crash.dump:
         try:
-            if os.path.getsize(crash.dump) <= MAX_DUMP:
+            size = os.path.getsize(crash.dump)
+            if size <= MAX_DUMP:
                 with open(crash.dump, "rb") as f:
-                    dump = f.read()
+                    dump = f.read(MAX_DUMP + 1)
+                if len(dump) > MAX_DUMP:
+                    dump = None
+                    dump_note = f"Dump exceeds {MAX_DUMP // (1 << 20)} MB limit"
+            else:
+                dump_note = f"Dump is {human_size(size)}; exceeds {MAX_DUMP // (1 << 20)} MB limit"
         except OSError:
-            pass
-    return Report(fields, files, dump, crash.dump)
+            dump_note = "Dump file could not be read"
+    attachments, notes = [], []
+    if skipped:
+        notes.append(f"{skipped} additional logs exceed the 64-file report limit")
+    if crash.mod_crash:
+        path = os.path.splitext(crash.mod_crash)[0] + ".dmp"
+        if os.path.isfile(path) and os.path.realpath(path) != os.path.realpath(crash.dump or ""):
+            remaining = MAX_DUMP - len(dump or b"")
+            try:
+                if os.path.getsize(path) > remaining:
+                    notes.append("Mod Platform dump exceeds the combined 32 MiB dump limit")
+                else:
+                    with open(path, "rb") as f:
+                        data = f.read(remaining + 1)
+                    if len(data) <= remaining and data.startswith(b"MDMP"):
+                        attachments.append(("mod-crash.dmp", path, data))
+            except OSError:
+                notes.append("Mod Platform dump could not be read")
+    return Report(fields, files, dump, crash.dump, dump_note if dump is None else "", attachments, notes)
 
 
 def human_size(n):

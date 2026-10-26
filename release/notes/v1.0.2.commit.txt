@@ -1,0 +1,3 @@
+Prepare 1.0.2: crash fixes,
+fix incompatible engine parts, rental class fix, fix crash diagnostics and isolate detected
+Redline/NitroSystem clients.

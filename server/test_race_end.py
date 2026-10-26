@@ -72,8 +72,27 @@ class FreeRoamRaceEnd(unittest.TestCase):
         w, (a, b) = world({"numlaps": None})
         w.event["laps"] = {}
         one = int.from_bytes(S.struct.pack("<d", 60.0), "little")
-        w.note_lap_score(a, 2, [one, one, int.from_bytes(S.struct.pack("<d", 130.0), "little")])
+        w.note_lap_score(a, 2, [int.from_bytes(S.struct.pack("<d", 130.0), "little"), one, one])
         self.assertEqual(w.event["laps"][a], 2)
+
+    def test_south_scramble_elapsed_time_is_not_the_last_lap(self):
+        # Prod 2026-10-25 23:31–23:34 UTC, lobby 56614b63. These elapsed
+        # times match the player's result screen: 2:34.088 and 2:38.367.
+        w, (a, b) = world({"numlaps": 2})
+        messages = []
+        w.log = messages.append
+        def score(peer, lap, times):
+            w.note_lap_score(peer, lap, [int.from_bytes(S.struct.pack("<d", t), "little") for t in times])
+        score(a, 0, (3.177, 0, 0))
+        score(a, 1, (79.331, 76.154, 76.154))
+        score(b, 1, (83.367, 81.668, 81.668))
+        self.assertEqual(w.event["finished"], {})
+        score(a, 2, (154.088, 74.755, 74.755))
+        self.assertNotIn(b, w.event["finished"])
+        score(b, 2, (158.367, 75, 75))
+        self.assertEqual(len(w.event["finished"]), 2)
+        self.assertIn("finished in 154.088 s", messages[0])
+        self.assertIn("finished in 158.367 s", messages[1])
 
     def test_keyframe_counts_once(self):
         w, (a, b) = world({"numlaps": None})

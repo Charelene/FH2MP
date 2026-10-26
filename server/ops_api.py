@@ -38,6 +38,7 @@ not carry proxy headers, so nothing reachable through the public reverse proxy c
 Errors: {"error": "<code>", "message": "..."}.
 """
 import calendar
+from dataclasses import dataclass
 import hmac
 import ipaddress
 import json
@@ -74,6 +75,16 @@ class OpsError(Exception):
         self.status, self.code, self.message = status, code, message or code
 
 
+@dataclass
+class FileDownload:
+    data: bytes
+    name: str
+
+    @property
+    def content_type(self):
+        return "application/octet-stream" if self.name.endswith(".dmp") else "text/plain; charset=utf-8"
+
+
 class OpsConfig:
     def __init__(self, token="", allow=("127.0.0.1/32", "::1/128")):
         self.token = token
@@ -102,6 +113,8 @@ def handle(cfg, lsp, method, path, headers, body, peer, proxied):
         _authorize(cfg, lsp, headers, peer, proxied)
         return _route(lsp, method, path, body)
     except OpsError as e:
+        return e.status, {"error": e.code, "message": e.message}
+    except auth.AuthError as e:
         return e.status, {"error": e.code, "message": e.message}
     except lsp.ApiError as e:                                  # the notification API's own errors
         return e.status, {"error": "bad_request", "message": e.msg}
@@ -148,6 +161,12 @@ def _route(lsp, method, path, body):
     if parts[:2] != ["ops", "v1"] or len(parts) < 3:
         raise OpsError(404, "not_found")
     what, rest = parts[2], parts[3:]
+
+    if what == "crash-reports" and len(rest) == 2 and method == "GET":
+        crashes = getattr(getattr(lsp, "LAUNCHER", None), "crashes", None)
+        if crashes is None:
+            raise OpsError(404, "not_found")
+        return 200, FileDownload(crashes.download(*rest), rest[1])
 
     if what == "reports":
         if not rest and method == "GET":

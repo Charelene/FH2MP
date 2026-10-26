@@ -52,6 +52,7 @@ class FreeRoamTeams(unittest.TestCase):
             p = S.Peer(("10.0.0.%d" % i, 5000 + i))
             p.connected, p.owner_id = True, i
             p.console_vars[4] = 1
+            p.choices = (3, 0.750)
             w.peers[p.addr] = p
             peers.append(p)
         writes = []
@@ -166,6 +167,7 @@ class LapSync(unittest.TestCase):
         self.w.log = lambda *a: None
         for q in (self.host, self.guest):
             q.entered = True
+            q.choices = (3, 0.750)
 
     def write_options(self, size, payload, seq=20):
         msg = S.transfer_update_message(S.ROUTER_LOBBY, 0, S.LOBBY_ID_BITS, seq, size, payload)
@@ -206,7 +208,8 @@ class LapSync(unittest.TestCase):
         self.assertEqual(self.host.outbox, [])
         self.write_options(18, 6 | (3 << 10), seq=23)  # TimeOfDayIndex only
         self.assertEqual(gameopts.lap_field(*self.w.game_options)[1], 10)
-        self.assertEqual(self.read_options(self.host)[1:], self.read_options(self.guest)[1:])
+        self.assertEqual(self.host.outbox, [])  # preserve other pending host UI edits
+        self.assertEqual(gameopts.fields(*self.read_options(self.guest)[1:])[6], (8, 3))
 
     def test_default_is_explicit_before_the_start_flags(self):
         self.w.set_console_bool = lambda *a: self.assertTrue(self.host.outbox and self.guest.outbox)
@@ -228,7 +231,7 @@ class LapSync(unittest.TestCase):
         ev.update(racing=True, finished={})
         def score(lap):
             val = lambda t: int.from_bytes(S.struct.pack('<d', t), 'little')
-            self.w.note_lap_score(self.host, lap, [val(60), val(60), val(60 * max(1, lap))])
+            self.w.note_lap_score(self.host, lap, [val(60 * max(1, lap)), val(60), val(60)])
         score(0)
         score(1)
         self.w.note_score_keyframe(self.host)
@@ -257,6 +260,116 @@ class LapSync(unittest.TestCase):
         self.assertEqual(gameopts.end_condition_type(*self.w.game_options), 2)
         self.w.start_event(self.host)
         self.assertIsNone(self.w.event['numlaps'])
+
+
+class RaceRestrictions(unittest.TestCase):
+    setUp = LapSync.setUp
+    write_options = LapSync.write_options
+    read_options = LapSync.read_options
+    # Consecutive writes by the South Scramble host, prod 2026-10-25.
+    PRIOR = (716, "001c0c70044c0f000014b0be0000e080800702490028313333f3b3c4ccccdc0f133333733f4d084866b2a269b400000000d20000e086508bd4be66b600dbde060000f8831b000028506e01ba01ec16c01b406f06e555ef7ad803")
+    SOUTH = (795, "00000c0004f80c00001420090000e040c003cb40200906250000007f96000000fc61020000f0a789ffc82ad9c98896d1040000004803000000380d000040083548cd6b653b1b806d6e03000009c20d0000f0273700dd107643e00da13780f2a867bdec05")
+
+    def setup_b(self):
+        self.write_options(*gameopts.encode_fields({30: (8, 2)}))
+        self.host.choices, self.guest.choices = (2, .671), (2, .698)
+        self.w.log = lambda *a: None
+
+    def test_captured_delta_retains_b_and_late_join_receives_it(self):
+        self.write_options(*parsed(self.PRIOR))
+        self.write_options(*parsed(self.SOUTH), seq=22)
+        self.assertEqual(gameopts.car_rule(self.w.game_options), (2, 0, 0))
+        self.assertEqual(gameopts.fields(*self.w.game_options)[77], (8, 255))
+        self.assertEqual(gameopts.fields(*self.w.game_options)[14], (8, 1))
+        self.assertEqual(gameopts.fields(*self.read_options(self.guest)[1:])[30], (8, 2))
+        self.host.choices, self.guest.choices = (2, .671), (1, .583)
+        self.w.start_event(self.host)
+        self.assertEqual(self.w.event['people'], [self.host])
+
+    def test_explicit_unrestricted_clears_the_old_class(self):
+        self.setup_b()
+        self.write_options(*gameopts.encode_fields({30: (8, 255)}), seq=22)
+        self.assertEqual(gameopts.car_rule(self.w.game_options)[0], 255)
+        self.guest.choices = (1, .583)
+        self.w.start_event(self.host)
+        self.assertIn(self.guest, self.w.event['people'])
+
+    def test_wrong_class_and_unknown_car_cannot_enter_grid(self):
+        for choices in ((1, .583), (3, .750), None):
+            with self.subTest(choices=choices):
+                self.setUp()
+                self.setup_b()
+                self.guest.choices = choices
+                self.w.start_event(self.host)
+                self.assertEqual(self.w.event['people'], [self.host])
+
+    def test_wrong_class_leader_cancels_start(self):
+        self.setup_b()
+        self.host.choices = (1, .583)
+        self.w.start_event(self.host)
+        self.assertIsNone(self.w.event)
+
+    def test_car_change_while_loading_cannot_bypass_the_rule(self):
+        self.setup_b()
+        self.w.start_event(self.host)
+        for q in (self.host, self.guest):
+            q.console_vars[S.CONSOLE_VAR_HAS_LOADED_CARS] = 1
+        self.guest.choices = (1, .583)
+        self.w.maybe_begin_race()
+        self.assertIsNone(self.w.event)
+        self.assertEqual(self.host.console_vars[S.CONSOLE_VAR_PARTICIPATING_IN_RACE], 0)
+
+    def test_car_change_on_grid_cannot_bypass_the_rule(self):
+        self.setup_b()
+        self.w.start_event(self.host)
+        self.guest.choices = (1, .583)
+        self.w.go_race()
+        self.assertIsNone(self.w.event)
+
+    def test_rule_is_fixed_for_the_event_that_is_loading(self):
+        self.setup_b()
+        self.w.start_event(self.host)
+        self.write_options(*gameopts.encode_fields({30: (8, 255)}), seq=22)
+        self.assertEqual(gameopts.car_rule(self.w.game_options)[0], 2)
+        self.assertEqual(gameopts.car_rule(self.read_options(self.host)[1:])[0], 2)
+        self.guest.choices = (1, .583)
+        self.w.maybe_begin_race()
+        self.assertIsNone(self.w.event)
+
+    def test_malformed_delta_does_not_erase_restrictions(self):
+        self.setup_b()
+        before = self.w.game_options
+        self.write_options(17, 30 | (255 << 10), seq=22)
+        self.assertEqual(self.w.game_options, before)
+
+    def test_previous_owner_cannot_override_new_leader(self):
+        self.setup_b()
+        self.w.ownership_grant(self.guest, S.ROUTER_LOBBY, S.TYPE_GAME_OPTIONS, 0, S.LOBBY_ID_BITS)
+        before = self.w.game_options
+        self.write_options(*gameopts.encode_fields({30: (8, 255)}), seq=22)
+        self.assertEqual(self.w.game_options, before)
+
+    def test_pi_boundaries_use_display_pi_and_reject_nonfinite(self):
+        rule = (2, 650, 700)
+        for pi in (.650, .671, .700):
+            self.assertTrue(gameopts.accepts_car(rule, (2, pi)))
+        for pi in (.649, .701, float('nan'), float('inf')):
+            self.assertFalse(gameopts.accepts_car(rule, (2, pi)))
+
+    def test_ready_request_rejects_c_class_in_b_event(self):
+        self.setup_b()
+        self.guest.choices = (1, .583)
+        self.w.pending_race = (9999999999, self.host)
+        def ready(w):
+            w.bits(S.MSG_READY_REQUEST, 7)
+            w.bits(1, 1)
+            w.bits(0, 1)
+            w.bits(0, 2)
+            w.bits(1, 1)
+        self.w.handle(S.build_packet([ready]), self.guest.addr)
+        self.assertEqual(self.guest.console_vars[4], 0)
+        responses = [m for m in self.guest.outbox if m[0] & 127 == S.MSG_READY_REQUEST_RESPONSE]
+        self.assertEqual((responses[-1][0] >> (7 + S.LOBBY_EVENT_KEY_BITS)) & 3, 1)
 
 
 if __name__ == "__main__":

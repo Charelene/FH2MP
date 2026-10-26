@@ -387,6 +387,24 @@ def announce_revoke(xuid):
         _control("revoke %x" % int(xuid))
 
 
+def quarantine_tools(xuid, tools):
+    """Flag the authenticated sender and wait for the hub before matchmaking can run. No caller-supplied target identity."""
+    import socket
+    tools = sorted(set(tools))
+    if not xuid or not tools or not set(tools) <= {"redline", "nitrosystem"}:
+        return None
+    target = os.environ.get("FH2MP_SERVER_CONTROL", "127.0.0.1:5090").rsplit(":", 1)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as so:
+            so.settimeout(1.0)
+            so.connect((target[0], int(target[1])))
+            so.send(("tools %x %s" % (int(xuid), ",".join(tools))).encode())
+            reply = so.recv(64).decode("ascii")
+            return reply if reply in ("ok", "rejoin") else None
+    except (OSError, ValueError):
+        return None
+
+
 def drop_player(xuid):
     """Takes a player out of every session and ticket (ban / kick)."""
     xuid = str(xuid)

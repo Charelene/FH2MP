@@ -33,6 +33,7 @@ INSERT INTO v_tracks VALUES (856,'Sisteron Citadel Circuit',1664,1), (891,'Siste
 INSERT INTO v_cars VALUES (7,'Test Car','Testmake',2014,3,'Italy','RWD','None',90.0), (8,'Other Car','Othermake',1969,0,'Japan','AWD','Rally',60.0);
 """
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
+JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 24
 
 
 def speed(sc, xuid, tag, mps, trap, st=5, car=7):
@@ -227,6 +228,10 @@ class GarageTests(Base):
         self.assertEqual((st, png), (200, PNG))
         for fid in (2, 4, 77, "x"):                                    # no picture, removed, unknown, not a number
             self.assertEqual(call(self.lsp, "GET", f"/ops/v1/garage/{fid}/preview.png")[0], 404)
+
+    def test_jpeg_preview(self):                                       # photos are stored as the game's JPEG
+        self.lsp.DB.execute("UPDATE ugc_files SET preview = ? WHERE id = 1", (ugc.pack(JPEG),))
+        self.assertEqual(call(self.lsp, "GET", "/ops/v1/garage/1/preview.png"), (200, JPEG))
 
 
 class PopulationTests(Base):

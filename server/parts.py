@@ -89,7 +89,7 @@ def find_unknown_car(size, payload):
 def problem(slot, word):
     """Why `word` cannot be in `slot` (None when it can): the one classification audit_parts and neutralize share."""
     if word == NONE:
-        return None
+        return "missing tire compound" if slot == 8 else None
     table = P.SLOT_TABLE.get(slot)
     if table is None:
         return "this slot has no part type"
@@ -100,10 +100,11 @@ def problem(slot, word):
 
 def must_replace(slot, word):
     """An id no client can build the car with: one that is in no part table at all, or anything but a camshaft row in the camshaft
-    slot (slot 12: the engine's torque curve is read from that row, game+0x1064408). An id of another table elsewhere is only
+    slot (slot 12: the engine's torque curve is read from that row, game+0x1064408), or a non-tire row in slot 8 (the tire loader
+    dereferences the selected row to read its friction curves at game+0x1062c30). An id of another table elsewhere is only
     reported: an electric car's slot 0, for one, may hold its Motor row (car 2101), which is not an Engine row."""
     text = problem(slot, word)
-    return text is not None and P.SLOT_TABLE.get(slot) is not None and slot != 2 and ("no such id" in text or slot == 12)
+    return text is not None and P.SLOT_TABLE.get(slot) is not None and slot != 2 and ("no such id" in text or slot in (8, 12))
 
 
 def audit_parts(words):
@@ -132,8 +133,9 @@ def neutralize(words):
     in the same second a car with a made-up engine row appeared, e.g. 368335 on an Integra whose real engine rows are 368000-368002).
     Such a word (see must_replace) becomes the stock row of its owner, or -1 where the owner has no stock row (an optional part such as
     a turbo). Slots 0 and 1 are fixed first, because the engine and drivetrain sub-parts belong to the engine / drivetrain those rows
-    install. Anything else that is odd (an id of another table, a row of another car or engine) is only reported in `odd`: nothing
-    shows that it crashes anyone. Returns (new words, [(slot, old, new, why)], [(slot, word, text)])."""
+    install. Engine sub-parts must belong to the resulting engine: the native loader rejects a different EngineID and returns NULL
+    (RVA 0x1048990), which the camshaft's RedlineRPM reader dereferences (#52). Other ownership differences are reported in `odd`.
+    Returns (new words, [(slot, old, new, why)], [(slot, word, text)])."""
     out, changes, odd = list(words), [], []
     if words[2] not in P.TABLE_IDS["CarBody"]:
         return out, changes, odd            # no car body row: the list may have been found at the wrong offset, never rewrite then
@@ -148,7 +150,8 @@ def neutralize(words):
             owner = _expected_owner(table, out)
             new = P.STOCK.get(table, {}).get(owner, NONE) if owner is not None else NONE
             out[k] = new
-            changes.append((k, w, new, "no such id" if w not in P.ALL_IDS else "an id of another part table"))
+            why = "missing tire compound" if k == 8 and w == NONE else ("no such id" if w not in P.ALL_IDS else "an id of another part table")
+            changes.append((k, w, new, why))
             continue
         text = problem(k, w)
         if text is not None:
@@ -159,6 +162,11 @@ def neutralize(words):
         owner = _expected_owner(table, out)
         have = P.ROW_OWNER.get(table, {}).get(w)
         if owner is not None and have is not None and have != owner:
+            if P.OWNER_KIND.get(table) == "engine":
+                new = P.STOCK.get(table, {}).get(owner, NONE)
+                out[k] = new
+                changes.append((k, w, new, f"{table} belongs to engine {have}, installed engine is {owner}"))
+                continue
             odd.append((k, w, f"{table} row of {P.OWNER_KIND[table]} {have}, this car's is {owner}"))
     return out, changes, odd
 

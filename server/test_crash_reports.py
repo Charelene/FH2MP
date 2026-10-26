@@ -48,6 +48,20 @@ class FakeGitHub:
 
 
 class CrashReportTests(unittest.TestCase):
+    def test_primary_failure_survives_crash_handler_failure_and_restart(self):
+        primary = "10 tid=3 CRASHED exception 0xc0000005 at game+0x12e26dd writing 0x1234 on thread 3"
+        secondary = "11 tid=4 CRASHED exception 0xc0000005 at azimuth+0x1d237d reading 0x4321 on thread 4"
+        old = "1 tid=1 STOPPED old failure at azimuth+0x136b9b"
+        log = old + "\n2 tid=1 session B began x\n" + primary + "\n" + secondary
+        log += "\n12 tid=1 session C began x\nrunning\n"
+        self.assertEqual(crash_reports.failure_line(log), primary.removeprefix("10 tid=3 "))
+        self.assertEqual(crash_reports.signature(crash_reports.failure_line(log))[0], "0xc0000005@game+0x12e26dd")
+
+    def test_azimuth_stops_have_stable_signatures(self):
+        key, title = crash_reports.signature("STOPPED D3D12 descriptor blocks exhausted at azimuth+0x136b9b")
+        self.assertIn("azimuth+0x136b9b", key)
+        self.assertIn("descriptor blocks", title)
+
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         self.gh = FakeGitHub()
@@ -65,10 +79,12 @@ class CrashReportTests(unittest.TestCase):
         self.assertIn("crash-report", body["labels"])
         self.assertIn(rid, body["body"])
         self.assertIn("`Speedy`", body["body"])
-        self.assertNotIn("launcher.log", body["body"])
+        self.assertIn(f"[launcher.log](https://forza.scuffed.af/panel/crashes/{rid}/launcher.log/download/)", body["body"])
         self.assertIn("Mod Platform crash report", body["body"])
         self.assertIn("0  game+0x2D8EAD", body["body"])
-        self.assertNotIn("platform.log", body["body"].replace("Platform", ""))
+        self.assertIn(f"[platform.log](https://forza.scuffed.af/panel/crashes/{rid}/platform.log/download/)", body["body"])
+        self.assertTrue(body["body"].startswith("This issue was created automatically by launcher's crash reporter."))
+        self.assertNotIn("| Crash dump |", body["body"])
         self.assertLess(len(body["body"]), 65536)
 
     def test_same_crash_is_a_comment_until_the_issue_is_closed(self):
@@ -89,8 +105,8 @@ class CrashReportTests(unittest.TestCase):
         self.assertIn("Azimuth stop at game+0x10c897b", self.gh.calls[-1][2]["title"])
         self.assertNotIn("0x14e7eec8", self.gh.calls[-1][2]["title"])
 
-    def test_only_the_last_session_counts_and_the_graphics_check_does_not(self):
-        self.assertEqual(crash_reports.failure_line("1 tid=1 session A began x\n" + CRASH + "\n2 tid=1 session B began x\nfine\n"), "")
+    def test_restart_does_not_hide_the_reported_crash_and_graphics_check_is_ignored(self):
+        self.assertIn("CRASHED exception", crash_reports.failure_line("1 tid=1 session A began x\n" + CRASH + "\n2 tid=1 session B began x\nfine\n"))
         self.assertEqual(crash_reports.failure_line(LOG), "CRASHED exception 0xc0000005 at game+0xcf2dc3 reading 0x20 on thread 2100")
         self.assertEqual(crash_reports.failure_line("1 tid=1 STOPPED CreateDXGIFactory2 failed at 0x1"), "")
 
@@ -107,14 +123,80 @@ class CrashReportTests(unittest.TestCase):
         self.cr.submit(report(log=log, **{"files": {"azimuth.log": log, "fh2mp.log": "lsp at 198.51.100.4 token=abc\n",
                                                     "mod-crash.txt": "CRASH at game+0x1 user bob@example.org\n"}}))
         body = self.gh.calls[-1][2]["body"]
-        for leak in ("pat@example.com", "203.0.113.9", "word1", "bob@example.org", "198.51.100.4", "fh2mp.log"):
+        for leak in ("pat@example.com", "203.0.113.9", "word1", "bob@example.org", "198.51.100.4"):
             self.assertNotIn(leak, body)
         self.assertIn("<email>", body)
         self.assertIn("CRASHED exception 0xc0000005", body)
 
+    def test_normal_azimuth_dump_is_retained_privately(self):
+        dump = b"MDMP" + b"x" * (4_897_508 - 4)
+        payload = dict(report(), dump=base64.b64encode(dump).decode())
+        self.assertLess(len(json.dumps(payload).encode()), crash_reports.MAX_BODY)
+        rid = self.cr.submit(payload)
+        with open(os.path.join(self.dir, rid, "crash.dmp"), "rb") as f:
+            self.assertEqual(f.read(), dump)
+        self.assertIn(f"/{rid}/crash.dmp/download/)", self.gh.calls[-1][2]["body"])
+
+    def test_missing_dump_has_no_placeholder_row_or_link(self):
+        self.cr.submit(dict(report(dump=False), dumpStatus="Dump exceeds 8 MB limit"))
+        body = self.gh.calls[-1][2]["body"]
+        self.assertNotIn("Dump exceeds", body)
+        self.assertNotIn("| Crash dump |", body)
+        self.assertNotIn("crash.dmp]", body)
+
+    def test_all_attachments_are_linked_in_issues_and_duplicate_comments(self):
+        payload = report()
+        payload['files']['extra-123-ExtraOptions.log'] = 'mod diagnostics'
+        payload['attachments'] = {'mod-crash.dmp': base64.b64encode(b'MDMPplatform').decode()}
+        rid = self.cr.submit(payload)
+        body = self.gh.calls[-1][2]['body']
+        for name in (*payload['files'], 'crash.dmp', 'mod-crash.dmp'):
+            self.assertIn(f'/{rid}/{name}/download/)', body)
+        self.assertEqual(self.cr.download(rid, 'mod-crash.dmp'), b'MDMPplatform')
+        self.assertEqual(self.cr.download(rid, 'extra-123-ExtraOptions.log'), b'mod diagnostics')
+        again = self.cr.submit(payload)
+        comment = self.gh.calls[-1][2]['body']
+        self.assertIn(f'/{again}/fh2mp.log/download/)', comment)
+        self.assertIn(f'/{again}/mod-crash.dmp/download/)', comment)
+
+    def test_downloads_require_operator_auth_and_reject_path_escapes(self):
+        import types
+        import ops_api
+        rid = self.cr.submit(report())
+        lsp = types.SimpleNamespace(LAUNCHER=self.ctx if hasattr(self, 'ctx') else types.SimpleNamespace(crashes=self.cr),
+                                    AUTH=None, ApiError=type('ApiError', (Exception,), {}))
+        cfg = ops_api.OpsConfig('test-token')
+        path = f'/ops/v1/crash-reports/{rid}/crash.dmp'
+        call = lambda headers, peer='127.0.0.1', proxied=False: ops_api.handle(cfg, lsp, 'GET', path, headers, b'', peer, proxied)
+        self.assertEqual(call({})[0], 401)
+        self.assertEqual(call({'Authorization': 'Bearer test-token'}, '203.0.113.1')[0], 403)
+        self.assertEqual(call({'Authorization': 'Bearer test-token'}, proxied=True)[0], 403)
+        status, download = call({'Authorization': 'Bearer test-token'})
+        self.assertEqual(status, 200)
+        self.assertTrue(download.data.startswith(b'MDMP'))
+        for name in ('../issues.json', 'report.json', '/etc/passwd', 'a/../../azimuth.log'):
+            with self.assertRaises(auth.AuthError):
+                self.cr.download(rid, name)
+        os.symlink('/etc/passwd', os.path.join(self.dir, rid, 'linked.log'))
+        with self.assertRaises(auth.AuthError):
+            self.cr.download(rid, 'linked.log')
+
+    def test_larger_dump_and_combined_limits(self):
+        dump = b'MDMP' + b'x' * (13 << 20)
+        payload = dict(report(), dump=base64.b64encode(dump).decode())
+        self.assertGreater(len(json.dumps(payload)), 16 << 20)
+        rid = self.cr.submit(payload)
+        self.assertEqual(self.cr.download(rid, 'crash.dmp'), dump)
+        from unittest import mock
+        with mock.patch.object(crash_reports, 'MAX_DUMP', 150):
+            payload = dict(report(), attachments={'mod-crash.dmp': base64.b64encode(b'MDMP'+b'x'*100).decode()})
+            with self.assertRaises(auth.AuthError) as cm:
+                crash_reports.validate(payload)
+            self.assertEqual(cm.exception.status, 413)
+
     def test_rejects_bad_input(self):
-        for bad, code in ((report(dump=False, files={"x.txt": "y"}), 400), (report(dump=False, files={}), 400),
-                          (report(dump=False, files={"azimuth.log": "x" * 400_000}), 413), ({"v": 2}, 400),
+        for bad, code in ((report(dump=False, files={"x.json": "y"}), 400), (report(dump=False, files={}), 400),
+                          (report(dump=False, files={"azimuth.log": "x" * (crash_reports.MAX_FILE + 1)}), 413), ({"v": 2}, 400),
                           (dict(report(), dump="not base64!"), 400), (dict(report(), dump=base64.b64encode(b"nope").decode()), 400)):
             with self.assertRaises(crash_reports.auth.AuthError) as cm:
                 self.cr.submit(bad)
@@ -169,6 +251,21 @@ class CrashReportApiTests(unittest.TestCase):
     def test_bigger_body_only_for_this_endpoint(self):
         self.assertEqual(launcher_api.body_limit("/v1/crash-reports"), crash_reports.MAX_BODY)
         self.assertEqual(launcher_api.body_limit("/v1/me"), launcher_api.MAX_BODY)
+
+    def test_http_handler_uses_the_crash_limit_instead_of_the_game_limit(self):
+        import types
+        import fh2mp_lsp
+        accepted, rejected = [], []
+        size = 17 << 20
+        handler = types.SimpleNamespace(path="/v1/crash-reports", headers={"Content-Length": str(size)},
+                                        rfile=io.BytesIO(b"x" * size), _v1=lambda body: accepted.append(len(body)),
+                                        _reply_json=lambda status, obj: rejected.append(status))
+        fh2mp_lsp.Handler._handle(handler)
+        self.assertEqual(accepted, [size])
+        self.assertEqual(rejected, [])
+        handler.path = "/v1/me"
+        fh2mp_lsp.Handler._handle(handler)
+        self.assertEqual(rejected, [413])
 
 
 if __name__ == "__main__":

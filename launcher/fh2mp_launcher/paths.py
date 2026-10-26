@@ -52,7 +52,12 @@ def atomic_write(path, data, mode=0o600, busy_ok=False):
             if os.path.exists(aside):
                 os.unlink(aside)
             os.replace(path, aside)
-            os.replace(tmp, path)
+            try:
+                os.replace(tmp, path)
+            except BaseException:
+                if not os.path.exists(path):
+                    os.replace(aside, path)
+                raise
             try:
                 os.unlink(aside)
             except OSError:

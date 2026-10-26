@@ -2,12 +2,14 @@
 
 The issue is public, so it carries only the summary, the Mod Platform's crash report and the end of azimuth.log, each passed through redact();
 fh2mp.log (server addresses, ids, requests), the platform and launcher logs and the crash dump stay in FH2MP_CRASH_DIR/<id>/ (the id is in the
-issue; security audit 2026-10-25 F05). A crash that was reported before (same exception and address) is added to the open issue
+issue; security audit 2026-10-25 F05). Every attachment has a download link through the website's staff-only panel.
+A crash that was reported before (same exception and address) is added to the open issue
 as a comment instead of a new issue; if that issue was closed, a new one is opened.
 
     FH2MP_CRASH_DIR       where reports are kept (needed; without it and a token the endpoint answers 503)
     FH2MP_GITHUB_TOKEN    token that may create issues in the repository (fine-grained: Issues read/write); unset = reports are only kept
     FH2MP_GITHUB_REPO     owner/name, default Charelene/FH2MP
+    FH2MP_CRASH_LINK_BASE website's protected attachment URL prefix (default https://forza.scuffed.af/panel/crashes)
 """
 import base64
 import binascii
@@ -23,17 +25,22 @@ import urllib.request
 
 import auth
 
-MAX_BODY = 2_700_000
+MAX_BODY = 96 << 20    # 32 MiB of dumps (base64) + 8 MiB of text, including worst-case JSON escaping
 FIELDS = {"date": "Date", "system": "System", "gpu": "GPU", "driver": "Driver's version", "launcher": "Launcher version",
           "azimuth": "Azimuth version", "extraOptions": "FH2 Extra Options version", "name": "Your FH2MP name"}
-FILE_LIMITS = {"azimuth.log": 320_000, "fh2mp.log": 220_000, "platform.log": 110_000, "mod-crash.txt": 35_000, "launcher.log": 60_000}
-MAX_DUMP = 1_000_000
+MAX_TEXT = 8 << 20
+MAX_FILE = 2 << 20
+MAX_FILES = 64
+MAX_DUMP = 32 << 20    # combined Azimuth and Mod Platform dumps
+LINK_BASE = "https://forza.scuffed.af/panel/crashes"
+_FILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}\.(?:log|txt|dmp)\Z")
 KEEP_DAYS = 90
 ISSUE_LABELS = ["bug", "crash-report"]
 BODY_LIMIT = 60_000                                  # GitHub refuses issue bodies over 65536 characters
 _FAIL_RE = re.compile(r"\b(CRASHED|STOPPED)\b")
-_CODE_RE = re.compile(r"CRASHED exception (0x[0-9a-fA-F]+) at ((?:game\+)?0x[0-9a-fA-F]+)")
-_STOP_RE = re.compile(r"STOPPED (.*?) at ((?:game\+)?0x[0-9a-fA-F]+)")
+_ADDRESS = r"(?:[A-Za-z0-9_.-]+\+)?0x[0-9a-fA-F]+"
+_CODE_RE = re.compile(r"CRASHED exception (0x[0-9a-fA-F]+) at (" + _ADDRESS + r")")
+_STOP_RE = re.compile(r"STOPPED (.*?) at (" + _ADDRESS + r")")
 _ID_RE = re.compile(r"^[0-9a-f]{16}$")
 
 
@@ -85,6 +92,24 @@ def clean_line(v, limit=200):
     return re.sub(r"[\x00-\x1f\x7f]+", " ", str(v)).strip()[:limit]
 
 
+def file_name(name, binary=False):
+    return isinstance(name, str) and bool(_FILE_RE.fullmatch(name)) and ".." not in name and name.endswith(".dmp") == binary
+
+
+def decode_dump(value):
+    if not isinstance(value, str) or len(value) > 4 * ((MAX_DUMP + 2) // 3):
+        raise auth.AuthError(413, "too_large", "the crash dump is too big")
+    try:
+        data = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        raise auth.AuthError(400, "bad_dump", "the crash dump is not valid base64") from None
+    if len(data) > MAX_DUMP:
+        raise auth.AuthError(413, "too_large", "the crash dump is too big")
+    if not data.startswith(b"MDMP"):
+        raise auth.AuthError(400, "bad_dump", "that is not a minidump")
+    return data
+
+
 def validate(d):
     """-> {"fields": {...}, "files": {name: text}, "dump": bytes | None}; raises auth.AuthError(400/413) for anything else."""
     if not isinstance(d, dict) or d.get("v") != 1:
@@ -93,36 +118,50 @@ def validate(d):
     if not isinstance(f, dict):
         raise auth.AuthError(400, "bad_request", "no fields")
     fields = {k: clean_line(f.get(k, "")) for k in FIELDS}
-    files = {}
-    for name, text in (d.get("files") or {}).items():
-        if name not in FILE_LIMITS or not isinstance(text, str):
+    files, total_text = {}, 0
+    raw_files, raw_attachments = d.get("files") or {}, d.get("attachments") or {}
+    if not isinstance(raw_files, dict) or not isinstance(raw_attachments, dict) or len(raw_files) + len(raw_attachments) > MAX_FILES:
+        raise auth.AuthError(400, "bad_request", "invalid file list")
+    for name, text in raw_files.items():
+        if not file_name(name) or not isinstance(text, str):
             raise auth.AuthError(400, "bad_request", "unknown file")
-        if len(text) > FILE_LIMITS[name]:
+        total_text += len(text.encode("utf-8"))
+        if len(text.encode("utf-8")) > MAX_FILE or total_text > MAX_TEXT:
             raise auth.AuthError(413, "too_large", f"{name} is too big")
         files[name] = text
     dump = None
     if d.get("dump"):
-        try:
-            dump = base64.b64decode(str(d["dump"]), validate=True)
-        except (binascii.Error, ValueError):
-            raise auth.AuthError(400, "bad_dump", "the crash dump is not valid base64") from None
-        if len(dump) > MAX_DUMP:
-            raise auth.AuthError(413, "too_large", "the crash dump is too big")
-        if not dump.startswith(b"MDMP"):
-            raise auth.AuthError(400, "bad_dump", "that is not a minidump")
-    if not any(files.values()) and dump is None:
+        dump = decode_dump(d["dump"])
+    attachments = {}
+    total_dump = len(dump or b"")
+    for name, value in raw_attachments.items():
+        if not file_name(name, binary=True) or name == "crash.dmp":
+            raise auth.AuthError(400, "bad_request", "invalid attachment name")
+        attachments[name] = decode_dump(value)
+        total_dump += len(attachments[name])
+        if total_dump > MAX_DUMP:
+            raise auth.AuthError(413, "too_large", "the crash dumps are too big")
+    if not any(files.values()) and dump is None and not attachments:
         raise auth.AuthError(400, "bad_request", "empty report")
-    return {"fields": fields, "files": files, "dump": dump}
+    return {"fields": fields, "files": files, "dump": dump, "attachments": attachments, "dumpStatus": clean_line(d.get("dumpStatus", ""))}
 
 
 def failure_line(azimuth_log):
-    """The last CRASHED / STOPPED line of the log's last session, cut before Azimuth's list of modifications; '' when there is none."""
-    lines = azimuth_log.splitlines()
-    start = max((i for i, ln in enumerate(lines) if " began " in ln and " session " in ln), default=0)
-    fails = [ln for ln in lines[start:] if _FAIL_RE.search(ln) and "CreateDXGIFactory2" not in ln]
-    if not fails:
+    """First failure in the most recent failing session, before failures in crash handling itself.
+
+    A subsequent launcher-only session may already have started when the report is submitted. Keep the previous failure in that case,
+    but do not let a secondary Wine/dbghelp or Azimuth worker exception replace its cause (#37, #39–42).
+    """
+    failure = ""
+    first_in_session = ""
+    for ln in azimuth_log.splitlines():
+        if re.search(r"\bsession \S+ began ", ln):
+            first_in_session = ""
+        if not first_in_session and _FAIL_RE.search(ln) and "CreateDXGIFactory2" not in ln:
+            first_in_session = failure = ln
+    if not failure:
         return ""
-    ln = fails[-1]
+    ln = failure
     ln = re.sub(r"^\d+ tid=\d+ ", "", ln)
     return clean_line(ln.split(" (modified:")[0], 300)
 
@@ -160,23 +199,30 @@ def _tail_block(title, text, lines, budget):
 
 
 def summary_table(rid, r, line):
-    rows = [("Crash", redact(line) or "not found in azimuth.log"), *((FIELDS[k], redact(r["fields"][k])) for k in FIELDS), ("Report id", rid),
-            ("Crash dump", "kept on the server" if r["dump"] is not None else "not sent")]
+    rows = [("Crash", redact(line) or "not found in azimuth.log"), *((FIELDS[k], redact(r["fields"][k])) for k in FIELDS), ("Report id", rid)]
     return "| | |\n|-|-|\n" + "".join(f"| {k} | {_code(v) if v else '-'} |\n" for k, v in rows)
 
 
-def issue_body(rid, r, line):
-    head = "Sent automatically by the launcher after a crash; the details are what the player agreed to send.\n\n" + summary_table(rid, r, line)
+def file_links(rid, r, link_base=LINK_BASE):
+    names = [n for n, t in r["files"].items() if t]
+    if r["dump"] is not None:
+        names.append("crash.dmp")
+    names.extend(r.get("attachments", {}))
+    return "\n".join(f"- [{name}]({link_base.rstrip('/')}/{rid}/{name}/download/)" for name in sorted(names))
+
+
+def issue_body(rid, r, line, link_base=LINK_BASE):
+    head = "This issue was created automatically by launcher's crash reporter.\n\n" + summary_table(rid, r, line)
     blocks = [_tail_block("FH2 Mod Platform crash report", redact(r["files"].get("mod-crash.txt", "")), 80, 8_000),
               _tail_block("azimuth.log, last 40 lines", redact(r["files"].get("azimuth.log", "")), 40, 10_000)]
-    return (head + "\n" + "\n".join(b for b in blocks if b))[:BODY_LIMIT]
+    return (head + "\n\n" + file_links(rid, r, link_base) + "\n\n" + "\n".join(b for b in blocks if b))[:BODY_LIMIT]
 
 
-def comment_body(rid, r):
+def comment_body(rid, r, link_base=LINK_BASE):
     f = r["fields"]
     return ("Another report of this crash.\n\n| | |\n|-|-|\n" + "".join(
         f"| {FIELDS[k]} | {_code(redact(f[k])) if f[k] else '-'} |\n" for k in ("date", "system", "gpu", "driver", "launcher", "azimuth", "extraOptions", "name"))
-        + f"| Report id | `{rid}` |\n")
+        + f"| Report id | `{rid}` |\n\n" + file_links(rid, r, link_base))
 
 
 class GitHub:
@@ -206,9 +252,10 @@ class GitHub:
 
 
 class CrashReports:
-    def __init__(self, directory, github=None, log=lambda m: None, background=True):
+    def __init__(self, directory, github=None, log=lambda m: None, background=True, link_base=LINK_BASE):
         self.dir, self.github, self.log, self.background = directory, github, log, background
         self._lock = threading.Lock()
+        self.link_base = link_base
 
     @classmethod
     def from_env(cls, log=lambda m: None):
@@ -216,7 +263,7 @@ class CrashReports:
         if not d and not token:
             return None
         gh = GitHub(os.environ.get("FH2MP_GITHUB_REPO", "Charelene/FH2MP"), token) if token else None
-        return cls(d, gh, log)
+        return cls(d, gh, log, link_base=os.environ.get("FH2MP_CRASH_LINK_BASE", LINK_BASE))
 
     # ---- intake
     def submit(self, payload):
@@ -245,10 +292,32 @@ class CrashReports:
             if r["dump"] is not None:
                 with open(os.path.join(d, "crash.dmp"), "wb") as f:
                     f.write(r["dump"])
-            self._write_meta(rid, {"received": int(time.time()), "fields": r["fields"], "failure": line, "issue": None})
+            for name, data in r.get("attachments", {}).items():
+                with open(os.path.join(d, name), "wb") as f:
+                    f.write(data)
+            self._write_meta(rid, {"received": int(time.time()), "fields": r["fields"], "failure": line, "issue": None,
+                                   "dumpStatus": r.get("dumpStatus", "")})
             self._prune()
         except OSError as e:
             self.log(f"  crash report {rid}: could not store it: {e}")
+            raise auth.AuthError(503, "storage_failed", "could not store the crash report") from None
+
+    def download(self, rid, name):
+        if not self.dir or not _ID_RE.fullmatch(rid) or not (file_name(name) or file_name(name, binary=True)):
+            raise auth.AuthError(404, "not_found", "no such attachment")
+        folder = os.path.join(self.dir, rid)
+        path = os.path.join(folder, name)
+        if os.path.islink(folder) or os.path.islink(path):
+            raise auth.AuthError(404, "not_found", "no such attachment")
+        limit = MAX_DUMP if name.endswith(".dmp") else MAX_FILE
+        try:
+            with open(path, "rb") as f:
+                data = f.read(limit + 1)
+        except OSError:
+            raise auth.AuthError(404, "not_found", "no such attachment") from None
+        if len(data) > limit:
+            raise auth.AuthError(413, "too_large", "the attachment is too big")
+        return data
 
     def _write_meta(self, rid, meta):
         p = os.path.join(self.dir, rid, "report.json")
@@ -282,9 +351,9 @@ class CrashReports:
                 index = self._index() if self.dir else {}
                 number = index.get(key) if key else None
                 if number and self.github.issue_state(number) == "open":
-                    self.github.comment(number, comment_body(rid, r))
+                    self.github.comment(number, comment_body(rid, r, self.link_base))
                 else:
-                    number = self.github.create_issue(title, issue_body(rid, r, line))
+                    number = self.github.create_issue(title, issue_body(rid, r, line, self.link_base))
                     if key and self.dir:
                         index[key] = number
                         with open(self._index_path() + ".tmp", "w", encoding="utf-8") as f:

@@ -2241,7 +2241,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def _ops(self, body, proxied):
         status, obj = ops_api.handle(OPS, sys.modules[__name__], self.command, self.path, self.headers, body, self.client_address[0], proxied)
-        self._reply_json(status, obj, "image/png" if isinstance(obj, bytes) else "application/json", [("Cache-Control", "no-store")])
+        if isinstance(obj, ops_api.FileDownload):
+            return self._reply_json(status, obj.data, obj.content_type,
+                                    [("Cache-Control", "private, no-store"), ("X-Content-Type-Options", "nosniff"),
+                                     ("Content-Disposition", f'attachment; filename="{obj.name}"')])
+        ctype = ("image/jpeg" if obj.startswith(b"\xff\xd8\xff") else "image/png") if isinstance(obj, bytes) else "application/json"
+        self._reply_json(status, obj, ctype, [("Cache-Control", "no-store")])
 
     def _remove_old_client(self):
         """A client with a shim below minShim that proves who it is (a live launcher token) is also taken out of the game: its live
@@ -2265,14 +2270,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def _gamedb_ok(self, acct):
         """A game whose car database is not the server's (X-FH2MP-GameDb, the shim's hash of the copy the launcher synced) is refused and
-        taken out of the game until it signs in again: a car the others do not have crashes them. No header = a shim without the check
-        (minShim decides about those). Replace the database during maintenance: everyone in the game is removed and gets the new copy at
+        taken out of the game until it signs in again: a car the others do not have crashes them. A configured database requires a hash,
+        including from clients that omit the header. Replace the database during maintenance: everyone in the game is removed and gets the new copy at
         the next Play."""
-        have = self.headers.get("X-FH2MP-GameDb")
-        if have is None or LAUNCHER is None:
+        have = self.headers.get("X-FH2MP-GameDb", "")
+        if LAUNCHER is None:
             return True
         m = LAUNCHER.gamedb.manifest()
-        if m is None or have.strip().lower() == m["sha256"]:
+        if m is None:
+            if LAUNCHER.gamedb.path:
+                self._reply_json(503, {"error": "gamedb_unavailable", "message": "The server's car database is unavailable. Please try again later."})
+                return False
+            return True
+        if have.strip().lower() == m["sha256"]:
             return True
         now = time.monotonic()
         if now - _GAMEDB_REMOVED.get(acct.xuid, -1e9) >= 60:
@@ -2283,6 +2293,35 @@ class Handler(BaseHTTPRequestHandler):
             on_revoke(acct.xuid)
         self._reply_json(409, {"error": "gamedb_mismatch", "message": "Your car database is not the server's. Press Play in the FH2MP launcher."})
         return False
+
+    def _restricted_tools_ok(self, acct):
+        value = self.headers.get("X-FH2MP-Tools", "")
+        tokens = value.split(",") if len(value) <= 80 else []
+        if not tokens or tokens[0] != "v1":
+            self._reply_json(426, {"error": "tool_check_required", "message": "Update FH2MP and restart the game from the launcher."})
+            return False
+        tools = tuple(sorted(set(tokens[1:])))
+        if not set(tools) <= {"redline", "nitrosystem"}:
+            self._reply_json(400, {"error": "bad_tool_report"})
+            return False
+        if not tools:
+            return True
+        now = time.monotonic()
+        old = _TOOLS_ANNOUNCED.get(acct.xuid)
+        if old and old[0] == tools and now - old[1] < 60:
+            return True
+        result = xbl.quarantine_tools(acct.xuid, tools)
+        if result is None:
+            self._reply_json(503, {"error": "pool_unavailable", "message": "Matchmaking is unavailable. Please try again later."})
+            return False
+        if len(_TOOLS_ANNOUNCED) >= 10000:
+            _TOOLS_ANNOUNCED.clear()
+        _TOOLS_ANNOUNCED[acct.xuid] = (tools, now)
+        if result == "rejoin":
+            xbl.drop_player(acct.xuid)
+            self._reply_json(409, {"error": "pool_changed", "message": "Restart the game from the launcher to join the restricted matchmaking pool."})
+            return False
+        return True
 
     def _identify(self):
         """Sets CTX.xuid / CTX.authed / CTX.tag from the session token. False (after answering) when the request must not go on."""
@@ -2303,6 +2342,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._reply_json(e.status, {"error": e.code, "message": e.message})
                     return False
                 CTX.xuid, CTX.tag, CTX.authed = acct.xuid, acct.gamertag, True
+                if os.environ.get("FH2MP_RESTRICTED_TOOLS") == "quarantine" and not Handler._restricted_tools_ok(self, acct):
+                    return False
                 if not self._gamedb_ok(acct):
                     return False
                 announce_auth(acct.xuid, self.client_ip(), token)
@@ -2324,8 +2365,8 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             self.close_connection = True
             return self._reply_json(400, {"error": "bad_length"})
-        if (self.path.startswith("/v1/") and n > launcher_api.body_limit(self.path)) or (self.path.startswith("/ops/") and n > 65536) \
-                or n > ugc.MAX_REQUEST_BODY or n < 0:
+        limit = launcher_api.body_limit(self.path) if self.path.startswith("/v1/") else ugc.MAX_REQUEST_BODY
+        if n > limit or (self.path.startswith("/ops/") and n > 65536) or n < 0:
             self.close_connection = True
             return self._reply_json(413, {"error": "too_large"})
         body = self.rfile.read(n) if n else b""
@@ -2606,6 +2647,7 @@ def announce_auth(xuid, ip, token=""):
 
 _OLD_REMOVED = {}
 _GAMEDB_REMOVED = {}
+_TOOLS_ANNOUNCED = {}
 
 
 def on_login(xuid, ip, token=""):

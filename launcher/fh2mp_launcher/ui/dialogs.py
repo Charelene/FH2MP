@@ -153,8 +153,7 @@ class CrashReportDialog(QDialog):
         t.setObjectName("h2")
         t.setWordWrap(True)
         lay.addWidget(t)
-        m = QLabel("This will help identify the cause and fix the issue. A short summary (the details below, the crash line and the end of "
-                   "azimuth.log) becomes a public issue on GitHub; the logs and the crash dump stay private on the FH2MP server.")
+        m = QLabel("A public GitHub issue contains the summary and log excerpts. Attached logs and crash dumps are available to FH2MP staff.")
         m.setObjectName("muted")
         m.setWordWrap(True)
         lay.addWidget(m)
@@ -195,14 +194,13 @@ class CrashReportDialog(QDialog):
         dl.addLayout(files)
         for name, path, size in report.sizes(os.path.join(paths.cache_dir(), "crash-report-preview")):
             label = f'<a href="{QUrl.fromLocalFile(path).toString()}">{name}</a>' if path else name
-            link = QLabel(f'{label} <span style="color:{theme.MUTED}">{crashreport.human_size(size)}</span>')
+            amount = crashreport.human_size(size) if size else ""
+            link = QLabel(f'{label} <span style="color:{theme.MUTED}">{amount}</span>')
             link.setTextFormat(Qt.TextFormat.RichText)
             link.setOpenExternalLinks(True)
             files.addWidget(link)
         dl.addWidget(hrule())
-        note = QLabel("The files open as they will be sent: folder names with your user name, e-mail and IP addresses and anything that looks "
-                      "like a password or key are blanked. Public on GitHub: the details above, the crash line, the Mod Platform crash report "
-                      "and the last 40 lines of azimuth.log. Kept private on the server for 90 days: the full logs and the crash dump.")
+        note = QLabel("Log text is redacted before upload. File links require admin login; attachments are retained for 90 days.")
         note.setObjectName("small")
         note.setWordWrap(True)
         dl.addWidget(note)

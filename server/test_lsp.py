@@ -85,6 +85,16 @@ class StringValidationTests(unittest.TestCase):
 
 
 class LayerCountTests(unittest.TestCase):
+    def test_operator_preview_content_type_matches_the_stored_image(self):
+        handler = object.__new__(L.Handler)
+        handler.command, handler.path, handler.headers = "GET", "/ops/v1/garage/1/preview.png", {}
+        handler.client_address = ("127.0.0.1", 1234)
+        handler._reply_json = mock.Mock()
+        for data, content_type in ((b"\xff\xd8\xffphoto", "image/jpeg"), (b"\x89PNG\r\n\x1a\nimage", "image/png")):
+            with mock.patch.object(L.ops_api, "handle", return_value=(200, data)):
+                handler._ops(b"", False)
+            self.assertEqual(handler._reply_json.call_args.args[2], content_type)
+
     def test_layer_count_always_fits_the_wire_field(self):
         self.assertEqual([L._layer_count(n) for n in (-1, 0, 7, 65535, 70000, None)], [0, 0, 7, 65535, 65535, 0])
 
@@ -193,11 +203,14 @@ class LayerCountTests(unittest.TestCase):
             L.LAUNCHER.gamedb = L.gamedb_sync.GameDb(path)
             self.assertEqual(ask(good), (True, []))
             self.assertEqual(ask(good.upper()), (True, []))
-            self.assertEqual(ask(None), (True, []))                        # a shim without the check (minShim decides)
             self.assertEqual(revoked, [])
+            self.assertEqual(ask(None), (False, [(409, "gamedb_mismatch")])) # omitting the hash cannot bypass enforcement
+            self.assertEqual(ask(""), (False, [(409, "gamedb_mismatch")]))
             self.assertEqual(ask("0" * 64), (False, [(409, "gamedb_mismatch")]))
             self.assertEqual(ask("missing"), (False, [(409, "gamedb_mismatch")]))
             self.assertEqual(revoked, [0x900000000def])                    # taken out of the game once a minute, not on every request
+            L.LAUNCHER.gamedb = L.gamedb_sync.GameDb(path + ".missing")
+            self.assertEqual(ask(good), (False, [(503, "gamedb_unavailable")]))
         finally:
             L.LAUNCHER, L.AUTH, L.on_revoke = old_launcher, old_auth, old_revoke
             for k, v in ctx_before.items():
