@@ -46,6 +46,7 @@ check shim/test_gamedb_keep.sh
 check shim/test_gamedb_files.sh
 check shim/test_game_image.sh
 check shim/test_title_scope.sh
+check shim/test_xhr_config.sh
 check shim/test_torque_scale.sh
 check shim/test_net_strings.sh
 check shim/test_torque_load.sh

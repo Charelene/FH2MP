@@ -264,9 +264,32 @@ class ScoreTests(Base):
         [t.join() for t in threads]
         self.assertEqual(self.sc.xp_of(42), 200.0)
 
-    def test_xp_board_takes_accumulated_xp(self):
+    def test_xp_does_not_create_bonus_board_count(self):
         self.sc.add_xp(5, 1234.0)
-        self.assertEqual(self.sc.best_of(5, *scoreboard.XP_BOARD, 65535)["score"], 1234.0)
+        self.assertEqual(self.sc.xp_of(5), 1234.0)
+        self.assertIsNone(self.sc.best_of(5, 4, 9, 65535))
+
+    def test_progress_counts_follow_current_save_and_remain_counts(self):
+        for st, previous, current, limit in ((9, 58, 29, 150), (10, 236, 200, 316)):
+            self.sc.submit(10, 'Driver', st, sub(previous, track=65535))
+            self.sc.submit(10, 'Driver', st, sub(current, track=65535))
+            self.sc.submit(11, 'Rival', st, sub(current - 1, track=65535))
+            self.sc.add_xp(10, 20000.0)
+            self.assertEqual(self.sc.best_of(10, 4, st, 65535)['score'], current)
+            self.assertEqual(self.sc.top(4, st)[0]['score'], current)
+            self.sc.submit(10, 'Driver', st, sub(current + 1, track=65535))
+            self.assertEqual(self.sc.best_of(10, 4, st, 65535)['score'], current + 1)
+            for invalid in (limit + 1, 173834, current + 0.5):
+                self.assertIsNone(self.sc.submit(10, 'Driver', st, sub(invalid, track=65535)))
+            # Historical invalid rows must also be excluded without deleting records.
+            bad = self.sc.submit(12, 'Legacy', st, sub(1, track=65535))
+            with self.db.tx() as c:
+                c.execute('UPDATE score_submissions SET score=? WHERE id=?', (173834, bad['id']))
+            self.assertIsNone(self.sc.best_of(12, 4, st, 65535))
+            with mock.patch.object(scoreboard, 'FAKE_ROWS', 100):
+                rows, mine, nreal, nfake = self.sc.rows(10, 4, st, 65535, 1, 100)
+            self.assertEqual((nreal, nfake), (2, 0))
+            self.assertEqual(mine['position'], 1)
 
     def test_impossible_xp_awards_are_kept_in_the_ledger_but_not_counted(self):
         # Test the ledger's rejection boundary under an explicit policy. Online

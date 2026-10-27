@@ -19,9 +19,9 @@ FH2MP $VERSION (Forza Horizon 2 online)
 https://github.com/Charelene/FH2MP
 
 The FH2MP launcher installs and updates everything for you. By hand, extract this zip into your Azimuth folder (the one with
-azimuth.exe), so FH2MP.dll ends up in fh2-mods. It is a mod for the FH2 Mod Platform $PLATFORM or newer (Trinculo54,
-https://github.com/Trinculo54/fh2-mod-platform), which you get from its release page or with any mod built on it, and it is tested
-with FH2 Extra Options 0.2.98 (RokkuDayo, https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions). On Linux start Azimuth with
+azimuth.exe), so FH2MP.dll ends up in fh2-mods. It requires Azimuth 1.0.2, FH2 Mod Platform $PLATFORM (Trinculo54,
+https://github.com/Trinculo54/fh2-mod-platform), and FH2 Extra Options 0.3.2 (RokkuDayo,
+https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions). On Linux start Azimuth with
 WINEDLLOVERRIDES="winmm,d3dcompiler_47=n,b" so Wine uses both mods' DLLs instead of its own.
 
 Logs: data\\bin\\fh2mp.log (FH2MP) and fh2-mods\\platform.log (the platform and every mod). FH2MP is GPL-3.0 (fh2mp\\LICENSE.txt).

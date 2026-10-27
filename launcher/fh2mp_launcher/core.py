@@ -7,7 +7,7 @@ import threading
 
 from . import azimuth, gamedb, keystore, launch, paths, shim, tunnel, updater, upstream
 from .api import Api, ApiError
-from .constants import BUILTIN_AZIMUTH_BUILDS, DEFAULT_WEBSITE, EXTRA_OPTIONS_VERSION, MODS_DIR, SHIM_DLL
+from .constants import BUILTIN_AZIMUTH_BUILDS, DEFAULT_WEBSITE, MODS_DIR, SHIM_DLL
 from .identity import Identity
 from .settings import Settings
 from .version import __version__
@@ -32,6 +32,7 @@ FRIENDLY = {
     "rate_limited": "Too many attempts. Wait a minute.",
     "ip_changed": "Your address changed. Restart from the launcher.",
     "token_expired": "Session expired. Press Play.",
+    "invalid_token": "Session ended. Close other launcher windows, then restart the game from this launcher.",
 }
 
 
@@ -277,7 +278,7 @@ class Launcher:
         return out + events[1:]
 
     def builds(self):
-        return list((self.server or {}).get("supportedAzimuth") or []) + BUILTIN_AZIMUTH_BUILDS
+        return list(BUILTIN_AZIMUTH_BUILDS)
 
     # ---- local state
     def azimuth_info(self):
@@ -355,7 +356,9 @@ class Launcher:
             try:
                 return self.api().community(self.token, path, method, body)
             except ApiError as e:
-                if e.code not in ("invalid_token", "token_expired") or self.game_running():
+                # A revoked token may belong to another launcher using this account.
+                # Automatically signing in here would revoke its token in turn.
+                if e.code != "token_expired" or self.game_running():
                     raise
                 self._sign_in()
                 return self.api().community(self.token, path, method, body)
@@ -388,7 +391,8 @@ class Launcher:
         if updater.newer(lv, __version__):
             out["launcher"] = lv
         if self.settings["azimuth_dir"] and not self.shim_pinned(kind, ver):
-            out["shim"] = updater.shim_update_needed(kind, ver, m)
+            if kind != 'ours' or ver != __version__:
+                out['shim'] = f'Install FH2MP {__version__} for this launcher.'
         need = max((m.get("minLauncher", "0.0.0"), (self.server or {}).get("minLauncher", "0.0.0")), key=updater.vkey)
         out["minLauncherOk"] = updater.at_least(__version__, need)
         return out
@@ -399,12 +403,14 @@ class Launcher:
         return not updater.at_least(__version__, need)
 
     def shim_outdated(self):
-        """The installed shim is older than the server's minShim: it would be refused by the web services. Needs a refresh_server first."""
+        """The shim must match this release and meet the server's minimum."""
         kind, ver = self.shim_state()
-        return kind == "ours" and not updater.at_least(ver, (self.server or {}).get("minShim", "0.0.0"))
+        return kind == "ours" and (ver != __version__ or not updater.at_least(ver, (self.server or {}).get("minShim", "0.0.0")))
 
     def shim_pinned(self, kind=None, ver=None):
         """True when the installed shim must be left alone: pinned in settings, or a debug build (version ends in -debug)."""
+        if not paths.is_dev():
+            return False
         if kind is None:
             kind, ver = self.shim_state()
         return kind == "ours" and (bool(self.settings["pin_shim"]) or (ver or "").endswith("-debug"))
@@ -425,18 +431,22 @@ class Launcher:
         return did
 
     def install_shim(self, progress=None, cancelled=lambda: False):
-        if not self.manifest:
-            self.check_updates()
-        e = self.manifest["shim"]
         up = updater.Updater(channel=self.settings["channel"])
-        zip_path = up.download(self.manifest["tag"], e, progress, cancelled)
-        did = shim.install(self.settings["azimuth_dir"], read_shim_zip(zip_path), e.get("dllSha256"), self.platform_files(progress, cancelled))
+        manifest = up.fetch_manifest(tag=f"v{__version__}")
+        e = manifest["shim"]
+        if e['version'] != __version__:
+            raise updater.UpdateError('The signed shim does not match this launcher release.')
+        zip_path = up.download(manifest["tag"], e, progress, cancelled)
+        dll = read_shim_zip(zip_path)
+        if shim.blob_version(dll) != __version__:
+            raise updater.UpdateError('The FH2MP DLL does not match this launcher release.')
+        did = shim.install(self.settings["azimuth_dir"], dll, e.get("dllSha256"), self.platform_files(progress, cancelled))
         did += self.repair_tls_helper()
         did += self.ensure_extra_options(progress, cancelled)
         return did
 
     def platform_files(self, progress=None, cancelled=lambda: False):
-        """The FH2 Mod Platform from its author's pinned GitHub release when the Azimuth folder has none (or an older one), else None."""
+        """Fetch the supplied platform when any installed loader differs from its pin."""
         if shim.platform_ok(self.settings["azimuth_dir"]):
             return None
         try:
@@ -445,7 +455,7 @@ class Launcher:
             raise updater.UpdateError(str(e)) from None
 
     # ---- play
-    def prepare_play(self, force_unsupported=False, require_game=True):
+    def prepare_play(self, require_game=True):
         """Everything up to (not including) starting the process: checks, sign-in, session hand-over. -> (account, notes)."""
         s = self.settings
         if not s["azimuth_dir"]:
@@ -456,8 +466,8 @@ class Launcher:
         info = self.azimuth_info()
         if not info.found:
             raise PlayBlocked("azimuth.exe not found.", "no_azimuth")
-        if not info.supported and not force_unsupported:
-            raise PlayBlocked(f"Azimuth {info.version or '?'} is untested with FH2MP.", "azimuth_unsupported")
+        if not info.supported:
+            raise PlayBlocked("This launcher requires Azimuth 1.0.2. Run setup to install the supported combination.", "azimuth_unsupported")
         kind, _v = self.shim_state()
         if kind == "old":
             raise PlayBlocked("The FH2MP shim needs installing again.", "no_shim")
@@ -476,9 +486,9 @@ class Launcher:
             from .api import log_failure
             log_failure("PLAY", "extra_options", e, str(e))
             if not self.extra_state()[0]:         # the car database cannot be put in play without it (gamedb.py): say why, now
-                raise PlayBlocked(f"FH2 Extra Options {EXTRA_OPTIONS_VERSION} could not be installed: {e}", "extra_options") from None
+                raise PlayBlocked(f"FH2 Extra Options {shim.extra_options_version(s['azimuth_dir'])} could not be installed: {e}", "extra_options") from None
         if not self.extra_state()[0]:
-            raise PlayBlocked(f"FH2MP needs FH2 Extra Options {EXTRA_OPTIONS_VERSION} (winmm.dll next to azimuth.exe) and yours is another version. "
+            raise PlayBlocked(f"FH2MP needs FH2 Extra Options {shim.extra_options_version(s['azimuth_dir'])} (winmm.dll next to azimuth.exe) and yours is another version. "
                               "Turn on \"Install FH2 Extra Options\" in Settings and press Play: the launcher installs it and keeps your "
                               "old winmm.dll in the fh2extra folder.", "extra_options")
         self.ensure_game()
@@ -609,16 +619,16 @@ class Launcher:
             return ""
         return f"picture updated ({len(png)} bytes)"
 
-    def prepare_session_only(self, force_unsupported=True):
+    def prepare_session_only(self):
         """Developer: sign in and write the session next to the shim without starting the game (start it yourself: rig, Steam, a debugger)."""
-        return self.prepare_play(force_unsupported)
+        return self.prepare_play()
 
-    def play(self, force_unsupported=False, azimuth_window=False):
+    def play(self, azimuth_window=False):
         """azimuth_window: start Azimuth's own launcher window (its settings) instead of going straight into the game."""
         if self.settings["offline_mode"]:
-            self.play_offline(force_unsupported, azimuth_window=azimuth_window)
+            self.play_offline(azimuth_window=azimuth_window)
             return None, ["offline mode: online features and progress sync are off"]
-        acct, notes = self.prepare_play(force_unsupported, require_game=not azimuth_window)
+        acct, notes = self.prepare_play(require_game=not azimuth_window)
         try:
             self.process = launch.start(self.settings, self.settings["azimuth_dir"], skip_launcher=not azimuth_window,
                                         extra_env=getattr(self, "game_env", None))
@@ -627,7 +637,7 @@ class Launcher:
             raise
         return acct, notes
 
-    def play_offline(self, force_unsupported=False, azimuth_window=False):
+    def play_offline(self, azimuth_window=False):
         """Solo play with the account's local save. The shim only sets the save ID; online hooks stay off."""
         s = self.settings
         d = s["azimuth_dir"]
@@ -636,8 +646,8 @@ class Launcher:
         info = self.azimuth_info()
         if not info.found:
             raise PlayBlocked("azimuth.exe not found.", "no_azimuth")
-        if not info.supported and not force_unsupported:
-            raise PlayBlocked(f"Azimuth {info.version or '?'} is untested with FH2MP.", "azimuth_unsupported")
+        if not info.supported:
+            raise PlayBlocked("This launcher requires Azimuth 1.0.2. Run setup to install the supported combination.", "azimuth_unsupported")
         try:
             self.repair_tls_helper()
         except shim.ShimError as e:
@@ -694,18 +704,16 @@ class Launcher:
 
     # ---- FH2 Extra Options (optional third-party mod, imported from the player's own copy)
     def extra_state(self):
-        """-> (the supported FH2 Extra Options 0.2.98 is in place, version, Azimuth version it targets)."""
+        """-> (the matching pinned Extra Options is in place, version, target Azimuth)."""
         d = self.settings["azimuth_dir"]
-        if not d or not os.path.isdir(d) or not shim.extra_options_supported(d):
+        if not d or not os.path.isdir(d) or not shim.extra_options_complete(d):
             return False, "", ""
         _i, _v, a = shim.extra_options_installed(d)
-        return True, EXTRA_OPTIONS_VERSION, a
+        return True, shim.extra_options_version(d), a
 
     def ensure_extra_options(self, progress=None, cancelled=lambda: False):
-        """The shim's menus (Social, Clubs, Rivals, Marketplace) and several game fixes come from FH2 Extra Options. When the winmm.dll next
-        to azimuth.exe is not the supported build (0.2.98, the shim is tested with it), download the author's pinned release from GitHub and
-        install it; another winmm.dll there is moved aside into fh2extra. Does nothing when 0.2.98 is there or the player turned this off in
-        Settings. -> list of things done."""
+        """Install the author's pinned Extra Options release for this Azimuth,
+        keeping the previous DLL and existing settings. -> list of things done."""
         d = self.settings["azimuth_dir"]
         if not self.settings["extra_options"] or not d or not os.path.isdir(d):
             return []
@@ -713,7 +721,7 @@ class Launcher:
         if shim.extra_options_complete(d):
             return []
         try:
-            files = upstream.fetch("extraOptions", updater.Updater(channel=self.settings["channel"]), progress, cancelled)
+            files = upstream.fetch(upstream.extra_options_kind(d), updater.Updater(channel=self.settings["channel"]), progress, cancelled)
         except upstream.UpstreamError as e:
             raise updater.UpdateError(str(e)) from None
         return shim.install_extra(d, files)

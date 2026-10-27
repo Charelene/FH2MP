@@ -4,9 +4,15 @@ its zip and of the DLL inside it, so nothing else is installed; the launcher onl
 missing or not the pinned build (shim.py decides)."""
 import hashlib
 import io
+import os
 import zipfile
 
 from .constants import UPSTREAM
+
+
+def extra_options_kind(folder):
+    """There is one supplied dependency set, independent of installed versions."""
+    return "extraOptions"
 
 
 class UpstreamError(Exception):

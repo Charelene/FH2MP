@@ -18,6 +18,7 @@ from fh2mp_launcher.ui import community, theme
 from fh2mp_launcher.ui.main_window import MainWindow
 from fh2mp_launcher.ui import images
 from fh2mp_launcher.ui.social_widgets import MessageBubble, PersonAvatar
+from fh2mp_launcher.ui.widgets import IconButton
 
 
 class FriendsUi(unittest.TestCase):
@@ -62,6 +63,27 @@ class FriendsUi(unittest.TestCase):
         QTest.qWait(80)
         self.assertGreater(self.window.friends_panel.width(), 0)
         self.assertLess(self.window.friends_panel.width(), 320)
+
+    def test_minimum_height_keeps_complete_cards_above_carousel_navigation(self):
+        w = self.window
+        cards = [dict(kind='challenge', tag='MONTHLY CHALLENGE', title='Made in Italy Cup',
+                      text='Best: Cprl Punishment · 1:03.042', glyph='A', url='', image='') for _ in range(8)]
+        w.cards.set_cards(cards, lambda _: None)
+        w.motd.show_message('Working on a fix for 1.0.x Azimuth, should be working properly again very soon today', 'info')
+        for opened in (True, False):
+            if w.friends_panel.opened != opened:
+                w.friends_panel.toggle()
+            QTest.qWait(300)
+            for width in (980, 1160):
+                w.resize(width, 660)
+                QTest.qWait(30)
+                w.resize(w.width(), w.minimumHeight())
+                QTest.qWait(30)
+                stage = w.cards.stage
+                self.assertGreaterEqual(stage.height(), w.cards.slots[0].height())
+                self.assertGreater(w.cards.nav.y(), stage.geometry().bottom())
+                self.assertLess(w.cards.geometry().bottom(), w.hero.height())
+                self.assertEqual(w.height(), w.minimumHeight())
         QTest.qWait(250)
         self.assertEqual(self.window.friends_panel.width(), 0)
         self.window._toggle_friends()
@@ -190,7 +212,13 @@ class FriendsUi(unittest.TestCase):
         self.assertNotIn('Your player ID', [l.text() for l in dlg.findChildren(QLabel)])
         dlg.close()
         QTest.qWait(240)
-        self.click_menu_action(self.window.account, 'ID 0x9')
+        QTest.mouseClick(self.window.account, Qt.MouseButton.LeftButton)
+        QTest.qWait(30)
+        action = next(a for a in self.window.account.menu.actions() if a.text() == 'ID 0x9')
+        copy = next(b for b in action.defaultWidget().findChildren(IconButton) if b.name == 'copy')
+        self.assertEqual(copy.toolTip(), 'Copy account ID')
+        QTest.mouseClick(copy, Qt.MouseButton.LeftButton)
+        self.window.account.menu.close()
         self.assertEqual(self.app.clipboard().text(), '0x9')
 
     def test_incoming_requests_are_inline_with_accept_and_decline_actions(self):

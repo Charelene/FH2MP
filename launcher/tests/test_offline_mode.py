@@ -30,6 +30,9 @@ class OfflineFixture:
         self.api = mock.patch.object(core.Launcher, "api", side_effect=AssertionError("offline network access")).start()
         self.updates = mock.patch.object(updater.Updater, "fetch_manifest", side_effect=AssertionError("offline update access")).start()
         self.spawn = mock.patch.object(launch, "start", return_value=mock.Mock(poll=mock.Mock(return_value=None))).start()
+        mock.patch.object(core, 'BUILTIN_AZIMUTH_BUILDS', [{'version': '1.0.2', 'sha256': hashlib.sha256(b'test azimuth').hexdigest()}]).start()
+        platform = ("FH2 Mod Platform\0ProductVersion\0" + shim.PLATFORM_VERSION).encode("utf-16-le")
+        mock.patch.object(shim, 'PLATFORM_DLL_SHA256', hashlib.sha256(platform).hexdigest()).start()
         self.addCleanup(mock.patch.stopall)
 
     def disabled_mods(self):
@@ -150,6 +153,8 @@ class OfflineWindowTests(OfflineFixture, unittest.TestCase):
 
     def test_saved_offline_start_skips_keyring_signup_and_background_work(self):
         from fh2mp_launcher.ui.main_window import MainWindow
+        from fh2mp_launcher.setup import REVISION
+        self.lc.settings['setup_revision'] = REVISION
         with mock.patch("fh2mp_launcher.ui.main_window.run_async", side_effect=AssertionError("background work in offline mode")):
             win = MainWindow(self.lc)
             self.addCleanup(win.deleteLater)
@@ -167,7 +172,7 @@ class OfflineWindowTests(OfflineFixture, unittest.TestCase):
             self.assertFalse(self.lc.identity_loaded)
             with mock.patch.object(win, "on_play_offline") as solo:
                 win.on_play(azimuth_window=True)
-                solo.assert_called_once_with(False, azimuth_window=True)
+                solo.assert_called_once_with(azimuth_window=True)
 
     def test_settings_toggle_is_saved(self):
         from fh2mp_launcher.ui.dialogs import SettingsDialog

@@ -1,0 +1,15 @@
+Prepare 1.1.1 setup, Azimuth compatibility and progress leaderboard fixes
+
+Add a setup wizard for new and existing installs, itch.io sign-in and
+Azimuth installation, dependency downloads, and Linux Proton preparation.
+Pin the supported combination to Azimuth 1.0.2, Extra Options 0.3.2,
+FH2 Mod Platform 2.7.3 and FH2MP 1.1.1.
+
+Prevent duplicate launcher sessions and automatic reauthentication loops,
+ignore stale crash dumps after a later launch, and correct minimum-height
+clipping. Fix the Azimuth command-line hook and startup HTTP configuration
+race.
+
+Keep bonus-board counts separate from XP and use current-save snapshots
+for bonus boards and road discovery. Prepare the full release workflow,
+regression checks, patch notes and versioned deployment entry point.

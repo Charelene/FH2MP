@@ -206,7 +206,13 @@ def check(settings, now=None):
         settings["crash_handled"] = now
         settings.save()
         return None
-    return find_crash(settings["azimuth_dir"], settings["crash_handled"])
+    folder = settings["azimuth_dir"]
+    # A later launch supersedes old dump files kept beside the cumulative log.
+    # Those files must not turn a healthy session's exit into a new crash report.
+    latest = _last_session(_read_tail(os.path.join(logs_dir(folder), "azimuth.log"), LIMITS["azimuth.log"]))
+    start = _session_start(latest)
+    since = max(settings["crash_handled"], start or 0)
+    return find_crash(folder, since)
 
 
 def handled(settings, crash):

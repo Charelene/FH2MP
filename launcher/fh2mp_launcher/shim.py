@@ -12,9 +12,10 @@ import os
 import re
 import shutil
 
-from . import paths
+from . import paths, upstream
+from .constants import UPSTREAM
 from .constants import (EXTRA_OPTIONS_DIR, EXTRA_OPTIONS_DLL, EXTRA_OPTIONS_DLL_SHA256, EXTRA_OPTIONS_VERSION, LEGACY_SHIM_DLL, LSP_FILE,
-                        MODS_DIR, PLATFORM_DLL, PLATFORM_FILES, PLATFORM_VERSION, SESSION_FILE, SHIM_DLL)
+                        MODS_DIR, PLATFORM_DLL, PLATFORM_DLL_SHA256, PLATFORM_FILES, PLATFORM_VERSION, SESSION_FILE, SHIM_DLL)
 
 MARKER = re.compile(rb"FH2MP-SHIM-VERSION:([0-9A-Za-z.+-]{1,32}):END")
 EXTRA_FILES_PREFIX = "FH2_ExtraOptions."
@@ -94,9 +95,18 @@ def platform_installed(folder):
 
 
 def platform_ok(folder):
-    """The FH2 Mod Platform next to azimuth.exe is there and at least the version the shim is tested with."""
+    """Every loader with this name must be the exact supplied platform build."""
     pk, pv = platform_installed(folder)
-    return pk == "platform" and _vkey(pv) >= _vkey(PLATFORM_VERSION)
+    if pk != "platform" or pv != PLATFORM_VERSION:
+        return False
+    try:
+        for path in _ci_paths(folder, PLATFORM_DLL):
+            with open(path, 'rb') as f:
+                if hashlib.sha256(f.read()).hexdigest() != PLATFORM_DLL_SHA256:
+                    return False
+    except OSError:
+        return False
+    return True
 
 
 def installed(folder):
@@ -150,7 +160,7 @@ def migrate_legacy(folder):
 
 
 def _install_platform(folder, files):
-    """Puts the platform in place unless the one there is the same version or newer (other mods ship it too). -> list of things done."""
+    """Puts the exact supplied platform in place, preserving a mismatched loader."""
     if platform_ok(folder):
         return []
     pk, pv = platform_installed(folder)
@@ -160,6 +170,7 @@ def _install_platform(folder, files):
             if platform_version_of(f.read()):
                 # Keep the canonical DLL for atomic_write's Windows loaded-file replacement. Deleting it here fails with
                 # ERROR_SHARING_VIOLATION before busy_ok can rename the loaded copy out of the way.
+                shutil.copy2(path, path + '.before-fh2mp-setup')
                 if os.path.normcase(path) != os.path.normcase(os.path.join(folder, PLATFORM_DLL)):
                     _move_aside(path, "old")
                 continue
@@ -281,7 +292,7 @@ EXTRA_INI = "FH2_ExtraOptions.ini"
 
 
 def _ini_info(text):
-    v = re.search(r"Release v([0-9][0-9.]*)", text)
+    v = re.search(r"(?:Release|Version) v([0-9][0-9.]*)", text, re.I)
     c = re.search(r"Compatible with Azimuth ([0-9][0-9.]*)", text)
     return (v.group(1) if v else "", c.group(1) if c else "")
 
@@ -299,6 +310,10 @@ def extra_options_installed(folder):
     if not _extra_dll(folder):
         return False, "", ""
     try:
+        with open(_extra_dll(folder), 'rb') as f:
+            if hashlib.sha256(f.read()).hexdigest() == UPSTREAM['extraOptions']['dllSha256']:
+                from .constants import AZIMUTH_VERSION
+                return True, UPSTREAM['extraOptions']['version'], AZIMUTH_VERSION
         with open(os.path.join(folder, EXTRA_INI), encoding="utf-8", errors="replace") as f:
             return (True, *_ini_info(f.read()))
     except OSError:
@@ -368,23 +383,40 @@ def restore_tls_helper(folder):
 SUPPORTED_EXTRA_SHA256 = {EXTRA_OPTIONS_DLL_SHA256}      # the only build FH2MP works with (tests may add their own)
 
 
-def is_supported_extra(dll_bytes):
-    return hashlib.sha256(dll_bytes).hexdigest() in SUPPORTED_EXTRA_SHA256
+def extra_options_version(folder):
+    return UPSTREAM[upstream.extra_options_kind(folder)]["version"]
+
+
+def is_supported_extra(dll_bytes, folder=None):
+    allowed = SUPPORTED_EXTRA_SHA256 | {UPSTREAM['extraOptions']['dllSha256']}
+    return hashlib.sha256(dll_bytes).hexdigest() in allowed
 
 
 def extra_options_supported(folder):
-    """-> True when the winmm.dll next to azimuth.exe is exactly the supported FH2 Extra Options build (0.2.98)."""
+    """The winmm.dll must match the pinned release for this Azimuth version."""
     path = _extra_dll(folder)
     try:
         with open(path, "rb") as f:
-            return is_supported_extra(f.read())
+            return is_supported_extra(f.read(), folder)
     except (OSError, TypeError):
         return False
 
 
 def extra_options_complete(folder):
     """The supported build is next to azimuth.exe with its settings file (the ini is where the launcher turns the media overrides on)."""
-    return extra_options_supported(folder) and os.path.isfile(os.path.join(folder, EXTRA_INI))
+    if not extra_options_supported(folder):
+        return False
+    pin = UPSTREAM[upstream.extra_options_kind(folder)]
+    if not all(os.path.isfile(os.path.join(folder, name)) for name in pin['files'].values()):
+        return False
+    try:
+        for name, digest in pin.get('fileSha256', {}).items():
+            with open(os.path.join(folder, name), 'rb') as f:
+                if hashlib.sha256(f.read()).hexdigest() != digest:
+                    return False
+    except OSError:
+        return False
+    return True
 
 
 def install_extra(folder, files):
@@ -392,15 +424,30 @@ def install_extra(folder, files):
     supported build is there already. Moves the rc5 layout over first; another winmm.dll there is kept as fh2extra\\winmm.dll.unsupported-N;
     settings that exist are kept. -> list of things done."""
     try:
+        dll = files[EXTRA_OPTIONS_DLL]
+        if MARKER.search(dll) or dll[:2] != b"MZ" or not is_supported_extra(dll, folder):
+            raise ShimError(f"that is not FH2 Extra Options {extra_options_version(folder)}")
         did = migrate_legacy(folder)
+        for name, data in files.items():
+            if name not in (EXTRA_OPTIONS_DLL, EXTRA_INI):
+                target = os.path.join(folder, name)
+                if os.path.exists(target):
+                    # Preserve preferences, but refresh the bundled plugin's code
+                    # and metadata when upgrading between host-specific builds.
+                    if name.lower().endswith('.ini'):
+                        continue
+                    with open(target, 'rb') as f:
+                        if f.read() == data:
+                            continue
+                    shutil.copy2(target, target + '.before-fh2mp-setup')
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                paths.atomic_write(target, data, 0o644)
+                did.append(f"installed {name}")
         if extra_options_supported(folder):            # it was in fh2extra (rc5 layout), or only its settings file is missing
             if EXTRA_INI in files and not os.path.exists(os.path.join(folder, EXTRA_INI)):
                 paths.atomic_write(os.path.join(folder, EXTRA_INI), files[EXTRA_INI], 0o644)
                 did.append("restored the FH2 Extra Options settings file")
             return did
-        dll = files[EXTRA_OPTIONS_DLL]
-        if MARKER.search(dll) or dll[:2] != b"MZ" or not is_supported_extra(dll):
-            raise ShimError(f"that is not FH2 Extra Options {EXTRA_OPTIONS_VERSION}")
         old = _extra_dll(folder)
         if old:
             dest = os.path.join(folder, EXTRA_OPTIONS_DIR, EXTRA_OPTIONS_DLL)
@@ -415,4 +462,4 @@ def install_extra(folder, files):
             paths.atomic_write(os.path.join(folder, EXTRA_INI), files[EXTRA_INI], 0o644)
     except OSError as e:
         raise ShimError(f"could not install FH2 Extra Options: {e.strerror or e}. Is the game still running?") from None
-    return did + [f"installed FH2 Extra Options {EXTRA_OPTIONS_VERSION} (RokkuDayo, GPL-3.0) from its GitHub release"]
+    return did + [f"installed FH2 Extra Options {extra_options_version(folder)} (RokkuDayo, GPL-3.0) from its GitHub release"]

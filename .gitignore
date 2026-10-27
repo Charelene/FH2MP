@@ -52,3 +52,6 @@ ops/fh2mp-lsp.service
 /launcher/*.spec.bak
 *.AppImage
 *.deb
+
+# Local editor configuration
+/.vscode/

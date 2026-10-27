@@ -128,6 +128,12 @@ def detect_prefix(folder):
         return m.group(1)
     ini = azimuth.read_ini(folder)
     game = azimuth.fh2_title(ini).get("folder", "")
+    # A game selected through the native Linux picker is stored as Z:\\... .
+    # Recover the existing Steam prefix from that actual host path first.
+    host_game = game[2:].replace('\\', '/') if game[:2].upper() == 'Z:' else game
+    m = re.match(r"^(.*/compatdata/[^/]+)/pfx/", os.path.realpath(host_game) + '/') if host_game.startswith('/') else None
+    if m and os.path.isdir(os.path.join(m.group(1), 'pfx')):
+        return m.group(1)
     for root in steam_roots():
         for pre in sorted(glob.glob(os.path.join(root, "steamapps", "compatdata", "*"))):
             if game and os.path.isdir(_game_dir_in_prefix(pre, game)):

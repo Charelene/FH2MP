@@ -138,8 +138,10 @@ class Updater:
             raise UpdateError("refusing a suspicious file name")
         return f"{self.base}/{self.repo}/releases/download/{tag}/{name}"
 
-    def fetch_manifest(self):
-        tag = self._release_tag()
+    def fetch_manifest(self, tag=None):
+        tag = tag or self._release_tag()
+        if tag and not _TAG_RE.fullmatch(tag):
+            raise UpdateError('invalid release tag')
         prefix = f"{self.base}/{self.repo}/releases/" + (f"download/{tag}/" if tag else "latest/download/")
         raw = self._get(prefix + "manifest.json", MAX_MANIFEST)
         sig = self._get(prefix + "manifest.json.sig", 4096).decode("ascii", "replace")

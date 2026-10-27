@@ -17,7 +17,9 @@ import xp_audit
 import score_reports
 
 ASCENDING = {1}          # scoreTypes where a smaller score wins (lap/race times) [guess]
-XP_BOARD = (4, 9)        # (scoreboardType, scoreType) of the XP ladder [guess from SubmitXpScore traffic]
+# Confirmed by real count submissions: bonus boards and mainland roads.
+# These describe the active save, rather than an all-time personal best.
+PROGRESS_LIMITS = {(4, 9): 150, (4, 10): 316}
 FAKE_ROWS = int(os.environ.get("FH2MP_FAKE_ROWS", "0"))   # synthesized rivals topping up a board; 0 = real players only
 CLASS_AVG_KMH = (88, 103, 119, 134, 150, 166)   # km/h; first race data: A-class Huracan averaged ~144 km/h on route 8001
 EVENT_BOARDS = {3, 6}   # scoreboardType whose pivotId is the rival event id (Monthly = 3, Showcase = 6) and SubmitScore.gameScoreboardId matches it [C]
@@ -76,6 +78,9 @@ class ScoreStore:
         score = u64_to_dbl(d["score"])
         if not math.isfinite(score) or score < 0 or (score_type in ASCENDING and score == 0):
             return None                 # no board has a negative score, and no race takes no time (audit 2026-10-25 F10)
+        limit = PROGRESS_LIMITS.get((d['scoreboardType'], score_type))
+        if limit is not None and (score > limit or not score.is_integer()):
+            return None
         if d["scoreboardType"] in SPEED_BOARDS and score > SPEED_CAP:
             return None
         if d["scoreboardType"] in EVENT_BOARDS and d["carClassId"] in MAXED_CLASSES:
@@ -141,15 +146,26 @@ class ScoreStore:
         r = self.db.one("SELECT xp FROM player_xp WHERE xuid=?", (xuid,))
         return r[0] if r else 0.0
 
+    def xp_top(self, limit=25):
+        """The operator XP ladder comes from its ledger, independently of game count boards."""
+        rows = self.db.query("SELECT x.xuid, x.xp, COALESCE(p.gamertag, '') AS tag "
+                             "FROM player_xp x LEFT JOIN players p ON p.xuid=x.xuid "
+                             "ORDER BY x.xp DESC, x.xuid LIMIT ?", (max(0, limit),))
+        return [dict(position=i + 1, xuid=r['xuid'], tag=r['tag'], score=r['xp']) for i, r in enumerate(rows)]
+
     # ---- reads
     def better(self, st, a, b):
         return a < b if st in ASCENDING else a > b
 
     def _best_per_player(self, sb, st, track, xuid=None, pivot=-1):
         """Each player's best submission on a board (any track when `track` is -1/65535), as row dicts keyed by
-        xuid. The XP ladder also takes the accumulated XP when that beats a submitted score."""
+        xuid. Progress counters use the latest valid snapshot of the active save."""
         asc = st in ASCENDING
         where, args = "s.sb=? AND s.st=? AND " + score_reports.VISIBLE, [sb, st]
+        limit = PROGRESS_LIMITS.get((sb, st))
+        if limit is not None:
+            where += " AND s.score BETWEEN 0 AND ? AND s.score = FLOOR(s.score)"
+            args.append(limit)
         if sb in EVENT_BOARDS:    # class X/R must never surface on a Rivals board, read or write (user decision); belt-and-suspenders
             where += f" AND s.cls NOT IN ({','.join(str(c) for c in MAXED_CLASSES)})"
         if sb in SPEED_BOARDS:    # impossible speeds submitted before the cap existed stay stored but never show
@@ -170,21 +186,14 @@ class ScoreStore:
         if sb in CLASS_PIVOT_BOARDS and 0 <= pivot <= 5:     # one board per car class (the submission's carClassId)
             where += " AND s.cls=?"
             args.append(pivot)
-        # ties go to the earlier submission (lowest id), as the in-memory scan did
+        # Record ties retain their first submission; save snapshots follow submission order.
+        order = 's.id DESC' if limit is not None else f"s.score {'ASC' if asc else 'DESC'}, s.id"
         sql = (f"SELECT * FROM (SELECT s.*, {score_reports.COUNTS} AS report_count, COALESCE(p.gamertag, '') AS tag, "
                "CASE WHEN g.submission_id IS NULL THEN 0 ELSE s.id END AS ghost, ROW_NUMBER() OVER "
-               f"(PARTITION BY s.xuid ORDER BY s.score {'ASC' if asc else 'DESC'}, s.id) AS rn "
+               f"(PARTITION BY s.xuid ORDER BY {order}) AS rn "
                "FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid "
                f"LEFT JOIN score_ghosts g ON g.submission_id = s.id WHERE {where}) ranked WHERE rn = 1")
         best = {r["xuid"]: _row(r) for r in self.db.query(sql, args)}
-        if (sb, st) == XP_BOARD:
-            q = "SELECT x.xuid, x.xp, COALESCE(p.gamertag, '') AS tag FROM player_xp x LEFT JOIN players p ON p.xuid = x.xuid"
-            for r in self.db.query(q + (" WHERE x.xuid=?" if xuid is not None else ""), (xuid,) if xuid is not None else ()):
-                cur = best.get(r["xuid"])
-                if cur is None or r["xp"] > cur["score"]:
-                    best[r["xuid"]] = {"xuid": r["xuid"], "tag": r["tag"], "sb": sb, "st": st, "track": track, "car": 0,
-                                       "cls": 0, "cpi": 0.0, "score": r["xp"], "clean": True, "stm": False,
-                                       "tcs": False, "abs": False, "t": time.time()}
         return best
 
     def best_of(self, xuid, sb, st, track, pivot=-1):
@@ -285,7 +294,7 @@ class ScoreStore:
         best = self._best_per_player(sb, st, track, pivot=pivot)
         me = best.get(xuid)
         real = list(best.values())
-        fake = self._fake(sb, st, track, me["score"] if me else None, max(0, FAKE_ROWS - len(real)), pivot)
+        fake = [] if (sb, st) in PROGRESS_LIMITS else self._fake(sb, st, track, me["score"] if me else None, max(0, FAKE_ROWS - len(real)), pivot)
         allrows = real + fake
         allrows.sort(key=lambda s: s["score"], reverse=(st not in ASCENDING))
         for i, s in enumerate(allrows):
