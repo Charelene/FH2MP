@@ -106,6 +106,14 @@ class BrowserOAuth(unittest.TestCase):
         self.assertNotEqual(first.state, second.state)
         self.assertNotEqual(first.verifier, second.verifier)
 
+    def test_callback_port_cannot_be_claimed_by_another_http_listener(self):
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        login = itch.BrowserLogin(itch.CLIENT_ID)
+        self.addCleanup(login.close)
+        with self.assertRaises(OSError):
+            other = HTTPServer(login.server.server_address, BaseHTTPRequestHandler)
+            self.addCleanup(other.server_close)
+
 
 class ButlerLogin(unittest.TestCase):
     def butler(self):
