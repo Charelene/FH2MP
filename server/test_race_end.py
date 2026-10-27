@@ -271,8 +271,10 @@ class LoadTimeout(unittest.TestCase):
         w.set_session_host_bool = lambda *x: None
         dropped = []
         w.set_console_bool = lambda q, var, value, why: dropped.append((q, value, why))
-        b.car_seen_at, b.car_doubt_at = now - 30, now - 30           # b's car change failed a check: the first suspect
-        c.car_seen_at = now - 5
+        # Fresh CI runners can have less than 30 seconds of monotonic uptime.
+        # A real failed-check timestamp is positive; zero means no failed check.
+        b.car_seen_at = b.car_doubt_at = now - min(30, now / 2)
+        c.car_seen_at = now - min(5, now / 4)
         w.tick()
         self.assertEqual(w.event["people"], [a, c])
         self.assertEqual(dropped, [(b, 0, "the others could not load its car")])
