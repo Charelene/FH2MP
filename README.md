@@ -1,6 +1,6 @@
 # FH2MP: Forza Horizon 2 online, back from the dead (sort of)
 
-> **v1.0.0-rc5, a pre-release.** It works and it is young: expect crashes, desyncs and rough edges.
+> **v1.1.0.** It works and it is young: expect crashes, desyncs and rough edges.
 > Known problems and workarounds: [KNOWN_ISSUES.md](KNOWN_ISSUES.md). Changes per version: [Releases](https://github.com/Charelene/FH2MP/releases).
 
 [![Patreon](https://img.shields.io/badge/Patreon-Support%20FH2MP-FF424D?logo=patreon&logoColor=white)](https://www.patreon.com/fh2mp)
