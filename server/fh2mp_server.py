@@ -29,6 +29,7 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import traffic as traffic_mod  # noqa: E402
 import gameopts  # noqa: E402
+import player_setup  # noqa: E402
 import replay  # noqa: E402
 import tunnel as tunnel_mod  # noqa: E402
 try:
@@ -217,7 +218,9 @@ CAR_PREDICTION_BODY_BITS = 710      # CarPredictionFull body, see the handler
 CAR_UNIVERSE_OFFSET = 395          # CarPredictionState +0x33, five bits; confirmed chain in docs/protocol.md
 CAR_UNIVERSE_MASK = 31 << CAR_UNIVERSE_OFFSET
 CAR_POLICY = os.environ.get("FH2MP_CAR_POLICY", "kick")   # a car in BLOCKED_CARS (traffic vehicles): off = ignore, log = report it, kick = withhold it and end the account's connections
-PART_POLICY = os.environ.get("FH2MP_PART_POLICY", "fix")     # a car whose part list holds an id that is not in the game data (it crashes the other clients that build it): fix = relay it with stock parts / log / kick / off
+PART_POLICY = os.environ.get("FH2MP_PART_POLICY", "fix").strip().lower()  # fix / kick / fix+kick / log / off
+if PART_POLICY not in {"fix", "kick", "fix+kick", "log", "off"}:
+    raise ValueError("invalid FH2MP_PART_POLICY")
 UNKNOWN_CAR_POLICY = os.environ.get("FH2MP_UNKNOWN_CAR_POLICY", "standin")   # a car that is in neither the game data, the synced car database nor data/dlc_cars.txt (a car pack the server does not have): standin = the others see STANDIN_CAR / off / log / kick
 TEST_CAR = int(os.environ.get("FH2MP_TEST_CAR", "0") or 0)    # dev test only: every relayed car is shown to the others as this car (stock parts)
 RENTAL_CLASS_ID = 7                  # CarClasses 7 = R: what a rental's PlayerChoices carry (the grid showed "R 999"), never a real car's class
@@ -369,6 +372,14 @@ NO_ID = 0xFFFE
 ROADTRIP_DB_DEFAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "roadtrip.sqlite")
 
 RESULT_OK, RESULT_VERSION_MISMATCH, RESULT_GAME_MISMATCH, RESULT_BANNED = 0, 1, 2, 3
+# Relay owner ids a world may hand out. The game's Nerd::ClientSyncedObjectManager (ctor game+17A0140) holds exactly 128 relay-owner tables
+# (manager+0x3c98, 0x70 bytes each: one map of that owner's objects, emptied object by object by DeregisterObject, game+17A3000) and its
+# lookup (game+17AA710) does not range-check the owner byte, so an object relayed under owner 128 or more makes every client read past the
+# array and fault at game+17AA83B / 17AA844 / 17AA84A (reproduced in game 2026-10-26, r12 = the owner id; docs/crash-triage-2026-10-26.md).
+# A world gives each connection the lowest id nobody holds. A leaver's id is kept out of use for OWNER_QUARANTINE_S, after the server has
+# sent the deletes of all its objects to everyone, and the receivers' per-owner replay counters for it are cleared; then it is handed out again.
+RELAY_OWNER_LAST = 127
+OWNER_QUARANTINE_S = float(os.environ.get("FH2MP_OWNER_QUARANTINE", "30"))
 
 
 class BitReader:
@@ -1149,7 +1160,10 @@ class Peer:
         self.car_seen_at = 0.0     # last LobbyPlayer object that carried the car (join, car change)
         self.car_doubt_at = 0.0    # last time that car failed a check (unreadable part list, unknown car, bad parts): a load-timeout suspect
         self.gopts_written_at = 0.0   # last GameOptions this client wrote itself (it was setting up an event of its own)
+        self.gopts_view = None       # settings last delivered to / written by this client
+        self.gopts_pending = None    # non-grantee's actual edits, awaiting its race request
         self.es_seq = 0           # server updates to the client's RoadTripEventSelection transfer object
+        self.parts_repair_car = None  # a violating car stays stock until a different car is selected
         self.player_seq = 0        # server updates to this client's LobbyPlayer object (router 1)
         self.last_id = NO_ID
         self.seen = set()
@@ -1297,7 +1311,7 @@ class Server:
         self.weather_init()
         self.peers = {}
         self.dirty = set()         # peers with queued messages (send -> flush)
-        self.next_owner = 1
+        self.owner_quarantine = {}   # relay owner id -> monotonic time it may be handed out again (see RELAY_OWNER_LAST)
         self.pending_race = None   # (deadline, leader Peer)
         self.game_options = None   # (size, payload) latest GameOptionsSynced written by the leader
         self.game_options_owner = None
@@ -1448,78 +1462,106 @@ class Server:
             peer.speed_flagged.add("soft")
             self.log(f"SPEED (log only): owner {peer.owner_id} xuid {peer.xuid:#x} car {peer.model_id} (stock {stock} km/h) drove {kmh:.0f} km/h for {peer.soft_s:.0f} s (soft limit {soft:.0f})")
 
-    def check_parts(self, peer: Peer, size: int, payload: int):
-        """The car's installed part ids (in the LobbyPlayer object, see parts.py) against the game data. An id the game does not have makes
-        the other clients crash when they build that car (prod 2026-10-21/22: lobby wipes in the same second a car with a made-up engine
-        row appeared). PART_POLICY fix (default) relays the object with those ids replaced by the car's stock parts, so the others build a
-        car they have and the owner keeps playing with its own (its game never gets its own object back); log only reports, kick removes
-        the account. Returns (something was wrong, withhold the object, the payload to relay)."""
-        if parts_check is None or PART_POLICY == "off":
-            return False, False, payload
-        load_sync_catalog(self.log)
-        peer.car_seen_at = time.monotonic()
-        found = parts_check.find_parts(size, payload)
-        if found is None or found[1][2] not in parts_check.P.TABLE_IDS["CarBody"]:
-            alien = parts_check.find_unknown_car(size, payload)
-            if alien is not None:
-                peer.car_doubt_at = peer.car_seen_at
-                return self.unknown_car(peer, payload, *alien)
-        if found is None and (shaped := parts_check.find_shaped(size, payload)) is not None:
-            # a list the finder rejected for its unknown ids: still a part list, so it gets the same cleaning (an engine row the game does
-            # not have crashes every client that builds the car); a body that is no car of this game gets the stand-in car's list
-            if shaped[1][2] not in parts_check.P.TABLE_IDS["CarBody"]:
-                peer.car_doubt_at = peer.car_seen_at
-                return self.unknown_car(peer, payload, *shaped)
-            found = shaped
-        if found is None and (loose := parts_check.find_loose(size, payload)) is not None:
-            found = loose        # ids in the slots without a part type (a mod): same cleaning, see parts.find_loose
-        if found is not None and TEST_CAR and (test := parts_check.stock_list(TEST_CAR)) is not None:
-            self.log(f"{peer.addr[1]} TEST CAR: owner {peer.owner_id}'s car {found[1][2] // 1000} relayed as car {TEST_CAR}")
-            return False, False, parts_check.write_parts(payload, found[0], test)
-        if found is None:
-            peer.car_doubt_at = peer.car_seen_at
+    def check_parts(self, peer: Peer, size: int, payload: int, oid=0):
+        """Decode before validating; return (violation, withhold, size, payload).
+
+        fix repairs a violating setup to stock for its owner and receivers;
+        kick withholds it; fix+kick also sends the repair before disconnecting.
+        Unknown/malformed serialization is withheld, never guessed or punished
+        as cheating. Legal deltas without a Parts field remain legal.
+        """
+        if PART_POLICY == "off":
+            return False, False, size, payload
+        try:
+            decoded = player_setup.fields(size, payload)
+        except ValueError as exc:
+            peer.car_doubt_at = time.monotonic()
             if peer.part_notes < 3:
                 peer.part_notes += 1
-                self.log(f"{peer.addr[1]} part check: no part list found in the {size}-bit player object (owner {peer.owner_id})")
-            if peer.odd_dumps < 4:
-                # probe (2026-10-23): one player's object of this kind crashed a whole lobby (11 clients, the same second) and joins with one were
-                # followed by a client death 33 % of the time, against 5 % for ordinary joins. The whole object goes into the log, in the same
-                # format as the WIPE dumps (little-endian bytes of the payload), so it can be decoded and compared
-                peer.odd_dumps += 1
-                self.log(f"{peer.addr[1]} ODD OBJECT: owner {peer.owner_id} xuid {peer.xuid:#x} {size} bits hex={payload.to_bytes((size + 7) // 8, 'little').hex()}")
-            return False, False, payload
-        offset, words = found
-        peer.parts = words
-        # The car itself: slot 2 (body) holds the CarBody row of the car, id = car id x 1000 (the 354 rows of the catalog table). The car's
-        # object (router 2) only says things like "100.0" (a float), so this is where the car id is actually readable. Same rules as before:
-        # a traffic-only model (BLOCKED_CARS) or an id that is not in the game is withheld / its owner removed by the car policy.
-        hide = False
-        body = words[2]
-        if body != parts_check.NONE and body in parts_check.P.TABLE_IDS["CarBody"]:
-            hide = self.car_model_seen(peer, body // 1000)
-        fixed, changes, odd = parts_check.neutralize(words)
-        car = body // 1000 if body in parts_check.P.TABLE_IDS["CarBody"] else None
-        name = lambda s: parts_check.P.SLOT_TABLE.get(s, "?")          # noqa: E731
-        key = (tuple(words), PART_POLICY)
-        if (changes or odd) and peer.part_logged != key and peer.part_notes < 6:   # once per car, and at most 6 cars per client
-            peer.part_logged = key
-            peer.part_notes += 1
-            what = {"fix": "replaced with the stock part for the others", "kick": "ending the connection", "log": "log only"}.get(PART_POLICY, PART_POLICY)
-            if changes:
-                self.log(f"PART CHECK ({what}): owner {peer.owner_id} xuid {peer.xuid:#x} car {car}: "
-                         + "; ".join(f"slot {s} {name(s)} {old:#x} ({old}, {why}) -> {new:#x}" for s, old, new, why in changes))
-                self.note("parts", peer.owner_id, f"car {car}: " + ", ".join(f"slot {s} {old} -> {new}" for s, old, new, _ in changes))
-            if odd:
-                self.log(f"PART CHECK (log only, row of another owner): owner {peer.owner_id} xuid {peer.xuid:#x} car {car}: "
-                         + "; ".join(f"slot {s} {w} ({text})" for s, w, text in odd[:8]))
-        if changes or odd:
-            peer.car_doubt_at = peer.car_seen_at
-        if changes and PART_POLICY == "kick" and peer.kick_reason is None:
-            peer.kick_reason = f"part id {changes[0][1]} in slot {changes[0][0]}"
-        if changes and PART_POLICY == "fix":
-            payload = parts_check.write_parts(payload, offset, fixed)
-        payload = self.rental_choices(peer, car, size, payload)
-        return bool(changes), hide, payload
+                self.log(f"{peer.addr[1]} PART CHECK: withheld undecodable player object: {exc}")
+            return True, True, size, payload
+        if parts_check is None:
+            return True, True, size, payload
+        load_sync_catalog(self.log)
+        values = {vid: value for vid, (_pos, _width, value) in decoded.items()}
+        repair = None
+        words = player_setup.part_words(values[player_setup.PARTS]) if player_setup.PARTS in values else None
+        car = words[2] // 1000 if words is not None else values.get(player_setup.MODEL)
+        if words is not None:
+            peer.car_seen_at = time.monotonic()
+            if words[2] not in parts_check.P.TABLE_IDS["CarBody"]:
+                # An unsupported car cannot be repaired to its own stock parts.
+                bad, hide, payload = self.unknown_car(peer, payload, decoded[player_setup.PARTS][0], words)
+                return bad, hide, size, payload
+            if player_setup.MODEL in values and values[player_setup.MODEL] != car:
+                self.log(f"{peer.addr[1]} PART CHECK: model/body mismatch withheld")
+                return True, True, size, payload
+            if car != peer.parts_repair_car:
+                peer.parts_repair_car = None
+            hide = self.car_model_seen(peer, car)
+            if hide or peer.kick_reason:
+                return True, True, size, payload
+            errors = parts_check.integrity_errors(words)
+            if errors:
+                peer.car_doubt_at = peer.car_seen_at
+                key = (tuple(words), PART_POLICY)
+                if peer.part_logged != key:
+                    peer.part_logged = key
+                    self.log(f"PART CHECK ({PART_POLICY}): owner {peer.owner_id} car {car}: "
+                             + "; ".join(f"slot {slot}: {why}" for slot, _word, why in errors[:8]))
+                    self.note("parts", peer.owner_id, f"car {car}: invalid setup")
+                if PART_POLICY in ("kick", "fix+kick"):
+                    peer.kick_reason = f"invalid parts for car {car} (slot {errors[0][0]})"
+                if PART_POLICY in ("fix", "fix+kick"):
+                    stock = parts_check.stock_list(car)
+                    if stock is None or parts_check.integrity_errors(stock):
+                        return True, True, size, payload
+                    peer.parts_repair_car = car
+                    repair = player_setup.stock_correction(stock, CAR_CHOICES.get(car))
+                elif PART_POLICY == "kick":
+                    return True, True, size, payload
+                else:
+                    # Explicit diagnostic log policy; it is not protective.
+                    return True, False, size, payload
+            peer.parts = words
+        elif car is not None and peer.parts_repair_car is not None and car != peer.parts_repair_car:
+            # Do not unlock a repaired setup with a model-only declaration.
+            # A different car must supply its own validated parts first.
+            return True, True, size, payload
+        if peer.parts_repair_car is not None:
+            # Later tune-only deltas must not restore a repaired car's modified
+            # sliders, ratios or reported PI. Keep it stock until another car.
+            stock = parts_check.stock_list(peer.parts_repair_car)
+            correction = player_setup.stock_correction(stock, CAR_CHOICES.get(peer.parts_repair_car))
+            setup_ids = set(correction) | {player_setup.MODEL}
+            attempted = any(vid in values and values[vid] != val for vid, val in correction.items())
+            if repair is not None or (setup_ids.intersection(values) and attempted):
+                repair = correction
+                values.update(correction)
+                peer.parts = stock
+                if peer.parts_repair_car in CAR_CHOICES:
+                    peer.choices = CAR_CHOICES[peer.parts_repair_car]
+                self.correct_owner_setup(peer, oid, correction)
+                size, payload = player_setup.encode(values)
+        elif words is not None:
+            payload = self.rental_choices(peer, car, size, payload)
+        return repair is not None, peer.kick_reason is not None, size, payload
+
+    def correct_owner_setup(self, peer: Peer, oid: int, values) -> None:
+        """Send the normal authority update for the owner's active player object.
+
+        This corrects synced setup only; it does not modify saves, databases or
+        stop another process from changing live physics. Manual verification of
+        the native local-car rebuild is required before claiming enforcement.
+        """
+        bits, payload = player_setup.encode(values)
+
+        def vars_(w):
+            w.bits(payload, bits)
+        self.send(peer, [server_update(1, oid, ROUTER_BITS[1][0], peer.player_seq, vars_)], fast=True)
+        peer.player_seq = (peer.player_seq + 1) % 0xFF
+        if PART_POLICY == "fix+kick":
+            self.flush_peer(peer)  # send the repair before kick_for_cars drops its queue
 
     def correct_owner_choices(self, peer: Peer, cls: int, pi: float) -> None:
         """Repair the owner's grid/results too: rewriting relays alone leaves its local rental at R 999."""
@@ -1529,6 +1571,34 @@ class Server:
             w.bits(value, bits)
         self.send(peer, [server_update(1, 0, ROUTER_BITS[1][0], peer.player_seq, vars_)])
         peer.player_seq = (peer.player_seq + 1) % 0xFF
+
+    def note_typed_choices(self, peer: Peer, size: int, payload: int) -> int:
+        """Track independently dirty class/PI fields in every legal player delta.
+
+        A car selection need not include all five ratings, and can share an
+        update with XP, team or setup fields. Payload-size heuristics miss it.
+        """
+        try:
+            values = player_setup.fields(size, payload)
+        except ValueError:
+            return payload
+        if 81 not in values and 82 not in values:
+            return payload
+        cls, pi = peer.choices or (None, math.nan)
+        if 81 in values:
+            cls = values[81][2]
+        if 82 in values:
+            pi = struct.unpack('<f', values[82][2].to_bytes(4, 'little'))[0]
+        peer.choices = (cls, pi)
+        want = CAR_CHOICES.get(peer.rental_car) if peer.rental_car is not None else None
+        if want and cls == RENTAL_CLASS_ID:
+            self.correct_owner_choices(peer, *want)
+            for vid, value in ((81, want[0]), (82, struct.unpack('<I', struct.pack('<f', want[1]))[0])):
+                if vid in values:
+                    at, width, _ = values[vid]
+                    payload = (payload & ~(((1 << width) - 1) << at)) | (value << at)
+            peer.choices = want
+        return payload
 
     def note_choices(self, peer: Peer, size: int, payload: int) -> int:
         """The class and performance index a player's game sends with its car (Nerd::PlayerChoices vars 81/82; the other clients show
@@ -1859,6 +1929,8 @@ class Server:
         if not self.game_options:
             return
         size, payload = options if options is not None else self.game_options
+        if not self.roadtrip:
+            q.gopts_view = gameopts.merge(q.gopts_view, size, payload)
         # A client that led an earlier event holds the GameOptions it wrote itself, numbered by its own writes, and applies updates
         # strictly in sequence order. The forward to it used to restart at 0, which looks stale: the Infection leader kept its own
         # Infection options when the other player then started King (dev 2026-10-20: one client showed Infection, the other King,
@@ -2203,6 +2275,27 @@ class Server:
         pr = self.pending_race
         return bool(pr and pr[1] is not peer and pr[1].connected)
 
+    def accept_requested_options(self, peer: Peer) -> None:
+        """A former native owner can start another event without requesting ownership again.
+
+        Keep its deltas private until its race request is accepted. Other former
+        owners also echo forwarded snapshots; those must not replace this event.
+        """
+        pending = peer.gopts_pending
+        if self.roadtrip or pending is None:
+            return
+        size, payload, laps = gameopts.bounded_laps(*pending, default=self.free_roam_laps,
+                                                  default_end=self.free_roam_end_condition)
+        self.game_options_owner = peer
+        self.game_options = (size, payload)
+        self.free_roam_laps = laps
+        self.free_roam_end_condition = gameopts.end_condition_type(size, payload)
+        peer.gopts_pending = None
+        self.log(f"{peer.addr[1]} GameOptions accepted from race requester: class/PI {gameopts.car_rule(self.game_options)}")
+        for q in self.peers.values():
+            if q.connected:
+                self.send_game_options(q)
+
     def close_finished_event(self) -> set:
         """A new request while the previous event only sits on its results screen (InRace=0, participants still leaving): end the old
         event first so the new one starts clean. Returns the peers that are still on its results screen."""
@@ -2522,6 +2615,19 @@ class Server:
         for q in ev["people"]:
             self.send(q, [start_race(go)])
 
+    def owner_ids_taken(self) -> set:
+        """Relay owner ids that cannot be handed out now: held by a connection, or a leaver's still in quarantine."""
+        now = time.monotonic()
+        for owner, until in list(self.owner_quarantine.items()):
+            if until <= now:
+                del self.owner_quarantine[owner]
+        return {p.owner_id for p in self.peers.values() if p.owner_id} | set(self.owner_quarantine)
+
+    def free_owner(self):
+        """The lowest relay owner id in 1..RELAY_OWNER_LAST nobody holds, or None."""
+        taken = self.owner_ids_taken()
+        return next((o for o in range(1, RELAY_OWNER_LAST + 1) if o not in taken), None)
+
     def drop_peer(self, peer: Peer, why: str) -> None:
         if self.game_options_owner is peer:
             self.game_options_owner = None
@@ -2567,6 +2673,11 @@ class Server:
             n = peer.relay_next.get((router, oid), 0)
             self.relay_numbered(peer, (router, oid), n, lambda sq, router=router, oid=oid, id_bits=id_bits:
                                 relay_delete_message(router, oid, peer.owner_id, id_bits, sq))
+        if peer.owner_id:
+            self.owner_quarantine[peer.owner_id] = time.monotonic() + OWNER_QUARANTINE_S
+            for q in self.peers.values():
+                for key in [k for k in q.seq_shift if k[0] == peer.owner_id]:
+                    del q.seq_shift[key]
 
     def noise(self, msg: str) -> None:
         """Log about datagrams from strangers at most once a second, so a flood of junk cannot fill the disk."""
@@ -2665,10 +2776,16 @@ class Server:
                     # that does not cannot have read it, so it does not complete the handshake (not a security check on its own)
                     self.noise(f"{addr[1]} OpenConnectionResponse with echo {echo}, expected {self.server_counter}: ignored")
                 elif code == RESPONSE_ACK and not peer.connected:
+                    owner = self.free_owner()
+                    if owner is None:
+                        # the hub routes around worlds without a free id (Hub.owner_room); this only catches a race or a standalone server
+                        self.log(f"{addr[1]} refused: no relay owner id free in this world (1..{RELAY_OWNER_LAST})")
+                        self.send(peer, [close_connection(0)], fast=True)
+                        self.drop_peer(peer, "no relay owner id free")
+                        continue
                     peer.connected = True
                     peer.connected_at = time.monotonic()
-                    peer.owner_id = self.next_owner
-                    self.next_owner = self.next_owner % 250 + 1
+                    peer.owner_id = owner
                     self.log(f"{addr[1]} *** CONNECTED *** (relay owner id {peer.owner_id})")
                     self.note("join", peer.owner_id, f"xuid {peer.xuid:#x} lobby type {peer.lobby_type}")
                     replies.append(time_sync(0, self.now_ms()))
@@ -2750,6 +2867,9 @@ class Server:
                 self.log(f"{addr[1]} MsgRequestRace (owner {peer.owner_id}) ignored: an event is already being set up or running in this lobby")
             elif mtype == MSG_REQUEST_RACE:
                 busy = self.close_finished_event()      # players still on the previous event's results screen cannot take an invite
+                self.accept_requested_options(peer)
+                if not self.roadtrip:
+                    self.game_options_owner = peer
                 self.log(f"{addr[1]} MsgRequestRace (owner {peer.owner_id}) -> RaceReady=1")
                 self.set_session_host_bool(SH_RACE_READY, 1, "race requested")
                 self.pending_race = (time.monotonic() + RACE_INVITE_SECONDS, peer)
@@ -2812,14 +2932,15 @@ class Server:
                 if CAR_CAPTURE and router == 1 and size:        # the LobbyPlayer object: gamertag, car, setup, livery ids (dev only)
                     self.log(f"{addr[1]} CAPTURE player {'create' if mtype == 7 else 'update'} id={oid} seq={seq} bits={size} "
                              f"xuid={peer.xuid:#x} hex={payload.to_bytes((size + 7) // 8, 'little').hex()}")
-                if router == 1 and parts_check is not None and size >= 240:
-                    payload = self.note_choices(peer, size, payload)
-                elif router == 1 and parts_check is not None and size in (40, 80):
-                    payload = self.short_rental_choices(peer, size, payload)
-                if router == 1 and parts_check is not None and size >= parts_check.MIN_BITS:   # the join-time object, and later updates that carry the whole car
-                    bad_parts, hide_car, payload = self.check_parts(peer, size, payload)
-                    if hide_car or (bad_parts and PART_POLICY == "kick"):
-                        suppress = True
+                if router == 1 and a == 0 and b == 0:
+                    bad_parts, suppress, size, payload = self.check_parts(peer, size, payload, oid)
+                    if suppress:
+                        continue  # never store or relay an unvalidated player object
+                    if parts_check is not None and size >= 240:
+                        payload = self.note_choices(peer, size, payload)
+                    elif parts_check is not None and size in (40, 80):
+                        payload = self.short_rental_choices(peer, size, payload)
+                    payload = self.note_typed_choices(peer, size, payload)
                 if CAR_CAPTURE and router == ROUTER_CAR and size:
                     self.log(f"{addr[1]} CAPTURE car {'create' if mtype == 7 else 'update'} id={oid} seq={seq} bits={size} "
                              f"hex={payload.to_bytes((size + 7) // 8, 'little').hex()}")
@@ -2863,8 +2984,23 @@ class Server:
                     # the leader's GameOptionsSynced after ownership transfer: others see it as a
                     # relay object owned by the leader (created once, then updated)
                     first = (router, oid) not in peer.objs
-                    if self.game_options_owner is not None and self.game_options_owner is not peer:
-                        continue  # an old writer must not replace the current leader's settings
+                    writer = self.pending_race[1] if self.pending_race and not self.roadtrip else self.game_options_owner
+                    if writer is not None and writer is not peer:
+                        if not self.roadtrip:
+                            try:
+                                # Use the state this client received, then retain all
+                                # its sparse edits until it actually requests a race.
+                                pending = gameopts.merge(peer.gopts_view or self.game_options, size, payload)
+                                gameopts.bounded_laps(*pending, default=self.free_roam_laps,
+                                                      default_end=self.free_roam_end_condition)
+                            except ValueError as exc:
+                                self.log(f"{addr[1]} invalid pending GameOptions: {exc}; ignored")
+                                continue
+                            peer.gopts_view = peer.gopts_pending = pending
+                            peer.gopts_written_at = time.monotonic()
+                            peer.gopts_own_seq = seq
+                            self.log(f"{addr[1]} GameOptions staged pending race request ({size} bits, own seq {seq})")
+                        continue
                     peer.gopts_own_seq = seq
                     peer.gopts_written_at = time.monotonic()
                     raw_options = (size, payload)
@@ -2909,6 +3045,9 @@ class Server:
                                 self.log(f"  GameOptions: value 1412 at bit offset {off} width {width}")
                     unchanged = self.game_options == (size, payload)
                     self.game_options = (size, payload)
+                    if not self.roadtrip:
+                        peer.gopts_view = self.game_options
+                        peer.gopts_pending = None
                     if correction is not None:
                         # Correct the writer too. Forwarding only to the guests would
                         # leave the host racing its original unlimited/oversize count.
@@ -3844,14 +3983,17 @@ class Hub:
             if held is None and not self.pending_room(addr):
                 return                      # before a world is picked or made for it: a flood must not create worlds
             name = self.assign.get(player_id)
-            target = self.world_for(ltype, name) if name else self.open_world_for(ltype, player_id)
+            target = self.world_for(ltype, name) if name else self.open_world_for(ltype, player_id, addr)
             if not self.world_pool_fits(target, player_id):
-                target = self.open_world_for(ltype, player_id)
+                target = self.open_world_for(ltype, player_id, addr)
+            if not self.owner_room(target, addr):
+                self.log(f"{player_id:#x} world {target.tag.strip()} has no relay owner ids left: sent to another world")
+                target = self.open_world_for(ltype, player_id, addr)
             if target is not cur and self.world_load(target, addr) >= self.WORLD_CAPACITY:
                 # The HUD player list has exactly 12 slots (HudPartyMembersComponent ctor FUN_1407726c0); a 13th player makes every
                 # client in the world read past them and call through a CUserProfile (game+0x144661d, "exception at 0x9") [C].
                 self.log(f"{player_id:#x} assigned to full lobby {name or 'default'}: sent to another world")
-                target = self.open_world_for(ltype, player_id)
+                target = self.open_world_for(ltype, player_id, addr)
             if cur is not None and cur is not target:
                 old = cur.peers.get(addr)
                 if old is not None:
@@ -3967,7 +4109,13 @@ class Hub:
         mine = xuid in flagged
         return all((p.xuid in flagged) == mine for p in world.peers.values() if p.xuid and p.xuid != xuid)
 
-    def open_world_for(self, lobby_type: int, player_id: int = 0):
+    def owner_room(self, w, addr=None) -> bool:
+        """Can world `w` give one more connection a relay owner id? Connections routed to it that have not finished their handshake will
+        each take one too."""
+        waiting = sum(1 for a, p in w.peers.items() if a != addr and not p.connected)
+        return RELAY_OWNER_LAST - len(w.owner_ids_taken()) - waiting >= 1
+
+    def open_world_for(self, lobby_type: int, player_id: int = 0, addr=None):
         """A player with no lobby assignment (joined from the menu: the matchmaking side cannot reach this hub's control port from the
         PC) goes to the busiest world of that type that has room, so menu joiners meet each other and whoever is already
         playing; a new world when every one of them is full. Players still connecting count (they are routed before their handshake
@@ -3978,12 +4126,13 @@ class Hub:
         best, best_n = None, 0
         for (ltype, _name), w in self.worlds.items():
             n = load.get(id(w), 0)
-            if ltype == lobby_type and 0 < n < self.WORLD_CAPACITY and n > best_n and self.world_pool_fits(w, player_id):
+            if (ltype == lobby_type and 0 < n < self.WORLD_CAPACITY and n > best_n and self.world_pool_fits(w, player_id)
+                    and self.owner_room(w, addr)):
                 best, best_n = w, n
         if best is not None:
             return best
         shared = self.worlds.get((lobby_type, ""))
-        if shared is None or (load.get(id(shared), 0) == 0 and self.world_pool_fits(shared, player_id)):
+        if shared is None or (load.get(id(shared), 0) == 0 and self.world_pool_fits(shared, player_id) and self.owner_room(shared, addr)):
             return self.world_for(lobby_type, "")                  # nobody anywhere: the shared default world
         self.auto_worlds = getattr(self, "auto_worlds", 0) + 1
         return self.world_for(lobby_type, f"auto{self.auto_worlds}")
@@ -4019,7 +4168,7 @@ class Hub:
                 del self.worlds[key]
                 self.empty_since.pop(key, None)
 
-    def serve(self) -> None:
+    def serve(self, stop=None) -> None:
         sel = self.sel = selectors.DefaultSelector()
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
         self.sock.setblocking(False)
@@ -4031,7 +4180,7 @@ class Hub:
             sel.register(self.tunnel.listener, selectors.EVENT_READ)
         last_sweep = 0.0
         nxt = math.inf
-        while True:
+        while stop is None or not stop.is_set():
             events = sel.select(timeout=min(0.01, max(0.0, nxt - time.monotonic())))
             if events:
                 self.control()
@@ -4063,6 +4212,7 @@ class Hub:
                 self.sweep()
                 if self.tunnel:
                     self.tunnel_sweep(now)
+        sel.close()
 
 
 if __name__ == "__main__":

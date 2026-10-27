@@ -408,6 +408,8 @@ def quarantine_tools(xuid, tools):
 def drop_player(xuid):
     """Takes a player out of every session and ticket (ban / kick)."""
     xuid = str(xuid)
+    import launcher_lobbies
+    launcher_lobbies.cancel(xuid)
     for res in _RESERVED.values():
         res.pop(xuid, None)
     for rec in _SESSIONS.values():
@@ -505,14 +507,18 @@ def lobby_occupancy(name, rec, pops, now=None):
     """Players in a lobby, counting the ones matched into it that are still on their way. With the game server's report that is who is
     connected plus the recent matches it has not seen yet; without it, the session's members."""
     now = time.time() if now is None else now
+    import launcher_lobbies
     if pops is None:
-        return sum(1 for k in rec["members"] if k.isdigit())
+        members = {k for k in rec["members"] if k.isdigit()}
+        return len(members | launcher_lobbies.seats(name, now=now))
     present = {x.lstrip("0") for x in pops.get(name, [])}
     res = _RESERVED.get(name, {})
     for x, t in list(res.items()):
         if now - t > RESERVE_SECONDS or ("%x" % int(x)).lstrip("0") in present:
             del res[x]             # it connected (the report counts it from now on, and a later leave must not leave a ghost) or never came
-    return len(pops.get(name, [])) + len(res)
+    held = launcher_lobbies.seats(name, now=now)
+    present_decimal = {str(int(x, 16)) for x in pops.get(name, []) if x}
+    return len(pops.get(name, [])) + len((set(res) | held) - present_decimal)
 
 
 def flagged_set(pops):
@@ -532,6 +538,8 @@ def pool_fits(name, pops, flagged, mine):
     (_RESERVED) count. An empty lobby fits both; the first to be matched into it decides."""
     members = {int(x, 16) for x in (pops or {}).get(name, []) if x}
     members |= {int(x) for x in _RESERVED.get(name, {}) if str(x).isdigit()}
+    import launcher_lobbies
+    members |= {int(x) for x in launcher_lobbies.seats(name)}
     members.discard(0)
     if mine:
         return all(m in flagged for m in members)
@@ -546,7 +554,9 @@ def _lobby_for(scid, hopper, attrs, ref, xuid=None):
     with _LOBBY_LOCK:
         names = _LOBBIES.setdefault(key, [])
         pops = hub_populations()
-        best, best_n = None, -1
+        import launcher_lobbies
+        preferred = launcher_lobbies.pick(xuid, key, attrs, ref, pops) if xuid else None
+        best, best_n = preferred, LOBBY_CAPACITY if preferred else -1
         flagged = flagged_set(pops)
         mine = int(xuid) in flagged if xuid and str(xuid).isdigit() else False
         for name in list(names):
@@ -576,8 +586,8 @@ def _lobby_for(scid, hopper, attrs, ref, xuid=None):
     return name
 
 
-def _new_lobby(scid, attrs, ref):
-    name = str(uuid.uuid4())
+def _new_lobby(scid, attrs, ref, name=None):
+    name = name or str(uuid.uuid4())
     # The game reads constants.custom.gameServerPlatform.{gameVariantId,gsiSetId[,location]} from the target session
     # (FUN_14183bb50) and throws on a missing key, so take them from the ticket session it wrote itself.
     custom = {}
@@ -644,7 +654,11 @@ def get_ticket(path, xuid=None):
     # A ticket keeps the lobby it was first matched into: the game polls it every second and the lobby it is sent to must not change
     name = t.get("lobby")
     if name is None or (t["scid"].lower(), TARGET_TEMPLATE.lower(), name.lower()) not in _SESSIONS:
-        name = t["lobby"] = _lobby_for(t["scid"], t["hopper"], t["attrs"], t["ref"], t.get("xuid"))
+        import auth
+        try:
+            name = t["lobby"] = _lobby_for(t["scid"], t["hopper"], t["attrs"], t["ref"], t.get("xuid"))
+        except auth.AuthError as e:
+            return e.status, {"error": e.code, "message": e.message}
     # The matchmaker puts the ticket session's members into the target session; the game checks that it is in there.
     ref = t["ref"] or {}
     src = _SESSIONS.get((str(ref.get("scid", "")).lower(), str(ref.get("templateName", "")).lower(),

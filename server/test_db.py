@@ -1,6 +1,6 @@
-"""Tests for the PostgreSQL storage layer: FH2MP_PG_DSN=... python3 -I server/test_db.py (needs psycopg 3).
+"""Tests for PostgreSQL: FH2MP_TEST_PG_DSN=... python3 -I server/test_db.py (needs psycopg 3).
 
-The DSN must point at a scratch database: every test drops and recreates the `public` schema (the `game` catalog schema is left alone).
+The DSN must point at a disposable fh2mp_test* database: tests reset `public` (leaving `game` alone).
 No game files needed: the Drivatar templates here are tiny stand-ins.
 """
 import math
@@ -8,6 +8,7 @@ import os
 import sys
 import threading
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db  # noqa: E402
@@ -24,7 +25,18 @@ def sub(score, sb=4, st=1, track=7, car=1):
 
 def fresh_db():
     import psycopg
-    with psycopg.connect(os.environ["FH2MP_PG_DSN"], autocommit=True) as c:
+    from psycopg.conninfo import conninfo_to_dict
+    dsn = os.environ.get('FH2MP_TEST_PG_DSN', '')
+    if not dsn or not conninfo_to_dict(dsn).get('dbname', '').startswith('fh2mp_test'):
+        raise RuntimeError('Database tests require FH2MP_TEST_PG_DSN with a disposable fh2mp_test* database')
+    # The stores created by these tests must use the same scratch database.
+    os.environ['FH2MP_PG_DSN'] = dsn
+    with psycopg.connect(dsn, autocommit=True) as c:
+        actual = c.execute('SELECT current_database()').fetchone()[0]
+        if isinstance(actual, bytes):
+            actual = actual.decode('ascii')
+        if not actual.startswith('fh2mp_test'):
+            raise RuntimeError('Refusing to reset a database outside fh2mp_test*')
         c.execute("DROP SCHEMA IF EXISTS public CASCADE")
         c.execute("CREATE SCHEMA public")
     return db.open_db()
@@ -36,6 +48,32 @@ class Base(unittest.TestCase):
 
     def tearDown(self):
         self.db.close()
+
+
+class ScratchDatabaseGuardTests(unittest.TestCase):
+    def test_regular_service_dsn_never_authorizes_schema_reset(self):
+        with mock.patch.dict(os.environ, {'FH2MP_PG_DSN': 'dbname=fh2mp'}, clear=True), \
+                mock.patch('psycopg.connect') as connect:
+            with self.assertRaisesRegex(RuntimeError, 'FH2MP_TEST_PG_DSN'):
+                fresh_db()
+            connect.assert_not_called()
+
+    def test_production_and_dev_names_are_refused_before_connecting(self):
+        for dsn in ('dbname=fh2mp', 'dbname=fh2mp_dev', 'postgresql://localhost/postgres'):
+            with self.subTest(dsn=dsn), mock.patch.dict(os.environ, {'FH2MP_TEST_PG_DSN': dsn}), \
+                    mock.patch('psycopg.connect') as connect:
+                with self.assertRaises(RuntimeError):
+                    fresh_db()
+                connect.assert_not_called()
+
+    def test_resolved_database_name_is_checked_before_drop(self):
+        with mock.patch.dict(os.environ, {'FH2MP_TEST_PG_DSN': 'dbname=fh2mp_test_audit'}), \
+                mock.patch('psycopg.connect') as connect:
+            connection = connect.return_value.__enter__.return_value
+            connection.execute.return_value.fetchone.return_value = ('fh2mp',)
+            with self.assertRaisesRegex(RuntimeError, 'Refusing to reset'):
+                fresh_db()
+            connection.execute.assert_called_once_with('SELECT current_database()')
 
 
 class SchemaTests(Base):
@@ -231,6 +269,11 @@ class ScoreTests(Base):
         self.assertEqual(self.sc.best_of(5, *scoreboard.XP_BOARD, 65535)["score"], 1234.0)
 
     def test_impossible_xp_awards_are_kept_in_the_ledger_but_not_counted(self):
+        # Test the ledger's rejection boundary under an explicit policy. Online
+        # XP is now scaled by 10 by default; that policy has separate tests.
+        patch = mock.patch.object(scoreboard.xp_audit, 'MAX_AWARD', 56000.)
+        patch.start()
+        self.addCleanup(patch.stop)
         self.sc.add_xp(7, 7500.0)
         self.assertEqual(self.sc.add_xp(7, 0.0)[:2], (7500.0, "ok"))      # a zero award adds nothing and is not worth a row
         for bad in (12_500_000.0, 56_001.0, -5.0, math.nan):
@@ -357,6 +400,9 @@ class DrivatarTests(Base):
         self.assertEqual(len(self.d.pool(100)), 5 + len(self.d.templates))
 
     def test_player_drivatars_do_not_all_share_one_wristband(self):
+        # Match the native catalog's 25 distinct bands for this distribution
+        # scenario; the ordinary small-pool fixture deliberately has only three.
+        self.d.templates.extend(template(0, w, 'Spread%d' % w) for w in range(400, 2600, 100))
         low = min(t["wristbandLevel"] for t in self.d.templates)
         for x in range(1, 41):
             self.d.add_player(x, "P%d" % x, wristband=low)

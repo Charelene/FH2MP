@@ -150,7 +150,65 @@ class TcpFallbackTests(unittest.TestCase):
 
 
 class GamerpicSyncTests(unittest.TestCase):
-    """sync_gamerpic: the server's picture reaches both Gamerpic.png files at every start (GitHub issue: the mod's default picture stayed)."""
+    """Account pictures reach the version's actual file, without repeated writes."""
+
+    def test_native_picture_is_cropped_and_synced_without_extra_options(self):
+        from PySide6.QtGui import QImage, QColor
+        from fh2mp_launcher.ui.images import png_bytes
+        with tempfile.TemporaryDirectory() as folder, tempfile.TemporaryDirectory() as cfg:
+            with open(os.path.join(folder, "azimuth.exe"), "wb") as f:
+                f.write(b"MZ native build by 1.0.1\0")
+            os.makedirs(os.path.join(folder, "data"))
+            target = os.path.join(folder, "data", "player.png")
+            with open(target, "wb") as f:
+                f.write(b"original native picture")
+            with open(os.path.join(folder, "data", "player-frame.txt"), "wb") as f:
+                f.write(b"user crop settings")
+            image = QImage(300, 100, QImage.Format.Format_RGBA8888)
+            for x in range(300):
+                for y in range(100):
+                    image.setPixelColor(x, y, QColor("red" if x < 100 else "green" if x < 200 else "blue"))
+            raw = png_bytes(image)
+            me, _unused = self.fake(folder, api_png=raw)
+            me.gamerpic_converter = lambda _raw: self.fail("Native sync must not use the legacy 1080 converter")
+            with mock.patch("fh2mp_launcher.paths.config_dir", return_value=cfg):
+                self.assertIn("updated", core.Launcher.sync_gamerpic(me))
+                decoded = QImage(target)
+                self.assertEqual((decoded.width(), decoded.height()), (256, 256))
+                self.assertEqual(decoded.pixelColor(0, 0), QColor("green"))
+                self.assertEqual(decoded.pixelColor(255, 255), QColor("green"))
+                stamp = os.stat(target).st_mtime_ns
+                self.assertEqual(core.Launcher.sync_gamerpic(me), "")
+                self.assertEqual(os.stat(target).st_mtime_ns, stamp)
+            self.assertFalse(os.path.exists(os.path.join(folder, "Gamerpic.png")))
+            with open(target + ".before-fh2mp", "rb") as f:
+                self.assertEqual(f.read(), b"original native picture")
+            with open(os.path.join(folder, "data", "player-frame.txt"), "rb") as f:
+                self.assertEqual(f.read(), b"user crop settings")
+            with self.assertRaises(ValueError):
+                azimuth.write_gamerpic(folder, b"invalid image")
+            self.assertEqual(os.stat(target).st_mtime_ns, stamp)
+            os.remove(target + ".before-fh2mp")
+            image.fill(QColor("blue"))
+            with mock.patch("fh2mp_launcher.paths.atomic_write", side_effect=FileNotFoundError("backup failed")):
+                with self.assertRaises(FileNotFoundError):
+                    azimuth.write_gamerpic(folder, png_bytes(image))
+            self.assertEqual(os.stat(target).st_mtime_ns, stamp)
+
+    def test_native_picture_uses_cached_image_when_server_is_unavailable(self):
+        from PySide6.QtGui import QImage, QColor
+        from fh2mp_launcher.ui.images import png_bytes
+        with tempfile.TemporaryDirectory() as folder:
+            with open(os.path.join(folder, "azimuth.exe"), "wb") as f:
+                f.write(b"MZ native build by 1.0.0\0")
+            image = QImage(1080, 1080, QImage.Format.Format_RGB888)
+            image.fill(QColor("blue"))
+            me, cfg = self.fake(folder, fail=True, kept=png_bytes(image))
+            with mock.patch("fh2mp_launcher.paths.config_dir", return_value=cfg):
+                self.assertIn("updated", core.Launcher.sync_gamerpic(me))
+            decoded = QImage(os.path.join(folder, "data", "player.png"))
+            self.assertEqual((decoded.width(), decoded.height()), (256, 256))
+            self.assertEqual(decoded.pixelColor(128, 128), QColor("blue"))
 
     def fake(self, folder, api_png=b"PNGDATA" * 20, fail=False, kept=None):
         from types import SimpleNamespace
@@ -511,7 +569,7 @@ def platform_dll(version):
     return b"MZ" + u("ProductName\0\0FH2 Mod Platform\0") + u("ProductVersion\0") + b"\x00\x00" + u(version + "\0")
 
 
-def platform_files(version="2.7.2"):
+def platform_files(version="2.7.3"):
     return {"d3dcompiler_47.dll": platform_dll(version), "LICENSE-FH2ModPlatform.txt": b"MIT License Trinculo54",
             "LICENSE-MinHook.txt": b"MinHook BSD"}
 
@@ -534,10 +592,10 @@ class ShimTests(unittest.TestCase):
             did = shim.install(d, self.DLL, platform=platform_files())
             self.assertEqual(shim.installed(d), ("ours", "0.1.0"))
             self.assertEqual(self.read(d, "fh2-mods", "FH2MP.dll"), self.DLL)
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.2"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.3"))
             for n in ("LICENSE-FH2ModPlatform.txt", "LICENSE-MinHook.txt"):
                 self.assertTrue(os.path.isfile(os.path.join(d, n)), n)
-            self.assertTrue(any("FH2 Mod Platform 2.7.2" in s for s in did))
+            self.assertTrue(any("FH2 Mod Platform 2.7.3" in s for s in did))
             self.assertFalse(os.path.exists(os.path.join(d, "winmm.dll")))
 
     def locked(self, locked_path):
@@ -609,21 +667,21 @@ class ShimTests(unittest.TestCase):
             self.write(platform_dll("2.8.0"), d, "d3dcompiler_47.dll")
             shim.install(d, self.DLL, platform=platform_files())
             self.assertEqual(shim.platform_installed(d), ("platform", "2.8.0"))          # another mod's newer copy stays
-            self.write(platform_dll("2.6.1"), d, "d3dcompiler_47.dll")
+            self.write(platform_dll("2.7.2"), d, "d3dcompiler_47.dll")
             self.assertEqual(shim.installed(d), ("old", "0.1.0"))                        # too old for this shim: install again
             shim.install(d, self.DLL, platform=platform_files())
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.2"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.3"))
             self.write(b"MZ fh2wheel loader", d, "d3dcompiler_47.dll")                     # fh2wheel's own loader
             self.assertEqual(shim.platform_installed(d), ("foreign", ""))
             did = shim.install(d, self.DLL, platform=platform_files())
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.2"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.3"))
             self.assertEqual(self.read(d, "d3dcompiler_47.dll.old"), b"MZ fh2wheel loader")
             self.assertTrue(any("d3dcompiler_47.dll.old" in s for s in did))
 
     @unittest.skipIf(sys.platform in ("win32", "darwin"), "needs a case-sensitive file system")
     def test_another_loader_in_other_letter_case_is_moved_aside(self):
         with tempfile.TemporaryDirectory() as d:
-            self.write(platform_dll("2.7.2"), d, "d3dcompiler_47.dll")
+            self.write(platform_dll("2.7.3"), d, "d3dcompiler_47.dll")
             self.write(b"MZ radio mod loader", d, "D3DCompiler_47.dll")          # Wine would load this one
             self.assertEqual(shim.platform_installed(d), ("foreign", ""))
             shim.install(d, self.DLL, platform=platform_files())
@@ -667,7 +725,7 @@ class ShimTests(unittest.TestCase):
             shim.uninstall(d)
             self.assertEqual(shim.installed(d), ("none", ""))
             self.assertEqual(self.read(d, "winmm.dll"), b"MZ extra options")
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.2"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.3"))
 
     def test_shim_zip(self):
         from fh2mp_launcher import core, updater
@@ -699,6 +757,43 @@ class ShimTests(unittest.TestCase):
 
 
 class AzimuthTests(unittest.TestCase):
+    def test_version_resource_wins_over_historical_migration_strings(self):
+        with tempfile.TemporaryDirectory() as folder:
+            exe = os.path.join(folder, "azimuth.exe")
+            for version in ("1.0.0", "1.0.1", "1.0.1.0"):
+                with open(exe, "wb") as f:
+                    f.write(b"MZ settings migrated by 0.9.10\0 then by 1.0.0\0")
+                    f.write("FileVersion\0".encode("utf-16-le"))
+                    f.write((version + "\0").encode("utf-16-le"))
+                self.assertEqual(azimuth.exe_version(exe), version)
+                self.assertTrue(azimuth.uses_native_gamerpic(folder))
+
+    def test_shared_library_uses_fh2_instead_of_first_or_selected_title(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.make(d)
+            text = ("[launcher]\r\ngame=deadbeef\r\n"
+                    "[title-deadbeef]\r\nfolder=C:\\OtherGame\r\ncontent=other-dlc\r\n"
+                    "[title-1A96545B]\r\nfolder=C:\\Games\\ForzaHorizon2\r\ncontent=storm-island\r\n")
+            path = os.path.join(d, "data", "azimuth.ini")
+            with open(path, "wb") as f:
+                f.write(text.encode("utf-16"))
+            self.assertEqual(azimuth.inspect(d).game_folder, "C:\\Games\\ForzaHorizon2")
+            self.assertFalse(azimuth.has_game_configured(d))
+            azimuth.configure_game(d, azimuth.fh2_title(azimuth.read_ini(d))["folder"], preserve_content=True)
+            self.assertTrue(azimuth.has_game_configured(d))
+            ini = azimuth.read_ini(d)
+            self.assertEqual(ini["title-deadbeef"], {"folder": "C:\\OtherGame", "content": "other-dlc"})
+            self.assertEqual(ini["title-1A96545B"]["content"], "storm-island")
+            self.assertEqual(len([k for k in ini if k.lower() == "title-1a96545b"]), 1)
+
+    def test_other_game_configuration_does_not_count_as_fh2(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.make(d)
+            with open(os.path.join(d, "data", "azimuth.ini"), "wb") as f:
+                f.write("[launcher]\ngame=deadbeef\n[title-deadbeef]\nfolder=C:\\OtherGame\n".encode("utf-16"))
+            self.assertFalse(azimuth.has_game_configured(d))
+            self.assertEqual(azimuth.inspect(d).game_folder, "")
+
     def make(self, d, exe=b"MZ \x000.9.10\x00\x00: Azimuth data"):
         with open(os.path.join(d, "azimuth.exe"), "wb") as f:
             f.write(exe)
@@ -906,6 +1001,66 @@ class ExtraOptionsTests(unittest.TestCase):
             self.assertIn("azimuth-tls.dll", str(cm.exception))
             self.assertEqual(self.read(az, "data", "bin", "azimuth-tls.dll"), old_mod)  # untouched
 
+    def test_helper_mismatch_does_not_identify_an_unknown_file_as_extra_options(self):
+        with tempfile.TemporaryDirectory() as az:
+            self.tls_rig(az, with_backup=False)
+            unknown = b"MZ unknown or damaged helper"
+            self.write(unknown, az, "data", "bin", "azimuth-tls.dll")
+            with self.assertRaises(shim.ShimError) as cm:
+                shim.restore_tls_helper(az)
+            message = str(cm.exception)
+            self.assertNotIn("is an old FH2 Extra Options file", message)
+            self.assertIn(os.path.join(az, shim.TLS_HELPER), message)
+            self.assertIn(hashlib.sha256(unknown).hexdigest(), message)
+
+    def test_helper_recovery_checks_other_backups_against_this_executable(self):
+        with tempfile.TemporaryDirectory() as az:
+            stock, old_mod = self.tls_rig(az)
+            self.write(b"MZ wrong backup", az, "data", "bin", "azimuth-tls.dll.old")
+            self.write(stock, az, "data", "bin", "azimuth-tls.dll.bak")
+            shim.restore_tls_helper(az)
+            self.assertEqual(self.read(az, "data", "bin", "azimuth-tls.dll"), stock)
+            self.assertEqual(self.read(az, "data", "bin", "azimuth-tls.dll.replaced"), old_mod)
+            self.assertEqual(self.read(az, "data", "bin", "azimuth-tls.dll.bak"), stock)
+
+    def test_unreadable_helper_is_an_error_instead_of_a_successful_check(self):
+        with tempfile.TemporaryDirectory() as az:
+            self.tls_rig(az)
+            with mock.patch("builtins.open", side_effect=PermissionError(13, "Access denied")):
+                with self.assertRaises(shim.ShimError):
+                    shim.restore_tls_helper(az)
+
+    def test_failed_helper_replacement_keeps_current_and_original_bytes(self):
+        for target, name in ((shim.shutil, "copy2"), (shim.paths, "atomic_write")):
+            with self.subTest(stage=name), tempfile.TemporaryDirectory() as az:
+                stock, old_mod = self.tls_rig(az)
+                with mock.patch.object(target, name, side_effect=PermissionError(13, "Access denied")):
+                    with self.assertRaises(shim.ShimError):
+                        shim.restore_tls_helper(az)
+                self.assertEqual(self.read(az, "data", "bin", "azimuth-tls.dll"), old_mod)
+                self.assertEqual(self.read(az, "data", "bin", "azimuth-tls.dll.old"), stock)
+
+    def test_wrong_version_backups_are_preserved_and_rejected(self):
+        with tempfile.TemporaryDirectory() as az:
+            _, old_mod = self.tls_rig(az, with_backup=False)
+            for suffix in ("old", "bak", "backup", "old-2", "replaced"):
+                self.write(b"MZ another Azimuth version", az, "data", "bin", "azimuth-tls.dll." + suffix)
+            with self.assertRaises(shim.ShimError):
+                shim.restore_tls_helper(az)
+            self.assertEqual(self.read(az, "data", "bin", "azimuth-tls.dll"), old_mod)
+            self.assertEqual(self.read(az, "data", "bin", "azimuth-tls.dll.old"), b"MZ another Azimuth version")
+
+    def test_repeated_helper_repair_keeps_previous_recovery_files(self):
+        with tempfile.TemporaryDirectory() as az:
+            stock, old_mod = self.tls_rig(az)
+            shim.restore_tls_helper(az)
+            # Another installer replaces it again between launches.
+            self.write(b"MZ newly replaced", az, "data", "bin", "azimuth-tls.dll")
+            shim.restore_tls_helper(az)
+            self.assertEqual(self.read(az, "data", "bin", "azimuth-tls.dll"), stock)
+            self.assertEqual(self.read(az, "data", "bin", "azimuth-tls.dll.replaced"), old_mod)
+            self.assertEqual(self.read(az, "data", "bin", "azimuth-tls.dll.replaced-2"), b"MZ newly replaced")
+
     def test_the_rc5_layout_is_moved_over_first(self):
         with tempfile.TemporaryDirectory() as az:
             self.write(b"MZ-mod-dll", az, "fh2extra", "winmm.dll")                     # the supported mod in fh2extra ...
@@ -1003,10 +1158,11 @@ class DevModeTests(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.TemporaryDirectory()
         self.old = {k: os.environ.get(k) for k in ("FH2MP_DEV", "FH2MP_LAUNCHER_HOME", "XDG_CONFIG_HOME", "FH2MP_NO_KEYRING",
-                                                  "APPDATA", "LOCALAPPDATA")}
+                                                  "APPDATA", "LOCALAPPDATA", "XDG_CACHE_HOME")}
         os.environ["FH2MP_NO_KEYRING"] = "1"
         os.environ.pop("FH2MP_LAUNCHER_HOME", None)
         os.environ["XDG_CONFIG_HOME"] = self.home.name
+        os.environ["XDG_CACHE_HOME"] = self.home.name
         os.environ["APPDATA"] = self.home.name
         os.environ["LOCALAPPDATA"] = self.home.name
 
@@ -1035,7 +1191,7 @@ class DevModeTests(unittest.TestCase):
         from fh2mp_launcher import core
         from fh2mp_launcher.settings import Settings
         with tempfile.TemporaryDirectory() as d:
-            for name, body in (("azimuth.exe", b"MZ"), ("d3dcompiler_47.dll", platform_dll("2.7.2"))):     # a bare DLL needs the platform
+            for name, body in (("azimuth.exe", b"MZ"), ("d3dcompiler_47.dll", platform_dll("2.7.3"))):     # a bare DLL needs the platform
                 with open(os.path.join(d, name), "wb") as f:
                     f.write(body)
             dll = os.path.join(d, "local.dll")

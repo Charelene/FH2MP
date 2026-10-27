@@ -1,9 +1,11 @@
 """xp_audit: the per-award rule, the rare-and-repeated suspect finder, and the lsp.log parser (no database needed)."""
 import datetime
 import math
+import importlib.util
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import xp_audit as X  # noqa: E402
@@ -20,6 +22,19 @@ def log_lines(entries):
 
 
 class Judge(unittest.TestCase):
+    def test_scaled_default_and_explicit_cap_policy(self):
+        for scale, cap, expected in (('1', None, 56000.), ('10', None, 560000.), ('10', '36000', 36000.)):
+            with self.subTest(scale=scale, cap=cap), mock.patch.dict(os.environ, {'FH2MP_XP_SCALE': scale}):
+                os.environ.pop('FH2MP_XP_MAX', None)
+                if cap is not None:
+                    os.environ['FH2MP_XP_MAX'] = cap
+                spec = importlib.util.spec_from_file_location('xp_policy_fixture', X.__file__)
+                policy = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(policy)
+                self.assertEqual(policy.MAX_AWARD, expected)
+                self.assertEqual(policy.judge(expected)[0], 'ok')
+                self.assertEqual(policy.judge(expected + 1)[0], 'rejected')
+
     def test_real_payouts_count(self):
         for xp in (0, 50, 7500, 15000, 34312, X.MAX_AWARD):
             self.assertEqual(X.judge(float(xp))[0], X.OK, xp)

@@ -1,11 +1,12 @@
 """Tests for the accountless identity (server/auth.py), the launcher API and the LSP's enforcement of session tokens:
-FH2MP_PG_DSN=... python3 -I server/test_auth.py   (scratch database; `public` is dropped and recreated, like test_db.py / test_lsp.py)."""
+FH2MP_TEST_PG_DSN=... python3 -I server/test_auth.py (disposable fh2mp_test* database; public is reset)."""
 import json
 import os
 import struct
 import sys
 import threading
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
@@ -273,7 +274,7 @@ class SessionTests(AuthCase):
         self.assertEqual(self.svc.rename(self.acct.xuid, "Brand New"), "Brand New")
         self.assertEqual(self.code(self.svc.rename, self.acct.xuid, "Another"), "rename_cooldown")
         self.clock.t += auth.TAG_COOLDOWN + 1
-        self.assertEqual(self.code(self.svc.rename, self.acct.xuid, "taken_name"), "gamertag_taken")
+        self.assertEqual(self.code(self.svc.rename, self.acct.xuid, "taken name"), "gamertag_taken")
         self.assertEqual(self.svc.rename(self.acct.xuid, "BRAND NEW"), "BRAND NEW")       # re-casing your own name is allowed
         self.assertEqual(self.db.one("SELECT gamertag FROM players WHERE xuid=?", (self.acct.xuid,))[0], "BRAND NEW")
 
@@ -441,20 +442,27 @@ class HttpTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import fh2mp_lsp as L
-        test_db.fresh_db().close()
-        L.setup()
+        # Authentication and these HTTP routes don't read the proprietary game
+        # catalog. Use the real PostgreSQL stores and handler without invoking
+        # the unrelated catalog/bootstrap step (which otherwise exits the suite).
+        database = test_db.fresh_db()
+        cls.addClassCleanup(database.close)
+        service = auth.AuthService(database, env='test', mode='required', token_ip='exact')
+        social_store = social.SocialStore(database)
+        context = launcher_api.Ctx(service, social_store, launcher_api.LauncherConfig(), lambda: 0)
+        patch = mock.patch.multiple(L, DB=database, AUTH=service, SOCIAL=social_store, LAUNCHER=context)
+        patch.start()
+        cls.addClassCleanup(patch.stop)
         cls.L = L
         L.AUTH.mode = "required"
         L.AUTH.token_ip = "exact"
         cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), L.Handler)
+        cls.addClassCleanup(cls.srv.server_close)
+        cls.addClassCleanup(cls.srv.shutdown)
         cls.port = cls.srv.server_address[1]
         threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
         cls.d = Device()
         cls.token, cls.acct = cls.register(cls.d, "Http Guy")
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.srv.shutdown()
 
     @classmethod
     def req(cls, method, path, headers=None, body=b""):
@@ -486,6 +494,25 @@ class HttpTests(unittest.TestCase):
 
     def game_headers(self, **extra):
         return {"X-FH2MP-Host": "achievements.xboxlive.com", "X-UserId": "0x9000000001234", **extra}
+
+    def test_actual_launcher_registration_login_recovery_and_logout(self):
+        # Run the existing launcher E2E contract against this real HTTP handler
+        # and PostgreSQL store. It previously always skipped in release CI.
+        import importlib.util
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        path = root / 'launcher' / 'tests' / 'test_e2e.py'
+        spec = importlib.util.spec_from_file_location('launcher_e2e_contract', path)
+        contract = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(os.environ, {'FH2MP_TEST_SERVER': f'http://127.0.0.1:{self.port}'}):
+            spec.loader.exec_module(contract)
+            suite = unittest.defaultTestLoader.loadTestsFromModule(contract)
+            result = unittest.TestResult()
+            suite.run(result)
+        self.assertEqual(result.testsRun, 1)
+        self.assertEqual(result.skipped, [])
+        self.assertEqual(result.errors, [])
+        self.assertEqual(result.failures, [])
 
     def test_game_traffic_needs_a_token(self):
         st, body = self.req("GET", "/titles/1/achievements", self.game_headers())

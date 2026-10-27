@@ -40,3 +40,14 @@ def azimuth_png_from_bytes(raw):
     img = img.copy((img.width() - side) // 2, (img.height() - side) // 2, side, side)
     big = img.scaled(1080, 1080, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
     return png_bytes(big, QImage.Format.Format_RGB888)
+
+
+def native_azimuth_png_from_bytes(raw):
+    """Azimuth 1.0's native picture: a centred 256x256 RGBA PNG."""
+    img = QImage.fromData(raw)
+    if img.isNull() or not img.width() or not img.height():
+        return None
+    side = min(img.width(), img.height())
+    img = img.copy((img.width() - side) // 2, (img.height() - side) // 2, side, side)
+    img = img.scaled(256, 256, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    return png_bytes(img)

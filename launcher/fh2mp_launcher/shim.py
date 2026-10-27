@@ -316,7 +316,7 @@ def _tls_stock(folder, path):
         with open(os.path.join(folder, "azimuth.exe"), "rb") as f:
             return digest in f.read()
     except OSError:
-        return True               # nothing to judge by: leave it alone
+        raise ShimError(f"Could not verify Azimuth's helper at {path}. Check that azimuth.exe and the helper are readable.") from None
 
 
 def tls_helper_modified(folder):
@@ -328,22 +328,41 @@ def tls_helper_modified(folder):
 
 
 def restore_tls_helper(folder):
-    """Puts Azimuth's own azimuth-tls.dll back when an old Extra Options replaced it: the mod's installer keeps the original as
-    azimuth-tls.dll.old. The replaced file is kept as azimuth-tls.dll.replaced[-n]. -> list of things done; raises ShimError when there is
-    no original to put back."""
+    """Restore a local backup only when its hash is accepted by this azimuth.exe.
+    Keep both the backup and displaced helper; failed writes leave the current helper in place.
+    """
     if not tls_helper_modified(folder):
         return []
     path = os.path.join(folder, TLS_HELPER)
-    backup = path + ".old"
-    if not (os.path.isfile(backup) and _tls_stock(folder, backup)):
-        raise ShimError("data\\bin\\azimuth-tls.dll in your Azimuth folder is an old FH2 Extra Options file, not Azimuth's own, and no copy of "
-                        "the original is there. Copy azimuth-tls.dll from a fresh Azimuth download over it and press Play again.")
     try:
-        moved = _move_aside(path, "replaced")
-        shutil.copy2(backup, path)
+        names = sorted(os.listdir(os.path.dirname(path)))
+        pattern = re.compile(r"azimuth-tls\.dll\.(?:old|bak|backup|replaced)(?:-?\d+)?", re.I)
+        backup = next((os.path.join(os.path.dirname(path), n) for n in names
+                       if pattern.fullmatch(n) and os.path.isfile(os.path.join(os.path.dirname(path), n))
+                       and _tls_stock(folder, os.path.join(os.path.dirname(path), n))), None)
+        if backup is None:
+            with open(path, "rb") as f:
+                digest = hashlib.sha256(f.read()).hexdigest()
+            raise ShimError(f"Azimuth's helper does not match this azimuth.exe, and no verified local backup was found. "
+                            f"File: {path} (SHA-256: {digest}). "
+                            "Copy data\\bin\\azimuth-tls.dll from a fresh download of the same Azimuth version into this folder, "
+                            "then press Play again. A mismatched file can come from an older mod or a mixed/incomplete Azimuth install.")
+        with open(backup, "rb") as f:
+            replacement = f.read()
+        # Verify the actual bytes being written, rather than trusting a prior read.
+        with open(os.path.join(folder, "azimuth.exe"), "rb") as f:
+            if hashlib.sha256(replacement).hexdigest().encode() not in f.read():
+                raise ShimError(f"Azimuth's helper backup changed during verification: {backup}. Try again.")
+        moved = path + ".replaced"
+        n = 1
+        while os.path.exists(moved):
+            n += 1
+            moved = f"{path}.replaced-{n}"
+        shutil.copy2(path, moved)
+        paths.atomic_write(path, replacement, 0o755)
     except OSError as e:
         raise ShimError(f"could not restore Azimuth's azimuth-tls.dll: {e.strerror or e}. Is the game still running?") from None
-    return [f"put Azimuth's own azimuth-tls.dll back (the old Extra Options one is kept as {os.path.basename(moved)})"]
+    return [f"put Azimuth's own azimuth-tls.dll back (the previous file is kept as {os.path.basename(moved)})"]
 
 
 SUPPORTED_EXTRA_SHA256 = {EXTRA_OPTIONS_DLL_SHA256}      # the only build FH2MP works with (tests may add their own)

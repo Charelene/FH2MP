@@ -7,6 +7,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import part_ids as P  # noqa: E402
 import parts  # noqa: E402
+import player_setup as C  # noqa: E402
 
 
 def player_object(slot_values, offset, size=2600, seed=1):
@@ -22,6 +23,16 @@ def player_object(slot_values, offset, size=2600, seed=1):
 def stock_list():
     """Every slot that has a table gets the first id of that table; slots 3 and 26 stay -1."""
     return {k: min(P.TABLE_IDS[t]) for k, t in P.SLOT_TABLE.items()}
+
+
+def serialized_object(words, values=None):
+    fields = dict(values or {})
+    fields[C.PARTS] = C.parts_value(list(words))
+    return C.encode(fields)
+
+
+def decoded_words(size, payload):
+    return C.part_words(C.fields(size, payload)[C.PARTS][2])
 
 
 class PartCheck(unittest.TestCase):
@@ -49,9 +60,9 @@ class PartCheck(unittest.TestCase):
 
     def test_an_id_of_another_table_in_the_wrong_slot_is_reported_but_exists(self):
         cars = stock_list()
-        cars[12] = min(P.TABLE_IDS["Brakes"])         # exists, but not as a camshaft
-        if cars[12] in P.TABLE_IDS["EngineCamshaft"]:
-            self.skipTest("the first brake id is also a camshaft id")
+        candidates = P.TABLE_IDS["Brakes"] - P.TABLE_IDS["EngineCamshaft"]
+        self.assertTrue(candidates, 'fixture needs a brake id that is not a camshaft')
+        cars[12] = min(candidates)                  # exists, but not as a camshaft
         size, v = player_object(cars, 910)
         offset, words = parts.find_parts(size, v)
         issues = parts.audit_parts(words)
@@ -196,13 +207,13 @@ class CarFromParts(unittest.TestCase):
     def object_for(self, car_id):
         stock = stock_car(car_id)
         cars = dict(enumerate(stock)) if stock else {**stock_list(), 2: car_id * 1000}
-        return player_object(cars, 910)
+        return serialized_object([cars.get(k, P.PART_NONE) for k in range(43)])
 
     def test_a_traffic_car_is_withheld_and_its_owner_removed(self):
         import fh2mp_server as S
         w, (a, b) = self.world()
         size, v = self.object_for(283)                      # VW Bora VR6 '03: a traffic-only model
-        bad, hide, _ = w.check_parts(a, size, v)
+        bad, hide, size, _ = w.check_parts(a, size, v)
         self.assertTrue(hide)
         self.assertEqual(a.model_id, 283)
         self.assertEqual(S.CAR_POLICY, "kick")
@@ -212,12 +223,12 @@ class CarFromParts(unittest.TestCase):
         w, (a, b) = self.world()
         cars = stock_car(368)
         cars[0] = 368335
-        size, v = player_object(dict(enumerate(cars)), 910)
-        bad, hide, v2 = w.check_parts(a, size, v)
+        size, v = serialized_object(cars)
+        bad, hide, size, v2 = w.check_parts(a, size, v)
         self.assertTrue(bad)
         self.assertFalse(hide)
         self.assertIsNone(a.kick_reason)
-        self.assertEqual(parts.find_parts(size, v2)[1][0], 368000)
+        self.assertEqual(decoded_words(size, v2)[0], 368000)
 
     # The part list of the object that wiped a prod lobby on 2026-10-23 (11 clients in one second): car 2179 with 14 ids the game does not have
     # (engine row 3104018, 2503088, 2632208, 91001005 ...). 26 of 41 ids known, so find_parts (34 needed) did not see it and it was relayed as it was.
@@ -237,15 +248,16 @@ class CarFromParts(unittest.TestCase):
         size, v = self.wiping_object()
         self.assertIsNone(parts.find_parts(size, v))        # the hole: the strict finder gives up
         self.assertEqual(parts.find_shaped(size, v)[0], 842)
-        bad, hide, v2 = w.check_parts(a, size, v)
+        size, v = serialized_object([w & 0xFFFFFFFF for w in self.WIPING_LIST])
+        bad, hide, size, v2 = w.check_parts(a, size, v)
         self.assertTrue(bad)
         self.assertFalse(hide)
         self.assertNotEqual(v2, v)
         found = parts.find_parts(size, v2)                  # what the others get is a list every client can build
-        self.assertEqual(found[0], 842)
+        self.assertEqual(found[0], C.fields(size, v2)[C.PARTS][0])
         self.assertEqual(found[1][2], 2179000)              # the car itself stays
         self.assertEqual([x for x in found[1] if x != P.PART_NONE and x not in P.ALL_IDS], [])
-        self.assertEqual(v2 & ~(((1 << (32 * P.PART_SLOTS)) - 1) << 842), v & ~(((1 << (32 * P.PART_SLOTS)) - 1) << 842))   # nothing else touched
+        self.assertEqual(found[1], parts.stock_list(2179))  # the whole violating setup becomes stock
 
     def test_a_list_with_ids_in_the_slots_without_a_part_type_is_found_and_cleaned(self):
         """Prod 2026-10-24 19:36:31: a mixed car (body 2287, rim / tire width / restrictor plate / motor ids in no catalog table, 9x ids in
@@ -262,11 +274,12 @@ class CarFromParts(unittest.TestCase):
         self.assertIsNone(parts.find_parts(size, v))
         self.assertIsNone(parts.find_shaped(size, v))
         self.assertEqual(parts.find_loose(size, v)[0], 760)
-        bad, hide, v2 = w.check_parts(a, size, v)
+        size, v = serialized_object(words)
+        bad, hide, size, v2 = w.check_parts(a, size, v)
         self.assertTrue(bad)
         self.assertFalse(hide)
         found = parts.find_parts(size, v2)                  # what the others get: a list every client can build
-        self.assertEqual(found[0], 760)
+        self.assertEqual(found[0], C.fields(size, v2)[C.PARTS][0])
         self.assertEqual(found[1][2], 2179000)
         self.assertEqual([x for x in found[1] if x != P.PART_NONE and x not in P.ALL_IDS], [])
         self.assertEqual((found[1][3], found[1][26]), (P.PART_NONE, P.PART_NONE))
@@ -279,8 +292,10 @@ class CarFromParts(unittest.TestCase):
         import fh2mp_server as S
         w, (a, b) = self.world()
         w.log = lambda *_: None
-        size, v = self.wiping_object(body=7777000)
-        bad, hide, v2 = w.check_parts(a, size, v)
+        words = [w & 0xFFFFFFFF for w in self.WIPING_LIST]
+        words[2] = 7777000
+        size, v = serialized_object(words)
+        bad, hide, size, v2 = w.check_parts(a, size, v)
         self.assertTrue(bad)
         self.assertFalse(hide)
         found = parts.find_parts(size, v2)
@@ -292,7 +307,7 @@ class CarFromParts(unittest.TestCase):
         for size in (1502, 2629, 3641):
             self.assertIsNone(parts.find_shaped(size, random.getrandbits(size)))
 
-    def test_an_unreadable_object_is_dumped_whole_to_the_log_at_most_four_times_per_player(self):
+    def test_an_unreadable_object_is_withheld_and_logging_is_bounded(self):
         import random
         w, (a, b) = self.world()
         logged = []
@@ -301,17 +316,16 @@ class CarFromParts(unittest.TestCase):
         size = 3641
         v = random.getrandbits(size)                        # no part list in noise (the shape needs two -1 words 800 bits apart)
         for _ in range(6):
-            bad, hide, v2 = w.check_parts(a, size, v)
-            self.assertEqual((bad, hide, v2), (False, False, v))        # still relayed as it came: this is a probe, not a rule
-        odd = [l for l in logged if "ODD OBJECT" in l]
-        self.assertEqual(len(odd), 4)
-        self.assertIn(f"{size} bits hex={v.to_bytes((size + 7) // 8, 'little').hex()}", odd[0])
-        self.assertIn(f"owner {a.owner_id} xuid {a.xuid:#x}", odd[0])
+            bad, hide, size, v2 = w.check_parts(a, size, v)
+            self.assertEqual((bad, hide, v2), (True, True, v))  # malformed serialization is withheld without guessing
+        notes = [l for l in logged if "withheld undecodable" in l]
+        self.assertEqual(len(notes), 3)
+        self.assertIsNone(a.kick_reason)  # parsing failure alone is not proof of cheating
 
     def test_a_normal_car_is_left_alone(self):
         w, (a, b) = self.world()
         size, v = self.object_for(1110)                     # 1994 Mazda Miata
-        bad, hide, _ = w.check_parts(a, size, v)
+        bad, hide, size, _ = w.check_parts(a, size, v)
         self.assertFalse(hide)
         self.assertFalse(bad)
         self.assertEqual(a.model_id, 1110)
@@ -380,10 +394,10 @@ class RentalChoices(unittest.TestCase):
     def test_a_rental_that_joins_with_class_R_is_corrected_in_place(self):
         import fh2mp_server as S
         w, (a, b) = self.world()
-        size, v = player_object(dict(enumerate(stock_car(self.JAG))), 910)
         bits, ch = choices_bits(7, 1.1)
-        v = (v & ~(((1 << bits) - 1) << 353)) | (ch << 353)
-        bad, hide, v2 = w.check_parts(a, size, v)
+        values = {k: raw for k, (_p, _w, raw) in C.fields(bits, ch).items()}
+        size, v = serialized_object(stock_car(self.JAG), values)
+        bad, hide, size, v2 = w.check_parts(a, size, v)
         self.assertEqual(a.rental_car, self.JAG)
         cls, pi = parts.read_choices(v2, parts.find_choices(size, v2))
         self.assertEqual((cls, round(pi, 4)), (S.CAR_CHOICES[self.JAG][0], round(S.CAR_CHOICES[self.JAG][1], 4)))
@@ -397,7 +411,7 @@ class RentalChoices(unittest.TestCase):
         bits, ch = choices_bits(7, 1.1)                          # the choices update comes first ...
         self.assertEqual(w.note_choices(a, bits, ch), ch)         # ... and the car is not known yet: left as sent
         self.assertEqual(a.choices[0], 7)
-        size, v = player_object(dict(enumerate(stock_car(self.JAG))), 48, size=1502)    # ... then the car change with the part list
+        size, v = serialized_object(stock_car(self.JAG))    # ... then the car change with the part list
         w.check_parts(a, size, v)
         self.assertEqual(len(relayed), 1)
         _peer, mtype, router, oid, tid, seq, nbits, value = relayed[0]
@@ -417,7 +431,7 @@ class RentalChoices(unittest.TestCase):
         w.remember_and_relay = lambda *x: None
         bits, ch = choices_bits(*S.CAR_CHOICES[self.JAG])
         w.note_choices(a, bits, ch)
-        size, v = player_object(dict(enumerate(stock_car(self.JAG))), 48, size=1502)
+        size, v = serialized_object(stock_car(self.JAG))
         w.check_parts(a, size, v)
         nbits, short = parts.choices_update(7, 1.0)
         out = w.short_rental_choices(a, nbits, short)
@@ -440,10 +454,10 @@ class RentalChoices(unittest.TestCase):
 
     def test_cars_that_are_not_rentals_keep_what_their_game_sent(self):
         w, (a, b) = self.world()
-        size, v = player_object(dict(enumerate(stock_car(368))), 910)
         bits, ch = choices_bits(4, 0.80)
-        v = (v & ~(((1 << bits) - 1) << 353)) | (ch << 353)
-        bad, hide, v2 = w.check_parts(a, size, v)
+        values = {k: raw for k, (_p, _w, raw) in C.fields(bits, ch).items()}
+        size, v = serialized_object(stock_car(368), values)
+        bad, hide, size, v2 = w.check_parts(a, size, v)
         self.assertIsNone(a.rental_car)
         self.assertEqual(v2, v)
         self.assertEqual(w.note_choices(a, bits, ch), ch)
@@ -464,10 +478,10 @@ class CarChangeUpdates(unittest.TestCase):
         w, (a, b) = T.world()
         cars = stock_car(368)
         cars[0] = 368335
-        size, v = player_object(dict(enumerate(cars)), 48, size=1462)
-        bad, hide, v2 = w.check_parts(a, size, v)
+        size, v = serialized_object(cars)
+        bad, hide, size, v2 = w.check_parts(a, size, v)
         self.assertTrue(bad)
-        self.assertEqual(parts.find_parts(size, v2)[1][0], 368000)
+        self.assertEqual(decoded_words(size, v2)[0], 368000)
 
     def test_noise_alone_is_never_taken_for_a_list(self):
         import random
@@ -521,17 +535,17 @@ class CarPacks(unittest.TestCase):
     def test_the_others_see_the_stand_in_and_nobody_is_kicked(self):
         self.S.UNKNOWN_CAR_POLICY = "standin"
         w, (a, b) = self.world()
-        size, v = player_object(dict(enumerate(self.pack_car())), 910)
-        bad, hide, v2 = w.check_parts(a, size, v)
+        size, v = serialized_object(self.pack_car())
+        bad, hide, size, v2 = w.check_parts(a, size, v)
         self.assertEqual((bad, hide, a.kick_reason, a.model_id), (True, False, None, self.PACK))
-        self.assertEqual(parts.find_parts(size, v2), (910, parts.stock_list(self.S.STANDIN_CAR)))
+        self.assertEqual(decoded_words(size, v2), parts.stock_list(self.S.STANDIN_CAR))
         self.assertEqual(parts.stock_list(1215)[2], 1215000)                     # NUL_Car_00 has a body row
 
     def test_kick_policy_removes_the_owner(self):
         self.S.UNKNOWN_CAR_POLICY = "kick"
         w, (a, b) = self.world()
-        size, v = player_object(dict(enumerate(self.pack_car())), 910)
-        bad, hide, _ = w.check_parts(a, size, v)
+        size, v = serialized_object(self.pack_car())
+        bad, hide, size, _ = w.check_parts(a, size, v)
         self.assertTrue(hide)
         self.assertIn(str(self.PACK), a.kick_reason)
 
@@ -555,8 +569,8 @@ class CarPacks(unittest.TestCase):
         c.close()
         self.S.SYNC_GAMEDB, self.S._sync["checked"] = path, -1e9
         w, (a, b) = self.world()
-        size, v = player_object(dict(enumerate(self.pack_car())), 910)
-        bad, hide, v2 = w.check_parts(a, size, v)
+        size, v = serialized_object(self.pack_car())
+        bad, hide, size, v2 = w.check_parts(a, size, v)
         self.assertIn(self.PACK, self.S.KNOWN_CARS)
         self.assertEqual(self.S.TOP_SPEED_KMH[self.PACK], 241)
         self.assertEqual((bad, hide, v2, a.model_id, a.kick_reason), (False, False, v, self.PACK, None))

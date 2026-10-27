@@ -53,6 +53,10 @@ def other_msg(w):
 def make_hub(auth="off"):
     os.environ["FH2MP_UDP_AUTH"] = auth
     hub = S.Hub(0, None)
+    hub.sock.close()               # replaced by an in-memory transport below
+    if hub.ctl:
+        hub.ctl.close()
+        hub.ctl = None
     hub.sock = FakeSock()
     hub.mux.udp = hub.sock          # worlds send through the hub's mux (TCP fallback), which sends UDP on hub.sock
     hub.idle.sock = hub.mux

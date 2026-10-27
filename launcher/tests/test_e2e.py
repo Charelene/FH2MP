@@ -5,6 +5,7 @@ import string
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -15,8 +16,10 @@ SERVER = os.environ.get("FH2MP_TEST_SERVER", "")
 class EndToEnd(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.TemporaryDirectory()
-        os.environ["FH2MP_LAUNCHER_HOME"] = self.home.name
-        os.environ["FH2MP_NO_KEYRING"] = "1"
+        self.addCleanup(self.home.cleanup)
+        patch = mock.patch.dict(os.environ, FH2MP_LAUNCHER_HOME=self.home.name, FH2MP_NO_KEYRING="1")
+        patch.start()
+        self.addCleanup(patch.stop)
         from fh2mp_launcher import api, core, identity
         from fh2mp_launcher.settings import Settings
         self.api, self.core, self.identity = api, core, identity
@@ -24,10 +27,9 @@ class EndToEnd(unittest.TestCase):
         s["api_base"] = SERVER
         s["allow_insecure"] = True
         self.lc = core.Launcher(s)
-        self.tag = "E2E " + "".join(random.choices(string.ascii_letters, k=8))
-
-    def tearDown(self):
-        self.home.cleanup()
+        # Random letters could accidentally contain a reserved word such as
+        # "staff". This namespace remains valid while allowing repeated runs.
+        self.tag = "E2E " + "".join(random.choices(string.digits, k=10))
 
     def test_full_flow(self):
         lc = self.lc
@@ -62,8 +64,9 @@ class EndToEnd(unittest.TestCase):
         lc2.restore_identity(code)
         self.assertEqual(lc2.sign_in()["xuid"], acct["xuid"])
         self.assertEqual(game(lc.token), 401)                       # ...and signing in elsewhere ended the first session
+        second_token = lc2.token
         lc2.sign_out()
-        self.assertEqual(game(lc2.token), 401)
+        self.assertEqual(game(second_token), 401)                  # revoke the actual token, not merely clear the local variable
 
 
 if __name__ == "__main__":

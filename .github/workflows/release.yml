@@ -14,7 +14,29 @@ permissions:
   contents: read
 
 jobs:
+  database-check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with: { python-version: "3.12" }
+      - run: python3 -m pip install --require-hashes -r release/requirements-test.txt
+      - name: PostgreSQL migrations, accounts and database download contracts
+        run: |
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 install -y postgresql
+          pg_bin=$(dirname "$(ls /usr/lib/postgresql/*/bin/initdb | sort -V | tail -1)")
+          pg_root=$(mktemp -d)
+          trap '"$pg_bin/pg_ctl" -D "$pg_root/data" -m immediate stop' EXIT
+          "$pg_bin/initdb" -D "$pg_root/data" -A trust --no-locale --encoding=UTF8
+          "$pg_bin/pg_ctl" -D "$pg_root/data" -l "$pg_root/postgres.log" -o "-h '' -k $pg_root" -w start
+          "$pg_bin/createdb" -h "$pg_root" fh2mp_test_ci
+          export FH2MP_TEST_PG_DSN="host=$pg_root dbname=fh2mp_test_ci"
+          python3 -I release/run_server_tests.py --lane postgres
+          python3 -I release/check_test_mutations.py --area postgres
+
   check:
+    needs: database-check
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -27,18 +49,18 @@ jobs:
           app=$(python3 -c "import re;print(re.search(r'\"(.+)\"',open('launcher/fh2mp_launcher/version.py').read())[1])")
           echo "tag=$tag shim=$shim launcher=$app"
           if [ "${GITHUB_EVENT_NAME}" = "push" ]; then [ "$tag" = "$shim" ] && [ "$tag" = "$app" ]; fi
-      # the server suites that need no database (the same list as release/publish.sh): a failure stops every build and the release
+      # Exhaustive collection with explicit prerequisite lanes, shared with publish.sh.
       - name: pinned test dependencies
         run: python3 -m pip install --require-hashes -r release/requirements-test.txt
       - name: server tests
-        working-directory: server
-        run: python3 -W ignore -m unittest test_security test_world_capacity test_tunnel test_lobby_packing test_race_end test_freeroam_tag_grant test_send_queue test_parts test_xp_audit test_gameopts test_phasing test_crash_reports
+        run: python3 -W ignore -I release/run_server_tests.py
+      - name: race and enforcement tests detect deliberate regressions
+        run: python3 -I release/check_test_mutations.py --area server
+      - name: production release refuses unsafe or incomplete execution
+        run: python3 -I -m unittest discover -s ops -p test_release_flow.py
       - run: shim/test_sha256.sh
+      - run: shim/test_inflate.sh
       - run: shim/test_gamedb_keep.sh
-      - name: database enforcement and operator access regressions
-        run: |
-          cd server
-          python3 -m unittest test_ops test_site_stats test_lsp.LayerCountTests test_lsp.StringValidationTests test_restricted_tools
 
   shim:
     needs: check
@@ -54,7 +76,11 @@ jobs:
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 install -y wine
           shim/test_gamedb_files.sh
           shim/test_game_image.sh
+          shim/test_title_scope.sh
           shim/test_torque_scale.sh
+          shim/test_net_strings.sh
+          shim/test_torque_load.sh
+          shim/test_speed_pb.sh
           shim/test_restricted_tools.sh
         timeout-minutes: 10
       - run: release/build_shim_zip.sh                                # fh2-mods/FH2MP.dll (the launcher fetches the FH2 Mod Platform and Extra Options from their authors)
@@ -112,6 +138,7 @@ jobs:
       - run: dist\fh2mp-launcher\fh2mp-launcher.exe --selftest
       - run: python -m unittest discover -s tests
         env: { FH2MP_NO_KEYRING: "1" }
+      - run: python -I ../release/check_test_mutations.py --area launcher
       # Azure Artifact Signing, skipped while the secrets are not set. Secrets: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET (an app
       # registration with the "Artifact Signing Certificate Profile Signer" role); variables: AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT,
       # AZURE_SIGNING_PROFILE.
@@ -169,6 +196,7 @@ jobs:
       - run: QT_QPA_PLATFORM=offscreen dist/fh2mp-launcher/fh2mp-launcher --selftest
       - run: python -m unittest discover -s tests
         env: { FH2MP_NO_KEYRING: "1", QT_QPA_PLATFORM: offscreen }
+      - run: python -I ../release/check_test_mutations.py --area launcher
       - run: packaging/build_deb.sh
       # appimagetool and the AppImage runtime it embeds: fixed releases, checked against reviewed hashes before anything runs
       - run: |
