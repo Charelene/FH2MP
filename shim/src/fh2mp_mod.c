@@ -33,9 +33,7 @@ typedef struct {
     unsigned long long fnv1a64;
 } hook_build;
 static const hook_build g_hook_builds[] = {
-    {0xc0850u, 301u, 0xb2987ae53c46b28cull}, /* azimuth.exe 0.9.10 (sha256 78a5f635...3739) */
-    {0x282670u, 9u, 0x4288f958fe9625cfull}, /* azimuth.exe 1.0.0 (sha256 a8f15b81...6c2d0) */
-    {0x282680u, 9u, 0x4288f958fe9625cfull}, /* azimuth.exe 1.0.1 (sha256 6e9a2290...172f7) */
+    {0x2860b0u, 9u, 0x4288f958fe9625cfull}, /* azimuth.exe 1.0.2 (sha256 42527964...7c597); resolver +286fd2 */
 };
 
 /* forza_durango_release_final.exe 1.0.0.64 (image identity, as checked by the Extra Options mod) */

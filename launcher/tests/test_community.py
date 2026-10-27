@@ -44,6 +44,16 @@ class Sessions(unittest.TestCase):
         lc._sign_in.assert_called_once()
         self.assertEqual(lc.api().community.call_args.args[0], 'new')
 
+    def test_revoked_session_polling_does_not_replace_another_launchers_login(self):
+        for running in (False, True):
+            lc = self.launcher(running=running)
+            lc.api().community.side_effect = ApiError(401, 'invalid_token')
+            for _ in range(15):
+                with self.assertRaises(ApiError):
+                    lc.community()
+            lc._sign_in.assert_not_called()
+            self.assertEqual(lc.token, 'live')
+
     def test_offline_has_no_social_network_calls(self):
         lc = self.launcher()
         lc.settings['offline_mode'] = True

@@ -5,6 +5,7 @@ import os
 from . import buildcfg, paths
 
 DEFAULTS = {
+    "setup_revision": 0,             # independent of account/key existence; completed only on the wizard's final page
     "azimuth_dir": "",
     "channel": "stable",            # stable | dev
     "api_base": "",                 # empty = the channel's default

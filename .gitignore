@@ -52,3 +52,8 @@ ops/fh2mp-lsp.service
 /launcher/*.spec.bak
 *.AppImage
 *.deb
+# Local release operator settings (host and SSH key path).
+release/operator.local.env
+
+# Local editor configuration
+/.vscode/

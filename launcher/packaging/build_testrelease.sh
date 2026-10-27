@@ -16,7 +16,7 @@ repo=Charelene/FH2MP
 rel=$work/mirror/$repo/releases
 mkdir -p "$rel/download/v$VERSION" "$rel/latest/download"
 cp "dist/fh2mp-shim-$VERSION.zip" "$rel/download/v$VERSION/"
-launcher/.venv/bin/python -I release/make_manifest.py --tag "v$VERSION" --dist "$rel/download/v$VERSION" --key "$key"
+launcher/.venv/bin/python -I release/make_manifest.py --tag "v$VERSION" --min-launcher "$VERSION" --dist "$rel/download/v$VERSION" --key "$key"
 cp "$rel/download/v$VERSION"/manifest.json "$rel/download/v$VERSION"/manifest.json.sig "$rel/download/v$VERSION/fh2mp-shim-$VERSION.zip" "$rel/latest/download/"
 case $api in http://*) insecure=true;; *) insecure=false;; esac
 printf '{"api_base": "%s", "allow_insecure": %s, "update_base": "bundled"}\n' "$api" "$insecure" > "$work/buildcfg.json"

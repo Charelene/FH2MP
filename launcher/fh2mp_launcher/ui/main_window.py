@@ -4,7 +4,7 @@ import sys
 from PySide6.QtCore import QEvent, QTimer, QUrl, Qt
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar,
-                               QVBoxLayout, QWidget)
+                               QVBoxLayout, QWidget, QWidgetAction)
 
 from .. import azimuth, crashreport, keystore, launch, paths, saves, shim, updater
 from ..api import ApiError
@@ -167,6 +167,7 @@ class MainWindow(QMainWindow):
         self.friends_panel = FriendsPanel(self.community)
         content.addWidget(self.friends_panel)
         outer.addLayout(content, 1)
+        root.installEventFilter(self)
 
     def _toggle_friends(self):
         self.friends_panel.toggle()
@@ -209,11 +210,25 @@ class MainWindow(QMainWindow):
         if lc.has_identity() and lc.settings["gamertag"]:
             xu = (lc.account or {}).get("xuid") or lc.settings["xuid"]
             if xu:
-                m.addAction(f"ID {xu:#x} · Copy", lambda: QApplication.clipboard().setText(f"{xu:#x}"))
+                action = QWidgetAction(m)
+                action.setText(f"ID {xu:#x}")
+                row = QWidget()
+                layout = QHBoxLayout(row)
+                layout.setContentsMargins(14, 4, 8, 4)
+                label = QLabel(f"ID {xu:#x}")
+                label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                layout.addWidget(label)
+                copy = IconButton("copy", size=30, radius=8, icon_px=18, label_text="Copy account ID")
+                copy.setToolTip("Copy account ID")
+                copy.clicked.connect(lambda: (QApplication.clipboard().setText(f"{xu:#x}"), copy.setToolTip("Copied")))
+                layout.addWidget(copy)
+                action.setDefaultWidget(row)
+                m.addAction(action)
             m.addAction("Edit profile", self.open_profile)
             m.addAction("Recovery key", self.show_recovery)
         else:
             m.addAction("Set up account", self.run_wizard)
+        m.addAction("Run setup wizard", self.run_wizard)
 
     # ---- rendering
     def _render_account(self):
@@ -266,6 +281,8 @@ class MainWindow(QMainWindow):
         info = lc.azimuth_info()
         if not info.found:
             return "bad", "azimuth.exe not found.", "Change...", self.open_settings
+        if not info.supported:
+            return "warn", "This launcher requires Azimuth 1.0.2 and its supplied mod versions.", "Run setup", self.run_wizard
         if not info.game_folder:
             return "warn", "Azimuth can't find the game files.", "Azimuth setup", self._azimuth_clicked
         if s["offline_mode"]:
@@ -290,8 +307,6 @@ class MainWindow(QMainWindow):
             return "warn", srv["maintenance"], None, None
         if up["launcher"]:
             return "warn", f"Launcher {up['launcher']} is available.", "Update", self.update_launcher
-        if not info.supported:
-            return "warn", f"Azimuth {info.version or '?'} is untested. Use {lc.builds()[0]['version']}.", "Change...", self.open_settings
         return None
 
     def _render_status(self):
@@ -319,10 +334,22 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
+        self._sync_minimum_height()
         if self.sheet.isVisible():
             self.sheet.place()
 
+    def _sync_minimum_height(self):
+        layout = self.centralWidget().layout()
+        height = layout.totalHeightForWidth(self.centralWidget().width())
+        if height < 0:
+            height = layout.minimumSize().height()
+        height = max(660, height)
+        if self.minimumHeight() != height:
+            self.setMinimumHeight(height)
+
     def eventFilter(self, obj, e):
+        if obj is self.centralWidget() and e.type() == QEvent.Type.LayoutRequest:
+            self._sync_minimum_height()
         if obj is self.version and e.type() == QEvent.Type.MouseButtonPress:
             self._tap()
         return super().eventFilter(obj, e)
@@ -383,7 +410,9 @@ class MainWindow(QMainWindow):
     # ---- startup and refresh
     def start(self):
         lc = self.lc
-        if lc.settings["offline_mode"]:
+        from ..setup import REVISION
+        needs_setup = lc.settings["setup_revision"] < REVISION
+        if lc.settings["offline_mode"] and not needs_setup:
             lc.ensure_game()
             self.render()
             return
@@ -400,10 +429,11 @@ class MainWindow(QMainWindow):
                 self.start()
             run_async(lambda j: lc.load_identity(), loaded, failed)
             return
-        lc.ensure_game()
+        if not needs_setup:
+            lc.ensure_game()
         self.render()
         self.community.refresh()
-        if not lc.has_identity() or not lc.settings["azimuth_dir"]:
+        if needs_setup or not lc.has_identity() or not lc.settings["azimuth_dir"]:
             QTimer.singleShot(0, self.run_wizard)
         else:
             self.refresh_all()
@@ -636,14 +666,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Save copy failed", str(error))
         return True
 
-    def on_play_offline(self, force=False, azimuth_window=False):
+    def on_play_offline(self, azimuth_window=False):
         lc = self.lc
         if self._busy or lc.game_running():
             return
         self.set_busy(True, "Starting offline...")
 
         def work(job):
-            lc.play_offline(force_unsupported=force, azimuth_window=azimuth_window)
+            lc.play_offline(azimuth_window=azimuth_window)
 
         def ok(_r):
             import time
@@ -654,19 +684,17 @@ class MainWindow(QMainWindow):
         def fail(e):
             self.set_busy(False)
             self.render()
-            if self._save_failure(e, lambda: self.on_play_offline(force, azimuth_window)):
+            if self._save_failure(e, lambda: self.on_play_offline(azimuth_window)):
                 return
             if isinstance(e, PlayBlocked) and e.code == "azimuth_unsupported":
-                if QMessageBox.question(self, "Untested Azimuth", f"{e}\nStart anyway?") == QMessageBox.StandardButton.Yes:
-                    return self.on_play_offline(force=True, azimuth_window=azimuth_window)
-                return self.say("Cancelled.")
+                return self.say(str(e), theme.BAD)
             self.say(str(e) if isinstance(e, (PlayBlocked, launch.LaunchError)) else friendly(e), theme.BAD)
         run_async(work, ok, fail)
 
-    def on_play(self, force=False, azimuth_window=False):
+    def on_play(self, azimuth_window=False):
         lc = self.lc
         if lc.settings["offline_mode"]:
-            return self.on_play_offline(force, azimuth_window=azimuth_window)
+            return self.on_play_offline(azimuth_window=azimuth_window)
         if self._busy or lc.game_running():
             return
         self.set_busy(True, "Checking everything...")
@@ -682,7 +710,7 @@ class MainWindow(QMainWindow):
                 except Exception:  # noqa: BLE001 - play with what is installed
                     pass
             job.progress("Signing in...")
-            return lc.play(force_unsupported=force, azimuth_window=azimuth_window)
+            return lc.play(azimuth_window=azimuth_window)
 
         def ok(res):
             import time
@@ -694,16 +722,14 @@ class MainWindow(QMainWindow):
         def fail(e):
             self.set_busy(False)
             self.render()
-            if self._save_failure(e, lambda: self.on_play(force, azimuth_window)):
+            if self._save_failure(e, lambda: self.on_play(azimuth_window)):
                 return
             if isinstance(e, PlayBlocked):
                 if e.code == "no_game":
                     self.say("Couldn't find your Forza Horizon 2 files. Open Azimuth setup and pick the folder.", theme.BAD)
                     return self.render()
                 if e.code == "azimuth_unsupported":
-                    if QMessageBox.question(self, "Untested Azimuth", f"{e}\nStart anyway?") == QMessageBox.StandardButton.Yes:
-                        return self.on_play(force=True, azimuth_window=azimuth_window)
-                    return self.say("Cancelled.")
+                    return self.say(str(e), theme.BAD)
                 if e.code in ("no_shim", "shim_outdated"):
                     self.say("Installing the shim...")
                     return self._shim_job(False)

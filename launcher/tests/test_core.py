@@ -577,6 +577,11 @@ def platform_files(version="2.7.3"):
 class ShimTests(unittest.TestCase):
     DLL = b"MZ....FH2MP-SHIM-VERSION:0.1.0:END...."
 
+    def setUp(self):
+        patch = mock.patch.object(shim, 'PLATFORM_DLL_SHA256', hashlib.sha256(platform_dll('2.7.3')).hexdigest())
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def read(self, *parts):
         with open(os.path.join(*parts), "rb") as f:
             return f.read()
@@ -662,11 +667,11 @@ class ShimTests(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(d, "fh2extra", "Gamerpic.png")))
             self.assertTrue(any("removed the old winmm.dll shim" in s for s in did))
 
-    def test_platform_newer_kept_older_and_foreign_replaced(self):
+    def test_platform_newer_older_and_foreign_are_replaced_with_exact_pin(self):
         with tempfile.TemporaryDirectory() as d:
             self.write(platform_dll("2.8.0"), d, "d3dcompiler_47.dll")
             shim.install(d, self.DLL, platform=platform_files())
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.8.0"))          # another mod's newer copy stays
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.3"))          # only the supplied build is supported
             self.write(platform_dll("2.7.2"), d, "d3dcompiler_47.dll")
             self.assertEqual(shim.installed(d), ("old", "0.1.0"))                        # too old for this shim: install again
             shim.install(d, self.DLL, platform=platform_files())
@@ -838,8 +843,9 @@ class AzimuthTests(unittest.TestCase):
 
     @unittest.skipUnless(RIG and os.path.isfile(os.path.join(RIG, "azimuth.exe")), "set FH2MP_TEST_AZIMUTH to a real Azimuth folder")
     def test_real_azimuth_is_recognised(self):
+        from fh2mp_launcher.constants import AZIMUTH_VERSION
         info = azimuth.inspect(RIG)
-        self.assertEqual((info.supported, info.version), (True, "0.9.10"))
+        self.assertEqual((info.supported, info.version), (True, AZIMUTH_VERSION))
 
     def test_find_game_installs_survives_an_unreadable_link(self):
         """GitHub #19: a Windows junction that cannot be followed made realpath raise inside the setup wizard."""
@@ -870,6 +876,7 @@ class UpstreamTests(unittest.TestCase):
         files = {"Azimuth/winmm.dll": b"MZ-eo", "Azimuth/FH2_ExtraOptions.ini": b"ini", "Azimuth/data/bin/azimuth-tls.dll": b"stub",
                  "Mezcal/xg.dll": b"other"}
         data, pin = fake_release("extraOptions", files, "Azimuth/winmm.dll")
+        pin['files'] = {'Azimuth/winmm.dll': 'winmm.dll', 'Azimuth/FH2_ExtraOptions.ini': 'FH2_ExtraOptions.ini'}
         self.assertEqual(upstream.extract("extraOptions", data, pin), {"winmm.dll": b"MZ-eo", "FH2_ExtraOptions.ini": b"ini"})
         with self.assertRaises(upstream.UpstreamError):
             upstream.extract("extraOptions", data + b"x", pin)                         # not the pinned zip
@@ -915,6 +922,21 @@ class ExtraOptionsTests(unittest.TestCase):
         for b in (b"MZ-mod-dll", b"MZ-release"):                                        # stand-ins for the one supported build
             shim.SUPPORTED_EXTRA_SHA256.add(hashlib.sha256(b).hexdigest())
         self.addCleanup(lambda: (shim.SUPPORTED_EXTRA_SHA256.clear(), shim.SUPPORTED_EXTRA_SHA256.update(self._saved)))
+        from fh2mp_launcher.constants import UPSTREAM
+        pin = dict(UPSTREAM['extraOptions'], files={'Azimuth/winmm.dll': 'winmm.dll', 'Azimuth/FH2_ExtraOptions.ini': 'FH2_ExtraOptions.ini'}, fileSha256={})
+        patch = mock.patch.dict(UPSTREAM, extraOptions=pin)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_only_one_extra_options_pin_is_supplied(self):
+        from fh2mp_launcher.constants import UPSTREAM
+        self.assertEqual(set(UPSTREAM), {'platform', 'extraOptions'})
+        self.assertEqual(UPSTREAM['extraOptions']['version'], '0.3.2')
+        with tempfile.TemporaryDirectory() as az:
+            self.write(b'MZ-0.3.0-old', az, 'winmm.dll')
+            self.assertFalse(shim.extra_options_supported(az))
+            shim.install_extra(az, self.release())
+            self.assertTrue(shim.extra_options_supported(az))
 
     def read(self, *parts):
         with open(os.path.join(*parts), "rb") as f:
@@ -1156,6 +1178,9 @@ class SaveAdoptionTests(unittest.TestCase):
 
 class DevModeTests(unittest.TestCase):
     def setUp(self):
+        patch = mock.patch.object(shim, 'PLATFORM_DLL_SHA256', hashlib.sha256(platform_dll('2.7.3')).hexdigest())
+        patch.start()
+        self.addCleanup(patch.stop)
         self.home = tempfile.TemporaryDirectory()
         self.old = {k: os.environ.get(k) for k in ("FH2MP_DEV", "FH2MP_LAUNCHER_HOME", "XDG_CONFIG_HOME", "FH2MP_NO_KEYRING",
                                                   "APPDATA", "LOCALAPPDATA", "XDG_CACHE_HOME")}
@@ -1233,6 +1258,8 @@ class DevModeTests(unittest.TestCase):
             lc.shim_state = lambda: ("ours", "1.0.0-rc3")
             self.assertTrue(lc.shim_outdated())
             lc.shim_state = lambda: ("ours", "1.0.0-rc4")
+            self.assertTrue(lc.shim_outdated())
+            lc.shim_state = lambda: ("ours", version.__version__)
             self.assertFalse(lc.shim_outdated())
 
     def test_extra_env_reaches_the_game(self):

@@ -56,10 +56,7 @@ static struct {
 } g_wh;
 
 static co_create_fn g_real_cocreate;
-static wchar_t g_lsp_host[128] = L"127.0.0.1";
-static unsigned g_lsp_port = 5080;
-static int g_lsp_secure;
-static int g_lsp_cfg_loaded;
+#include "xhr_config.inc"
 static volatile LONG g_xhr_seq;
 
 static const GUID XHR_CLSID_FREETHREADED = {0x88d96a09, 0xf192, 0x11d4, {0xa6, 0x5f, 0x00, 0x40, 0x96, 0x32, 0x51, 0xe5}};
@@ -114,66 +111,6 @@ static int xhr_weq_nocase(const wchar_t *a, const wchar_t *b)
     return CompareStringOrdinal(a, -1, b, -1, TRUE) == CSTR_EQUAL;
 }
 
-static void xhr_load_cfg(void)
-{
-    wchar_t path[MAX_PATH];
-    char raw[160];
-    DWORD got = 0;
-    HANDLE f;
-    int i, colon = -1, n;
-
-    if (g_lsp_cfg_loaded) {
-        return;
-    }
-    g_lsp_cfg_loaded = 1;
-    lstrcpyW(path, g_dir);
-    lstrcatW(path, L"\\fh2mp-lsp.txt");
-    f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (f == INVALID_HANDLE_VALUE) {
-        return;
-    }
-    if (!ReadFile(f, raw, sizeof raw - 1, &got, NULL)) {
-        got = 0;
-    }
-    CloseHandle(f);
-    raw[got] = '\0';
-    {
-        const char *r = raw;
-        if (r[0] == 'h' && r[1] == 't' && r[2] == 't' && r[3] == 'p') {
-            if (r[4] == 's' && r[5] == ':' && r[6] == '/' && r[7] == '/') {
-                g_lsp_secure = 1;
-                g_lsp_port = 443;
-                r += 8;
-            } else if (r[4] == ':' && r[5] == '/' && r[6] == '/') {
-                g_lsp_port = 80;
-                r += 7;
-            }
-        }
-        n = 0;
-        while (r[n] && r[n] != '\r' && r[n] != '\n' && r[n] != ' ' && r[n] != '/') {
-            if (r[n] == ':') {
-                colon = n;
-            }
-            n++;
-        }
-        if (n == 0) {
-            return;
-        }
-        for (i = 0; i < (colon >= 0 ? colon : n) && i < 120; i++) {
-            g_lsp_host[i] = (wchar_t)(unsigned char)r[i];
-        }
-        g_lsp_host[i] = 0;
-        if (colon >= 0) {
-            unsigned v = 0;
-            for (i = colon + 1; i < n; i++) {
-                v = v * 10 + (unsigned)(r[i] - '0');
-            }
-            if (v) {
-                g_lsp_port = v;
-            }
-        }
-    }
-}
 
 static int xhr_wh_init(void)
 {
@@ -679,8 +616,13 @@ static DWORD WINAPI xhr_thread(LPVOID param)
         }
     }
 
-    stage = "send/receive";
-    if (!g_wh.send(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, x->body, x->nbody, x->nbody, 0) || !g_wh.recv(req, NULL)) {
+    stage = "send";
+    if (!g_wh.send(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, x->body, x->nbody, x->nbody, 0)) {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        goto fail;
+    }
+    stage = "receive";
+    if (!g_wh.recv(req, NULL)) {
         hr = HRESULT_FROM_WIN32(GetLastError());
         goto fail;
     }

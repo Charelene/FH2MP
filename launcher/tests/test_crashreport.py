@@ -135,6 +135,22 @@ class FindTests(Base):
 
 
 class CheckTests(Base):
+    def test_old_dump_does_not_report_a_later_healthy_session_as_crashed(self):
+        now = time.time()
+        def began_at(t):
+            stamp = crashreport.datetime.datetime.fromtimestamp(t, crashreport.datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+            return BEGAN.replace('2026-10-23 22:13:02', stamp)
+        self.st['crash_handled'] = now - 1000
+        self.write('data/logs/old.dmp', b'MDMP', now - 500)
+        self.log(began_at(now - 600) + CRASH + began_at(now - 60) +
+                 '400 tid=1 session ended: the game window was closed, after 1202 frames\n', now)
+        self.assertIsNone(crashreport.check(self.st, now))
+        # New failures remain reportable; the retained dump is not attached to them.
+        self.log(began_at(now - 60) + CRASH, now)
+        found = crashreport.check(self.st, now)
+        self.assertIn('CRASHED', found.line)
+        self.assertIsNone(found.dump)
+
     def test_first_call_only_notes_the_time(self):
         self.log(BEGAN + CRASH)
         self.assertIsNone(crashreport.check(self.st, now=time.time() + 5))       # old crash from before reports existed
@@ -148,13 +164,15 @@ class CheckTests(Base):
 
     def test_asking_off_offers_nothing_and_skips_what_happened_meanwhile(self):
         now = 1_700_000_000.0
+        stamp = crashreport.datetime.datetime.fromtimestamp(now - 10, crashreport.datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        began = BEGAN.replace('2026-10-23 22:13:02', stamp)
         self.st["crash_handled"] = 1.0
         self.st["crash_report_ask"] = False
-        self.log(BEGAN + CRASH, now - 1)
+        self.log(began + CRASH, now - 1)
         self.assertIsNone(crashreport.check(self.st, now=now))
         self.st["crash_report_ask"] = True
         self.assertIsNone(crashreport.check(self.st, now=now + 1))
-        self.log(BEGAN + CRASH, now + 2)
+        self.log(began + CRASH, now + 2)
         self.assertIsNotNone(crashreport.check(self.st, now=now + 3))
 
 

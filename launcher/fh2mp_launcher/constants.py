@@ -17,9 +17,10 @@ AZIMUTH_PAGE = "https://almost-there-games.itch.io/azimuth"
 # (release/keygen.py); a compromised GitHub account alone therefore cannot push code to players.
 RELEASE_PUBKEY_B64 = os.environ.get("FH2MP_RELEASE_PUBKEY") or "zo6hBWSZYaeL9YsZOC03kHJ8MR9f4awtgndgWR9h0Ic="
 
-# Azimuth builds the shim was verified against. The server's launcher config can add newer ones without a launcher release.
+# One supplied compatibility set per launcher release. Server metadata cannot broaden it.
+AZIMUTH_VERSION = "1.0.2"
 BUILTIN_AZIMUTH_BUILDS = [
-    {"version": "0.9.10", "sha256": "78a5f635b3241918707b5acddeaa96bd59ccb3819490e9218ee152497ca73639"},
+    {"version": AZIMUTH_VERSION, "sha256": "42527964f48c90a537f2414200b8598ab9a6f92919bfbe046dbecccb36e7c597"},
 ]
 
 # The shim is a mod for the FH2 Mod Platform (Trinculo54, MIT): fh2-mods\FH2MP.dll, loaded by the platform's d3dcompiler_47.dll next to
@@ -44,14 +45,20 @@ UPSTREAM = {
                   "LICENSE-MinHook.txt": "LICENSE-MinHook.txt"},
     },
     "extraOptions": {
-        "name": "FH2 Extra Options", "author": "RokkuDayo", "license": "GPL-3.0", "version": "0.2.98",      # its ini still says v0.2.88
-        "url": "https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions/releases/download/Azimuth_v0.9.10/FH2_Extra_Options_0.2.98-release.zip",
-        "sha256": "d3b9db715416abd8efef4048445a9edbe22d333ba0267fb48fb255dfab000c38", "size": 731258,
-        "dll": "Azimuth/winmm.dll", "dllSha256": "d372b3a331c93cbbbf984d9a3b5df63836fdfb2aee26a10660c838c4806ff3d5",
-        "files": {"Azimuth/winmm.dll": "winmm.dll", "Azimuth/FH2_ExtraOptions.ini": "FH2_ExtraOptions.ini"},
+        "name": "FH2 Extra Options", "author": "RokkuDayo", "license": "GPL-3.0", "version": "0.3.2",
+        "url": "https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions/releases/download/Azimuth_v1.0.0/FH2_Extra_Options_0.3.2-release.zip",
+        "sha256": "d7a9713c7a21e4b6ed57a105911ab22ce20192d2fe977c41ffa9bdc51210a15d", "size": 747478,
+        "dll": "Azimuth/winmm.dll", "dllSha256": "bdee5227492fc7235cce567483d4bf73876aa8bad11b3db380674f12a5496908",
+        "files": {"Azimuth/winmm.dll": "winmm.dll", "Azimuth/FH2_ExtraOptions.ini": "FH2_ExtraOptions.ini",
+                  **{f"Azimuth/mods/Extra Options - Garage Revving/{name}": f"mods/Extra Options - Garage Revving/{name}"
+                     for name in ("mod.json", "plugins/EO_GarageEngineRev.dll", "plugins/EO_GarageEngineRev.ini")}},
+        "fileSha256": {
+            "mods/Extra Options - Garage Revving/mod.json": "4f70c5538490f61011f854c7afcdcea91658417aa54bafad98c5e61ea28af00f",
+            "mods/Extra Options - Garage Revving/plugins/EO_GarageEngineRev.dll": "bde253ca136cf45dfeac1010f95065ab7eb97e48a190ca78310eb9eb096f0421",
+        },
     },
 }
-# The platform build the shim is tested against; a newer one (another mod's) is kept.
+# The exact platform build in this release's supported combination.
 PLATFORM_VERSION = UPSTREAM["platform"]["version"]
 PLATFORM_DLL_SHA256 = UPSTREAM["platform"]["dllSha256"]
 # Wine and Proton use their own winmm.dll (Extra Options) and possibly d3dcompiler_47.dll (the platform) unless told otherwise
@@ -61,6 +68,6 @@ SESSION_FILE = "fh2mp-session.txt"
 LSP_FILE = "fh2mp-lsp.txt"
 EXTRA_OPTIONS_DIR = "fh2extra"         # where rc5 and earlier kept FH2 Extra Options (it is winmm.dll next to azimuth.exe now)
 EXTRA_OPTIONS_DLL = "winmm.dll"
-# FH2 Extra Options: 0.2.98 is the only supported build, identified by its DLL.
+# The only supported Extra Options build for this release.
 EXTRA_OPTIONS_VERSION = UPSTREAM["extraOptions"]["version"]
 EXTRA_OPTIONS_DLL_SHA256 = UPSTREAM["extraOptions"]["dllSha256"]

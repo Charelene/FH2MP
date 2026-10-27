@@ -305,7 +305,7 @@ def challenges(lsp, top):
 def leaderboards(lsp, limit):
     names = lsp.RIV.names()["car"]
     xp = [{"position": r["position"], "xuid": r["xuid"], "gamertag": _gamertag(lsp, r), "xp": int(r["score"])}
-          for r in lsp.SB.top(*scoreboard.XP_BOARD, -1, -1, limit)]
+          for r in lsp.SB.xp_top(limit)]
     events = [_event(lsp, e, [_board_row(lsp, r, names) for r in lsp.SB.top(*MONTHLY_BOARD, -1, e["id"], limit)])
               for e in lsp.RIV.events()]
     return {"rotation": _rotation(lsp), "xp": xp, "events": events}

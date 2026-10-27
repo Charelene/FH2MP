@@ -3,6 +3,14 @@ import os
 import sys
 
 
+def lock_profile(folder):
+    """Hold the profile until process exit; Qt also recovers locks from dead owners."""
+    from PySide6.QtCore import QLockFile
+    lock = QLockFile(os.path.join(folder, 'launcher.lock'))
+    lock.setStaleLockTime(0)  # A launcher may stay open for days; age alone is not stale.
+    return lock if lock.tryLock(0) else None
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] in (["--save-copy"], ["--save-adopt"]):
@@ -26,7 +34,7 @@ def main(argv=None):
         return 0
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QFont, QFontDatabase
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QMessageBox
 
     from .core import Launcher
     from .ui import theme
@@ -35,6 +43,13 @@ def main(argv=None):
     app = QApplication([sys.argv[0]] + argv)
     app.setApplicationName("FH2MP Dev" if os.environ.get("FH2MP_DEV") == "1" else "FH2MP")
     app.setOrganizationName("FH2MP")
+    from . import paths
+    profile_lock = lock_profile(paths.config_dir())
+    if profile_lock is None:
+        QMessageBox.information(None, 'FH2MP is already running',
+                                'Use the existing launcher window. Only one launcher can use this profile at a time.')
+        return 0
+    app._profile_lock = profile_lock
     fonts = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fonts")
     for name in ("Roboto-Regular.ttf", "Roboto-Medium.ttf", "Roboto-Bold.ttf", "Roboto-BlackItalic.ttf"):
         QFontDatabase.addApplicationFont(os.path.join(fonts, name))
