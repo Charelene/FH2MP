@@ -60,8 +60,15 @@ class ProfileInstance(unittest.TestCase):
                           'from fh2mp_launcher.instance import request_activation;'
                           'assert lock_profile(sys.argv[2]) is None;'
                           'sys.exit(0 if request_activation(sys.argv[2]) else 1)')
-                subprocess.run([sys.executable, '-I', '-c', script,
-                                str(Path(__file__).resolve().parents[1]), folder], check=True, timeout=5)
+                child = subprocess.Popen([sys.executable, '-I', '-c', script,
+                                          str(Path(__file__).resolve().parents[1]), folder])
+                deadline = time.monotonic() + 5
+                while child.poll() is None and time.monotonic() < deadline:
+                    self.app.processEvents()
+                    time.sleep(.005)
+                if child.poll() is None:
+                    child.kill()
+                self.assertEqual(child.wait(), 0)
                 deadline = time.monotonic() + 2
                 while not activated and time.monotonic() < deadline:
                     self.app.processEvents()

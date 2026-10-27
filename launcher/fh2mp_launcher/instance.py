@@ -16,8 +16,12 @@ def request_activation(folder):
     socket.connectToServer(server_name(folder))
     if not socket.waitForConnected(1500):
         return False
-    socket.write(b'activate\n')
-    sent = socket.waitForBytesWritten(1500)
+    if socket.write(b'activate\n') < 0:
+        return False
+    socket.flush()
+    # Named pipes may complete the write immediately. Waiting for a future
+    # bytesWritten signal then times out even though the message was delivered.
+    sent = socket.bytesToWrite() == 0 or socket.waitForBytesWritten(1500)
     socket.disconnectFromServer()
     return sent
 
