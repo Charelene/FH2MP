@@ -8,7 +8,11 @@ def lock_profile(folder):
     from PySide6.QtCore import QLockFile
     lock = QLockFile(os.path.join(folder, 'launcher.lock'))
     lock.setStaleLockTime(0)  # A launcher may stay open for days; age alone is not stale.
-    return lock if lock.tryLock(0) else None
+    if lock.tryLock(0):
+        return lock
+    if lock.error() == QLockFile.LockError.LockFailedError:
+        return None
+    raise OSError('Could not lock the launcher profile folder: ' + folder)
 
 
 def main(argv=None):
@@ -28,7 +32,7 @@ def main(argv=None):
         print(__version__)
         return 0
     if "--selftest" in argv:                       # used by the packaging checks: imports everything, opens nothing
-        from . import api, azimuth, core, identity, keystore, launch, shim, updater  # noqa: F401
+        from . import api, azimuth, core, identity, instance, keystore, launch, shim, updater  # noqa: F401
         from .ui import main_window  # noqa: F401
         print("ok")
         return 0
@@ -44,12 +48,27 @@ def main(argv=None):
     app.setApplicationName("FH2MP Dev" if os.environ.get("FH2MP_DEV") == "1" else "FH2MP")
     app.setOrganizationName("FH2MP")
     from . import paths
-    profile_lock = lock_profile(paths.config_dir())
+    from .instance import InstanceServer, request_activation
+    folder = paths.config_dir()
+    try:
+        profile_lock = lock_profile(folder)
+    except OSError as e:
+        QMessageBox.critical(None, 'Could not open FH2MP', str(e))
+        return 1
     if profile_lock is None:
-        QMessageBox.information(None, 'FH2MP is already running',
-                                'Use the existing launcher window. Only one launcher can use this profile at a time.')
+        if request_activation(folder):
+            return 0
+        QMessageBox.information(None, 'FH2MP is still running',
+                                'An older launcher is still using this profile and could not be brought forward. '
+                                'Close that process in your task manager, then open FH2MP again.')
         return 0
     app._profile_lock = profile_lock
+    try:
+        app._instance_server = InstanceServer(folder, app)
+    except OSError as e:
+        QMessageBox.critical(None, 'Could not open FH2MP', str(e))
+        return 1
+    app.aboutToQuit.connect(app._instance_server.close)
     fonts = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fonts")
     for name in ("Roboto-Regular.ttf", "Roboto-Medium.ttf", "Roboto-Bold.ttf", "Roboto-BlackItalic.ttf"):
         QFontDatabase.addApplicationFont(os.path.join(fonts, name))
@@ -65,6 +84,11 @@ def main(argv=None):
     app.setFont(f)
     lc = Launcher(load_identity=False)
     win = MainWindow(lc)
+    def activate():
+        win.showNormal() if win.isMinimized() else win.show()
+        win.raise_()
+        win.activateWindow()
+    app._instance_server.activated.connect(activate)
     win.resize(1280, 760)
     win.show()
     win.start()

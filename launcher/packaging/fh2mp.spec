@@ -7,7 +7,7 @@ from PyInstaller.utils.hooks import collect_submodules
 root = os.path.abspath(os.path.join(SPECPATH, ".."))        # launcher/ (SPECPATH is the folder of this file)
 hidden = collect_submodules("keyring.backends") + ["keyring.backends.SecretService", "keyring.backends.Windows", "secretstorage", "jeepney"]
 excluded_qt = ["PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtMultimedia",
-               "PySide6.QtNetwork", "PySide6.QtSql", "PySide6.QtTest", "PySide6.QtPdf", "PySide6.Qt3DCore", "PySide6.QtCharts",
+               "PySide6.QtSql", "PySide6.QtTest", "PySide6.QtPdf", "PySide6.Qt3DCore", "PySide6.QtCharts",
                "PySide6.QtDataVisualization", "PySide6.QtBluetooth", "PySide6.QtSensors", "PySide6.QtSerialPort", "PySide6.QtSvg"]
 
 extra_datas = []
