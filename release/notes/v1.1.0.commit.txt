@@ -1,0 +1,7 @@
+Prepare 1.1.0 full launcher, shim and server release
+
+Add issue-linked release notes and align launcher/shim versions.
+Prepare the existing full production release flow with a local plan by
+default, explicit execution and a clean reviewed commit requirement.
+Remove automatic staging/committing from publication and retain exact
+commit checks before tagging, building and deploying both services.

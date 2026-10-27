@@ -158,9 +158,9 @@ class CheckTests(Base):
 class ScrubTests(unittest.TestCase):
     def test_user_names_in_paths(self):
         cases = {
-            r"Z:\home\ugandanhobo\Documents\azimuth.exe": r"Z:\home\<user>\Documents\azimuth.exe",
+            r"Z:\home\exampleuser\Documents\azimuth.exe": r"Z:\home\<user>\Documents\azimuth.exe",
             r"C:\Users\John Smith\AppData\x.dmp": r"C:\Users\<user>\AppData\x.dmp",
-            "/home/ugandanhobo/.local/share": "/home/<user>/.local/share",
+            "/home/exampleuser/.local/share": "/home/<user>/.local/share",
             "/Users/anna/Library": "/Users/<user>/Library",
             r"c:/users/Bob/x": "c:/users/<user>/x",
             r"C:\Games\ForzaHorizon2\Mount": r"C:\Games\ForzaHorizon2\Mount",
@@ -222,9 +222,9 @@ class BuildTests(Base):
 
     def test_fields_files_and_payload(self):
         now = time.time()
-        self.log(BEGAN + GPU + CRASH + "  Z:\\home\\ugandanhobo\\x\n", now)
-        self.write("data/bin/fh2mp.log", "shim line\nsecond /home/ugandanhobo/y\n")
-        self.write("fh2-mods/platform.log", "18:13:02 FH2 Mod Platform 2.7.1 in Z:\\home\\ugandanhobo\\x\n", now - 1)
+        self.log(BEGAN + GPU + CRASH + "  Z:\\home\\exampleuser\\x\n", now)
+        self.write("data/bin/fh2mp.log", "shim line\nsecond /home/exampleuser/y\n")
+        self.write("fh2-mods/platform.log", "18:13:02 FH2 Mod Platform 2.7.1 in Z:\\home\\exampleuser\\x\n", now - 1)
         self.write("fh2-mods/crashes/crash-1.txt", "CRASH: access violation at game+0x1\ncall stack:\n", now)
         self.write("data/logs/a.dmp", b"MDMP" + b"\1" * 20, now)
         rep = crashreport.build(FakeLauncher(self.st), crashreport.find_crash(self.folder, now - 10))
@@ -240,7 +240,7 @@ class BuildTests(Base):
         body = rep.payload()
         self.assertEqual(body["v"], 1)
         self.assertEqual(set(body["files"]), {"azimuth.log", "fh2mp.log", "platform.log", "mod-crash.txt"})     # no launcher.log written in this test
-        self.assertNotIn("ugandanhobo", "".join(body["files"].values()))
+        self.assertNotIn("exampleuser", "".join(body["files"].values()))
         preview = os.path.join(self.folder, "preview")
         for name, path, size in rep.sizes(preview):
             if name != "crashdump":                                   # the text files open as the exact text that is sent

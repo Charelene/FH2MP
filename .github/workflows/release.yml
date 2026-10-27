@@ -56,6 +56,8 @@ jobs:
         run: python3 -W ignore -I release/run_server_tests.py
       - name: race and enforcement tests detect deliberate regressions
         run: python3 -I release/check_test_mutations.py --area server
+      - name: production release refuses unsafe or incomplete execution
+        run: python3 -I -m unittest discover -s ops -p test_release_flow.py
       - run: shim/test_sha256.sh
       - run: shim/test_inflate.sh
       - run: shim/test_gamedb_keep.sh
