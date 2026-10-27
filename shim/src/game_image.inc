@@ -1,14 +1,13 @@
 /* Azimuth remaps the game during startup. Copy headers through ReadProcessMemory so an unmap during a probe fails safely (#32).
  * VirtualQuery followed by a direct pointer read cannot provide that guarantee. Windows types/functions come from windows.h.
  */
-static int read_game_memory(const void *address, void *out, SIZE_T size)
+static int readable_game_range(const void *address, SIZE_T size)
 {
     /* Older Wine can report a successful zero-filled ReadProcessMemory for reserved
      * pages. Reject uncommitted/unreadable ranges first, then still use the safe
      * copy so an unmap between VirtualQuery and the read cannot fault our probe.
      */
     UINT_PTR start = (UINT_PTR)address, cursor = start;
-    SIZE_T got;
     if (size > (UINT_PTR)-1 - start) return 0;
     while (cursor < start + size) {
         MEMORY_BASIC_INFORMATION info;
@@ -22,7 +21,18 @@ static int read_game_memory(const void *address, void *out, SIZE_T size)
         if (end <= cursor) return 0;
         cursor = end;
     }
-    return ReadProcessMemory(GetCurrentProcess(), address, out, size, &got) && got == size;
+    return 1;
+}
+
+static int read_game_memory(const void *address, void *out, SIZE_T size)
+{
+    SIZE_T got = 0;
+    /* Wine 6 can also copy a page revoked after the initial range check.
+     * Inspect the mapping again before trusting the copied header/fields.
+     */
+    return readable_game_range(address, size) &&
+           ReadProcessMemory(GetCurrentProcess(), address, out, size, &got) && got == size &&
+           readable_game_range(address, size);
 }
 
 static int read_game_headers(const unsigned char *img, IMAGE_NT_HEADERS64 *nt, IMAGE_SECTION_HEADER *sections)

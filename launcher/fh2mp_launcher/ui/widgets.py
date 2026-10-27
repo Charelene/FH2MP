@@ -199,6 +199,8 @@ class Tween:
         self.on_change = on_change
 
     def _set(self, v):
+        if v is None:  # Qt can emit an unset value while initializing animation endpoints.
+            return
         self.v = float(v)
         if self.on_change:
             self.on_change(self.v)

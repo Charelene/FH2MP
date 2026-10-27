@@ -16,15 +16,19 @@ cat > "$tmp/test.c" <<'C'
 #define XS_SIZE_OF_IMAGE 0x579000u
 static int reserved_reads_succeed;
 static const void *revoke_at;
-static int revoked, short_read;
+static int revoked, short_read, revoked_reads_succeed;
 static BOOL WINAPI compatibility_read(HANDLE process, LPCVOID address, LPVOID out, SIZE_T size, SIZE_T *got)
 {
     MEMORY_BASIC_INFORMATION info;
     if (address == revoke_at) {
         DWORD old;
+        if (revoked_reads_succeed) {
+            assert(ReadProcessMemory(process, address, out, size, got) && *got == size);
+        }
         assert(VirtualProtect((void *)address, size, PAGE_NOACCESS, &old));
         revoke_at = NULL;
         revoked++;
+        if (revoked_reads_succeed) return TRUE;
     }
     if (reserved_reads_succeed && VirtualQuery(address, &info, sizeof info) && info.State == MEM_RESERVE) {
         ZeroMemory(out, size); *got = size; return TRUE;
@@ -111,6 +115,19 @@ int main(void)
     revoke_at = p;
     assert(!read_xsapi_headers(p));
     assert(revoked == 2 && !revoke_at);
+    assert(VirtualProtect(p, 8192, PAGE_READWRITE, &old));
+    assert(read_xsapi_headers(p));
+    /* Wine 6 can return the original bytes even after revocation. Model its
+     * successful-copy result on every host so the post-copy check is covered.
+     */
+    revoked_reads_succeed = 1;
+    revoke_at = nt;
+    assert(!read_xsapi_headers(p));
+    assert(revoked == 3 && !revoke_at);
+    assert(VirtualProtect(p, 8192, PAGE_READWRITE, &old));
+    revoke_at = p;
+    assert(!read_xsapi_headers(p));
+    assert(revoked == 4 && !revoke_at);
     assert(VirtualProtect(p, 8192, PAGE_READWRITE, &old));
     assert(read_xsapi_headers(p));
     assert(VirtualFree(p, 0, MEM_RELEASE));

@@ -147,12 +147,15 @@ class CheckTests(Base):
         self.assertEqual(settings_mod.Settings(self.st.path)["crash_handled"], self.st["crash_handled"])    # and remembered
 
     def test_asking_off_offers_nothing_and_skips_what_happened_meanwhile(self):
+        now = 1_700_000_000.0
         self.st["crash_handled"] = 1.0
         self.st["crash_report_ask"] = False
-        self.log(BEGAN + CRASH)
-        self.assertIsNone(crashreport.check(self.st))
+        self.log(BEGAN + CRASH, now - 1)
+        self.assertIsNone(crashreport.check(self.st, now=now))
         self.st["crash_report_ask"] = True
-        self.assertIsNone(crashreport.check(self.st))
+        self.assertIsNone(crashreport.check(self.st, now=now + 1))
+        self.log(BEGAN + CRASH, now + 2)
+        self.assertIsNotNone(crashreport.check(self.st, now=now + 3))
 
 
 class ScrubTests(unittest.TestCase):
