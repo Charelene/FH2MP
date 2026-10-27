@@ -28,6 +28,19 @@ def pick_dir(parent, title, start):
 # Stroke icons on a 24-unit grid (QtSvg is not shipped): each is a list of ("line", x1, y1, ...) polylines, ("loop", ...) closed
 # polylines, ("circle", cx, cy, r), ("dot", cx, cy) and ("cog", teeth, outer r, root r, hole r).
 ICONS = {
+    "check": [("line", 5, 12, 10, 17, 19, 7)],
+    "plus": [("line", 12, 5, 12, 19), ("line", 5, 12, 19, 12)],
+    "search": [("circle", 10.5, 10.5, 6.5), ("line", 15.5, 15.5, 21, 21)],
+    "chat": [("loop", 4, 5, 20, 5, 20, 16, 9, 16, 4, 20)],
+    "clock": [("circle", 12, 12, 8.5), ("line", 12, 7.5, 12, 12, 15, 14)],
+    "copy": [("loop", 9, 9, 20, 9, 20, 20, 9, 20), ("line", 5, 15, 5, 4, 16, 4)],
+    "send": [("loop", 4, 12, 20, 4, 14, 20, 11, 13), ("line", 11, 13, 20, 4)],
+    "more": [("dot", 5, 12), ("dot", 12, 12), ("dot", 19, 12)],
+    "shield": [("loop", 12, 3, 19, 5.5, 19, 12, 17, 17, 12, 21, 7, 17, 5, 12, 5, 5.5)],
+    "friends": [("circle", 9, 8, 3.5), ("line", 2.5, 20, 3, 17, 6, 14.5, 12, 14.5, 15, 17, 15.5, 20),
+                ("line", 17, 5, 20, 7, 20, 10, 17, 12), ("line", 18, 15, 21, 17, 22, 20)],
+    "person-add": [("circle", 9, 8, 3.5), ("line", 2.5, 20, 3, 17, 6, 14.5, 12, 14.5),
+                   ("line", 18, 14, 18, 21), ("line", 14.5, 17.5, 21.5, 17.5)],
     "pc": [("loop", 3, 4, 21, 4, 21, 16, 3, 16), ("line", 12, 16, 12, 21), ("line", 7, 21, 17, 21)],
     "globe": [("circle", 12, 12, 9), ("ellipse", 12, 12, 4.5, 9), ("line", 3, 12, 21, 12)],
     "arrow-right": [("line", 4, 12, 20, 12), ("line", 14, 6, 20, 12, 14, 18)],
@@ -125,7 +138,7 @@ def paint_icon(p, name, rect, colour, width=1.8, angle=0.0):
         return
     p.setPen(pen)
     p.setBrush(Qt.BrushStyle.NoBrush)
-    for kind, *v in ICONS[name]:
+    for kind, *v in ICONS.get(name, ()):
         if kind == "circle":
             p.drawEllipse(QPointF(v[0], v[1]), v[2], v[2])
         elif kind == "ellipse":
@@ -233,7 +246,7 @@ def font(px, weight=QFont.Weight.Normal, italic=False, spacing=0.0):
     """Roboto at a pixel size; spacing is letter spacing in em, as the design gives it."""
     f = QFont("Roboto")
     f.setPixelSize(px)
-    f.setWeight(weight)
+    f.setWeight(QFont.Weight(weight))
     f.setItalic(italic)
     if spacing:
         f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, px * spacing)
@@ -267,17 +280,10 @@ def menu(parent):
 
 
 def popup(m, anchor, above=False, right=False):
-    """Opens menu m under (or above) anchor, aligned to its left (or right) edge, fading in where the platform allows it."""
+    """Open under (or above) the anchor, aligned to its left (or right) edge."""
     m.ensurePolished()
     sz = m.sizeHint()
     pos = anchor.mapToGlobal(QPoint(anchor.width() - sz.width() if right else 0, -sz.height() - 6 if above else anchor.height() + 6))
-    if QGuiApplication.platformName() != "wayland":          # Wayland has no per-window opacity
-        m.setWindowOpacity(0.0)
-        a = QPropertyAnimation(m, b"windowOpacity", m)
-        a.setDuration(140)
-        a.setStartValue(0.0)
-        a.setEndValue(1.0)
-        a.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
     m.popup(pos)
 
 
@@ -753,6 +759,17 @@ class CardArt(QWidget):
         glow.setColorAt(0, alpha(hue, 0.25))
         glow.setColorAt(1, alpha(hue, 0))
         p.fillRect(r, glow)
+        if self.kind == "lobbies":
+            lines = self.glyph.split("|")
+            p.setPen(QColor(theme.TEXT))
+            p.setFont(font(13, QFont.Weight.Medium))
+            p.drawText(QRectF(14, 12, r.width() - 28, 28), Qt.AlignmentFlag.AlignVCenter, "Free Roam")
+            p.drawText(QRectF(14, 51, r.width() - 28, 28), Qt.AlignmentFlag.AlignVCenter, "Road Trip")
+            p.setPen(QColor(theme.ACCENT))
+            p.setFont(font(12, QFont.Weight.Bold))
+            for i, value in enumerate((lines + ["", ""])[:2]):
+                p.drawText(QRectF(14, 12 + i * 39, r.width() - 28, 28), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, value)
+            return
         if not self.glyph:
             return
         px = 64
@@ -825,7 +842,7 @@ class NewsCard(QFrame):
 
     def set(self, c, pix):
         self.c = c
-        self.url = "detail" if has_detail(c) else c["url"]
+        self.url = "lobbies" if c["kind"] == "lobbies" else "detail" if has_detail(c) else c["url"]
         self.art.set(pix, c.get("glyph", ""), c["kind"])
         self.tag.setText(c["tag"])
         self.tag.setStyleSheet(f"color: {card_hue(c['kind'])};")
@@ -1008,7 +1025,7 @@ class Carousel(QWidget):
     def pages(self):
         return max(1, -(-len(self.cards) // self.PER_PAGE))
 
-    def set_cards(self, cards, pix):
+    def set_cards(self, cards, pix, restart_timer=True):
         """pix(url) -> QPixmap or None for a card picture."""
         first = not self.cards and bool(cards)
         same = [(c["kind"], c["title"]) for c in cards] == [(c["kind"], c["title"]) for c in self.cards]
@@ -1022,7 +1039,8 @@ class Carousel(QWidget):
         elif not same:
             fade_in(self.stage.page, 260)
         if self.pages() > 1:
-            self.auto.start()
+            if restart_timer or not self.auto.isActive():
+                self.auto.start()
         else:
             self.auto.stop()
 

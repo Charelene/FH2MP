@@ -13,6 +13,12 @@ from fh2mp_launcher import azimuth, core, saves
 from fh2mp_launcher.settings import Settings
 
 
+def profile_bytes(root):
+    """Independent filesystem oracle: compare file bytes, not saves._manifest."""
+    return {str(p.relative_to(root)): p.read_bytes() if p.is_file() else None
+            for p in sorted(Path(root).rglob('*'))}
+
+
 class SaveTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -29,17 +35,17 @@ class SaveTests(unittest.TestCase):
         return path
 
     def test_both_profiles_backed_up_and_can_be_restored(self):
-        old_source, old_target = saves._manifest(self.source), saves._manifest(self.target)
+        old_source, old_target = profile_bytes(self.source), profile_bytes(self.target)
         backup = Path(saves.copy_profile(self.source, self.target))
-        self.assertEqual(saves._manifest(backup / "source"), old_source)
-        self.assertEqual(saves._manifest(backup / "destination"), old_target)
-        self.assertEqual(saves._manifest(self.source), old_source)
-        self.assertEqual(saves._manifest(self.target), old_source)
+        self.assertEqual(profile_bytes(backup / "source"), old_source)
+        self.assertEqual(profile_bytes(backup / "destination"), old_target)
+        self.assertEqual(profile_bytes(self.source), old_source)
+        self.assertEqual(profile_bytes(self.target), old_source)
         saves.copy_profile(backup / "destination", self.target)
-        self.assertEqual(saves._manifest(self.target), old_target)
+        self.assertEqual(profile_bytes(self.target), old_target)
 
     def test_backup_failure_does_not_touch_destination(self):
-        original = saves._manifest(self.target)
+        original = profile_bytes(self.target)
         real = saves._verified_copy
         def copy(source, target):
             if target.name == "destination":
@@ -49,10 +55,10 @@ class SaveTests(unittest.TestCase):
             with self.assertRaises(saves.SaveCopyError) as err:
                 saves.copy_profile(self.source, self.target)
         self.assertTrue(err.exception.permission)
-        self.assertEqual(saves._manifest(self.target), original)
+        self.assertEqual(profile_bytes(self.target), original)
 
     def test_install_failure_rolls_back_destination(self):
-        original = saves._manifest(self.target)
+        original = profile_bytes(self.target)
         rename = Path.rename
         def fail_stage(path, target):
             if path.name == "profile":
@@ -61,21 +67,25 @@ class SaveTests(unittest.TestCase):
         with mock.patch.object(Path, "rename", fail_stage):
             with self.assertRaises(saves.SaveCopyError):
                 saves.copy_profile(self.source, self.target)
-        self.assertEqual(saves._manifest(self.target), original)
+        self.assertEqual(profile_bytes(self.target), original)
         self.assertFalse(list(self.root.glob("*.adopting-*")))
 
     def test_corrupt_copy_is_detected_before_replacement(self):
-        original = saves._manifest(self.target)
+        original = profile_bytes(self.target)
+        corrupted = []
         copytree = saves.shutil.copytree
         def corrupt(source, target, *args, **kwargs):
             result = copytree(source, target, *args, **kwargs)
             if Path(target).name == "source":
                 (Path(target) / "pipeline-log.bin").write_bytes(b"corrupt")
+                corrupted.append(Path(target))
             return result
         with mock.patch.object(saves.shutil, "copytree", side_effect=corrupt):
-            with self.assertRaises(saves.SaveCopyError):
+            with self.assertRaises(saves.SaveCopyError) as error:
                 saves.copy_profile(self.source, self.target)
-        self.assertEqual(saves._manifest(self.target), original)
+        self.assertTrue(corrupted, 'test never reached the corrupt-copy fault')
+        self.assertIn('verification failed', str(error.exception).lower())
+        self.assertEqual(profile_bytes(self.target), original)
 
     def test_same_profile_nested_and_linked_paths_rejected(self):
         for target in (self.source, self.source / "User_123"):
@@ -130,7 +140,7 @@ class SaveTests(unittest.TestCase):
         result = subprocess.run([sys.executable, saves.__file__, "--save-copy", str(self.source), str(target)],
                                 cwd=self.tmp.name, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(saves._manifest(target), saves._manifest(self.source))
+        self.assertEqual(profile_bytes(target), profile_bytes(self.source))
 
     def test_scan_retry_runs_the_same_adoption_with_explicit_folders(self):
         error = saves.SaveScanError(str(self.root), 123, ["another install"], PermissionError("denied"))
@@ -160,7 +170,7 @@ class SaveTests(unittest.TestCase):
         self.assertIn("--save-copy", script)
 
     def test_source_changing_after_backup_aborts_before_replacement(self):
-        original = saves._manifest(self.target)
+        original = profile_bytes(self.target)
         real = saves._verified_copy
         def copy(source, target):
             real(source, target)
@@ -169,7 +179,7 @@ class SaveTests(unittest.TestCase):
         with mock.patch.object(saves, "_verified_copy", side_effect=copy):
             with self.assertRaisesRegex(saves.SaveCopyError, "source changed after backup"):
                 saves.copy_profile(self.source, self.target)
-        self.assertEqual(saves._manifest(self.target), original)
+        self.assertEqual(profile_bytes(self.target), original)
 
     def test_offline_migration_failure_prevents_launch(self):
         settings = Settings(str(self.root / "settings.json"))

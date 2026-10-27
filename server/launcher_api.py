@@ -37,6 +37,7 @@ import crash_reports
 import gamedb_sync
 import pngtool
 import social
+import community
 
 MAX_BODY = 1_200_000
 GAMERPIC_MAX_DIM = 512
@@ -311,6 +312,13 @@ def _route(ctx, method, path, headers, body, ip):
             raise auth.AuthError(404, "no_gamedb", "this server does not set a car database")
         ctx.log(f"  v1 gamedb download {acct.xuid:#x} {len(blob)} bytes")
         return 200, blob, "application/x-xz"
+    if p == "/v1/community" or p.startswith("/v1/community/"):
+        acct = a.authenticate(_bearer(headers), ip)
+        if not a.hit(("community", acct.xuid), 120, 60):
+            raise auth.AuthError(429, "rate_limited", "Please wait a moment before trying again.")
+        if method != "GET" and not a.hit(("community-write", acct.xuid), 30, 60):
+            raise auth.AuthError(429, "rate_limited", "Please wait a moment before trying again.")
+        return 200, community.handle(ctx, method, p, u, _json(body), acct), ok
     if p == "/v1/me" or p.startswith("/v1/me/"):
         acct = a.authenticate(_bearer(headers), ip)
         if p == "/v1/me" and method == "GET":

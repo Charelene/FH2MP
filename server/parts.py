@@ -186,6 +186,37 @@ def stock_list(car):
     return words
 
 
+def integrity_errors(words):
+    """Check decoded values, without using their validity to locate the field.
+
+    Known cross-car/drivetrain rows are violations too. Electric cars may put
+    their Motor row in slot 0; derive MotorParts ownership from that row.
+    """
+    if len(words) != P.PART_SLOTS:
+        return [(None, None, "invalid parts count")]
+    errors = []
+    car = words[2] // 1000 if words[2] in P.TABLE_IDS["CarBody"] else None
+    motor = P.INSTALLS.get("Motor", {}).get(words[0])
+    electric = motor is not None and P.ROW_OWNER.get("Motor", {}).get(words[0]) == car
+    for slot, word in enumerate(words):
+        if slot == 0 and electric:
+            continue
+        text = problem(slot, word)
+        table = P.SLOT_TABLE.get(slot)
+        if word == NONE and slot in (0, 1, 2, 12) and not electric and car is not None:
+            stock = stock_list(car)
+            if stock is not None and stock[slot] != NONE:
+                text = "missing required part"
+        if text is None and word != NONE and table is not None:
+            expected = motor if P.OWNER_KIND.get(table) == "motor" else _expected_owner(table, words)
+            actual = P.ROW_OWNER.get(table, {}).get(word)
+            if expected is not None and actual is not None and expected != actual:
+                text = f"{table} belongs to {actual}, expected {expected}"
+        if text is not None:
+            errors.append((slot, word, text))
+    return errors
+
+
 def extend(tables):
     """Adds the rows of another game database (part_tables.read_parts of the canonical database: car packs) to the catalog's. Rows the
     catalog has keep their owner and stock entries. -> number of part ids added."""

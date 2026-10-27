@@ -7,6 +7,71 @@ import sys
 
 from .. import launch, paths
 
+SOCIAL_CUES = {"receive": "zen-receive.wav", "friend_added": "zen-success.wav"}
+
+
+def social(cue):
+    """Play a bundled Zen cue through the existing native player; audio never blocks the UI."""
+    name = SOCIAL_CUES.get(cue)
+    if not name:
+        return
+    path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "sounds", name)
+    try:
+        play(path)
+    except (OSError, RuntimeError):
+        pass
+
+
+class SocialNotifications:
+    """Compare confirmed social state, sharing message watermarks between polls and open chats."""
+    def __init__(self, emit=social):
+        self.emit = emit
+        self.context = None
+        self.friends = None
+        self.incoming = {}
+        self.accepts = set()
+
+    def _context(self, context):
+        if context != self.context:
+            self.context, self.friends, self.incoming = context, None, {}
+            self.accepts.clear()
+
+    def snapshot(self, context, data):
+        self._context(context)
+        friends = {p['xuid'] for p in data.get('friends', [])}
+        if self.friends is not None and friends - self.friends:
+            self.emit('friend_added')
+        initial = self.friends is None
+        self.accepts -= friends
+        self.friends = friends | self.accepts
+        received = False
+        for ch in data.get('chats', []):
+            if 'lastIncomingId' not in ch:
+                continue
+            latest = ch.get('lastIncomingId', 0)
+            previous = self.incoming.get(ch['id'])
+            if not initial and previous is not None and latest > previous:
+                received = True
+            self.incoming[ch['id']] = max(latest, previous or 0)
+        if received:
+            self.emit('receive')
+
+    def accepted(self, context, xuid):
+        self._context(context)
+        if xuid not in self.accepts and (self.friends is None or xuid not in self.friends):
+            self.emit('friend_added')
+        self.accepts.add(xuid)
+        if self.friends is not None:
+            self.friends.add(xuid)
+
+    def messages(self, context, ref, rows, me):
+        self._context(context)
+        latest = max((r['id'] for r in rows if r['sender'] != me), default=0)
+        previous = self.incoming.get(ref)
+        if previous is not None and latest > previous:
+            self.emit('receive')
+        self.incoming[ref] = max(latest, previous or 0)
+
 
 def fetch(api, name):
     """-> local path of the sound, downloading it the first time; None when the server has none."""

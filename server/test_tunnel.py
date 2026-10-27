@@ -111,7 +111,19 @@ class ThroughTheHub(unittest.TestCase):
         self.addCleanup(os.environ.pop, "FH2MP_TUNNEL_PORT", None)
         self.hub = S.Hub(0, None)
         self.hub.udp_auth = auth
-        threading.Thread(target=self.hub.serve, daemon=True).start()
+        stop = threading.Event()
+        worker = threading.Thread(target=self.hub.serve, args=(stop,), daemon=True)
+        def close():
+            stop.set()
+            worker.join(2)
+            self.assertFalse(worker.is_alive(), 'test left a Hub thread running')
+            if self.hub.tunnel:
+                self.hub.tunnel.close()
+            self.hub.sock.close()
+            if self.hub.ctl:
+                self.hub.ctl.close()
+        self.addCleanup(close)
+        worker.start()
         return port
 
     def test_a_player_connects_through_tcp_and_leaves_with_it(self):

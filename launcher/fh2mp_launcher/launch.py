@@ -127,7 +127,7 @@ def detect_prefix(folder):
     if m:
         return m.group(1)
     ini = azimuth.read_ini(folder)
-    game = next((v.get("folder", "") for k, v in ini.items() if k.startswith("title-")), "")
+    game = azimuth.fh2_title(ini).get("folder", "")
     for root in steam_roots():
         for pre in sorted(glob.glob(os.path.join(root, "steamapps", "compatdata", "*"))):
             if game and os.path.isdir(_game_dir_in_prefix(pre, game)):
@@ -192,11 +192,11 @@ def start(settings, folder, extra_args=(), skip_launcher=True, extra_env=None):
     # the shim must find the session in its own folder, never in the environment of an unrelated process
     env.pop("FH2MP_TOKEN", None)
     try:
-        log = open(os.path.join(paths.cache_dir(), "game-launch.log"), "ab")     # Proton / Wine output: the first place to look when nothing opens
-        log.write(("\n--- " + " ".join(shlex.quote(a) for a in argv) + "\n").encode())
-        log.flush()
-        p = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                             **({"creationflags": 0x00000008 | 0x00000200} if WIN else {"start_new_session": True}))
+        with open(os.path.join(paths.cache_dir(), "game-launch.log"), "ab") as log:
+            log.write(("\n--- " + " ".join(shlex.quote(a) for a in argv) + "\n").encode())
+            log.flush()
+            p = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                                 **({"creationflags": 0x00000008 | 0x00000200} if WIN else {"start_new_session": True}))
     except OSError as e:
         raise LaunchError(f"could not start the game: {e.strerror or e}") from None
     return p

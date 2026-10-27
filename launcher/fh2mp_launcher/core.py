@@ -3,6 +3,7 @@ import os
 import platform
 import re
 import time
+import threading
 
 from . import azimuth, gamedb, keystore, launch, paths, shim, tunnel, updater, upstream
 from .api import Api, ApiError
@@ -141,6 +142,7 @@ class Launcher:
         self.stats = {}                 # the website's public counters (community card)
         self._extras_at = {}
         self.token = ""
+        self._session_lock = threading.RLock()
         self.account = None             # dict from the API: xuid, gamertag
         self.process = None
         self.manifest = None
@@ -328,6 +330,10 @@ class Launcher:
 
     def sign_in(self):
         """-> account dict. Raises ApiError (404 unknown_account when the key has no account on this server)."""
+        with self._session_lock:
+            return self._sign_in()
+
+    def _sign_in(self):
         if not self.identity:
             raise PlayBlocked("no key yet")
         r = self.api().login(self.identity, f"launcher/{__version__} {platform.system().lower()}")
@@ -337,10 +343,28 @@ class Launcher:
         self.settings.save()
         return self.account
 
+    def community(self, path="", method="GET", body=None):
+        """Social actions share the game session; never replace a live game's token."""
+        with self._session_lock:
+            if self.settings["offline_mode"] or getattr(self, "offline_run", False):
+                raise PlayBlocked("Friends and lobbies are unavailable in offline mode.")
+            if not self.token:
+                if self.game_running():
+                    raise PlayBlocked("The game session is unavailable. Close the game before signing in again.")
+                self._sign_in()
+            try:
+                return self.api().community(self.token, path, method, body)
+            except ApiError as e:
+                if e.code not in ("invalid_token", "token_expired") or self.game_running():
+                    raise
+                self._sign_in()
+                return self.api().community(self.token, path, method, body)
+
     def sign_out(self):
-        if self.token:
-            self.api().logout(self.token)
-        self.token = ""
+        with self._session_lock:
+            if self.token:
+                self.api().logout(self.token)
+            self.token = ""
 
     # ---- updates
     def check_updates(self):
@@ -563,7 +587,7 @@ class Launcher:
         return ", ".join(n for n in (note, synced) if n)
 
     def sync_gamerpic(self):
-        """Every start: the account's picture from the server goes into the Azimuth folder (Gamerpic.png, read by Azimuth and Extra Options),
+        """Every start: the account's picture goes into Azimuth's native or legacy picture file,
         so the in-game picture is the player's own, not the mod's default one. The server always has one (the picture the player uploaded,
         else a generated one). `self.gamerpic_converter` (set by the UI) turns it into the 1080x1080 RGB PNG the game expects; without it
         the server's picture is written as it is. Falls back to the copy kept in the config folder. -> a short note, '' when unchanged."""
@@ -572,7 +596,7 @@ class Launcher:
         png = None
         try:
             raw = self.api().gamerpic(self.account["xuid"])
-            png = (self.gamerpic_converter(raw) if self.gamerpic_converter else raw) or None
+            png = (self.gamerpic_converter(raw) if self.gamerpic_converter and not azimuth.uses_native_gamerpic(d) else raw) or None
         except Exception as e:  # noqa: BLE001 - offline or a server hiccup: use the kept copy
             from .api import log_failure
             log_failure("GET", f"/v1/gamerpic/{self.account['xuid']}.png", e, str(e))
@@ -581,13 +605,8 @@ class Launcher:
                 png = f.read()
         if not png:
             return "no picture"
-        try:
-            with open(os.path.join(d, "Gamerpic.png"), "rb") as f:
-                if f.read() == png:
-                    return ""
-        except OSError:
-            pass
-        azimuth.write_gamerpic(d, png)
+        if not azimuth.write_gamerpic(d, png):
+            return ""
         return f"picture updated ({len(png)} bytes)"
 
     def prepare_session_only(self, force_unsupported=True):
@@ -660,6 +679,12 @@ class Launcher:
         d = self.settings["azimuth_dir"]
         if not d or not os.path.isdir(d) or azimuth.has_game_configured(d):
             return ""
+        # A different title may be selected in a shared Azimuth installation.
+        # Reuse FH2's own configured folder before searching for another copy.
+        own = azimuth.fh2_title(azimuth.read_ini(d)).get("folder", "")
+        if own:
+            azimuth.configure_game(d, own, preserve_content=True)
+            return own
         found = azimuth.find_game_installs()
         if not found:
             return ""

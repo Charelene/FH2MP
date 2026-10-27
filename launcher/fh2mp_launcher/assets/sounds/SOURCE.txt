@@ -1,0 +1,14 @@
+UI SFX, Zen pack — https://uisfx.com/
+Source: https://github.com/romainsimon/uisfx/tree/9950fe66f993a6660dab9c2651dcbcd899ffd83b
+Audio license: CC0-1.0 (LICENSE-UISFX-AUDIO.txt).
+
+Only receive and success are bundled; no UI SFX runtime is included.
+Converted from official Ogg files to 44.1kHz mono PCM16 WAV for the existing native player.
+Applied the manifest cue default volume: receive=0.20, success=0.23.
+
+receive: packages/uisfx/sounds/zen/receive.ogg
+  Original SHA256: 8078934c8ac1e31655d9a637389a2a8cf738ce91a277a877a06c166b5b0cf7db
+  Bundled WAV SHA256: dc4495c9e8df28cf775e0f5d0665a52e89a44038d087c5c9e6d4d506884a8321
+success: packages/uisfx/sounds/zen/success.ogg
+  Original SHA256: dfc0425b035439dac40c64f9918a74a986852c9fac35ca11e57788d7894cfc44
+  Bundled WAV SHA256: 3a542535ac57ab2dc8f41e925d896e09c5dc8c5f52d55d0802cf852e5cd15db5

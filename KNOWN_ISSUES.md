@@ -14,12 +14,17 @@ Local validation now checks engine sub-part ownership after selecting the final 
 The captured-list regression fails on the old validator and passes with the fix. Valid supported swaps remain unchanged.
 
 
-**B-only events admitting other classes.** (fix prepared, not deployed)
+**Race class synchronization.** (initial fix deployed in v1.0.2; host handover follow-up local)
 In South Scramble lobby `56614b63`, the host's earlier 716-bit settings explicitly select B. The later 795-bit write omits that
 unchanged field. The server incorrectly replaced the whole settings snapshot and lost the restriction. Local code now merges partial
 updates, preserves pending selections during ownership grants, and checks class/PI at invitation acceptance, participant selection,
 loading and GO. The active event's rule cannot be changed during loading. The exact captured sequence reproduces the old failure and
-passes with the fix; live verification remains pending.
+passes with the fix. Post-release logs on October 26 also show former hosts writing settings without requesting ownership again:
+their settings were discarded while their new race requests were accepted using another host's snapshot. A local follow-up retains
+those edits and selects them on the accepted race request before invitations. A subsequent test audit also caught ignored mixed sparse
+car selections and an invalid three-second expiry on pending settings; both are corrected locally. Independent packet-flow tests now
+check invite contents, admission, loading, grid/GO and host changes. Deployment and native verification remain pending.
+See `release/TEST_AUDIT.md` and `docs/race-class-followup-2026-10-26.md`.
 
 **Festival Drag Race / South Scramble: stationary opponents despite arriving results.** (relay fix prepared; in-game verification pending)
 Local code now forwards live prediction packets even when their timestamp is behind the server's cached high-water mark. Native receiving
@@ -53,6 +58,13 @@ If the player who started the event loses connection while it is being set up, t
 
 ## Boards and rivals
 
+**Speed traps and zones announce a new PB on slower passes.** (local shim fix; in-game verification pending)
+Reported by JonKaasKanon and reproduced by the maintainer. The notification compares against the online result,
+while score uploads require beating the PB in the save. A missing online result reads as zero, so repeated slower
+passes can announce a PB without uploading anything. The local patch retains the saved PB before each pass updates
+it and uses the higher of that value and the online score for the notification comparison. No save reset is needed.
+Offline hook checks and a release build pass; this has not been installed, released or verified in-game.
+
 **Speed trap, speed zone and other Bonus Board results did not update when you improved.** (fix ready)
 Every trap and zone was treated as one board, so a better run on one trap changed nothing unless it beat your best on any trap. Each trap and zone now has its own board. Your existing results are kept.
 
@@ -70,6 +82,13 @@ For themed events such as "Made in Italy" the card showed a class but only the t
 Report `89b10352722bb565` / GitHub #30 omitted a 4,897,508-byte Azimuth dump because both uploader and server capped dumps at 1,000,000 bytes. The original remains on the reporter's PC. The production server now accepts up to 32 MiB of combined dumps with a 96 MiB JSON request limit (nginx 100 MiB), retains the first failure in the latest failing session before secondary crash-handler exceptions, and recognizes `azimuth+...` stop addresses. Every stored attachment is linked through the website staff login; 23 existing issues and one duplicate-report comment were updated. The launcher changes collect additional mod logs and the matching platform dump, share an 8 MiB text budget across files, and exclude Mod Platform crash text from other sessions; they still need release. Already omitted dumps require a new upload from the original PC.
 
 **Startup crashes in FH2MP or the Mod Platform.** (FH2MP fix prepared; Mod Platform failures unresolved)
+#155 confirms a separate FH2MP scanner failure during play: the shipped 1.0.2 DLL reads a candidate MZ header directly after
+`IsBadReadPtr`. Its dump matches `FH2MP.dll+0x2893`; this scan repeats after startup. A local correction copies XSAPI headers through
+the safe memory-read helper. Windows/Wine checks cover both DOS and NT mappings becoming inaccessible after the page query, and
+the release build passes. It has not been installed or released. See [the newer crash investigation](docs/crash-followup-2026-10-26.md).
+#76 confirms that the Mod Platform failure persists with launcher/shim 1.0.2: its retained 592,527-byte dump faults at
+`d3dcompiler_47.dll+0x18fa`, directly reading an MZ header from candidate memory during startup. The platform also reports a missing
+game Mount folder; this separate setup failure prevents installing the online car database. See [the #76 triage](docs/crash-76.md).
 #32 faults while FH2MP reads a cached game header that Azimuth has unmapped. The shim now copies and validates headers through Windows'
 safe memory-read API. Dumps for #33, #35 and #45 pinpoint the platform's equivalent unsafe MZ-header comparison; #34 has the same platform
 offset as #33. The launcher downloads the original upstream DLL; this release does not patch the Mod Platform.

@@ -159,6 +159,26 @@ class CrashReportTests(unittest.TestCase):
         self.assertIn(f'/{again}/fh2mp.log/download/)', comment)
         self.assertIn(f'/{again}/mod-crash.dmp/download/)', comment)
 
+    def test_legacy_log_labels_are_clean_but_download_paths_are_preserved(self):
+        payload = report()
+        payload['files'].update({'extra-0123456789-radio.log': 'first',
+                                 'extra-abcdef0123-radio.log': 'second'})
+        rid = self.cr.submit(payload)
+        body = self.gh.calls[-1][2]['body']
+        self.assertIn(f'[radio.log](https://forza.scuffed.af/panel/crashes/{rid}/extra-0123456789-radio.log/download/)', body)
+        self.assertIn(f'[radio-2.log](https://forza.scuffed.af/panel/crashes/{rid}/extra-abcdef0123-radio.log/download/)', body)
+        self.assertEqual(self.cr.download(rid, 'extra-abcdef0123-radio.log'), b'second')
+
+    def test_infinity_logs_have_no_issue_or_comment_links(self):
+        payload = report()
+        for name in ('infinity.log', 'Infinity.previous.log',
+                     'extra-6757afa7b2-infinity.log', 'extra-85c0e9bdbf-infinity.previous-4.log'):
+            payload['files'][name] = 'private infinity diagnostics'
+        self.cr.submit(payload)
+        self.assertNotIn('infinity', self.gh.calls[-1][2]['body'].lower())
+        self.cr.submit(payload)
+        self.assertNotIn('infinity', self.gh.calls[-1][2]['body'].lower())
+
     def test_downloads_require_operator_auth_and_reject_path_escapes(self):
         import types
         import ops_api

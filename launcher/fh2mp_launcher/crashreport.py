@@ -7,7 +7,6 @@ example a graphics call it cannot do) in its last session, or it wrote a minidum
 import base64
 import datetime
 import glob
-import hashlib
 import os
 import platform
 import re
@@ -265,15 +264,25 @@ class Report:
 def diagnostic_logs(folder, used):
     """Known diagnostic folders only: no saves, session/config files, binaries, or unrelated crash sessions."""
     root = os.path.realpath(folder)
+    names = set(LIMITS)
     for pattern in ("*.log", "data/logs/*.log", "data/bin/*.log", "fh2-mods/*.log", "fh2-mods/*/*.log", "fh2extra/*.log"):
         for path in sorted(glob.glob(os.path.join(folder, pattern))):
+            if re.fullmatch(r"infinity(?:[.-].*)?\.log", os.path.basename(path), re.IGNORECASE):
+                continue
             real = os.path.realpath(path)
             if real in used or os.path.commonpath((root, real)) != root or not os.path.isfile(path):
                 continue
             used.add(real)
-            relative = os.path.relpath(path, folder)
             base = re.sub(r"[^A-Za-z0-9_.-]|\.{2,}", "_", os.path.basename(path))[-70:]
-            name = "extra-" + hashlib.sha256(relative.encode()).hexdigest()[:10] + "-" + base
+            if not base[0].isalnum():
+                base = "log-" + base
+            name = base
+            stem, ext = os.path.splitext(base)
+            number = 2
+            while name.lower() in names:
+                name = f"{stem}-{number}{ext}"
+                number += 1
+            names.add(name.lower())
             yield name, path
 
 

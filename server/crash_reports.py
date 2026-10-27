@@ -208,7 +208,22 @@ def file_links(rid, r, link_base=LINK_BASE):
     if r["dump"] is not None:
         names.append("crash.dmp")
     names.extend(r.get("attachments", {}))
-    return "\n".join(f"- [{name}]({link_base.rstrip('/')}/{rid}/{name}/download/)" for name in sorted(names))
+    links = []
+    labels = set()
+    for name in sorted(names):
+        # Older launchers prefixed every additional log with a path hash.
+        base = re.sub(r"^extra-[0-9a-f]{10}-", "", name)
+        if re.fullmatch(r"infinity(?:[.-].*)?\.log", base, re.IGNORECASE):
+            continue
+        label = base
+        stem, ext = os.path.splitext(base)
+        number = 2
+        while label.lower() in labels:
+            label = f"{stem}-{number}{ext}"
+            number += 1
+        labels.add(label.lower())
+        links.append(f"- [{label}]({link_base.rstrip('/')}/{rid}/{name}/download/)")
+    return "\n".join(links)
 
 
 def issue_body(rid, r, line, link_base=LINK_BASE):

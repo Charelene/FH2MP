@@ -192,6 +192,34 @@ class SecretTests(unittest.TestCase):
 
 
 class BuildTests(Base):
+    def test_log_names_are_readable_and_collisions_keep_each_file(self):
+        now = time.time()
+        self.log(BEGAN + CRASH, now)
+        self.write("FH2_ExtraOptions.log", "options")
+        self.write("radio.log", "current")
+        self.write("data/logs/radio.log", "other")
+        self.write("data/bin/azimuth.log", "secondary azimuth")
+        rep = crashreport.build(FakeLauncher(self.st), crashreport.find_crash(self.folder, now - 10))
+        files = rep.payload()["files"]
+        self.assertEqual(files["FH2_ExtraOptions.log"], "options")
+        self.assertEqual(files["radio.log"], "current")
+        self.assertEqual(files["radio-2.log"], "other")
+        self.assertEqual(files["azimuth-2.log"], "secondary azimuth")
+        self.assertIn("CRASHED", files["azimuth.log"])
+        self.assertFalse(any(n.startswith("extra-") for n in files))
+
+    def test_infinity_logs_are_not_collected_or_shown(self):
+        now = time.time()
+        self.log(BEGAN + CRASH, now)
+        for name in ("infinity.log", "infinity.previous.log", "infinity.previous-4.log",
+                     "data/logs/Infinity.previous-2.log", "fh2-mods/infinity.log"):
+            self.write(name, "INFINITY PRIVATE CONTENT")
+        self.write("FH2_ExtraOptions.log", "options")
+        rep = crashreport.build(FakeLauncher(self.st), crashreport.find_crash(self.folder, now - 10))
+        self.assertIn("FH2_ExtraOptions.log", rep.payload()["files"])
+        self.assertNotIn("INFINITY PRIVATE CONTENT", str(rep.payload()))
+        self.assertFalse(any("infinity" in name.lower() for name, _, _ in rep.sizes()))
+
     def test_fields_files_and_payload(self):
         now = time.time()
         self.log(BEGAN + GPU + CRASH + "  Z:\\home\\ugandanhobo\\x\n", now)

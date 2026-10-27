@@ -14,20 +14,30 @@ class FakeServer:
         self.srv = socket.socket()
         self.srv.bind(("127.0.0.1", 0))
         self.srv.listen(4)
+        self.srv.settimeout(.1)
         self.port = self.srv.getsockname()[1]
         self.got = []
         self.conn = None
         self.lock = threading.Lock()
-        threading.Thread(target=self.run, daemon=True).start()
+        self.closed = threading.Event()
+        self.connections = []
+        self.workers = []
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
 
     def run(self):
-        while True:
+        while not self.closed.is_set():
             try:
                 c, _ = self.srv.accept()
+            except socket.timeout:
+                continue
             except OSError:
                 return
             self.conn = c
-            threading.Thread(target=self.read, args=(c,), daemon=True).start()
+            self.connections.append(c)
+            worker = threading.Thread(target=self.read, args=(c,), daemon=True)
+            self.workers.append(worker)
+            worker.start()
 
     def read(self, c):
         buf = b""
@@ -49,7 +59,17 @@ class FakeServer:
         self.conn.sendall(struct.pack(">H", len(data)) + data)
 
     def close(self):
+        self.closed.set()
         self.srv.close()
+        self.thread.join(1)
+        for conn in self.connections:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            conn.close()
+        for worker in self.workers:
+            worker.join(1)
 
 
 def wait(cond, seconds=3.0):

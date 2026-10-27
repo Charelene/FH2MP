@@ -36,17 +36,26 @@ check() {
   if out=$("$@" 2>&1); then echo "  ok   $*"; else echo "  FAIL $*"; echo "$out" | tail -25 | sed 's/^/       /'; failed=1; fi
 }
 check env FH2MP_NO_KEYRING=1 launcher/.venv/bin/python -m unittest discover -s launcher/tests
+check launcher/.venv/bin/python -I release/check_test_mutations.py --area launcher
 check shim/test_sha256.sh
+check shim/test_inflate.sh
 check shim/test_gamedb_keep.sh
 check shim/test_gamedb_files.sh
 check shim/test_game_image.sh
+check shim/test_title_scope.sh
 check shim/test_torque_scale.sh
+check shim/test_net_strings.sh
+check shim/test_torque_load.sh
+check shim/test_speed_pb.sh
 check shim/test_restricted_tools.sh
-for t in test_security test_world_capacity test_tunnel test_lobby_packing test_race_end test_freeroam_tag_grant test_send_queue test_parts test_xp_audit test_gameopts test_phasing test_crash_reports; do
-  check env -C server ../.venv-pg/bin/python -W ignore -m unittest "$t"
-done
-# These import psycopg but use fakes: no live or scratch database is changed.
-check env -C server ../.venv-pg/bin/python -m unittest test_ops test_site_stats test_lsp.LayerCountTests test_lsp.StringValidationTests test_restricted_tools
+check .venv-pg/bin/python -W ignore -I release/run_server_tests.py
+check .venv-pg/bin/python -I release/check_test_mutations.py --area server
+if [ -n "${FH2MP_TEST_PG_DSN:-}" ]; then
+  check .venv-pg/bin/python -I release/run_server_tests.py --lane postgres
+  check .venv-pg/bin/python -I release/check_test_mutations.py --area postgres
+else
+  echo "  PostgreSQL checks are required by release CI; local lane not run (FH2MP_TEST_PG_DSN is unset)."
+fi
 if [ "$failed" != 0 ]; then git reset -q; echo "tests failed: nothing was committed or published"; exit 1; fi
 
 # The commit message comes from release/notes/<tag>.commit.txt (the old fixed text is gone). No authorship trailers: this is the maintainer's release.

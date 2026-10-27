@@ -26,14 +26,16 @@
 #define MAX_ARGS 32
 #define MAX_ARG_CHARS 256
 
-/* Platform::Details::GetCmdArguments(int*): same 301-byte function in each supported azimuth.exe */
-#define HOOK_SIZE 301u
+/* Platform::Details::GetCmdArguments(int*): verify the complete function for each build. */
 typedef struct {
     unsigned rva;
+    unsigned size;
     unsigned long long fnv1a64;
 } hook_build;
 static const hook_build g_hook_builds[] = {
-    {0xc0850u, 0xb2987ae53c46b28cull}, /* azimuth.exe 0.9.10 (sha256 78a5f635...3739) */
+    {0xc0850u, 301u, 0xb2987ae53c46b28cull}, /* azimuth.exe 0.9.10 (sha256 78a5f635...3739) */
+    {0x282670u, 9u, 0x4288f958fe9625cfull}, /* azimuth.exe 1.0.0 (sha256 a8f15b81...6c2d0) */
+    {0x282680u, 9u, 0x4288f958fe9625cfull}, /* azimuth.exe 1.0.1 (sha256 6e9a2290...172f7) */
 };
 
 /* forza_durango_release_final.exe 1.0.0.64 (image identity, as checked by the Extra Options mod) */
@@ -1572,12 +1574,55 @@ static int patch_same_session(void)
  *     141064405  mov rcx,[rsi]      (rsi = pointer to the result)
  *     141064408  mov rax,[rcx]      <- rcx = 0
  * crashes the client of everybody who loads that car: seen on prod on 2026-10-20 whenever a player joined one particular lobby, the same
- * call chain every time (call chain and registers read from three minidumps). An engine the local game does not simulate (another
- * player's car is driven by prediction) does not need its curve, so the function now returns when the result is null, leaving the output as
- * it was. The function is hooked through the platform with a small stub as the detour: it does the check, then jumps on to the platform's
+ * call chain every time (call chain and registers read from three minidumps). This guard returns when the result is null, leaving the output
+ * as it was. This only guards the null database read: remote cars ALSO reach the later physics constructor, which requires a valid curve
+ * count (#84/#128/#145). It is not a safe fallback for that constructor. The function is hooked through the platform with a small stub
+ * as the detour: it does the check, then jumps on to the platform's
  * `original` (the game's first instructions, 48 8B C4 mov rax,rsp / 48 89 50 10 mov [rax+0x10],rdx, and the rest of the function).
  * Disable with env FH2MP_NO_NULLTORQUE.
  */
+#include "speed_pb.inc"
+
+static int patch_speed_pb(void)
+{
+    static const struct { unsigned rva; unsigned char bytes[16]; } signatures[] = {
+        {0x6c2ca0, {0x48,0x8b,0xc4,0x48,0x89,0x50,0x10,0x55,0x56,0x57,0x41,0x54,0x41,0x55,0x41,0x56}},
+        {0x6b76b0, {0x48,0x8b,0xc4,0x55,0x57,0x41,0x54,0x41,0x56,0x41,0x57,0x48,0x8d,0xa8,0x18,0xff}},
+        {0x5b0b70, {0x48,0x89,0x54,0x24,0x10,0x57,0x48,0x83,0xec,0x30,0x48,0xc7,0x44,0x24,0x20,0xfe}},
+        {0x5b0b9d, {0xe8,0x0e,0x08,0x03,0x00,0xc5,0xfa,0x11,0x83,0x20,0x01,0x00,0x00,0x8b,0x83,0x1c}},
+        {0x3eb620, {0x40,0x53,0x48,0x83,0xec,0x20,0x48,0x8b,0xda,0xe8,0x52,0x18,0x01,0x00,0x48,0x8b}},
+        {0x3d2d70, {0x48,0x8b,0xc4,0x48,0x89,0x50,0x10,0x57,0x48,0x81,0xec,0x80,0x00,0x00,0x00,0x48}},
+        {0x5e13b0, {0xc5,0xfb,0x10,0x81,0xe0,0xa2,0x00,0x00,0xc5,0xf9,0x5a,0xc0,0xc3,0xcc,0xcc,0xcc}},
+    };
+    unsigned char *img = find_fh2_image();
+    unsigned i;
+    if (!img) return 0;
+    for (i = 0; i < sizeof signatures / sizeof signatures[0]; ++i) {
+        if (memcmp(img + signatures[i].rva, signatures[i].bytes, 16)) {
+            log_begin();
+            log_raw("speedpb: unexpected completion/comparison code, not patched\n");
+            return 0;
+        }
+    }
+    g_speed_pb_tls = TlsAlloc();
+    if (g_speed_pb_tls == TLS_OUT_OF_INDEXES) return 0;
+    g_speed_pb_resolve = (speed_pb_resolve_fn)(img + 0x3eb620);
+    g_speed_pb_property = (speed_pb_property_fn)(img + 0x3d2d70);
+    /* Partial installation stays inert until every hook is available. */
+    if (!plat_hook_call("speedpb: local PB fallback in HUD comparison", img + 0x5b0b9d,
+                        (void *)speed_pb_score, (void **)&g_speed_pb_score) ||
+        !plat_hook("speedpb: HUD comparison scope", img + 0x5b0b70,
+                   (void *)speed_pb_compare, (void **)&g_speed_pb_compare) ||
+        !plat_hook("speedpb: saved trap PB before completion", img + 0x6c2ca0,
+                   (void *)speed_pb_trap, (void **)&g_speed_pb_trap) ||
+        !plat_hook("speedpb: saved zone PB before completion", img + 0x6b76b0,
+                   (void *)speed_pb_zone, (void **)&g_speed_pb_zone)) return 0;
+    InterlockedExchange(&g_speed_pb_active, 1);
+    log_begin();
+    log_raw("speedpb: speed notifications retain the saved PB when the online result is missing or lower\n");
+    return 1;
+}
+
 #include "torque_scale.inc"
 
 static int patch_null_torque_scale(void)
@@ -1640,7 +1685,7 @@ static int patch_missing_cinematics(void)
     return 1;
 }
 
-static volatile unsigned *g_nulltorque_hits;      /* counts the engines the guard skipped (read by the monitor thread, which logs changes) */
+static volatile unsigned *g_nulltorque_hits;      /* counts missing-row reads, not rejected car loads */
 
 static int patch_null_torque_curve(void)
 {
@@ -1690,7 +1735,7 @@ static int patch_null_torque_curve(void)
         return 0;
     }
     log_begin();
-    log_raw("nulltorque: an engine whose torque curve is missing from the game database is skipped instead of crashing the game\n");
+    log_raw("nulltorque: missing-row reads guarded; torqueload separately rejects invalid car physics\n");
     return 1;
 }
 
@@ -2009,6 +2054,77 @@ static int patch_online_meet(void)
 #define XS_AUTH_CTOR_RVA 0x30860u
 #define XS_ALLOC_CALL_OFF 0xdcu /* mov ecx,0x48 ; call [rip+disp] inside GetTokenAndSignature */
 
+#include "game_image.inc"
+#include "xsapi_image.inc"
+#include "net_string_guard.inc"
+#include "torque_load_guard.inc"
+
+static int patch_torque_load(void)
+{
+    static const struct { unsigned rva; unsigned char bytes[16]; } signatures[] = {
+        {0xfcfe70, {0x40,0x55,0x53,0x56,0x57,0x41,0x54,0x41,0x56,0x41,0x57,0x48,0x8d,0x6c,0x24,0x80}},
+        {0x104d5f0, {0x44,0x89,0x44,0x24,0x18,0x48,0x89,0x54,0x24,0x10,0x55,0x56,0x57,0x41,0x54,0x41}},
+        {0x1042d10, {0x48,0xc7,0x01,0xff,0xff,0xff,0xff,0x33,0xd2,0x4c,0x8d,0x41,0x08,0x0f,0x1f,0x00}},
+        {0x10482f0, {0x48,0x8b,0xc4,0x48,0x89,0x50,0x10,0x48,0x89,0x48,0x08,0x55,0x57,0x41,0x55,0x41}},
+        {0x1048990, {0x48,0x8b,0xc4,0x48,0x89,0x50,0x10,0x48,0x89,0x48,0x08,0x55,0x57,0x41,0x55,0x41}},
+    };
+    unsigned char *img = find_fh2_image();
+    unsigned i;
+    if (!img) return 0;
+    for (i = 0; i < sizeof signatures / sizeof signatures[0]; ++i) {
+        if (memcmp(img + signatures[i].rva, signatures[i].bytes, 16)) {
+            log_begin();
+            log_raw("torqueload: unexpected native preloader/resolver code, not patched\n");
+            return 0;
+        }
+    }
+    g_torque_load_img = img;
+    g_torque_parts_ctor = (torque_parts_ctor_fn)(img + 0x1042d10);
+    g_torque_stock = (torque_stock_fn)(img + 0x104d5f0);
+    g_torque_car_part = (torque_part_fn)(img + 0x10482f0);
+    g_torque_engine_part = (torque_part_fn)(img + 0x1048990);
+    return plat_hook("torqueload: native fallback for invalid engine curves", img + 0xfcfe70,
+                     (void *)torque_preload_guard, (void **)&g_torque_preload_orig);
+}
+
+static int patch_net_string_receivers(void)
+{
+    static const struct {
+        unsigned rva;
+        unsigned char bytes[16];
+        const char *name;
+        void *detour;
+        net_string_receive_fn *original;
+    } hooks[] = {
+        {0x176d570, {0x48,0x8b,0xc4,0x55,0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57,0x48,0x8d,0x68,0xa1},
+         "netstrings: OpenConnection bounds", (void *)net_string_open, &g_string_open_orig},
+        {0x17f7440, {0x48,0x8b,0xc4,0x55,0x41,0x56,0x41,0x57,0x48,0x8d,0x68,0xa1,0x48,0x81,0xec,0x90},
+         "netstrings: CarMeet session string bounds", (void *)net_string_meet, &g_string_meet_orig},
+        {0x181f630, {0x48,0x8b,0xc4,0x55,0x57,0x41,0x54,0x41,0x56,0x41,0x57,0x48,0x8b,0xec,0x48,0x81},
+         "netstrings: BucketList partner string bounds", (void *)net_string_bucket, &g_string_bucket_orig},
+    };
+    unsigned char *img = find_fh2_image();
+    unsigned i;
+    int ok = 1;
+    if (!img) return 0;
+    for (i = 0; i < sizeof hooks / sizeof hooks[0]; ++i) {
+        if (memcmp(img + hooks[i].rva, hooks[i].bytes, sizeof hooks[i].bytes)) {
+            log_begin();
+            log_raw("netstrings: unexpected receive-handler code, not patched\n");
+            return 0;
+        }
+    }
+    /* Each independent handler is safe as soon as its own hook is enabled. */
+    for (i = 0; i < sizeof hooks / sizeof hooks[0]; ++i)
+        if (!plat_hook(hooks[i].name, img + hooks[i].rva, hooks[i].detour,
+                       (void **)hooks[i].original)) ok = 0;
+    if (!ok) {
+        log_begin();
+        log_raw("netstrings: some receive handlers could not be guarded; check platform.log\n");
+    }
+    return ok;
+}
+
 static unsigned char *find_xsapi_image(void)
 {
     SYSTEM_INFO si;
@@ -2020,19 +2136,13 @@ static unsigned char *find_xsapi_image(void)
     while (addr < (unsigned char *)si.lpMaximumApplicationAddress &&
            VirtualQuery(addr, &mbi, sizeof mbi) == sizeof mbi) {
         if (mbi.State == MEM_COMMIT && mbi.BaseAddress == mbi.AllocationBase && mbi.RegionSize >= 0x1000) {
-            const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)mbi.AllocationBase;
-            if (!IsBadReadPtr(dos, sizeof *dos) && dos->e_magic == IMAGE_DOS_SIGNATURE &&
-                dos->e_lfanew > 0 && dos->e_lfanew < 0x1000) {
-                const IMAGE_NT_HEADERS64 *nt =
-                    (const IMAGE_NT_HEADERS64 *)((unsigned char *)dos + dos->e_lfanew);
-                if (!IsBadReadPtr(nt, sizeof *nt) && nt->Signature == IMAGE_NT_SIGNATURE &&
-                    nt->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 &&
-                    nt->FileHeader.TimeDateStamp == XS_TIMESTAMP &&
-                    nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC &&
-                    nt->OptionalHeader.SizeOfImage == XS_SIZE_OF_IMAGE) {
-                    return (unsigned char *)mbi.AllocationBase;
-                }
+            if (read_xsapi_headers((const unsigned char *)mbi.AllocationBase)) {
+                return (unsigned char *)mbi.AllocationBase;
             }
+        }
+        if (!mbi.RegionSize || mbi.RegionSize > (UINT_PTR)-1 - (UINT_PTR)mbi.BaseAddress ||
+            (UINT_PTR)mbi.BaseAddress + mbi.RegionSize <= (UINT_PTR)addr) {
+            break;
         }
         addr = (unsigned char *)mbi.BaseAddress + mbi.RegionSize;
     }
@@ -2341,8 +2451,8 @@ static int install_cmdline_hook(void)
 
     for (i = 0; i < sizeof g_hook_builds / sizeof g_hook_builds[0]; i++) {
         unsigned char *cand = exe + g_hook_builds[i].rva;
-        if (!IsBadReadPtr(cand, HOOK_SIZE)) {
-            h = fnv1a64(cand, HOOK_SIZE);
+        if (!IsBadReadPtr(cand, g_hook_builds[i].size)) {
+            h = fnv1a64(cand, g_hook_builds[i].size);
             if (h == g_hook_builds[i].fnv1a64) {
                 target = cand;
                 break;
@@ -2385,8 +2495,6 @@ static int has_arg_prefix(const wchar_t *prefix)
     }
     return 0;
 }
-
-#include "game_image.inc"
 
 /* The platform's cached pointer must still identify the mapped game. */
 static unsigned char *find_fh2_image(void)
@@ -3143,7 +3251,7 @@ static DWORD WINAPI option_monitor(LPVOID unused)
                 log_begin();
                 log_raw("nulltorque: skipped ");
                 log_dec(nt_now - nt_seen);
-                log_raw(" engine(s) with no torque curve (");
+                log_raw(" missing torque-curve row read(s) (");
                 log_dec(nt_now);
                 log_raw(" in all)\n");
                 nt_seen = nt_now;
@@ -4639,6 +4747,14 @@ static DWORD WINAPI late_init(LPVOID unused)
         }
         patch_server_port();
         {
+            wchar_t env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_SPEEDPB", env, 8) == 0) patch_speed_pb();
+        }
+        {
+            wchar_t env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_NETSTRINGS", env, 8) == 0) patch_net_string_receivers();
+        }
+        {
             wchar_t it_env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_INVITETYPE", it_env, 8) == 0) {
                 patch_invite_type();
@@ -4667,6 +4783,12 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_NULLTORQUE", nt_env, 8) == 0) {
                 patch_null_torque_curve();
                 patch_null_torque_scale();
+            }
+        }
+        {
+            wchar_t env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_TORQUELOAD", env, 8) == 0) {
+                patch_torque_load();
             }
         }
         {
@@ -4925,6 +5047,8 @@ static int patch_identity(void)
 #endif
 
 /* Called by the FH2 Mod Platform on its own thread (outside the loader lock) right after it loads this DLL from fh2-mods. */
+#include "title_scope.inc"
+
 FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
 {
     FH2ModInfo info;
@@ -4933,6 +5057,11 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
 
     if (!api || !api->register_mod) {
         return 1;
+    }
+    /* This must precede registration, session/identity I/O, host hooks and
+     * mediaoverride changes, including the offline-account-save branch. */
+    if (!fh2_launch_selected(api->azimuth_dir, GetCommandLineW()) || !fh2_launch_executable(api->game_dir)) {
+        return 0;
     }
     info.size = sizeof info;
     info.name = "FH2MP";

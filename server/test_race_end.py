@@ -1,8 +1,9 @@
 """Free roam circuit races end when every player's final score (MsgScoreKeyframe) has arrived, or 30 s after the first one.
 
 Seen on prod (3-lap circuit): the first finisher's last LapScore came with a ScoreKeyframe, the player who was cut off by "race ends in"
-sent one too, and nothing earlier did. The lap count of a free roam event is not decoded, so the keyframe is the only end signal; before it
-the server never set SessionHost.InRace=0 and the clients stayed on the results screen."""
+sent one too, and nothing earlier did. Events with a decoded lap count now use LapScore for completion;
+the keyframe fallback remains for events without a lap count. These are race-state unit tests;
+test_race_flow covers the transport, setup and result transitions together."""
 import os
 import sys
 import time

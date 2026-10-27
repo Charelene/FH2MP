@@ -39,6 +39,7 @@ def sha256_file(path):
 # Azimuth keeps its version next to "...: Azimuth " in a message ("\x000.9.10\x00\x00: Azimuth ") and in its settings migration note
 _VERSION_RES = [re.compile(rb"\x00(\d{1,3}\.\d{1,3}\.\d{1,3})\x00+: Azimuth "), re.compile(rb"\bby (\d{1,3}\.\d{1,3}\.\d{1,3})\x00"),
                 re.compile(rb"\bv(\d{1,3}\.\d{1,3}\.\d{1,3})\b")]
+_FILE_VERSION_RE = re.compile(re.escape("FileVersion".encode("utf-16-le")) + rb"(?:\x00\x00)+((?:[0-9.]\x00){3,32})")
 
 
 def exe_version(path):
@@ -48,6 +49,13 @@ def exe_version(path):
             data = f.read()
     except OSError:
         return ""
+    # Modern Azimuth retains migration messages for older releases. Prefer its
+    # version resource over those historical strings (support still uses SHA).
+    m = _FILE_VERSION_RE.search(data)
+    if m:
+        version = m.group(1).decode("utf-16-le")
+        if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){2,3}", version):
+            return version
     for rx in _VERSION_RES:
         m = rx.search(data)
         if m:
@@ -98,7 +106,7 @@ def inspect(folder, builds=None):
     if not info.supported:
         info.notes.append("this Azimuth build has not been tested with FH2MP")
     ini = read_ini(folder)
-    title = next((v for k, v in ini.items() if k.startswith("title-")), {})
+    title = fh2_title(ini)
     info.game_folder = title.get("folder", "")
     if info.game_folder:
         info.game_ok = _game_folder_exists(info.game_folder)
@@ -200,9 +208,42 @@ def set_player_name(folder, name):
     return True
 
 
+def uses_native_gamerpic(folder):
+    version = exe_version(os.path.join(folder, EXE))
+    return bool(version) and tuple(map(int, version.split("."))) >= (1, 0, 0)
+
+
+def gamerpic_path(folder):
+    return os.path.join(folder, "data", "player.png") if uses_native_gamerpic(folder) else os.path.join(folder, "Gamerpic.png")
+
+
 def write_gamerpic(folder, png):
-    """Azimuth shows Gamerpic.png from its own folder as the local player's picture; FH2 Extra Options, next to it, reads the same file."""
-    paths.atomic_write(os.path.join(folder, "Gamerpic.png"), png, 0o644)
+    """Write the account picture for this Azimuth version; return whether it changed.
+
+    1.0's native profile uses data/player.png (256 square RGBA). Older Extra
+    Options uses Gamerpic.png. Keep the native crop editor's source/frame files.
+    """
+    native = uses_native_gamerpic(folder)
+    if native:
+        from .ui.images import native_azimuth_png_from_bytes
+        png = native_azimuth_png_from_bytes(png)
+        if png is None:
+            raise ValueError("The account picture could not be decoded for Azimuth.")
+    target = os.path.join(folder, "data", "player.png") if native else os.path.join(folder, "Gamerpic.png")
+    try:
+        with open(target, "rb") as f:
+            previous = f.read()
+    except FileNotFoundError:
+        previous = None
+    if previous is not None:
+        if previous == png:
+            return False
+        backup = target + ".before-fh2mp"
+        if native and not os.path.exists(backup):
+            paths.atomic_write(backup, previous, 0o644)
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    paths.atomic_write(target, png, 0o644)
+    return True
 
 
 # ---- the game install: found and written into Azimuth's own settings, so the player never has to
@@ -261,7 +302,7 @@ def find_game_installs():
     return out
 
 
-def configure_game(folder, win_path):
+def configure_game(folder, win_path, *, preserve_content=False):
     """Writes the game folder into Azimuth's data/azimuth.ini ([launcher] game=<id>, [title-<id>] folder=...). Keeps the file's encoding."""
     path = os.path.join(folder, "data", "azimuth.ini")
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -276,7 +317,7 @@ def configure_game(folder, win_path):
     lines = text.split(nl)
 
     def set_key(section, key, value):
-        sec = next((i for i, l in enumerate(lines) if l.strip() == f"[{section}]"), None)
+        sec = next((i for i, l in enumerate(lines) if l.strip().lower() == f"[{section}]".lower()), None)
         if sec is None:
             lines[:] = [l for l in lines if l != ""] + [f"[{section}]", f"{key}={value}"]
             return
@@ -288,15 +329,20 @@ def configure_game(folder, win_path):
         lines.insert(end, f"{key}={value}")
     set_key("launcher", "game", GAME_ID)
     set_key(f"title-{GAME_ID}", "folder", win_path)
-    set_key(f"title-{GAME_ID}", "content", "")
+    if not preserve_content:
+        set_key(f"title-{GAME_ID}", "content", "")
     set_key(f"title-{GAME_ID}", "name", GAME_NAME)
     out = nl.join(lines).rstrip(nl) + nl
     paths.atomic_write(path, out.encode(enc), 0o644)
 
 
+def fh2_title(ini):
+    return next((v for k, v in ini.items() if k.lower() == f"title-{GAME_ID}"), {})
+
+
 def has_game_configured(folder):
     ini = read_ini(folder)
-    return bool(ini.get("launcher", {}).get("game")) and bool(ini.get(f"title-{ini.get('launcher', {}).get('game')}", {}).get("folder"))
+    return ini.get("launcher", {}).get("game", "").lower() == GAME_ID and bool(fh2_title(ini).get("folder"))
 
 
 def steam_shortcut_folders():

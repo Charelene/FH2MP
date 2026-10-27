@@ -329,6 +329,9 @@ class Api:
     def me(self, token):
         return self._call("GET", "/v1/me", token=token)
 
+    def community(self, token, path="", method="GET", body=None):
+        return self._call(method, "/v1/community" + path, body, token=token)
+
     def rename(self, token, gamertag):
         return self._call("PATCH", "/v1/me", {"gamertag": gamertag}, token=token)
 

@@ -18,6 +18,8 @@ from .widgets import (AccountButton, Banner, Brand, Carousel, DetailSheet, Gradi
                       has_detail, link_colour, menu)
 from .wizard import Wizard
 from .workers import run_async
+from .community import CommunityController, FriendsPanel
+from .social_widgets import BadgeIcon
 
 
 def open_url(u):
@@ -39,7 +41,11 @@ class MainWindow(QMainWindow):
         self._avatar_png = None
         self._launched_at = 0
         self._crash_dialog = False
+        self.community = CommunityController(lc, self)
         self._build()
+        self.community.changed.connect(self._community_render)
+        self.community.lobbies_changed.connect(self._community_render)
+        self.community.message.connect(lambda text: self.say(text, theme.WARN))
         link_colour()
         self.poll = QTimer(self)
         self.poll.timeout.connect(self._tick)
@@ -80,6 +86,9 @@ class MainWindow(QMainWindow):
         self.account_menu.aboutToShow.connect(self._fill_account_menu)
         self.account.set_menu(self.account_menu)
         head.addWidget(self.account)
+        self.friends_button = BadgeIcon("friends", 44, 12, 22, label_text="Show or hide Friends")
+        self.friends_button.clicked.connect(self._toggle_friends)
+        head.addWidget(self.friends_button)
         gear = IconButton("gear", 44, 12, 22, spin=45, label_text="Settings and logs")
         gm = menu(self)
         gm.addAction("Settings", self.open_settings)
@@ -151,7 +160,42 @@ class MainWindow(QMainWindow):
         self._taps = 0
         foot.addWidget(self.version)
         body.addWidget(bottom)
-        outer.addWidget(main, 1)
+        content = QHBoxLayout()
+        content.setContentsMargins(0, 0, 0, 0)
+        content.setSpacing(0)
+        content.addWidget(main, 1)
+        self.friends_panel = FriendsPanel(self.community)
+        content.addWidget(self.friends_panel)
+        outer.addLayout(content, 1)
+
+    def _toggle_friends(self):
+        self.friends_panel.toggle()
+        if self.friends_panel.opened:
+            self.community.refresh()
+
+    def _community_render(self):
+        if not hasattr(self, "cards"):
+            return
+        cards = self._home_cards()
+        if cards != self.cards.cards:
+            self.cards.set_cards(cards, self._pix, restart_timer=False)
+        n = sum(f['state'] == 'playing' for f in self.community.data.get('friends', []))
+        unread = sum(ch.get('unread', 0) for ch in self.community.data.get('chats', []))
+        requests = len(self.community.data.get('incoming', []))
+        self.friends_button.set_count(unread + requests)
+        self.friends_button.setToolTip(f"Friends · {n} playing · {unread} unread messages · {requests} requests")
+        self._render_account()
+
+    def _home_cards(self):
+        cards = self.lc.home_cards()
+        hold = self.community.hold
+        text = f"Spot held · {self.community.remaining()}" if hold else "Hold a slot for 5 min"
+        lobbies = self.community.lobby_data.get('lobbies')
+        live_counts = self.community.data.get('lobbyCounts')
+        counts = [f"{live_counts[kind]} active" if live_counts is not None else
+                  f"{sum(r['kind'] == kind for r in lobbies)} active" if lobbies is not None else "Browse" for kind in ('freeroam', 'roadtrip')]
+        return [{"kind": "lobbies", "tag": "ONLINE LOBBIES", "title": "Reserve a spot", "text": text,
+                 "glyph": "|".join(counts), "image": "", "url": "", "link": ""}] + cards
 
     @staticmethod
     def _link(text, fn):
@@ -165,14 +209,14 @@ class MainWindow(QMainWindow):
         if lc.has_identity() and lc.settings["gamertag"]:
             xu = (lc.account or {}).get("xuid") or lc.settings["xuid"]
             if xu:
-                m.addAction(f"ID {xu:#x}").setEnabled(False)
+                m.addAction(f"ID {xu:#x} · Copy", lambda: QApplication.clipboard().setText(f"{xu:#x}"))
             m.addAction("Edit profile", self.open_profile)
             m.addAction("Recovery key", self.show_recovery)
         else:
             m.addAction("Set up account", self.run_wizard)
 
     # ---- rendering
-    def render(self):
+    def _render_account(self):
         lc, s = self.lc, self.lc.settings
         has_acct = bool(s["gamertag"]) and (lc.has_identity() or s["offline_mode"] or getattr(lc, "offline_run", False))
         name = (lc.account or {}).get("gamertag") or s["gamertag"]
@@ -184,8 +228,15 @@ class MainWindow(QMainWindow):
             state = ("In game", theme.GOOD)
         else:
             state = ("Online", theme.GOOD) if self._server_state == "ok" else ("Offline", theme.MUTED)
+        me = self.community.data.get('me')
+        if has_acct and self.community.available() and me and me.get('xuid') == s['xuid'] and me.get('club'):
+            state = (f"[{me['club']['tag']}] · {state[0]}", state[1])
         self.account.set(name if has_acct else "Guest", *state)
         self.account.avatar.set_png(self._avatar_png)
+
+    def render(self):
+        lc, s = self.lc, self.lc.settings
+        self._render_account()
         self.channel.setText("DEV LAUNCHER, channel " + s["channel"] + (f", server {s['api_base']}" if s["api_base"] else "") if paths.is_dev()
                              else ("DEV CHANNEL" if s["channel"] == "dev" else ""))
         self.channel.setStyleSheet(f"color: {theme.WARN};")
@@ -198,7 +249,7 @@ class MainWindow(QMainWindow):
         else:
             self.motd.hide()
         self.hero.set_picture(self._pix(lc.hero_image))
-        self.cards.set_cards(lc.home_cards(), self._pix)
+        self.cards.set_cards(self._home_cards(), self._pix)
         if self.sheet.isVisible():
             self.sheet.place()
         self._render_status()
@@ -258,6 +309,9 @@ class MainWindow(QMainWindow):
         self.status.show_message(text, kind, button)
 
     def _open_card(self, c):
+        if c.get("kind") == "lobbies":
+            self.community.lobbies()
+            return
         if has_detail(c):
             self.sheet.show_card(c)
         else:
@@ -348,6 +402,7 @@ class MainWindow(QMainWindow):
             return
         lc.ensure_game()
         self.render()
+        self.community.refresh()
         if not lc.has_identity() or not lc.settings["azimuth_dir"]:
             QTimer.singleShot(0, self.run_wizard)
         else:
@@ -388,6 +443,7 @@ class MainWindow(QMainWindow):
             self.say("")
             self.refresh_all()
             self._load_avatar()
+            self.community.refresh()
         self.render()
 
     def _require_update(self):

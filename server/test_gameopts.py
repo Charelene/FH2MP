@@ -275,7 +275,7 @@ class RaceRestrictions(unittest.TestCase):
         self.host.choices, self.guest.choices = (2, .671), (2, .698)
         self.w.log = lambda *a: None
 
-    def test_captured_delta_retains_b_and_late_join_receives_it(self):
+    def test_captured_delta_retains_b_and_existing_guest_receives_it(self):
         self.write_options(*parsed(self.PRIOR))
         self.write_options(*parsed(self.SOUTH), seq=22)
         self.assertEqual(gameopts.car_rule(self.w.game_options), (2, 0, 0))
@@ -348,6 +348,67 @@ class RaceRestrictions(unittest.TestCase):
         before = self.w.game_options
         self.write_options(*gameopts.encode_fields({30: (8, 255)}), seq=22)
         self.assertEqual(self.w.game_options, before)
+
+    def request_race(self, peer):
+        self.w.handle(S.build_packet([lambda w: w.bits(S.MSG_REQUEST_RACE, 7)]), peer.addr)
+
+    def former_owner(self):
+        self.w.ownership_grant(self.host, S.ROUTER_LOBBY, S.TYPE_GAME_OPTIONS, 0, S.LOBBY_ID_BITS)
+        self.write_options(*gameopts.encode_fields({30: (8, 3)}))
+        self.w.ownership_grant(self.guest, S.ROUTER_LOBBY, S.TYPE_GAME_OPTIONS, 0, S.LOBBY_ID_BITS)
+
+    def test_returning_host_uses_its_own_class_before_inviting_guests(self):
+        # Prod 2026-10-26 19:26:14, world 921fdbd1: a previous owner
+        # writes settings then requests a race without a new ownership request.
+        self.former_owner()
+        self.host.choices = self.guest.choices = (4, .850)
+        self.write_options(*gameopts.encode_fields({30: (8, 4)}), seq=21)
+        self.assertEqual(gameopts.car_rule(self.w.game_options)[0], 3)
+        self.request_race(self.host)
+        self.assertEqual(gameopts.car_rule(self.w.game_options)[0], 4)
+        self.assertEqual(gameopts.car_rule(self.guest.gopts_view)[0], 4)
+        self.assertIs(self.w.game_options_owner, self.host)
+        self.assertIs(self.w.pending_race[1], self.host)
+        self.w.start_event(self.host)
+        self.assertEqual(self.w.event['people'], [self.host, self.guest])
+
+    def test_returning_host_retains_multiple_sparse_edits_and_pi_bounds(self):
+        self.former_owner()
+        self.write_options(*gameopts.encode_fields({30: (8, 4), 31: (16, 810), 32: (16, 890)}), seq=21)
+        self.write_options(*gameopts.encode_fields({419: (32, 3)}), seq=22)
+        self.request_race(self.host)
+        self.assertEqual(gameopts.car_rule(self.w.game_options), (4, 810, 890))
+        self.assertEqual(gameopts.lap_field(*self.w.game_options)[1], 3)
+
+    def test_old_owner_echo_cannot_replace_accepted_requesters_settings(self):
+        self.former_owner()
+        old = self.w.game_options
+        self.write_options(*gameopts.encode_fields({30: (8, 4)}), seq=21)
+        self.request_race(self.host)
+        msg = S.transfer_update_message(S.ROUTER_LOBBY, 0, S.LOBBY_ID_BITS, 7, *old)
+        self.w.handle(S.build_packet([msg]), self.guest.addr)
+        self.assertEqual(gameopts.car_rule(self.w.game_options)[0], 4)
+
+    def test_blocked_request_does_not_promote_pending_settings(self):
+        self.former_owner()
+        self.w.start_event(self.guest)
+        self.write_options(*gameopts.encode_fields({30: (8, 4)}), seq=21)
+        self.request_race(self.host)
+        self.assertEqual(gameopts.car_rule(self.w.game_options)[0], 3)
+        self.assertIs(self.w.game_options_owner, self.guest)
+        self.assertEqual(self.w.event['car_rule'][0], 3)
+
+    def test_later_grant_during_invites_cannot_change_advertised_class(self):
+        self.former_owner()
+        self.write_options(*gameopts.encode_fields({30: (8, 4)}), seq=21)
+        self.request_race(self.host)
+        self.w.ownership_grant(self.guest, S.ROUTER_LOBBY, S.TYPE_GAME_OPTIONS, 0, S.LOBBY_ID_BITS)
+        options = gameopts.encode_fields({30: (8, 5)})
+        msg = S.transfer_update_message(S.ROUTER_LOBBY, 0, S.LOBBY_ID_BITS, 0, *options)
+        self.w.handle(S.build_packet([msg]), self.guest.addr)
+        self.request_race(self.guest)
+        self.assertEqual(gameopts.car_rule(self.w.game_options)[0], 4)
+        self.assertIs(self.w.pending_race[1], self.host)
 
     def test_pi_boundaries_use_display_pi_and_reject_nonfinite(self):
         rule = (2, 650, 700)

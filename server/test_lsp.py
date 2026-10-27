@@ -1,6 +1,6 @@
-"""Smoke tests for the LSP handlers against PostgreSQL: FH2MP_PG_DSN=... python3 -I server/test_lsp.py (needs psycopg 3 and the `game`
-catalog schema in the scratch database; the `public` schema is dropped and recreated). Every registered handler is called once with
-default parameters (so a broken SQL statement anywhere shows up), then the main flows run end to end."""
+"""LSP handlers: FH2MP_ENV=test FH2MP_TEST_PG_DSN=... python3 -I server/test_lsp.py (needs psycopg 3 and the `game`
+catalog schema in the scratch database; public is reset). The default-parameter smoke test excludes NotifyRival,
+which needs a specific notification payload; the main covered flows then run end to end."""
 import json
 import io
 import os
@@ -228,15 +228,16 @@ class LayerCountTests(unittest.TestCase):
 
 
 class LspTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
+    def setUp(self):
+        # Handlers mutate scores, gamertags and UGC. Sharing one public schema
+        # made unrelated tests inherit earlier runs and fail in different orders.
         test_db.fresh_db().close()
+        L.TAGS.clear()
+        L.LEVELS.clear()
         L.setup()
+        self.addCleanup(L.DB.close)
         L.CTX.xuid = 0x0009000000000042
         L.TAGS[L.CTX.xuid] = "Tester"
-
-    def setUp(self):
-        L.CTX.xuid = 0x0009000000000042
 
     def test_bots_show_their_names_not_player_numbers(self):
         for nm in L.SB.names[:20]:
@@ -245,7 +246,7 @@ class LspTests(unittest.TestCase):
             self.assertFalse(tag.startswith("Player"), tag)
         self.assertTrue(L.SOCIAL.profile(0x9000000ABCDE)["Gamertag"].startswith("Player"))          # an unknown id still gets a fallback
 
-    def test_every_handler_runs_with_default_parameters(self):
+    def test_handlers_accept_default_parameters_except_rival_notifications(self):
         failures = []
         for (cls, method) in sorted(L.HANDLERS):
             if method == "NotifyRival":          # needs real rival parameters (it queues a notification with typed fields)
@@ -264,6 +265,11 @@ class LspTests(unittest.TestCase):
         self.assertEqual((row["gamertag"], row["career_level"]), ("Tester", 7))
 
     def test_livery_share_and_download(self):
+        # UGC search resolves creators through the durable player record. A real
+        # client logs on before sharing; an in-memory TAGS entry isn't that flow.
+        code, _ = call('Forza.WebServices.User', 'Logon', {'loginData': {
+            'xuid': L.CTX.xuid, 'gamerTag': 'Tester', 'currentCareerLevel': 7}})
+        self.assertEqual(code, 0)
         container = b"vlrc" + struct.pack("<II", 1, 325) + bytes(range(200))
         comp = zlib.compress(container)
         blob = struct.pack("<II", len(comp), len(container)) + comp
