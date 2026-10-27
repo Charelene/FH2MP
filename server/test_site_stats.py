@@ -21,6 +21,7 @@ CREATE TABLE ugc_files (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, type IN
     car_id INTEGER, make_id INTEGER, model_id INTEGER, class_id INTEGER, keyword1 INTEGER DEFAULT 0, keyword2 INTEGER DEFAULT 0, env INTEGER,
     track INTEGER, pi INTEGER, downloads INTEGER DEFAULT 0, likes INTEGER DEFAULT 0, uses INTEGER DEFAULT 0, views INTEGER DEFAULT 0,
     popularity INTEGER DEFAULT 0, removed INTEGER DEFAULT 0);
+CREATE TABLE ugc_blobs (id INTEGER PRIMARY KEY, data BLOB, received INTEGER NOT NULL, total_size INTEGER NOT NULL);
 CREATE TABLE stats_samples (at REAL PRIMARY KEY, online INTEGER NOT NULL, lobbies INTEGER NOT NULL);
 CREATE TABLE mode_results (id INTEGER PRIMARY KEY AUTOINCREMENT, at REAL NOT NULL, mode TEXT NOT NULL, detail TEXT NOT NULL);
 """
@@ -232,6 +233,22 @@ class GarageTests(Base):
     def test_jpeg_preview(self):                                       # photos are stored as the game's JPEG
         self.lsp.DB.execute("UPDATE ugc_files SET preview = ? WHERE id = 1", (ugc.pack(JPEG),))
         self.assertEqual(call(self.lsp, "GET", "/ops/v1/garage/1/preview.png"), (200, JPEG))
+
+    def test_photo_prefers_complete_original_and_falls_back_to_thumbnail(self):
+        db = self.lsp.DB
+        original = JPEG + b'original'
+        db.execute("INSERT INTO ugc_blobs VALUES (?,?,?,?)", (10, ugc.pack(original), len(original), len(original)))
+        db.execute("UPDATE ugc_files SET kind='photo', blob_id=10 WHERE id=1")
+        self.assertEqual(call(self.lsp, "GET", "/ops/v1/garage/1/preview.png"), (200, original))
+        self.assertTrue(self.get("/ops/v1/garage?kind=photo")["items"][0]["preview"])
+        db.execute("UPDATE ugc_blobs SET received=0 WHERE id=10")
+        self.assertEqual(call(self.lsp, "GET", "/ops/v1/garage/1/preview.png"), (200, PNG))
+        db.execute("UPDATE ugc_files SET preview=NULL WHERE id=1")
+        self.assertFalse(self.get("/ops/v1/garage?kind=photo")["items"][0]["preview"])
+        self.assertEqual(call(self.lsp, "GET", "/ops/v1/garage/1/preview.png")[0], 404)
+        db.execute("UPDATE ugc_blobs SET received=total_size, data=? WHERE id=10", (ugc.pack(b'not an image'),))
+        db.execute("UPDATE ugc_files SET preview=? WHERE id=1", (ugc.pack(PNG),))
+        self.assertEqual(call(self.lsp, "GET", "/ops/v1/garage/1/preview.png"), (200, PNG))
 
 
 class PopulationTests(Base):
