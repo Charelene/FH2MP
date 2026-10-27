@@ -8,6 +8,7 @@ import os
 import platform
 import queue
 import secrets
+import socket
 import subprocess
 import sys
 import threading
@@ -29,6 +30,17 @@ PINS = {
 
 def client_id():
     return os.environ.get('FH2MP_ITCH_CLIENT_ID') or buildcfg.get('itch_client_id') or CLIENT_ID
+
+
+class CallbackServer(HTTPServer):
+    # Windows SO_REUSEADDR permits two listeners to claim the same callback.
+    # Use exclusive ownership there; Unix keeps normal restart-safe reuse.
+    allow_reuse_address = sys.platform != 'win32'
+
+    def server_bind(self):
+        if sys.platform == 'win32':
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 class BrowserLogin:
@@ -77,9 +89,9 @@ class BrowserLogin:
                 self.wfile.write(body)
 
         try:
-            self.server = HTTPServer(('127.0.0.1', 34567), Handler)
+            self.server = CallbackServer(('127.0.0.1', 34567), Handler)
         except OSError:
-            self.server = HTTPServer(('127.0.0.1', 0), Handler)
+            self.server = CallbackServer(('127.0.0.1', 0), Handler)
         self.server.timeout = .2
         self.redirect_uri = f'http://127.0.0.1:{self.server.server_port}/callback'
         challenge = base64.urlsafe_b64encode(hashlib.sha256(self.verifier.encode('ascii')).digest()).rstrip(b'=').decode('ascii')
