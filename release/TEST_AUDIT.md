@@ -166,6 +166,7 @@ client/server lifecycle.
 | `test_platform_scanner.sh` (manual diagnostic) | Original hash-checked upstream2.7.2 DLL in an isolated Wine host, with neither game nor FH2MP loaded. Paired committed/revoked private-page controls invoke unchanged original scanner; expected18FA AV verified by instruction/read address/query count. Process-local VirtualQuery import instrumentation only; on-disk hashes preserved. Requires the user's official upstream DLL, so not a CI dependency. Does not measure FH2MP timing influence in real launches. |
 | `test_speed_pb.sh` (added after audit) | Production PB hooks with native save/HUD stand-ins and real Windows TLS; old-behavior control, trap/zone slower/tied/improved runs, delayed/nested/concurrent comparisons, weak lifetime, aborted zones and bounded eviction. Native offsets and actual notification rendering still require manual in-game verification. |
 | `test_restricted_tools.sh` | Actual process detection/platform registration with a temporary helper in its own Wine prefix. |
+| `test_lighting.sh` | Isolated Windows codec/HMAC vector, replay/epoch/length/owner rejection, remote identity matching, stale-state fallback and scoped visual-field restoration. No game loaded or network traffic to clients; real beam/material/pop-up visibility requires manual two-client checks. |
 
 The packaging `--selftest` is an import smoke check. The auxiliary test-build
 workflow builds an artifact, and sign-test validates Authenticode when run with

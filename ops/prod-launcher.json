@@ -1,8 +1,16 @@
 {
   "motd": "",
-  "links": {"website": "https://forza.scuffed.af", "patreon": ""},
-  "supportedAzimuth": [{"version": "1.0.2", "sha256": "42527964f48c90a537f2414200b8598ab9a6f92919bfbe046dbecccb36e7c597"}],
-  "latestAzimuth": "1.0.2",
-  "minLauncher": "1.1.1",
-  "minShim": "1.1.1"
+  "links": {
+    "website": "https://forza.scuffed.af",
+    "patreon": ""
+  },
+  "supportedAzimuth": [
+    {
+      "version": "1.0.3",
+      "sha256": "ebfd5d43a165dcec5d4007b9d41ed5b2ed122fcd02ecfef7e4ed35b40826821f"
+    }
+  ],
+  "latestAzimuth": "1.0.3",
+  "minLauncher": "1.1.2",
+  "minShim": "1.1.2"
 }

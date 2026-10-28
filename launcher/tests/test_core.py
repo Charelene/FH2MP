@@ -525,7 +525,7 @@ class ProtonPathTests(unittest.TestCase):
         st["proton"], st["launch_mode"], st["prefix"] = d, "proton", os.path.join(d, "pfx")
         argv, env, _ = launch.build_command(st, d)
         self.assertEqual(argv[:2], [script, "run"])
-        self.assertEqual(env["WINEDLLOVERRIDES"], "winmm,d3dcompiler_47=n,b")      # Extra Options and the FH2 Mod Platform
+        self.assertEqual(env["WINEDLLOVERRIDES"], "winmm,dwrite,d3dcompiler_47=n,b")      # Extra Options and the FH2 Mod Platform
 
 
 class NoProtonTests(unittest.TestCase):
@@ -569,8 +569,8 @@ def platform_dll(version):
     return b"MZ" + u("ProductName\0\0FH2 Mod Platform\0") + u("ProductVersion\0") + b"\x00\x00" + u(version + "\0")
 
 
-def platform_files(version="2.7.3"):
-    return {"d3dcompiler_47.dll": platform_dll(version), "LICENSE-FH2ModPlatform.txt": b"MIT License Trinculo54",
+def platform_files(version="2.7.4"):
+    return {"d3dcompiler_47.dll": platform_dll(version), "DWrite.dll": platform_dll(version), "LICENSE-FH2ModPlatform.txt": b"MIT License Trinculo54",
             "LICENSE-MinHook.txt": b"MinHook BSD"}
 
 
@@ -578,7 +578,7 @@ class ShimTests(unittest.TestCase):
     DLL = b"MZ....FH2MP-SHIM-VERSION:0.1.0:END...."
 
     def setUp(self):
-        patch = mock.patch.object(shim, 'PLATFORM_DLL_SHA256', hashlib.sha256(platform_dll('2.7.3')).hexdigest())
+        patch = mock.patch.object(shim, 'PLATFORM_DLL_SHA256', hashlib.sha256(platform_dll('2.7.4')).hexdigest())
         patch.start()
         self.addCleanup(patch.stop)
 
@@ -597,10 +597,10 @@ class ShimTests(unittest.TestCase):
             did = shim.install(d, self.DLL, platform=platform_files())
             self.assertEqual(shim.installed(d), ("ours", "0.1.0"))
             self.assertEqual(self.read(d, "fh2-mods", "FH2MP.dll"), self.DLL)
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.3"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.4"))
             for n in ("LICENSE-FH2ModPlatform.txt", "LICENSE-MinHook.txt"):
                 self.assertTrue(os.path.isfile(os.path.join(d, n)), n)
-            self.assertTrue(any("FH2 Mod Platform 2.7.3" in s for s in did))
+            self.assertTrue(any("FH2 Mod Platform 2.7.4" in s for s in did))
             self.assertFalse(os.path.exists(os.path.join(d, "winmm.dll")))
 
     def locked(self, locked_path):
@@ -647,6 +647,30 @@ class ShimTests(unittest.TestCase):
                 shim.install(d, self.DLL, platform=platform_files())
             self.assertEqual(self.read(target), platform_files()["d3dcompiler_47.dll"])
 
+    def test_both_platform_loaders_are_required_and_repaired(self):
+        with tempfile.TemporaryDirectory() as d:
+            shim.install(d, self.DLL, platform=platform_files())
+            self.assertTrue(shim.platform_ok(d))
+            os.unlink(os.path.join(d, 'DWrite.dll'))
+            self.assertFalse(shim.platform_ok(d))
+            self.assertEqual(shim.installed(d)[0], 'old')
+            shim.install(d, self.DLL, platform=platform_files())
+            self.write(b'MZ foreign dwrite', d, 'DWrite.dll')
+            self.assertFalse(shim.platform_ok(d))
+            shim.install(d, self.DLL, platform=platform_files())
+            self.assertTrue(shim.platform_ok(d))
+            self.assertEqual(self.read(d, 'DWrite.dll.old'), b'MZ foreign dwrite')
+
+    @unittest.skipIf(sys.platform in ('win32', 'darwin'), 'needs a case-sensitive file system')
+    def test_conflicting_dwrite_case_variant_is_backed_up(self):
+        with tempfile.TemporaryDirectory() as d:
+            shim.install(d, self.DLL, platform=platform_files())
+            self.write(b'MZ old dwrite loader', d, 'dwrite.dll')
+            self.assertFalse(shim.platform_ok(d))
+            shim.install(d, self.DLL, platform=platform_files())
+            self.assertEqual(self.read(d, 'dwrite.dll.old'), b'MZ old dwrite loader')
+            self.assertTrue(shim.platform_ok(d))
+
     def test_the_winmm_layout_is_moved_over(self):
         """Up to rc5: our winmm.dll next to azimuth.exe, Extra Options (with its settings) in fh2extra."""
         with tempfile.TemporaryDirectory() as d:
@@ -671,22 +695,22 @@ class ShimTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self.write(platform_dll("2.8.0"), d, "d3dcompiler_47.dll")
             shim.install(d, self.DLL, platform=platform_files())
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.3"))          # only the supplied build is supported
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.4"))          # only the supplied build is supported
             self.write(platform_dll("2.7.2"), d, "d3dcompiler_47.dll")
             self.assertEqual(shim.installed(d), ("old", "0.1.0"))                        # too old for this shim: install again
             shim.install(d, self.DLL, platform=platform_files())
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.3"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.4"))
             self.write(b"MZ fh2wheel loader", d, "d3dcompiler_47.dll")                     # fh2wheel's own loader
             self.assertEqual(shim.platform_installed(d), ("foreign", ""))
             did = shim.install(d, self.DLL, platform=platform_files())
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.3"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.4"))
             self.assertEqual(self.read(d, "d3dcompiler_47.dll.old"), b"MZ fh2wheel loader")
             self.assertTrue(any("d3dcompiler_47.dll.old" in s for s in did))
 
     @unittest.skipIf(sys.platform in ("win32", "darwin"), "needs a case-sensitive file system")
     def test_another_loader_in_other_letter_case_is_moved_aside(self):
         with tempfile.TemporaryDirectory() as d:
-            self.write(platform_dll("2.7.3"), d, "d3dcompiler_47.dll")
+            self.write(platform_dll("2.7.4"), d, "d3dcompiler_47.dll")
             self.write(b"MZ radio mod loader", d, "D3DCompiler_47.dll")          # Wine would load this one
             self.assertEqual(shim.platform_installed(d), ("foreign", ""))
             shim.install(d, self.DLL, platform=platform_files())
@@ -730,7 +754,7 @@ class ShimTests(unittest.TestCase):
             shim.uninstall(d)
             self.assertEqual(shim.installed(d), ("none", ""))
             self.assertEqual(self.read(d, "winmm.dll"), b"MZ extra options")
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.3"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.4"))
 
     def test_shim_zip(self):
         from fh2mp_launcher import core, updater
@@ -882,10 +906,10 @@ class UpstreamTests(unittest.TestCase):
             upstream.extract("extraOptions", data + b"x", pin)                         # not the pinned zip
         with self.assertRaises(upstream.UpstreamError):
             upstream.extract("extraOptions", data, dict(pin, dllSha256="0" * 64))     # the DLL inside is not the pinned build
-        pdata, ppin = fake_release("platform", {"d3dcompiler_47.dll": b"MZ-plat", "LICENSE.txt": b"MIT", "LICENSE-MinHook.txt": b"BSD",
+        pdata, ppin = fake_release("platform", {"d3dcompiler_47.dll": b"MZ-plat", "DWrite.dll": b"MZ-plat", "LICENSE.txt": b"MIT", "LICENSE-MinHook.txt": b"BSD",
                                                 "README.txt": b"r"}, "d3dcompiler_47.dll")
         self.assertEqual(upstream.extract("platform", pdata, ppin),
-                         {"d3dcompiler_47.dll": b"MZ-plat", "LICENSE-FH2ModPlatform.txt": b"MIT", "LICENSE-MinHook.txt": b"BSD"})
+                         {"d3dcompiler_47.dll": b"MZ-plat", "DWrite.dll": b"MZ-plat", "LICENSE-FH2ModPlatform.txt": b"MIT", "LICENSE-MinHook.txt": b"BSD"})
 
     def test_pins_point_at_the_authors_releases(self):
         from fh2mp_launcher.constants import UPSTREAM
@@ -931,7 +955,7 @@ class ExtraOptionsTests(unittest.TestCase):
     def test_only_one_extra_options_pin_is_supplied(self):
         from fh2mp_launcher.constants import UPSTREAM
         self.assertEqual(set(UPSTREAM), {'platform', 'extraOptions'})
-        self.assertEqual(UPSTREAM['extraOptions']['version'], '0.3.2')
+        self.assertEqual(UPSTREAM['extraOptions']['version'], '0.3.9')
         with tempfile.TemporaryDirectory() as az:
             self.write(b'MZ-0.3.0-old', az, 'winmm.dll')
             self.assertFalse(shim.extra_options_supported(az))
@@ -1022,6 +1046,40 @@ class ExtraOptionsTests(unittest.TestCase):
                 shim.restore_tls_helper(az)
             self.assertIn("azimuth-tls.dll", str(cm.exception))
             self.assertEqual(self.read(az, "data", "bin", "azimuth-tls.dll"), old_mod)  # untouched
+
+    def test_numbered_helpers_retire_a_legacy_file_without_a_legacy_backup(self):
+        with tempfile.TemporaryDirectory() as az:
+            exe, old = b"MZ-modern-host", b"MZ-obsolete-shared-helper"
+            helpers = {"azimuth-tls-1.dll": b"MZ-title-one", "azimuth-tls-2.dll": b"MZ-title-two"}
+            self.write(exe, az, "azimuth.exe")
+            self.write(old, az, "data", "bin", "azimuth-tls.dll")
+            self.write(b"earlier backup", az, "data", "bin", "azimuth-tls.dll.replaced")
+            for name, data in helpers.items():
+                self.write(data, az, "data", "bin", name)
+            builds = [{"sha256": hashlib.sha256(exe).hexdigest()}]
+            hashes = {name: hashlib.sha256(data).hexdigest() for name, data in helpers.items()}
+            with mock.patch.object(shim, "BUILTIN_AZIMUTH_BUILDS", builds), mock.patch.object(shim, "AZIMUTH_TLS_HELPERS", hashes):
+                self.assertTrue(shim.restore_tls_helper(az))
+                self.assertFalse(os.path.exists(os.path.join(az, shim.TLS_HELPER)))
+                self.assertEqual(shim.restore_tls_helper(az), [])
+            self.assertEqual(self.read(az, "data", "bin", "azimuth-tls.dll.replaced-2"), old)
+            self.assertEqual(self.read(az, "data", "bin", "azimuth-tls.dll.replaced"), b"earlier backup")
+            for name, data in helpers.items():
+                self.assertEqual(self.read(az, "data", "bin", name), data)
+
+    def test_unverified_numbered_helpers_do_not_retire_the_legacy_file(self):
+        for invalid in (None, b"MZ-wrong-version"):
+            with self.subTest(helper=invalid), tempfile.TemporaryDirectory() as az:
+                exe, old = b"MZ-modern-host", b"MZ-obsolete-shared-helper"
+                self.write(exe, az, "azimuth.exe")
+                self.write(old, az, "data", "bin", "azimuth-tls.dll")
+                if invalid is not None:
+                    self.write(invalid, az, "data", "bin", "azimuth-tls-1.dll")
+                with mock.patch.object(shim, "BUILTIN_AZIMUTH_BUILDS", [{"sha256": hashlib.sha256(exe).hexdigest()}]):
+                    with self.assertRaises(shim.ShimError) as cm:
+                        shim.restore_tls_helper(az)
+                self.assertNotIn("Copy data\\bin\\azimuth-tls.dll", str(cm.exception))
+                self.assertEqual(self.read(az, "data", "bin", "azimuth-tls.dll"), old)
 
     def test_helper_mismatch_does_not_identify_an_unknown_file_as_extra_options(self):
         with tempfile.TemporaryDirectory() as az:
@@ -1178,7 +1236,7 @@ class SaveAdoptionTests(unittest.TestCase):
 
 class DevModeTests(unittest.TestCase):
     def setUp(self):
-        patch = mock.patch.object(shim, 'PLATFORM_DLL_SHA256', hashlib.sha256(platform_dll('2.7.3')).hexdigest())
+        patch = mock.patch.object(shim, 'PLATFORM_DLL_SHA256', hashlib.sha256(platform_dll('2.7.4')).hexdigest())
         patch.start()
         self.addCleanup(patch.stop)
         self.home = tempfile.TemporaryDirectory()
@@ -1216,7 +1274,7 @@ class DevModeTests(unittest.TestCase):
         from fh2mp_launcher import core
         from fh2mp_launcher.settings import Settings
         with tempfile.TemporaryDirectory() as d:
-            for name, body in (("azimuth.exe", b"MZ"), ("d3dcompiler_47.dll", platform_dll("2.7.3"))):     # a bare DLL needs the platform
+            for name, body in (("azimuth.exe", b"MZ"), ("d3dcompiler_47.dll", platform_dll("2.7.4")), ("DWrite.dll", platform_dll("2.7.4"))):     # a bare DLL needs the platform
                 with open(os.path.join(d, name), "wb") as f:
                     f.write(body)
             dll = os.path.join(d, "local.dll")

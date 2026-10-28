@@ -8,10 +8,10 @@ import zipfile
 from pathlib import PurePosixPath
 
 from . import azimuth, paths, shim, updater, upstream
-from .constants import AZIMUTH_VERSION, BUILTIN_AZIMUTH_BUILDS
+from .constants import AZIMUTH_TLS_HELPERS, AZIMUTH_VERSION, BUILTIN_AZIMUTH_BUILDS
 from .version import __version__
 
-REVISION = 1
+REVISION = 2
 MIN_AZIMUTH = AZIMUTH_VERSION
 
 
@@ -133,6 +133,12 @@ def validate_azimuth_files(files):
             version = azimuth.exe_version(exe)
         detail = f'Azimuth {version}' if version else 'An unrecognized Azimuth build'
         raise ValueError(f'{detail} selected. Choose the official Azimuth {AZIMUTH_VERSION} ZIP.')
+
+    for name, expected in AZIMUTH_TLS_HELPERS.items():
+        data = files.get('data/bin/' + name, b'')
+        if hashlib.sha256(data).hexdigest() != expected:
+            raise ValueError(f'The Azimuth ZIP is incomplete or contains a mismatched {name}. '
+                             f'Choose the complete official Azimuth {AZIMUTH_VERSION} ZIP.')
 
 
 def validate_archive(path):

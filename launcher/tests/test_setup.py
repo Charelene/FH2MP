@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from fh2mp_launcher import core, identity, setup, shim, upstream, updater
 from fh2mp_launcher.settings import Settings
+from fh2mp_launcher.version import __version__
 
 
 def host(version):
@@ -27,8 +28,13 @@ class SetupFiles(unittest.TestCase):
         self.env = mock.patch.dict(os.environ, FH2MP_LAUNCHER_HOME=str(self.root / 'config'))
         self.env.start()
         self.addCleanup(self.env.stop)
-        builds = [{'version': '1.0.2', 'sha256': hashlib.sha256(host('1.0.2')).hexdigest()}]
+        builds = [{'version': '1.0.3', 'sha256': hashlib.sha256(host('1.0.3')).hexdigest()}]
         patch = mock.patch.object(setup, 'BUILTIN_AZIMUTH_BUILDS', builds)
+        patch.start()
+        self.addCleanup(patch.stop)
+        helpers = {f'azimuth-tls-{n}.dll': hashlib.sha256(data).hexdigest()
+                   for n, data in ((1, b'new one'), (2, b'new two'))}
+        patch = mock.patch.object(setup, 'AZIMUTH_TLS_HELPERS', helpers)
         patch.start()
         self.addCleanup(patch.stop)
         self.folder = self.root / 'azimuth'
@@ -36,8 +42,10 @@ class SetupFiles(unittest.TestCase):
 
     def zip(self, files=None):
         with zipfile.ZipFile(self.archive, 'w') as z:
-            for n, value in (files or {'azimuth.exe': host('1.0.2'), 'data/bin/runtime.dll': b'new',
-                                     'data/azimuth.ini': b'defaults'}).items():
+            contents = {'data/bin/azimuth-tls-1.dll': b'new one', 'data/bin/azimuth-tls-2.dll': b'new two'}
+            contents.update(files or {'azimuth.exe': host('1.0.3'), 'data/bin/runtime.dll': b'new',
+                                     'data/azimuth.ini': b'defaults'})
+            for n, value in contents.items():
                 z.writestr(n, value)
         return str(self.archive)
 
@@ -50,7 +58,7 @@ class SetupFiles(unittest.TestCase):
         setup.install_azimuth(self.zip(), str(self.folder))
         self.assertEqual((self.folder / 'data/azimuth.ini').read_bytes(), b'custom settings')
         self.assertEqual(save.read_bytes(), b'progress')
-        self.assertEqual((self.folder / 'azimuth.exe').read_bytes(), host('1.0.2'))
+        self.assertEqual((self.folder / 'azimuth.exe').read_bytes(), host('1.0.3'))
         backup = next(self.folder.glob('azimuth-before-setup-*'))
         self.assertEqual((backup / 'azimuth.exe').read_bytes(), host('1.0.1'))
 
@@ -60,11 +68,11 @@ class SetupFiles(unittest.TestCase):
         exe.write_bytes(host('1.0.1'))
         bad = [
             {'azimuth.exe': host('1.0.1')},
-            {'azimuth.exe': host('1.0.2') + b'not the pinned build'},
-            {'azimuth.exe': host('1.0.2'), '../escaped': b'x'},
-            {'azimuth.exe': host('1.0.2'), 'C:/escaped': b'x'},
-            {'azimuth.exe': host('1.0.2'), 'AZIMUTH.EXE': b'x'},
-            {'azimuth.exe': host('1.0.2'), 'data/evil.': b'x'},
+            {'azimuth.exe': host('1.0.3') + b'not the pinned build'},
+            {'azimuth.exe': host('1.0.3'), '../escaped': b'x'},
+            {'azimuth.exe': host('1.0.3'), 'C:/escaped': b'x'},
+            {'azimuth.exe': host('1.0.3'), 'AZIMUTH.EXE': b'x'},
+            {'azimuth.exe': host('1.0.3'), 'data/evil.': b'x'},
         ]
         for files in bad:
             with self.subTest(files=list(files)), self.assertRaises(ValueError):
@@ -72,9 +80,23 @@ class SetupFiles(unittest.TestCase):
             self.assertEqual(exe.read_bytes(), host('1.0.1'))
             self.assertEqual(list(self.folder.iterdir()), [exe])
 
+    def test_incomplete_host_update_is_rejected_before_any_write(self):
+        self.folder.mkdir()
+        original = host('1.0.2')
+        (self.folder / 'azimuth.exe').write_bytes(original)
+        for helper in (None, b'wrong helper'):
+            with self.subTest(helper=helper), zipfile.ZipFile(self.archive, 'w') as z:
+                z.writestr('azimuth.exe', host('1.0.3'))
+                if helper is not None:
+                    z.writestr('data/bin/azimuth-tls-1.dll', helper)
+            with self.assertRaisesRegex(ValueError, 'incomplete'):
+                setup.install_azimuth(str(self.archive), str(self.folder))
+            self.assertEqual((self.folder / 'azimuth.exe').read_bytes(), original)
+            self.assertEqual(list(self.folder.iterdir()), [self.folder / 'azimuth.exe'])
+
     def test_symlink_archive_is_rejected(self):
         with zipfile.ZipFile(self.archive, 'w') as z:
-            z.writestr('azimuth.exe', host('1.0.2'))
+            z.writestr('azimuth.exe', host('1.0.3'))
             info = zipfile.ZipInfo('data/link')
             info.external_attr = (stat.S_IFLNK | 0o777) << 16
             z.writestr(info, '/tmp/target')
@@ -108,18 +130,18 @@ class SetupFiles(unittest.TestCase):
         self.assertFalse((self.folder / 'data/bin/runtime.dll').exists())
 
     def test_only_the_supplied_host_is_accepted_and_server_cannot_add_builds(self):
-        self.assertTrue(setup.version_ok('1.0.2'))
-        for version in ['0.9.10', '1.0.1', '1.0.3', '2.0.0', '']:
+        self.assertTrue(setup.version_ok('1.0.3'))
+        for version in ['0.9.10', '1.0.1', '1.0.2', '2.0.0', '']:
             self.assertFalse(setup.version_ok(version))
         lc = core.Launcher(Settings(str(self.root / 'settings.json')), load_identity=False)
         lc.server = {'supportedAzimuth': [{'version': '9.0.0', 'sha256': '0' * 64}]}
-        self.assertEqual([b['version'] for b in lc.builds()], ['1.0.2'])
+        self.assertEqual([b['version'] for b in lc.builds()], ['1.0.3'])
 
     def test_get_requires_current_signed_release_and_install_is_separate(self):
         lc = core.Launcher(Settings(str(self.root / 'settings.json')), load_identity=False)
         packages = setup.Packages(lc)
-        data = b'MZ FH2MP-SHIM-VERSION:1.1.1:END'
-        manifest = {'tag': 'v1.1.1', 'shim': {'version': '1.1.1', 'dllSha256': hashlib.sha256(data).hexdigest()}}
+        data = f'MZ FH2MP-SHIM-VERSION:{__version__}:END'.encode()
+        manifest = {'tag': f'v{__version__}', 'shim': {'version': __version__, 'dllSha256': hashlib.sha256(data).hexdigest()}}
         lc.settings['azimuth_dir'] = str(self.folder)
         with mock.patch.object(updater, 'Updater') as factory, mock.patch.object(core, 'read_shim_zip', return_value=data), mock.patch.object(shim, 'install') as install:
             up = factory.return_value
@@ -127,13 +149,13 @@ class SetupFiles(unittest.TestCase):
             with self.assertRaises(updater.UpdateError):
                 packages.get_shim()
             up.download.assert_not_called()
-            up.fetch_manifest.return_value = {'tag': 'v1.1.2', 'shim': {'version': '1.1.2'}}
+            up.fetch_manifest.return_value = {'tag': 'v999.0.0', 'shim': {'version': '999.0.0'}}
             with self.assertRaises(updater.UpdateError):
                 packages.get_shim()
             up.download.assert_not_called()
             up.fetch_manifest.return_value = manifest
-            self.assertEqual(packages.get_shim(), '1.1.1')
-            up.fetch_manifest.assert_called_with(tag='v1.1.1')
+            self.assertEqual(packages.get_shim(), __version__)
+            up.fetch_manifest.assert_called_with(tag=f'v{__version__}')
             install.assert_not_called()
             packages.install_shim()
             install.assert_called_once_with(str(self.folder), data, manifest['shim']['dllSha256'])
@@ -143,9 +165,9 @@ class SetupFiles(unittest.TestCase):
         lc.settings['azimuth_dir'] = str(self.folder)
         target = self.folder / 'fh2-mods/FH2MP.dll'
         target.parent.mkdir(parents=True)
-        dll = b'MZ FH2MP-SHIM-VERSION:1.1.1:END release candidate'
+        dll = f'MZ FH2MP-SHIM-VERSION:{__version__}:END release candidate'.encode()
         target.write_bytes(dll)
-        lc.manifest = {'tag': 'v1.1.1', 'shim': {'version': '1.1.1', 'dllSha256': hashlib.sha256(dll).hexdigest()}}
+        lc.manifest = {'tag': f'v{__version__}', 'shim': {'version': __version__, 'dllSha256': hashlib.sha256(dll).hexdigest()}}
         packages = setup.Packages(lc)
         self.assertTrue(packages.shim_current())
         target.write_bytes(dll + b'older candidate with the same marker')
@@ -166,7 +188,7 @@ class WizardFlow(unittest.TestCase):
         self.env = mock.patch.dict(os.environ, FH2MP_LAUNCHER_HOME=str(self.root / 'config'))
         self.env.start()
         self.addCleanup(self.env.stop)
-        builds = [{'version': '1.0.2', 'sha256': hashlib.sha256(host('1.0.2')).hexdigest()}]
+        builds = [{'version': '1.0.3', 'sha256': hashlib.sha256(host('1.0.3')).hexdigest()}]
         patch = mock.patch.object(setup, 'BUILTIN_AZIMUTH_BUILDS', builds)
         patch.start()
         self.addCleanup(patch.stop)
@@ -297,7 +319,7 @@ class WizardFlow(unittest.TestCase):
         self.w.itch_profile = {'id': 7}
         self.w.auto_az.setChecked(True)
         def immediate(work, ok, banner, bar=None, failed=None):
-            ok('1.0.2')
+            ok('1.0.3')
         with mock.patch.object(self.w, '_operation', side_effect=immediate), mock.patch.object(self.w, '_archive_next') as advance:
             self.w._select_archive('verified.zip')
             advance.assert_called_once()
@@ -308,7 +330,7 @@ class WizardFlow(unittest.TestCase):
     def test_destination_accepts_an_existing_compatible_azimuth(self):
         folder = self.root / 'existing'
         folder.mkdir()
-        (folder / 'azimuth.exe').write_bytes(host('1.0.2'))
+        (folder / 'azimuth.exe').write_bytes(host('1.0.3'))
         self.w.destination_edit.setText(str(folder))
         with mock.patch.object(self.lc, 'builds', return_value=setup.BUILTIN_AZIMUTH_BUILDS), mock.patch.object(self.w, '_use_azimuth') as use:
             self.w._fresh_install()
@@ -399,7 +421,7 @@ class UpgradeLeftovers(SetupFiles):
         (self.folder / 'data/bin').mkdir(parents=True)
         (self.folder / 'azimuth.exe').write_bytes(host('1.0.1'))
         (self.folder / 'data/bin/azimuth-tls.dll').write_bytes(b'old helper')
-        archive = self.zip({'azimuth.exe': host('1.0.2'), 'data/bin/azimuth-tls-1.dll': b'new one',
+        archive = self.zip({'azimuth.exe': host('1.0.3'), 'data/bin/azimuth-tls-1.dll': b'new one',
                             'data/bin/azimuth-tls-2.dll': b'new two'})
         setup.install_azimuth(archive, str(self.folder))
         self.assertFalse((self.folder / 'data/bin/azimuth-tls.dll').exists())
@@ -409,7 +431,7 @@ class UpgradeLeftovers(SetupFiles):
     def test_extra_options_upgrade_refreshes_plugin_but_preserves_preferences(self):
         from fh2mp_launcher.constants import UPSTREAM
         self.folder.mkdir()
-        (self.folder / 'azimuth.exe').write_bytes(host('1.0.2'))
+        (self.folder / 'azimuth.exe').write_bytes(host('1.0.3'))
         plugin = 'mods/Extra Options - Garage Revving/plugins/EO_GarageEngineRev.dll'
         prefs = plugin[:-3] + 'ini'
         dll = b'MZ-new-extra'

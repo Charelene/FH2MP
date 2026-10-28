@@ -3,8 +3,10 @@ import json
 import os
 
 from . import buildcfg, paths
+from .constants import API_BASES
 
 DEFAULTS = {
+    "dev_api_revision": 1,          # distinguishes the retired default from a newly selected SSH tunnel
     "setup_revision": 0,             # independent of account/key existence; completed only on the wizard's final page
     "azimuth_dir": "",
     "channel": "stable",            # stable | dev
@@ -38,15 +40,21 @@ class Settings:
             self.data["api_base"] = os.environ.get("FH2MP_API") or buildcfg.get("api_base")
             self.data["allow_insecure"] = bool(buildcfg.get("allow_insecure", False))
         if paths.is_dev():
-            # until the dev domain has DNS, the dev stack is reached through `ssh -N -L 127.0.0.1:5180:127.0.0.1:5180 <vps>`
             self.data.update(channel="dev", allow_insecure=True, pin_shim=True,
-                             api_base=os.environ.get("FH2MP_API", "http://127.0.0.1:5180"))
+                             api_base=os.environ.get("FH2MP_API") or buildcfg.get("api_base") or API_BASES["dev"])
         try:
             with open(self.path, encoding="utf-8") as f:
                 loaded = json.load(f)
             self.data.update({k: v for k, v in loaded.items() if k in DEFAULTS})
         except (OSError, ValueError):
-            pass
+            loaded = {}
+        if paths.is_dev() and buildcfg.get("migrate_legacy_dev_api", False):
+            if (loaded.get("dev_api_revision", 0) < 1
+                    and self.data["api_base"] == "http://127.0.0.1:5180"):
+                self.data["api_base"] = buildcfg.get("api_base") or API_BASES["dev"]
+            self.data["dev_api_revision"] = 1
+        if os.environ.get("FH2MP_API"):
+            self.data["api_base"] = os.environ["FH2MP_API"]
 
     def __getitem__(self, k):
         return self.data[k]

@@ -282,7 +282,7 @@ class MainWindow(QMainWindow):
         if not info.found:
             return "bad", "azimuth.exe not found.", "Change...", self.open_settings
         if not info.supported:
-            return "warn", "This launcher requires Azimuth 1.0.2 and its supplied mod versions.", "Run setup", self.run_wizard
+            return "warn", "This launcher requires Azimuth 1.0.3 and its supplied mod versions.", "Run setup", self.run_wizard
         if not info.game_folder:
             return "warn", "Azimuth can't find the game files.", "Azimuth setup", self._azimuth_clicked
         if s["offline_mode"]:

@@ -72,13 +72,15 @@ in both modes. Turn the setting off to play online again. The Play menu also off
 another computer. Keep that code private.
 
 **Updates.** The launcher checks the signed release manifest and updates itself and the shim. Every release is signed; nothing unsigned is
-installed. The server refuses launchers and shims older than the minimum it announces (rc5 at the moment), so an old install shows
+installed. The server refuses launchers and shims older than the minimum it announces (1.1.2 after this release is deployed), so an old install shows
 "update required" and has to update before it can play.
 
+Version 1.1.2 uses Azimuth 1.0.3, FH2 Extra Options 0.3.9 and FH2 Mod Platform 2.7.4. Setup installs the supported combination and preserves your existing settings and saves. Headlights, indicators and hazard lights are visible between players using the updated shim.
+
 **Linux.** Azimuth runs under Wine/Proton. The launcher picks the newest Proton it finds in the usual Steam folders and starts the game with
-`WINEDLLOVERRIDES="winmm,d3dcompiler_47=n,b"`, so Wine loads FH2 Extra Options (`winmm.dll`) and the FH2 Mod Platform (`d3dcompiler_47.dll`)
+`WINEDLLOVERRIDES="winmm,dwrite,d3dcompiler_47=n,b"`, so Wine loads FH2 Extra Options (`winmm.dll`) and the FH2 Mod Platform (`DWrite.dll` and `d3dcompiler_47.dll`)
 instead of its own DLLs (see the platform's [Linux notes](https://github.com/Trinculo54/fh2-mod-platform/blob/main/docs/linux.md)). Starting
-Azimuth from Steam instead? Use the same value in its launch options: `WINEDLLOVERRIDES="winmm,d3dcompiler_47=n,b" %command%`. Set the Proton
+Azimuth from Steam instead? Use the same value in its launch options: `WINEDLLOVERRIDES="winmm,dwrite,d3dcompiler_47=n,b" %command%`. Set the Proton
 script, prefix or a custom launch command once in Settings if yours are elsewhere. Tested on Proton-CachyOS 11; distro Wine is usually too old
 for Azimuth.
 

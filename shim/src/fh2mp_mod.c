@@ -1,7 +1,7 @@
 /*
  * FH2MP shim: fh2-mods\FH2MP.dll, a mod for the FH2 Mod Platform (Trinculo54, MIT; third_party/fh2-mod-platform).
  *
- * The platform is the d3dcompiler_47.dll next to azimuth.exe. It loads every DLL in fh2-mods and calls its fh2mod_init, so FH2MP
+ * The platform is DWrite.dll (and the identical d3dcompiler_47.dll) next to azimuth.exe. It loads every DLL in fh2-mods and calls its fh2mod_init, so FH2MP
  * runs next to the other FH2 mods (FH2 Extra Options keeps winmm.dll, which is its own) and changes the game through the platform's
  * shared hooks: each change is checked against the exe on disk, Extra Options' patches and every other mod's hooks, and is listed in
  * the platform's crash reports.
@@ -20,6 +20,8 @@
  * Only KERNEL32 is used (no CRT).
  */
 #define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include "fh2mod.h"
 
@@ -33,7 +35,7 @@ typedef struct {
     unsigned long long fnv1a64;
 } hook_build;
 static const hook_build g_hook_builds[] = {
-    {0x2860b0u, 9u, 0x4288f958fe9625cfull}, /* azimuth.exe 1.0.2 (sha256 42527964...7c597); resolver +286fd2 */
+    {0x2909b0u, 9u, 0x4288f958fe9625cfull}, /* azimuth.exe 1.0.3 (sha256 ebfd5d43...26821f); resolver +2918d2 */
 };
 
 /* forza_durango_release_final.exe 1.0.0.64 (image identity, as checked by the Extra Options mod) */
@@ -243,7 +245,7 @@ static int line_has(const char *l, int n, const char *pat)
 static int line_wanted(const char *l, int n)
 {
     static const char *const keep[] = {"attached", "session:", "identity:", "late:", "not patched", "NOT ", "unexpected", "fail", "error", "could not",
-                                       "refus", "crash", "xsbody", "bindfix", "gamedb:", "rivalsleave", "probe:", 0};
+                                       "refus", "crash", "xsbody", "bindfix", "gamedb:", "rivalsleave", "probe:", "lighting:", 0};
     int i;
     for (i = 0; keep[i]; i++) {
         if (line_has(l, n, keep[i])) {
@@ -537,6 +539,7 @@ static void fh_ensure_bound(fh_sock s)
 typedef int(WINAPI *fh_f_wsasendto)(fh_sock, void *, DWORD, DWORD *, DWORD, const void *, int, void *, void *);
 static fh_f_wsasendto g_r_wsasendto;
 static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *to, int tolen);
+static void lighting_note_ticket(const void *to, int len, const unsigned char *nonce);
 
 #ifdef FH2MP_DEBUG_BUILD
 /*
@@ -2850,11 +2853,14 @@ static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *
     wb.len = sizeof t;
     wb.buf = t;
     g_r_wsasendto(s, &wb, 1, &sent, 0, to, tolen, NULL, NULL);
+    lighting_note_ticket(to, tolen, t + 36);
     if (n <= 3) {
         log_begin();
         log_raw("ticket: sent before OpenConnection\n");
     }
 }
+
+#include "lighting_sync.inc"
 
 /*
  * #64: a Monthly Rival started from the pause menu inside an online session loaded for ever. The menu's launch (RivalsModule
@@ -4747,6 +4753,7 @@ static DWORD WINAPI late_init(LPVOID unused)
         {
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_SPEEDPB", env, 8) == 0) patch_speed_pb();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_LIGHTING", env, 8) == 0) patch_lighting();
         }
         {
             wchar_t env[8];

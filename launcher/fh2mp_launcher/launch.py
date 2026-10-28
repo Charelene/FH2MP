@@ -87,7 +87,7 @@ def gpu_check_advice(settings):
         return ""
     return ("Azimuth stopped at the graphics check (\"Your graphics card or driver is not supported\"). Your GPU is probably fine: on some "
             "AMD systems the game only starts from Steam. Workaround: leave this launcher open, add Azimuth to Steam as a non-Steam game with "
-            "the launch option WINEDLLOVERRIDES=\"winmm,d3dcompiler_47=n,b\" %command% , and start it from Steam.")
+            "the launch option WINEDLLOVERRIDES=\"winmm,dwrite,d3dcompiler_47=n,b\" %command% , and start it from Steam.")
 
 
 def resolve_proton(path):

@@ -508,7 +508,7 @@ class Wizard(AccountWizard):
             return
         if not azimuth.inspect(folder, self.lc.builds()).supported:
             self.update_folder = folder
-            self.acquire_notice.setText('This installation needs Azimuth 1.0.2. Your settings and saves will be kept.')
+            self.acquire_notice.setText('This installation needs Azimuth 1.0.3. Your settings and saves will be kept.')
             self.stack.setCurrentIndex(self.ACQUIRE)
             return
         self._use_azimuth(folder)
@@ -551,7 +551,7 @@ class Wizard(AccountWizard):
             self._after_multiplayer()
 
     def _acquire_page(self):
-        w, lay = self._page('Get Azimuth 1.0.2', 'Choose how to get Azimuth.')
+        w, lay = self._page('Get Azimuth 1.0.3', 'Choose how to get Azimuth.')
         self.acquire_notice = w.subtitle
         choices = QHBoxLayout()
         self.auto_az = QRadioButton('Download in launcher')
@@ -622,7 +622,7 @@ class Wizard(AccountWizard):
 
     def _zip_browse(self):
         from .widgets import open_file
-        path = open_file(self, 'Select Azimuth 1.0.2 ZIP', os.path.expanduser('~'), 'ZIP files (*.zip)')
+        path = open_file(self, 'Select Azimuth 1.0.3 ZIP', os.path.expanduser('~'), 'ZIP files (*.zip)')
         if path:
             self._select_archive(path)
 
@@ -634,9 +634,9 @@ class Wizard(AccountWizard):
         self.zip_name.setText('Checking ZIP…')
         def ok(_version):
             self.archive = self._validated_archive = path
-            self.zip_name.setText(os.path.basename(path) + ' (Azimuth 1.0.2)')
+            self.zip_name.setText(os.path.basename(path) + ' (Azimuth 1.0.3)')
             if self.auto_az.isChecked():
-                self.itch_status.setText('Azimuth 1.0.2 is ready to install.')
+                self.itch_status.setText('Azimuth 1.0.3 is ready to install.')
                 self.itch_get.hide()
             self.acquire_next.setEnabled(True)
             if self.auto_az.isChecked():
@@ -682,7 +682,7 @@ class Wizard(AccountWizard):
 
     def _archive_next(self):
         if not self.archive or self.archive != self._validated_archive:
-            self.acquire_banner.show_message('Select an Azimuth 1.0.2 ZIP first.', 'warn')
+            self.acquire_banner.show_message('Select an Azimuth 1.0.3 ZIP first.', 'warn')
             return
         if self.update_folder:
             self._install_azimuth(self.update_folder, self.acquire_banner, self.acquire_progress)
