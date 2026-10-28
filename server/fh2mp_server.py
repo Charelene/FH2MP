@@ -27,6 +27,7 @@ import traceback
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import lighting  # noqa: E402
 import traffic as traffic_mod  # noqa: E402
 import gameopts  # noqa: E402
 import player_setup  # noqa: E402
@@ -3673,6 +3674,7 @@ class Hub:
         if self.udp_auth not in UDP_AUTH_MODES:
             raise SystemExit(f"FH2MP_UDP_AUTH={self.udp_auth!r}: expected one of {', '.join(UDP_AUTH_MODES)}")
         self.keys = {}        # xuid -> {ticket key: valid until}: the signed-in sessions of a player ("auth <xuid> <ip> <key hex>")
+        self.ticket_epochs = {}  # native address -> last verified ticket nonce, for opt-in lighting
         self.bound = {}       # address -> (xuid, valid until, key): the address showed a valid ticket for xuid (kept while it is routed)
         self.nonces = {}      # (xuid, nonce) -> forget after: tickets already used
         self.auth_log = {}
@@ -3929,6 +3931,7 @@ class Hub:
         if held is None or held[0] != xuid or held[2] != key:
             self.log(f"auth: ticket for {xuid:#x} from {addr[0]}:{addr[1]} accepted")
         self.bound[addr] = (xuid, now + TICKET_BIND_SECONDS, key)
+        self.ticket_epochs[addr] = nonce
 
     def revoke(self, xuid: int) -> None:
         """A ban or kick: forget the sign-in, the lobby assignment, and end every live connection of this player."""
@@ -3967,6 +3970,9 @@ class Hub:
             return None
 
     def handle(self, data: bytes, addr) -> None:
+        if len(data) >= 19 and data[11:19] == lighting.MAGIC:
+            lighting.handle(self, data, addr)
+            return
         if len(data) == TICKET_LEN and data[11:19] == TICKET_MAGIC:
             self.ticket(data, addr)
             return
@@ -4149,6 +4155,9 @@ class Hub:
                 del self.keys[xuid]
         for addr in [a for a, b in self.bound.items() if b[1] < now and a not in self.route]:
             del self.bound[addr]        # kept while the connection lives: a sign-out ends what its key opened (Hub.logout)
+        for addr in list(self.ticket_epochs):
+            if addr not in self.bound:
+                del self.ticket_epochs[addr]
         if len(self.nonces) > 1000:
             for k in [k for k, until in self.nonces.items() if until < now]:
                 del self.nonces[k]

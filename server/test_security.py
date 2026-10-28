@@ -120,6 +120,19 @@ class UdpTickets(unittest.TestCase):
         w = self.hub.route.get(addr)
         return w is not None and addr in w.peers
 
+    def test_lighting_epoch_changes_only_after_a_verified_fresh_ticket(self):
+        addr = (self.ip, 4001)
+        first = make_ticket(0xA, "fh2.tokA")
+        self.hub.handle(first, addr)
+        self.assertEqual(self.hub.ticket_epochs[addr], first[36:52])
+        bad = make_ticket(0xA, "wrong-key")
+        self.hub.handle(bad, addr)
+        self.assertEqual(self.hub.ticket_epochs[addr], first[36:52])
+        second = make_ticket(0xA, "fh2.tokA")
+        self.hub.handle(second, addr)
+        self.hub.handle(first, addr)  # replay cannot restore a superseded epoch
+        self.assertEqual(self.hub.ticket_epochs[addr], second[36:52])
+
     def test_ticket_admits_its_own_xuid_only(self):
         a, b = (self.ip, 4001), (self.ip, 4002)
         self.hub.handle(make_ticket(0xA, "fh2.tokA"), a)

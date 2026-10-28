@@ -1,10 +1,10 @@
 /*
  * fh2mod.h -- FH2 Mod Platform API (MIT licensed, see LICENSE).
  *
- * The FH2 Mod Platform is the d3dcompiler_47.dll next to azimuth.exe. It
- * loads every DLL in the fh2-mods folder and offers them the services in
- * FH2ModApi below, so mods don't each reinvent them and don't step on each
- * other's files.
+ * The FH2 Mod Platform is the d3dcompiler_47.dll (and, the same file, the
+ * DWrite.dll) next to azimuth.exe. It loads every DLL in the fh2-mods folder
+ * and offers them the services in FH2ModApi below, so mods don't each
+ * reinvent them and don't step on each other's files.
  *
  * A mod is a 64-bit Windows DLL in fh2-mods that exports:
  *

@@ -102,18 +102,23 @@ ssh_ 'curl -fsS http://127.0.0.1:5080/v1/status' >/dev/null || { echo "the LSP d
 echo "== 4/6 game server"
 if [ $skip_game = 1 ]; then echo "skipped"; else ops/deploy.sh prod "$host" "$key" --only game --yes-prod; fi
 
-echo "== 5/6 minimum versions -> $ver"
-ssh_ "sudo bash -s" "$cfg" "$ver" <<'REMOTE'
+echo "== 5/6 minimum versions and Azimuth compatibility -> $ver"
+compatibility=$(launcher/.venv/bin/python -I -c "
+import base64, json, runpy
+c = runpy.run_path('launcher/fh2mp_launcher/constants.py')
+print(base64.b64encode(json.dumps({'latestAzimuth': c['AZIMUTH_VERSION'], 'supportedAzimuth': c['BUILTIN_AZIMUTH_BUILDS']}).encode()).decode())")
+ssh_ "sudo bash -s" "$cfg" "$ver" "$compatibility" <<'REMOTE'
 set -euo pipefail
-cfg=$1; ver=$2
+cfg=$1; ver=$2; compatibility=$3
 [ -f "$cfg" ] || { echo "$cfg does not exist: set FH2MP_LAUNCHER_CONFIG for the LSP first (docs/environments.md)"; exit 1; }
 cp -a "$cfg" "$cfg.bak-$(date +%Y%m%d-%H%M%S)"
-python3 - "$cfg" "$ver" <<'PY'
-import json, os, sys
-p, v = sys.argv[1:3]
+python3 - "$cfg" "$ver" "$compatibility" <<'PY'
+import base64, json, os, sys
+p, v, compatibility = sys.argv[1:4]
 d = json.load(open(p))
 d["minLauncher"] = v
 d["minShim"] = v
+d.update(json.loads(base64.b64decode(compatibility)))
 tmp = p + ".new"
 with open(tmp, "w") as f:
     json.dump(d, f, indent=2); f.write("\n")
@@ -135,8 +140,10 @@ printf 'header = "Authorization: Bearer %s"\n' "$release_ops_token" | curl --con
 REMOTE
 sleep 2
 ssh_ 'curl -fsS http://127.0.0.1:5080/v1/launcher/config' | python3 -I -c "
-import json, sys
+import base64, json, sys
 c = json.load(sys.stdin)
+expected_compatibility = json.loads(base64.b64decode('$compatibility'))
+assert all(c.get(k) == v for k, v in expected_compatibility.items()), 'server reports stale Azimuth compatibility metadata'
 got = (c.get('minLauncher'), c.get('minShim'))
 print('server reports minLauncher/minShim:', got)
 sys.exit(0 if got == ('$ver', '$ver') else 'the server does not report $ver: a setting saved through the operator API (PUT /ops/v1/config) overrides the file; set it there too')"

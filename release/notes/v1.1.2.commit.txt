@@ -1,0 +1,12 @@
+Prepare 1.1.2 lighting sync and Azimuth 1.0.3 dependency update
+
+Synchronize actual headlight and indicator state through authenticated,
+world-scoped snapshots and apply it during remote-car visual publication.
+Use the native car-network object's key to identify the target vehicle.
+
+Pin Azimuth 1.0.3, Extra Options 0.3.9 and Mod Platform 2.7.4, including
+both platform loaders and the full Extra Options plugin bundle. Preserve
+preferences and verify per-title helpers before replacing an installation.
+
+Prepare versioned packages, release notes and compatibility metadata for
+the existing signed Windows/Linux release and production rollout workflow.

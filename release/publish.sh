@@ -52,6 +52,7 @@ check shim/test_net_strings.sh
 check shim/test_torque_load.sh
 check shim/test_speed_pb.sh
 check shim/test_restricted_tools.sh
+check shim/test_lighting.sh
 check .venv-pg/bin/python -W ignore -I release/run_server_tests.py
 check .venv-pg/bin/python -I release/check_test_mutations.py --area server
 if [ -n "${FH2MP_TEST_PG_DSN:-}" ]; then

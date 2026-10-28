@@ -467,7 +467,7 @@ class Launcher:
         if not info.found:
             raise PlayBlocked("azimuth.exe not found.", "no_azimuth")
         if not info.supported:
-            raise PlayBlocked("This launcher requires Azimuth 1.0.2. Run setup to install the supported combination.", "azimuth_unsupported")
+            raise PlayBlocked("This launcher requires Azimuth 1.0.3. Run setup to install the supported combination.", "azimuth_unsupported")
         kind, _v = self.shim_state()
         if kind == "old":
             raise PlayBlocked("The FH2MP shim needs installing again.", "no_shim")
@@ -647,7 +647,7 @@ class Launcher:
         if not info.found:
             raise PlayBlocked("azimuth.exe not found.", "no_azimuth")
         if not info.supported:
-            raise PlayBlocked("This launcher requires Azimuth 1.0.2. Run setup to install the supported combination.", "azimuth_unsupported")
+            raise PlayBlocked("This launcher requires Azimuth 1.0.3. Run setup to install the supported combination.", "azimuth_unsupported")
         try:
             self.repair_tls_helper()
         except shim.ShimError as e:

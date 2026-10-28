@@ -13,9 +13,9 @@ import re
 import shutil
 
 from . import paths, upstream
-from .constants import UPSTREAM
+from .constants import AZIMUTH_TLS_HELPERS, BUILTIN_AZIMUTH_BUILDS, UPSTREAM
 from .constants import (EXTRA_OPTIONS_DIR, EXTRA_OPTIONS_DLL, EXTRA_OPTIONS_DLL_SHA256, EXTRA_OPTIONS_VERSION, LEGACY_SHIM_DLL, LSP_FILE,
-                        MODS_DIR, PLATFORM_DLL, PLATFORM_DLL_SHA256, PLATFORM_FILES, PLATFORM_VERSION, SESSION_FILE, SHIM_DLL)
+                        MODS_DIR, PLATFORM_DLL, PLATFORM_DLL_SHA256, PLATFORM_FILES, PLATFORM_LOADERS, PLATFORM_VERSION, SESSION_FILE, SHIM_DLL)
 
 MARKER = re.compile(rb"FH2MP-SHIM-VERSION:([0-9A-Za-z.+-]{1,32}):END")
 EXTRA_FILES_PREFIX = "FH2_ExtraOptions."
@@ -95,15 +95,19 @@ def platform_installed(folder):
 
 
 def platform_ok(folder):
-    """Every loader with this name must be the exact supplied platform build."""
+    """Both loader names and every case variant must match the supplied build."""
     pk, pv = platform_installed(folder)
     if pk != "platform" or pv != PLATFORM_VERSION:
         return False
     try:
-        for path in _ci_paths(folder, PLATFORM_DLL):
-            with open(path, 'rb') as f:
-                if hashlib.sha256(f.read()).hexdigest() != PLATFORM_DLL_SHA256:
-                    return False
+        for loader in PLATFORM_LOADERS:
+            candidates = _ci_paths(folder, loader)
+            if not candidates:
+                return False
+            for path in candidates:
+                with open(path, 'rb') as f:
+                    if hashlib.sha256(f.read()).hexdigest() != PLATFORM_DLL_SHA256:
+                        return False
     except OSError:
         return False
     return True
@@ -165,20 +169,24 @@ def _install_platform(folder, files):
         return []
     pk, pv = platform_installed(folder)
     did = []
-    for path in _ci_paths(folder, PLATFORM_DLL):        # another mod's loader (fh2wheel's, a radio mod's) or an older platform
-        with open(path, "rb") as f:
-            if platform_version_of(f.read()):
-                # Keep the canonical DLL for atomic_write's Windows loaded-file replacement. Deleting it here fails with
-                # ERROR_SHARING_VIOLATION before busy_ok can rename the loaded copy out of the way.
-                shutil.copy2(path, path + '.before-fh2mp-setup')
-                if os.path.normcase(path) != os.path.normcase(os.path.join(folder, PLATFORM_DLL)):
-                    _move_aside(path, "old")
-                continue
-        moved = _move_aside(path, "old")
-        did.append(f"kept the other {os.path.basename(path)} as {os.path.basename(moved)}: only one d3dcompiler_47.dll can load, and "
-                   "the platform loads fh2wheel.dll itself; another mod must go in fh2-mods")
+    # Inspect both names: an old compiler loader can take precedence over DWrite.
+    # Keep every displaced file, including case variants on Linux.
+    for loader in PLATFORM_LOADERS:
+        for path in _ci_paths(folder, loader):
+            with open(path, "rb") as f:
+                ours = bool(platform_version_of(f.read()))
+            if ours and os.path.normcase(path) == os.path.normcase(os.path.join(folder, loader)):
+                saved = path + '.before-fh2mp-setup'
+                n = 1
+                while os.path.lexists(saved):
+                    n += 1
+                    saved = f"{path}.before-fh2mp-setup-{n}"
+                shutil.copy2(path, saved)
+            else:
+                saved = _move_aside(path, "old")
+            did.append(f"kept the previous {os.path.basename(path)} as {os.path.basename(saved)}")
     for name in PLATFORM_FILES:
-        paths.atomic_write(os.path.join(folder, name), files[name], 0o755 if name == PLATFORM_DLL else 0o644, busy_ok=True)
+        paths.atomic_write(os.path.join(folder, name), files[name], 0o755 if name in PLATFORM_LOADERS else 0o644, busy_ok=True)
     did.append(f"installed FH2 Mod Platform {PLATFORM_VERSION}" + (f" (was {pv})" if pv else ""))
     return did
 
@@ -223,7 +231,7 @@ def install(folder, dll_bytes, expect_sha256=None, platform=None):
     if not blob_version(dll_bytes):
         raise ShimError("that file is not an FH2MP shim")
     if platform is None and not platform_ok(folder):
-        raise ShimError(f"The FH2 Mod Platform {PLATFORM_VERSION} (d3dcompiler_47.dll) is not installed.")
+        raise ShimError(f"The FH2 Mod Platform {PLATFORM_VERSION} (DWrite.dll and d3dcompiler_47.dll) is not installed.")
     try:
         did = migrate_legacy(folder)
         if platform is not None:
@@ -346,9 +354,35 @@ def restore_tls_helper(folder):
     """Restore a local backup only when its hash is accepted by this azimuth.exe.
     Keep both the backup and displaced helper; failed writes leave the current helper in place.
     """
+    path = os.path.join(folder, TLS_HELPER)
+    if os.path.isfile(path):
+        # Modern Azimuth no longer loads the shared helper. Preserve a leftover
+        # from an in-place/manual upgrade instead of demanding an obsolete file.
+        try:
+            with open(os.path.join(folder, "azimuth.exe"), "rb") as f:
+                modern = hashlib.sha256(f.read()).hexdigest() == BUILTIN_AZIMUTH_BUILDS[0]["sha256"]
+            if modern:
+                for name, expected in AZIMUTH_TLS_HELPERS.items():
+                    helper = os.path.join(os.path.dirname(path), name)
+                    with open(helper, "rb") as f:
+                        if hashlib.sha256(f.read()).hexdigest() != expected:
+                            raise ShimError(f"Azimuth's helper does not match the supported installation: {helper}. "
+                                            "Reinstall Azimuth 1.0.3 using launcher setup, then press Play again.")
+                if os.path.islink(path):
+                    raise ShimError(f"Azimuth's obsolete helper is a symbolic link: {path}.")
+                moved = path + ".replaced"
+                n = 1
+                while os.path.lexists(moved):
+                    n += 1
+                    moved = f"{path}.replaced-{n}"
+                shutil.copy2(path, moved)
+                os.unlink(path)
+                return [f"retired Azimuth's obsolete shared helper (kept as {os.path.basename(moved)})"]
+        except OSError as e:
+            raise ShimError(f"Could not retire Azimuth's obsolete helper: {e}. "
+                            "Reinstall Azimuth 1.0.3 using launcher setup, then press Play again.") from None
     if not tls_helper_modified(folder):
         return []
-    path = os.path.join(folder, TLS_HELPER)
     try:
         names = sorted(os.listdir(os.path.dirname(path)))
         pattern = re.compile(r"azimuth-tls\.dll\.(?:old|bak|backup|replaced)(?:-?\d+)?", re.I)

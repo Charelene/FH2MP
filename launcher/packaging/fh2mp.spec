@@ -17,7 +17,7 @@ if os.environ.get("FH2MP_MIRROR"):          # ... and a signed release mirror pa
     extra_datas.append((os.environ["FH2MP_MIRROR"], "fh2mp_launcher/mirror"))
 
 a = Analysis(
-    [os.path.join(SPECPATH, "entry.py")],
+    [os.path.join(SPECPATH, "dev_entry.py" if os.environ.get("FH2MP_DEV_BUILD") == "1" else "entry.py")],
     pathex=[root],
     datas=[(os.path.join(root, "fh2mp_launcher", "assets"), "fh2mp_launcher/assets")] + extra_datas,
     hiddenimports=hidden,

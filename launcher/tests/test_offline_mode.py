@@ -102,6 +102,7 @@ class OfflineModeTests(OfflineFixture, unittest.TestCase):
         dll = self.folder / "fh2-mods" / shim.SHIM_DLL
         dll.parent.mkdir(exist_ok=True)
         dll.write_bytes(b"FH2MP-SHIM-VERSION:1.0.0:END" + "FH2MP_OFFLINE".encode("utf-16-le"))
+        (self.folder / 'DWrite.dll').write_bytes(("FH2 Mod Platform\0ProductVersion\0" + shim.PLATFORM_VERSION).encode("utf-16-le"))
         (self.folder / shim.PLATFORM_DLL).write_bytes(("FH2 Mod Platform\0ProductVersion\0" + shim.PLATFORM_VERSION).encode("utf-16-le"))
         shim.disable(str(self.folder))
         self.lc.play()

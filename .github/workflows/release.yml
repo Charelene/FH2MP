@@ -83,6 +83,7 @@ jobs:
           shim/test_torque_load.sh
           shim/test_speed_pb.sh
           shim/test_restricted_tools.sh
+          shim/test_lighting.sh
         timeout-minutes: 10
       - run: release/build_shim_zip.sh                                # fh2-mods/FH2MP.dll (the launcher fetches the FH2 Mod Platform and Extra Options from their authors)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
