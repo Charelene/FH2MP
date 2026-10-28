@@ -223,8 +223,18 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with: { python-version: "3.12" }
       - run: pip install --require-hashes -r release/requirements-sign.txt
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with: { path: dist, merge-multiple: true }
+      # The intermediate shim-unsigned artifact has the same ZIP filename as
+      # shim. Download only final artifacts, so extraction cannot overwrite the
+      # signed ZIP with unsigned bytes or interleave two writes to that file.
+      - name: download signed shim
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: shim, path: dist }
+      - name: download Windows launchers
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: windows, path: dist }
+      - name: download Linux launchers
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: linux, path: dist }
       - name: sign the manifest
         env: { FH2MP_RELEASE_KEY: "${{ secrets.RELEASE_SIGNING_KEY }}" }
         run: python3 -I release/make_manifest.py --tag "$GITHUB_REF_NAME" --min-launcher "${GITHUB_REF_NAME#v}" --dist dist
