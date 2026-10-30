@@ -24,7 +24,13 @@ done
 [ ${#lanes[@]} -gt 0 ] || { sed -n '2,9p' "$0" >&2; exit 2; }
 
 if [ "$container" = 1 ]; then
-    engine=$(command -v podman || command -v docker || true)
+    # The GitHub image action builds/loads Docker's image; use the same engine
+    # there even when the runner also happens to have Podman installed.
+    if [ "${GITHUB_ACTIONS:-}" = true ]; then
+        engine=$(command -v docker || true)
+    else
+        engine=$(command -v podman || command -v docker || true)
+    fi
     [ -n "$engine" ] || { echo "--container needs podman or docker" >&2; exit 2; }
     # the tag names the image's inputs, so an edited Containerfile or requirement file builds a new one
     tag=fh2mp-ci:$(cat release/ci.Containerfile release/requirements-sign.txt release/requirements-test.txt launcher/requirements-release.txt \
