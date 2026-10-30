@@ -97,7 +97,11 @@ fi
 systemctl daemon-reload
 REMOTE
 ops/deploy.sh prod "$host" "$key" --only lsp --yes-prod
-ssh_ 'curl -fsS http://127.0.0.1:5080/v1/status' >/dev/null || { echo "the LSP does not answer after the deploy; the backup is /opt/fh2mp/lsp.bak-*"; exit 1; }
+for attempt in $(seq 1 30); do
+    if ssh_ 'curl -fsS --max-time 2 http://127.0.0.1:5080/v1/status' >/dev/null 2>&1; then break; fi
+    [ "$attempt" -lt 30 ] || { echo "the LSP does not answer after the deploy; the backup is /opt/fh2mp/lsp.bak-*"; exit 1; }
+    sleep 1
+done
 
 echo "== 4/6 game server"
 if [ $skip_game = 1 ]; then echo "skipped"; else ops/deploy.sh prod "$host" "$key" --only game --yes-prod; fi
