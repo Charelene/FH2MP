@@ -109,6 +109,9 @@ class Receiver:
         self.events = []
         self.responses, self.grids, self.starts = [], [], []
         self.counter = None
+        self.slot_messages = []  # (kind, type, id, seq, body) of the server's own router 12 object
+        self.bucket = []        # bucket-list messages 61 and 65 to 68, as the client reads them
+        self.bucket_owner = {}  # (router 12 object id) -> relay owner of the objects this client was given
 
     def receive(self, data):
         _ack, _remote, _bits, count, length = struct.unpack('<HHIBH', data[:11])
@@ -119,12 +122,17 @@ class Receiver:
             if kind in (7, 8, 11):
                 router = r.take(4)
                 a, b = r.take(1), r.take(1)
-                oid = r.take({1: 7, 3: 7, 6: 2, 10: 1}[router])
+                oid = r.take({1: 7, 3: 7, 6: 2, 10: 1, 12: 4}[router])
                 owner = r.take(8) if (a, b) == (0, 1) else None
                 if kind == 7 and router == 6:
                     r.take(2)
+                tid12 = r.take(2) if kind == 7 and router == 12 else None
+                if router == 12 and owner is not None:
+                    self.bucket_owner[oid] = owner
                 seq, size = r.take(8), r.take(14)
                 body = Bits(r.take(size), size)
+                if router == 12 and (a, b) == (0, 0):
+                    self.slot_messages.append((kind, tid12, oid, seq, body))      # the server-owned slot array
                 if router == 6 and (a, b, oid) == (1, 0, 0):
                     if self.last_options_seq is not None:
                         gap = (seq - self.last_options_seq) % 255
@@ -182,6 +190,24 @@ class Receiver:
                 r.take(48)
             elif kind == 34:
                 pass
+            elif kind == 9:      # relay ObjectDelete: router | A | B | id | [owner] | message id
+                router = r.take(4)
+                a, b = r.take(1), r.take(1)
+                r.take({1: 7, 2: 7, 3: 7, 6: 2, 9: 4, 10: 1, 12: 4}[router])
+                if (a, b) == (0, 1):
+                    r.take(8)
+                r.take(8)
+            elif kind == 61:
+                self.bucket.append(('start', r.take(32)))
+            elif kind == 65:
+                key, value, found = self.key(r), r.take(5), r.take(1)
+                self.bucket.append(('partner', key, value, found, self.string(r)))
+            elif kind == 66:
+                self.bucket.append(('waiting', self.key(r), r.take(32)))
+            elif kind == 67:
+                self.bucket.append(('started', self.key(r), self.key(r), r.take(32)))
+            elif kind == 68:
+                self.bucket.append(('ended', self.key(r), self.key(r), r.take(32), r.take(1)))
             elif kind == 54:
                 r.take(384)
             elif kind == 72:
@@ -190,6 +216,20 @@ class Receiver:
                 raise AssertionError(f'unexpected outbound message {kind}')
         assert r.size - r.pos < 8, 'unconsumed server output'
         assert r.take(r.size - r.pos) == 0, 'nonzero datagram padding'
+
+
+def _key(self, r):
+    """FUN_1417ba4d0 with 7 id bits: A | B | id | [owner when A=0, B=1]."""
+    a, b, oid = r.take(1), r.take(1), r.take(7)
+    return ('relay', oid, r.take(8)) if (a, b) == (0, 1) else ('own', oid, 0) if (a, b) == (0, 0) else ('other', a, b, oid)
+
+
+def _string(self, r):
+    n = r.take(r.take(2) * 8 + 6)
+    return bytes(r.take(8) for _ in range(n)).decode('latin1')
+
+
+Receiver.key, Receiver.string = _key, _string
 
 
 class RaceFlow(unittest.TestCase):
@@ -346,6 +386,31 @@ class RaceFlow(unittest.TestCase):
         self.advance(2)
         self.go()
 
+    def test_refused_ready_counts_when_the_car_is_changed_afterwards(self):
+        # dev 2026-10-29 lights2: the Ready came while the server still had the old (wrong class) car; the class-restricted pick reached it
+        # 17 s later and no second Ready was ever sent, so the event started without the invitee
+        self.grant(self.a)
+        self.options(self.a, {4: 1001, 30: 3})
+        self.car(self.a, 3, .750)
+        self.car(self.b, 2, .613)
+        self.request(self.a)
+        self.assertNotEqual(self.ready(self.b), 0)
+        self.car(self.b, 3, .725)             # no second ready()
+        self.advance(2)
+        self.go()
+        self.assertEqual(len(self.b.grids), 1, 'the invitee whose Ready was refused on the old car was left out')
+
+    def test_refused_ready_is_not_revived_for_a_later_invite(self):
+        self.grant(self.a)
+        self.options(self.a, {4: 1001, 30: 3})
+        self.car(self.a, 3, .750)
+        self.car(self.b, 2, .613)
+        self.request(self.a)
+        self.assertNotEqual(self.ready(self.b), 0)
+        self.advance(60)                       # the invite is over, the event ran without b
+        self.car(self.b, 3, .725)
+        self.assertIsNone(self.w.peers[self.b.addr].ready_retry)
+
     def test_car_choice_in_a_mixed_delta_is_used_for_admission(self):
         self.grant(self.a)
         self.options(self.a, {4: 1001, 30: 3})
@@ -441,6 +506,17 @@ class RaceFlow(unittest.TestCase):
         self.assertNotEqual(self.ready(c), 0)
         self.car(c, 3, .750)
         self.assertEqual(self.ready(c), 0)
+
+    def test_a_bucket_list_object_does_not_cut_the_rest_of_its_packet(self):
+        """Prod 2026-10-28: 2,101 packets were cut at "object msg on unmapped router 12", so what the client sent after it in the same
+        datagram was lost. Native configure FUN_1417dc800: 13 objects, 2 types -> 4 id bits and 2 type bits (written out here, not read from
+        the server's table)."""
+        body = Bits().put(0x2A5, 10)
+        bucket = message(7, (12, 4), (0, 1), (0, 1), (3, 4), (1, 2)).put(0, 8).put(body.size, 14).put(body.value, body.size)
+        before = len(self.a.responses)
+        self.send(self.a, bucket, message(41, (0, 4), (1, 1)))          # the object, then a Ready request in the same datagram
+        self.assertEqual(len(self.a.responses), before + 1, 'the Ready request after the bucket-list object was lost')
+        self.assertFalse([l for l in self.logs if 'unmapped router 12' in l])
 
     def test_late_joiner_gets_class_and_pi_before_accepting(self):
         self.grant(self.a)

@@ -13,7 +13,7 @@ import re
 import shutil
 
 from . import paths, upstream
-from .constants import AZIMUTH_TLS_HELPERS, BUILTIN_AZIMUTH_BUILDS, UPSTREAM
+from .constants import AZIMUTH_TLS_HELPERS, AZIMUTH_VERSION, BUILTIN_AZIMUTH_BUILDS, UPSTREAM
 from .constants import (EXTRA_OPTIONS_DIR, EXTRA_OPTIONS_DLL, EXTRA_OPTIONS_DLL_SHA256, EXTRA_OPTIONS_VERSION, LEGACY_SHIM_DLL, LSP_FILE,
                         MODS_DIR, PLATFORM_DLL, PLATFORM_DLL_SHA256, PLATFORM_FILES, PLATFORM_LOADERS, PLATFORM_VERSION, SESSION_FILE, SHIM_DLL)
 
@@ -287,6 +287,28 @@ def write_identity(folder, xuid):
     paths.atomic_write(os.path.join(bin_dir(folder), "fh2mp-identity.txt"), f"{xuid & 0xFFFFFFFF:08x}\n".encode(), 0o644)
 
 
+RESTART_FILE = "fh2mp-restart.txt"       # written by the shim when the game never started its online setup (shim/src/xhr2.inc)
+
+
+def take_restart_request(folder):
+    """The shim's note that this game start skipped its online setup, removed on reading -> its text, or '' when there is none."""
+    path = os.path.join(bin_dir(folder), RESTART_FILE)
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read().strip() or "restart requested"
+    except OSError:
+        return ""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+    return text
+
+
+def restart_requested(folder):
+    return os.path.isfile(os.path.join(bin_dir(folder), RESTART_FILE))
+
+
 def clear_session(folder):
     try:
         os.unlink(os.path.join(bin_dir(folder), SESSION_FILE))
@@ -367,7 +389,7 @@ def restore_tls_helper(folder):
                     with open(helper, "rb") as f:
                         if hashlib.sha256(f.read()).hexdigest() != expected:
                             raise ShimError(f"Azimuth's helper does not match the supported installation: {helper}. "
-                                            "Reinstall Azimuth 1.0.3 using launcher setup, then press Play again.")
+                                            f"Reinstall Azimuth {AZIMUTH_VERSION} using launcher setup, then press Play again.")
                 if os.path.islink(path):
                     raise ShimError(f"Azimuth's obsolete helper is a symbolic link: {path}.")
                 moved = path + ".replaced"
@@ -380,7 +402,7 @@ def restore_tls_helper(folder):
                 return [f"retired Azimuth's obsolete shared helper (kept as {os.path.basename(moved)})"]
         except OSError as e:
             raise ShimError(f"Could not retire Azimuth's obsolete helper: {e}. "
-                            "Reinstall Azimuth 1.0.3 using launcher setup, then press Play again.") from None
+                            f"Reinstall Azimuth {AZIMUTH_VERSION} using launcher setup, then press Play again.") from None
     if not tls_helper_modified(folder):
         return []
     try:

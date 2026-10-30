@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 export WINEPREFIX="$tmp/prefix" WINEDEBUG=-all
+. ./wine_prefix.sh; wine_prefix "$WINEPREFIX"
 cat > "$tmp/test.c" <<'C'
 #include <windows.h>
 #include <stdio.h>

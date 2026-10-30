@@ -18,6 +18,7 @@ from .version import __version__
 MAX_FILE = 2 << 20
 MAX_TEXT = 8 << 20
 MAX_FILES = 64
+PLATFORM_LOGS_KEPT = 3            # per-session log copies of the Mod Platform (fh2-mods/platform-logs) attached to a report
 LIMITS = dict.fromkeys(("azimuth.log", "fh2mp.log", "platform.log", "mod-crash.txt", "launcher.log"), MAX_FILE)
 MAX_DUMP = 32 << 20    # combined Azimuth and matching Mod Platform dumps
 
@@ -272,7 +273,13 @@ def diagnostic_logs(folder, used):
     root = os.path.realpath(folder)
     names = set(LIMITS)
     for pattern in ("*.log", "data/logs/*.log", "data/bin/*.log", "fh2-mods/*.log", "fh2-mods/*/*.log", "fh2extra/*.log"):
-        for path in sorted(glob.glob(os.path.join(folder, pattern))):
+        found = sorted(glob.glob(os.path.join(folder, pattern)))
+        if pattern == "fh2-mods/*/*.log":
+            # Mod Platform 2.8.0 keeps a copy of every session's log in fh2-mods/platform-logs: only the newest few belong to a report
+            kept = [x for x in found if os.path.basename(os.path.dirname(x)).lower() != "platform-logs"]
+            newest = sorted((x for x in found if x not in kept), key=os.path.getmtime, reverse=True)[:PLATFORM_LOGS_KEPT]
+            found = kept + sorted(newest)
+        for path in found:
             if re.fullmatch(r"infinity(?:[.-].*)?\.log", os.path.basename(path), re.IGNORECASE):
                 continue
             real = os.path.realpath(path)

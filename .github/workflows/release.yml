@@ -14,29 +14,7 @@ permissions:
   contents: read
 
 jobs:
-  database-check:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with: { python-version: "3.12" }
-      - run: python3 -m pip install --require-hashes -r release/requirements-test.txt
-      - name: PostgreSQL migrations, accounts and database download contracts
-        run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 install -y postgresql
-          pg_bin=$(dirname "$(ls /usr/lib/postgresql/*/bin/initdb | sort -V | tail -1)")
-          pg_root=$(mktemp -d)
-          trap '"$pg_bin/pg_ctl" -D "$pg_root/data" -m immediate stop' EXIT
-          "$pg_bin/initdb" -D "$pg_root/data" -A trust --no-locale --encoding=UTF8
-          "$pg_bin/pg_ctl" -D "$pg_root/data" -l "$pg_root/postgres.log" -o "-h '' -k $pg_root" -w start
-          "$pg_bin/createdb" -h "$pg_root" fh2mp_test_ci
-          export FH2MP_TEST_PG_DSN="host=$pg_root dbname=fh2mp_test_ci"
-          python3 -I release/run_server_tests.py --lane postgres
-          python3 -I release/check_test_mutations.py --area postgres
-
   check:
-    needs: database-check
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -49,42 +27,23 @@ jobs:
           app=$(python3 -c "import re;print(re.search(r'\"(.+)\"',open('launcher/fh2mp_launcher/version.py').read())[1])")
           echo "tag=$tag shim=$shim launcher=$app"
           if [ "${GITHUB_EVENT_NAME}" = "push" ]; then [ "$tag" = "$shim" ] && [ "$tag" = "$app" ]; fi
-      # Exhaustive collection with explicit prerequisite lanes, shared with publish.sh.
-      - name: pinned test dependencies
-        run: python3 -m pip install --require-hashes -r release/requirements-test.txt
-      - name: server tests
-        run: python3 -W ignore -I release/run_server_tests.py
-      - name: race and enforcement tests detect deliberate regressions
-        run: python3 -I release/check_test_mutations.py --area server
-      - name: production release refuses unsafe or incomplete execution
-        run: python3 -I -m unittest discover -s ops -p test_release_flow.py
-      - run: shim/test_sha256.sh
-      - run: shim/test_inflate.sh
-      - run: shim/test_gamedb_keep.sh
+      # The same checks and image as ci.yml (release/ci.sh); publish.sh only tags commits whose ci.yml run passed, so this is the last word,
+      # not the first.
+      - uses: ./.github/actions/ci-image
+      - run: release/ci.sh --container server pg mutations
 
   shim:
     needs: check
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/ci-image
+      - run: release/ci.sh --container shim
+        timeout-minutes: 10
+      - run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"      # back to the runner's user for the build
       # the runner image usually has mingw already; the apt mirror has hung here, so install only if missing, with timeouts
       - run: command -v x86_64-w64-mingw32-gcc || sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 install -y gcc-mingw-w64-x86-64
         timeout-minutes: 5
-      - name: shim safety and database restoration checks
-        run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 install -y wine
-          shim/test_gamedb_files.sh
-          shim/test_game_image.sh
-          shim/test_title_scope.sh
-          shim/test_xhr_config.sh
-          shim/test_torque_scale.sh
-          shim/test_net_strings.sh
-          shim/test_torque_load.sh
-          shim/test_speed_pb.sh
-          shim/test_restricted_tools.sh
-          shim/test_lighting.sh
-        timeout-minutes: 10
       - run: release/build_shim_zip.sh                                # fh2-mods/FH2MP.dll (the launcher fetches the FH2 Mod Platform and Extra Options from their authors)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: shim-unsigned, path: dist/*.zip }

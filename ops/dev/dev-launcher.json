@@ -1,6 +1,6 @@
 {
   "motd": "DEV server: accounts and progress here are separate from the live server and may be wiped.",
   "links": {"website": "https://forza.scuffed.af", "patreon": ""},
-  "supportedAzimuth": [{"version": "1.0.3", "sha256": "ebfd5d43a165dcec5d4007b9d41ed5b2ed122fcd02ecfef7e4ed35b40826821f"}],
-  "latestAzimuth": "1.0.3"
+  "supportedAzimuth": [{"version": "1.0.4", "sha256": "56d2c9cb6ccf3ae1836dee9676b64285f3a247efa2d12cf02c6c742696b3b092"}],
+  "latestAzimuth": "1.0.4"
 }
