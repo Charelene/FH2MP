@@ -7,7 +7,7 @@ import threading
 
 from . import azimuth, gamedb, keystore, launch, paths, shim, tunnel, updater, upstream
 from .api import Api, ApiError
-from .constants import BUILTIN_AZIMUTH_BUILDS, DEFAULT_WEBSITE, MODS_DIR, SHIM_DLL
+from .constants import AZIMUTH_VERSION, BUILTIN_AZIMUTH_BUILDS, DEFAULT_WEBSITE, MODS_DIR, PLATFORM_VERSION, SHIM_DLL
 from .identity import Identity
 from .settings import Settings
 from .version import __version__
@@ -407,6 +407,20 @@ class Launcher:
         kind, ver = self.shim_state()
         return kind == "ours" and (ver != __version__ or not updater.at_least(ver, (self.server or {}).get("minShim", "0.0.0")))
 
+    def auto_update_shim(self):
+        """Replaces our own shim in the Azimuth folder with this launcher's when it is older, without waiting for Play. -> True when it did.
+        Prod 2026-10-29: 256 of 530 players refused for an outdated shim ran launcher 1.1.2 from the same address; the game was started
+        without Play (directly, or restarted from in-game), so the old shim in the folder was used. Never while the game runs (the DLL is
+        loaded), never a pinned shim, and never a file that is not ours: replacing someone else's DLL needs the player's click."""
+        d = self.settings["azimuth_dir"]
+        if not d or not os.path.isdir(d) or not self.manifest or self.game_running():
+            return False
+        kind, ver = self.shim_state()
+        if kind != "ours" or self.shim_pinned(kind, ver) or updater.at_least(ver, __version__):
+            return False
+        self.install_shim()
+        return True
+
     def shim_pinned(self, kind=None, ver=None):
         """True when the installed shim must be left alone: pinned in settings, or a debug build (version ends in -debug)."""
         if not paths.is_dev():
@@ -467,7 +481,7 @@ class Launcher:
         if not info.found:
             raise PlayBlocked("azimuth.exe not found.", "no_azimuth")
         if not info.supported:
-            raise PlayBlocked("This launcher requires Azimuth 1.0.3. Run setup to install the supported combination.", "azimuth_unsupported")
+            raise PlayBlocked(f"This launcher requires Azimuth {AZIMUTH_VERSION}. Run setup to install the supported combination.", "azimuth_unsupported")
         kind, _v = self.shim_state()
         if kind == "old":
             raise PlayBlocked("The FH2MP shim needs installing again.", "no_shim")
@@ -498,7 +512,7 @@ class Launcher:
             raise PlayBlocked(self.server["maintenance"], "maintenance")
         acct = self.sign_in()
         adopted = self.prepare_saves(acct["xuid"])
-        cars = self.sync_gamedb()
+        cars = self.car_database_step()
         r = self._login_reply
         lsp = (r.get("lsp") or {}).get("url") or (self.server.get("lsp") or {}).get("url")
         if not lsp:
@@ -559,11 +573,25 @@ class Launcher:
         127.0.0.1 as the game server for this client). -> a note for the player, '' when the fallback is off."""
         from .api import log_note
         self.stop_tunnel()
-        if not self.settings["tcp_fallback"]:
-            return ""
+        forced = self.settings["tcp_fallback"]
         tcp = (game or {}).get("tcp") if isinstance(game, dict) else None
         host = (game or {}).get("host") if isinstance(game, dict) else None
-        if not (isinstance(tcp, int) and not isinstance(tcp, bool) and 1 <= tcp <= 65535 and host):
+        udp = (game or {}).get("port") if isinstance(game, dict) else None
+        offered = isinstance(tcp, int) and not isinstance(tcp, bool) and 1 <= tcp <= 65535 and bool(host)
+        automatic = False
+        if not forced:
+            # Automatic: only on a server that says it answers probes (an older one would look like a network that drops UDP), and only
+            # when it also offers TCP. Prod 2026-10-29 (#242): a player's race requests never arrived over UDP; TCP was a hidden checkbox.
+            advertised = (game or {}).get("probe")
+            if not (self.settings["tcp_auto"] and offered and advertised == 1 and not isinstance(advertised, bool)
+                    and isinstance(udp, int) and not isinstance(udp, bool) and 1 <= udp <= 65535):
+                return ""
+            if tunnel.probe_udp(host, udp):
+                log_note(f"UDP probe to {host}:{udp} answered: using UDP")
+                return ""
+            log_note(f"UDP probe to {host}:{udp} got no answer: this network drops UDP, using TCP for this start")
+            automatic = True
+        if not offered:
             log_note("TCP fallback is on but the server offers none: using UDP")
             return "the server has no TCP connection yet; using UDP"
         port = tunnel.free_udp_port()
@@ -573,7 +601,16 @@ class Launcher:
         self.tunnel = tunnel.UdpOverTcp(host, tcp, port, log=log_note).start()
         self.game_env = dict(getattr(self, "game_env", None) or {}, FH2MP_TUNNEL="1", FH2MP_SERVER_PORT=str(port))
         log_note(f"TCP fallback on: the game's UDP goes through 127.0.0.1:{port} to {host}:{tcp}")
-        return "connecting over TCP"
+        return "your network blocks UDP: connecting over TCP" if automatic else "connecting over TCP"
+
+    def car_database_step(self):
+        """Every start: the server's car database goes in place, unless the player keeps their own car packs. -> a note for the player.
+        Keeping them: the session names no database, so the shim leaves the game's database (and the car packs in it) alone; the server
+        serves every service as usual but keeps this client out of play with other people (fh2mp_lsp._gamedb_ok)."""
+        if self.settings["keep_car_packs"]:
+            self.gamedb_synced = False
+            return "your own car packs are kept: tunes, liveries and photos work, play with other people is off"
+        return self.sync_gamedb()
 
     def sync_gamedb(self):
         """Every start: the server's car database goes into fh2mp\\ in the Azimuth folder, from where the shim puts it in the game's
@@ -623,8 +660,62 @@ class Launcher:
         """Developer: sign in and write the session next to the shim without starting the game (start it yourself: rig, Steam, a debugger)."""
         return self.prepare_play()
 
-    def play(self, azimuth_window=False):
+    AUTO_RESTARTS = 2          # per Play: a game start that skipped its online setup is started again this many times at most
+
+    def restart_requested(self):
+        """The shim saw this game start skip its online setup (it then never recovers: every search sits on "Finding session"; a new start
+        is fine). Online play only; two automatic restarts per Play at most."""
+        d = self.settings["azimuth_dir"]
+        return bool(d and self.game_running() and not getattr(self, "offline_run", False)
+                    and getattr(self, "auto_restarts", 0) < self.AUTO_RESTARTS and shim.restart_requested(d))
+
+    def stop_game(self, wait=20):
+        """Ends the game the launcher started (its whole process group) and waits for it."""
+        p = self.process
+        if p is None:
+            return
+        import subprocess
+        try:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"], capture_output=True, timeout=15)
+            else:
+                import signal
+                os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        try:
+            p.wait(timeout=wait)
+        except subprocess.TimeoutExpired:
+            try:
+                if os.name == "nt":
+                    p.kill()
+                else:
+                    import signal
+                    os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                p.wait(timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        self.process = None
+
+    def restart_game(self):
+        """Starts a game that skipped its online setup again -> what play() returns."""
+        d = self.settings["azimuth_dir"]
+        why = shim.take_restart_request(d)
+        self.auto_restarts = getattr(self, "auto_restarts", 0) + 1
+        self.stop_game()
+        import time
+        time.sleep(2.0)                      # Wine keeps the prefix busy for a moment after its last process ends
+        launch.cleanup(d)
+        from .api import log_failure
+        log_failure("GAME", "restart", None, f"game start restarted automatically: {why}")
+        return self.play(_auto=True)
+
+    def play(self, azimuth_window=False, _auto=False):
         """azimuth_window: start Azimuth's own launcher window (its settings) instead of going straight into the game."""
+        if not _auto:
+            self.auto_restarts = 0
+        if self.settings["azimuth_dir"]:
+            shim.take_restart_request(self.settings["azimuth_dir"])        # a note left by an earlier game start is not this one's
         if self.settings["offline_mode"]:
             self.play_offline(azimuth_window=azimuth_window)
             return None, ["offline mode: online features and progress sync are off"]
@@ -647,7 +738,7 @@ class Launcher:
         if not info.found:
             raise PlayBlocked("azimuth.exe not found.", "no_azimuth")
         if not info.supported:
-            raise PlayBlocked("This launcher requires Azimuth 1.0.3. Run setup to install the supported combination.", "azimuth_unsupported")
+            raise PlayBlocked(f"This launcher requires Azimuth {AZIMUTH_VERSION}. Run setup to install the supported combination.", "azimuth_unsupported")
         try:
             self.repair_tls_helper()
         except shim.ShimError as e:
@@ -744,6 +835,45 @@ class Launcher:
 
     def game_running(self):
         return self.process is not None and self.process.poll() is None
+
+    def status_lines(self):
+        """The player's setup as (component, what is installed, what this launcher needs, ok: True / False / None for "nothing to judge").
+        Everything a support request starts with, in one place: a game that was started without Play, or with an old shim, shows here."""
+        s = self.settings
+        d = s["azimuth_dir"]
+        out = [("FH2MP launcher", __version__, (self.server or {}).get("minLauncher") or "-", not self.launcher_outdated())]
+        if not d or not os.path.isdir(d):
+            return out + [("Azimuth folder", "not chosen", "choose it in Settings", False)]
+        info = self.azimuth_info()
+        out.append(("Azimuth", info.version or ("not found" if not info.found else "unknown"), ", ".join(b.get("version", "") for b in BUILTIN_AZIMUTH_BUILDS if b.get("version")) or "-",
+                    bool(info.found and info.supported)))
+        kind, ver = self.shim_state()
+        out.append(("FH2MP shim", ver if kind == "ours" else {"none": "not installed", "old": "needs installing again"}.get(kind, kind),
+                    __version__ + (f" (server needs {(self.server or {}).get('minShim')})" if (self.server or {}).get("minShim") else ""),
+                    kind == "ours" and not self.shim_outdated()))
+        pkind, pver = shim.platform_installed(d)
+        out.append(("FH2 Mod Platform", pver if pkind == "platform" else {"none": "not installed"}.get(pkind, pkind), PLATFORM_VERSION,
+                    pkind == "platform" and pver == PLATFORM_VERSION))
+        have, eo_ver, _target = shim.extra_options_installed(d)
+        want_eo = shim.extra_options_version(d)
+        out.append(("FH2 Extra Options", eo_ver if have else "not installed", want_eo, have and eo_ver == want_eo))
+        session = os.path.exists(os.path.join(shim.bin_dir(d), shim.SESSION_FILE))
+        out.append(("Session for the game", "present (written by Play)" if session else "none: the game starts offline", "Play writes it", None))
+        out.append(("Car database", "your own car packs kept: no play with other people" if s["keep_car_packs"] else "the server's, put in place at Play", "-", None))
+        out.append(("Connection", "TCP always" if s["tcp_fallback"] else "UDP, TCP when the probe fails" if s["tcp_auto"] else "UDP only", "-", None))
+        out.append(("Mode", "offline" if s["offline_mode"] else "online", "-", None))
+        return out
+
+    def clear_leftover_session(self):
+        """Removes the session file an earlier Play left in the Azimuth folder when no game of ours is running (called when the launcher starts
+        and when it closes). A leftover lets the game go online without Play, on the old shim and the old car database, for as long as its
+        token lives (12 hours after its last use); the shim also ignores a file older than 30 minutes. -> True when one was removed."""
+        d = self.settings["azimuth_dir"]
+        if not d or not os.path.isdir(d) or self.game_running():
+            return False
+        before = os.path.exists(os.path.join(shim.bin_dir(d), shim.SESSION_FILE))
+        launch.cleanup(d)
+        return before
 
     def after_game(self):
         launch.cleanup(self.settings["azimuth_dir"])

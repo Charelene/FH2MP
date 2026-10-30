@@ -155,6 +155,9 @@ class ThroughTheHub(unittest.TestCase):
         self.assertTrue(d.recv(4096))
 
     def test_a_connection_that_never_opens_a_game_connection_is_closed(self):
+        hello = T.HELLO_SECONDS
+        T.HELLO_SECONDS = 0.3                                   # the real 10 s wait made this one test 70 % of the server lane
+        self.addCleanup(setattr, T, "HELLO_SECONDS", hello)
         port = self.start()
         c = socket.create_connection(("127.0.0.1", port))
         self.addCleanup(c.close)

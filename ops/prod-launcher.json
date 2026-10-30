@@ -6,11 +6,11 @@
   },
   "supportedAzimuth": [
     {
-      "version": "1.0.3",
-      "sha256": "ebfd5d43a165dcec5d4007b9d41ed5b2ed122fcd02ecfef7e4ed35b40826821f"
+      "version": "1.0.4",
+      "sha256": "56d2c9cb6ccf3ae1836dee9676b64285f3a247efa2d12cf02c6c742696b3b092"
     }
   ],
-  "latestAzimuth": "1.0.3",
-  "minLauncher": "1.1.2",
-  "minShim": "1.1.2"
+  "latestAzimuth": "1.0.4",
+  "minLauncher": "1.1.3",
+  "minShim": "1.1.3"
 }

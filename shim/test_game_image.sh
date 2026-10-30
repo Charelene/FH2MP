@@ -5,6 +5,7 @@ cd "$(dirname "$0")"
 tmp=$(mktemp -d)
 cleanup() { WINEPREFIX="$tmp/prefix" wineserver -w || true; rm -rf "$tmp"; }
 trap cleanup EXIT
+. ./wine_prefix.sh; wine_prefix "$tmp/prefix"
 cat > "$tmp/test.c" <<'C'
 #include <windows.h>
 #include <stddef.h>

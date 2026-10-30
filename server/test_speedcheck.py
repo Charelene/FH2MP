@@ -32,6 +32,23 @@ class SpeedCheck(unittest.TestCase):
             self.pos[1] += dy_kmh / 3.6 * step
             self.w.track_speed(self.a, tuple(self.pos))
 
+    def test_the_timestamp_rate_is_logged_from_one_second_windows(self):
+        logs, a = [], self.a
+        self.w.log = logs.append
+        S.STAMP_RATE_SAMPLES, was = 5, S.STAMP_RATE_SAMPLES
+        self.addCleanup(setattr, S, "STAMP_RATE_SAMPLES", was)
+        stamp = 1000
+        for _ in range(8):
+            self.clock.t += 1.0
+            self.pos[0] += 10.0
+            stamp += 1000                                  # a clock in milliseconds: 1000 ticks per second
+            self.w.track_speed(a, tuple(self.pos), stamp)
+        rates = [m for m in logs if m.startswith("STAMP RATE")]
+        self.assertEqual(len(rates), 1)
+        self.assertIn("1000.0 ticks per second", rates[0])
+        self.w.track_speed(a, tuple(self.pos), None)       # a packet without a stamp neither breaks nor counts
+        self.assertEqual(len([m for m in logs if m.startswith("STAMP RATE")]), 1)
+
     def test_a_legal_speed_is_left_alone(self):
         self.drive(10, dx_kmh=300)
         self.assertIsNone(self.a.kick_reason)

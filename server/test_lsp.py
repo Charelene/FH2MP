@@ -117,6 +117,40 @@ class LayerCountTests(unittest.TestCase):
         self.assertEqual([f(v) for v in ("", "junk", "1.0.0-rc1", "1.0.0-rc2")], [False] * 4)
         self.assertEqual([f(v) for v in ("1.0.0-rc3", "1.0.0-rc10", "1.0.0", "1.0.1", "1.1.0-rc1", "1.0.0-rc2-debug")], [True] * 6)
 
+    def test_an_outdated_clients_logon_is_answered_without_admitting_it(self):
+        """Prod 2026-10-29: a refused Logon made the game retry it forever and never poll the Message Center, so the update notice could not
+        be read. Logon is answered with the empty result; no ticket is announced, and every other call stays refused."""
+        cfg = L.launcher_api.LauncherConfig()
+        cfg.overlay = {"minShim": "1.1.2"}
+        old = (L.LAUNCHER, L.AUTH)
+        announced, replies = [], []
+        L.LAUNCHER, L.AUTH = L.launcher_api.Ctx(None, None, cfg, lambda: 0), None
+        frame = L.frame()                                        # a real, empty result frame: only the routing is under test here
+
+        class Req:
+            headers = {}
+            _remove_old_client = lambda self: None          # noqa: E731
+            client_ip = lambda self: "127.0.0.1"            # noqa: E731
+            _reply_json = lambda self, status, obj, ctype="application/json", *a, **k: replies.append((status, ctype, obj))   # noqa: E731
+        try:
+            with mock.patch.object(L, "announce_auth", lambda *a: announced.append(a)), \
+                    mock.patch.object(L, "outdated_logon", lambda: frame), mock.patch.object(L, "SC", object()):
+                def ask(cls, method, shim="1.1.1"):
+                    replies.clear()
+                    r = Req()
+                    r.headers = {"X-FH2MP-Shim": shim, "X-ClassName": cls, "X-Method": method}
+                    return L.Handler._identify(r), list(replies)
+                ok, got = ask("Forza.WebServices.User, Forza.WebServices", "Logon")
+                self.assertFalse(ok)                                     # the request is answered here and goes no further
+                self.assertEqual((got[0][0], got[0][1]), (200, "bin/xtsw"))
+                self.assertEqual(struct.unpack(">III", got[0][2][:12])[0], 0)
+                self.assertEqual(announced, [])
+                ok, got = ask("Forza.WebServices.Scoreboard, Forza.WebServices", "GetRowsAnthem")
+                self.assertEqual((ok, got[0][0]), (False, 426))          # everything else is still refused
+                self.assertEqual(ask("Forza.WebServices.User, Forza.WebServices", "Logon", "1.1.2")[0], True)   # a current client is untouched
+        finally:
+            L.LAUNCHER, L.AUTH = old
+
     def test_min_shim_turns_old_clients_away(self):
         cfg = L.launcher_api.LauncherConfig()
         self.assertEqual(cfg.get()["minShim"], "0.0.0")
@@ -162,12 +196,17 @@ class LayerCountTests(unittest.TestCase):
             self.assertEqual(len(revoked), 1)                               # ... once a minute, not on every request
             self.assertEqual(ask("1.0.0-rc4", "fh2.good")[0], True)
             self.assertEqual(len(revoked), 1)                               # an up-to-date client is left alone
+            r = Req()                                                       # its Message Center poll without a schema: the plain refusal
+            r.headers = {"X-FH2MP-Shim": "1.0.0-rc3", "X-ClassName": "Xls.WebServices.Notifications, Xls.WebServices",
+                         "X-Method": "RetrieveForUser"}
+            replies.clear()
+            self.assertEqual((L.Handler._identify(r), replies), (False, [(426, "shim_too_old")]))
         finally:
             L.LAUNCHER, L.AUTH, L.on_revoke = old_launcher, old_auth, old_revoke
             for k, v in ctx_before.items():
                 setattr(L.CTX, k, v)
 
-    def test_another_car_database_is_turned_away(self):
+    def test_another_car_database_keeps_the_services_but_not_multiplayer(self):
         import hashlib
         import tempfile
         path = os.path.join(tempfile.mkdtemp(), "gamedbRC.slt")
@@ -185,8 +224,8 @@ class LayerCountTests(unittest.TestCase):
                 return type("A", (), {"xuid": 0x900000000def, "gamertag": "Panzer Fan"})()
         L.LAUNCHER = L.launcher_api.Ctx(None, None, L.launcher_api.LauncherConfig(), lambda: 0, gamedb=L.gamedb_sync.GameDb(""))
         L.AUTH, L.on_revoke = FakeAuth(), revoked.append
-        L._GAMEDB_REMOVED.clear()
-        ctx_before = {k: getattr(L.CTX, k, None) for k in ("xuid", "tag", "authed", "shim")}
+        L._OWN_CARS.clear()
+        ctx_before = {k: getattr(L.CTX, k, None) for k in ("xuid", "tag", "authed", "shim", "own_cars")}
 
         class Req:
             headers = {}
@@ -200,19 +239,100 @@ class LayerCountTests(unittest.TestCase):
                 r.headers = {"X-FH2MP-Token": "fh2.x", **({"X-FH2MP-GameDb": db} if db is not None else {})}
                 return L.Handler._identify(r), list(replies)
             self.assertEqual(ask("missing"), (True, []))                   # the server sets no database: nothing to compare
+            self.assertFalse(L.CTX.own_cars)
             L.LAUNCHER.gamedb = L.gamedb_sync.GameDb(path)
-            self.assertEqual(ask(good), (True, []))
-            self.assertEqual(ask(good.upper()), (True, []))
+            for match in (good, good.upper()):
+                self.assertEqual(ask(match), (True, []))
+                self.assertFalse(L.CTX.own_cars)
             self.assertEqual(revoked, [])
-            self.assertEqual(ask(None), (False, [(409, "gamedb_mismatch")])) # omitting the hash cannot bypass enforcement
-            self.assertEqual(ask(""), (False, [(409, "gamedb_mismatch")]))
-            self.assertEqual(ask("0" * 64), (False, [(409, "gamedb_mismatch")]))
-            self.assertEqual(ask("missing"), (False, [(409, "gamedb_mismatch")]))
-            self.assertEqual(revoked, [0x900000000def])                    # taken out of the game once a minute, not on every request
+            for other in (None, "", "0" * 64, "missing"):                  # omitting the hash cannot bypass the multiplayer gate
+                self.assertEqual(ask(other), (True, []))                   # every service stays open ...
+                self.assertTrue(L.CTX.own_cars)                            # ... but the request is marked
+            self.assertEqual(revoked, [0x900000000def])                    # taken out of the game once, not on every request
+            self.assertEqual(ask(good), (True, []))                        # back to the server's database: unmarked, and a later change counts again
+            self.assertFalse(L.CTX.own_cars)
+            ask("0" * 64)
+            self.assertEqual(revoked, [0x900000000def] * 2)
             L.LAUNCHER.gamedb = L.gamedb_sync.GameDb(path + ".missing")
             self.assertEqual(ask(good), (False, [(503, "gamedb_unavailable")]))
         finally:
             L.LAUNCHER, L.AUTH, L.on_revoke = old_launcher, old_auth, old_revoke
+            for k, v in ctx_before.items():
+                setattr(L.CTX, k, v)
+
+    def test_indented_log_lines_carry_their_requests_number(self):
+        import contextlib
+        out = io.StringIO()
+        before = getattr(L.CTX, "seq", None)
+        try:
+            with contextlib.redirect_stdout(out):
+                L.CTX.seq = 41
+                L.log("#41 POST host/x Forza.WebServices.Scoreboard SubmitScore body=10 user=0x1")      # the request line already has it
+                L.log("  -> error result: no such livery 5")
+                L.log("  #41 already numbered")
+                L.log("stats sampler: nothing to attribute")                                            # not a request's line
+                L.CTX.seq = None
+                L.log("  ops: banned 0x1")                                                              # outside a request
+        finally:
+            L.CTX.seq = before
+        lines = [l.split(" ", 1)[1] for l in out.getvalue().splitlines()]
+        self.assertEqual(lines, ["#41 POST host/x Forza.WebServices.Scoreboard SubmitScore body=10 user=0x1",
+                                 "  #41 -> error result: no such livery 5", "  #41 already numbered",
+                                 "stats sampler: nothing to attribute", "  ops: banned 0x1"])
+
+    def test_files_of_cars_the_server_does_not_have_are_listed_only_to_players_with_their_own_database(self):
+        class Cars:
+            def row(self, cid):
+                return {"Id": cid} if cid in (325, 1496) else None            # the server's catalog: two cars of many
+        files = [{"id": 1, "car_id": 325}, {"id": 2, "car_id": 99999}, {"id": 3, "car_id": 0}, {"id": 4, "car_id": None}, {"id": 5, "car_id": 1496}]
+        old_cars, before = L.CARS, getattr(L.CTX, "own_cars", False)
+        L.CARS = Cars()
+        try:
+            L.CTX.own_cars = False
+            self.assertEqual([f["id"] for f in L._shown(files)], [1, 3, 4, 5])      # the pack car's file is not shown; car-less ones are
+            L.CTX.own_cars = True
+            self.assertEqual([f["id"] for f in L._shown(files)], [1, 2, 3, 4, 5])   # the player with packs sees everything
+            L.CTX.own_cars = False
+            L.CARS = None
+            self.assertEqual(len(L._shown(files)), 5)                                  # no catalog loaded: nothing can be judged
+        finally:
+            L.CARS, L.CTX.own_cars = old_cars, before
+
+    def test_a_marked_request_may_not_reach_multiplayer_or_the_boards(self):
+        """The player's own car packs: tunes, liveries and photos keep working; matchmaking, session documents and the game servers do not."""
+        replies, calls = [], []
+
+        class Req:
+            command, path = "POST", "/x"
+            headers = {}
+            rfile = io.BytesIO(b"")
+            wfile = io.BytesIO()
+            client_address = ("127.0.0.1", 1)
+            close_connection = False
+
+            def _identify(self):
+                L.CTX.xuid, L.CTX.own_cars = 0x900000000def, True
+                return True
+            _reply_json = lambda self, status, obj, *a, **k: replies.append((status, obj["error"]))     # noqa: E731
+            send_response = send_header = end_headers = lambda self, *a: None                             # noqa: E731
+        ctx_before = {k: getattr(L.CTX, k, None) for k in ("xuid", "tag", "authed", "shim", "own_cars")}
+        try:
+            with mock.patch.object(L, "handle_xls", lambda *a: calls.append(a) or b""), mock.patch.object(L.social, "touch", lambda *a: None):
+                for host in ("momatch.xboxlive.com", "sessiondirectory.xboxlive.com", "gameserverds.xboxlive.com",
+                             "gameserverms.xboxlive.com"):                     # written out: not read from the code under test
+                    replies.clear()
+                    r = Req()
+                    r.headers = {"Content-Length": "0", "X-FH2MP-Host": host}
+                    L.Handler._handle(r)
+                    self.assertEqual(replies, [(409, "gamedb_mismatch")], host)
+                self.assertEqual(calls, [])
+                r = Req()
+                r.headers = {"Content-Length": "0", "X-FH2MP-Host": "gameservices.FH2.forzamotorsport.net",
+                             "X-ClassName": "Forza.WebServices.Storefront, Forza.WebServices", "X-Method": "GetCuratedContent"}
+                replies.clear()
+                L.Handler._handle(r)
+                self.assertEqual((replies, len(calls)), ([], 1))               # the tune and livery storefront is served as usual
+        finally:
             for k, v in ctx_before.items():
                 setattr(L.CTX, k, v)
 
@@ -245,6 +365,19 @@ class LspTests(unittest.TestCase):
             self.assertEqual(tag, nm[:15])
             self.assertFalse(tag.startswith("Player"), tag)
         self.assertTrue(L.SOCIAL.profile(0x9000000ABCDE)["Gamertag"].startswith("Player"))          # an unknown id still gets a fallback
+
+    def test_an_outdated_client_reads_how_to_update_in_its_message_center(self):
+        out = L.outdated_notice("1.1.2")
+        result, _error, n = struct.unpack(">III", out[:12])
+        self.assertEqual(result, 0)
+        _name, rf = L.find_struct("Xls.WebServices.Notifications", "RetrieveForUser", "_Results")
+        res, rest = xls.decode(L.SC, rf, out[12 + n:])
+        self.assertEqual(rest, 0)
+        self.assertEqual([r["notificationType"] for r in res["results"]], [0x200])
+        params, _ = xls.decode(L.SC, L.notif_fields(0x200), bytes(res["parameterBlock"]))
+        self.assertIn("open the FH2MP launcher and press Play", params["Message"])
+        self.assertIn("1.1.2", params["Message"])
+        self.assertEqual(L.NOTIF.visible(0), L.NOTIF.visible(0))           # nothing was stored for anybody
 
     def test_handlers_accept_default_parameters_except_rival_notifications(self):
         failures = []

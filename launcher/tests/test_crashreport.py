@@ -241,6 +241,19 @@ class BuildTests(Base):
         self.assertNotIn("INFINITY PRIVATE CONTENT", str(rep.payload()))
         self.assertFalse(any("infinity" in name.lower() for name, _, _ in rep.sizes()))
 
+    def test_only_the_newest_platform_session_logs_are_attached(self):
+        """Mod Platform 2.8.0 copies every session's log to fh2-mods/platform-logs; a report gets the newest few, not the whole history."""
+        now = time.time()
+        self.log(BEGAN + CRASH, now)
+        for age in range(8):
+            self.write(f"fh2-mods/platform-logs/session-{age}.log", f"platform session {age}\n", now - 1000 - age * 100)
+        self.write("fh2-mods/other-mod/mod.log", "another mod's log\n", now - 5)
+        rep = crashreport.build(FakeLauncher(self.st), crashreport.find_crash(self.folder, now - 10))
+        files = rep.payload()["files"]
+        sessions = sorted(n for n in files if n.startswith("session-"))
+        self.assertEqual(sessions, ["session-0.log", "session-1.log", "session-2.log"])      # the three newest
+        self.assertIn("mod.log", files)                                                       # other mods' logs are unaffected
+
     def test_fields_files_and_payload(self):
         now = time.time()
         self.log(BEGAN + GPU + CRASH + "  Z:\\home\\exampleuser\\x\n", now)

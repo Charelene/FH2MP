@@ -1,0 +1,19 @@
+name: test image
+description: Loads the image release/ci.sh --container uses (release/ci.Containerfile) from the Actions cache, or builds and caches it.
+runs:
+  using: composite
+  steps:
+    - name: image key
+      id: key
+      shell: bash
+      run: echo "tag=fh2mp-ci:$(cat release/ci.Containerfile release/requirements-sign.txt release/requirements-test.txt launcher/requirements-release.txt | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with: { path: /tmp/ci-image.tar, key: "${{ steps.key.outputs.tag }}" }
+    - name: load or build
+      shell: bash
+      run: |
+        if [ -f /tmp/ci-image.tar ]; then docker load -i /tmp/ci-image.tar; else
+          docker build -f release/ci.Containerfile -t "${{ steps.key.outputs.tag }}" .
+          docker save -o /tmp/ci-image.tar "${{ steps.key.outputs.tag }}"
+        fi
+        sudo chown -R 1000:1000 "$GITHUB_WORKSPACE"     # the image's user (PostgreSQL will not run as root)

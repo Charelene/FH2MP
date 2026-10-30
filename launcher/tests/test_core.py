@@ -10,6 +10,7 @@ import zipfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from fh2mp_launcher import azimuth, core, identity, shim, updater  # noqa: E402
+from fh2mp_launcher.settings import Settings  # noqa: E402
 from cryptography.hazmat.primitives import serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey  # noqa: E402
 
@@ -114,10 +115,10 @@ class HomeCardTests(unittest.TestCase):
 class TcpFallbackTests(unittest.TestCase):
     """Launcher.start_tunnel: off by default; on, the game is pointed at a local proxy."""
 
-    def me(self, on):
+    def me(self, on, auto=False):
         from types import SimpleNamespace
         from fh2mp_launcher import core
-        me = SimpleNamespace(settings={"tcp_fallback": on}, tunnel=None, game_env={"FH2MP_SERVER_PORT": "5000"})
+        me = SimpleNamespace(settings={"tcp_fallback": on, "tcp_auto": auto}, tunnel=None, game_env={"FH2MP_SERVER_PORT": "5000"})
         me.stop_tunnel = lambda: core.Launcher.stop_tunnel(me)
         return me
 
@@ -147,6 +148,89 @@ class TcpFallbackTests(unittest.TestCase):
         finally:
             core.Launcher.stop_tunnel(me)
         self.assertIsNone(me.tunnel)
+
+
+    def test_automatic_stays_on_udp_when_the_server_answers_the_probe(self):
+        import socket
+        import threading
+        from fh2mp_launcher import core
+        echo = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        echo.bind(("127.0.0.1", 0))
+        echo.settimeout(5)
+        self.addCleanup(echo.close)
+
+        def serve():
+            try:
+                data, addr = echo.recvfrom(256)
+                echo.sendto(data, addr)             # what server/probe.py does
+            except OSError:
+                pass
+        threading.Thread(target=serve, daemon=True).start()
+        me = self.me(False, auto=True)
+        game = {"host": "127.0.0.1", "port": echo.getsockname()[1], "tcp": 5000, "probe": 1}
+        self.assertEqual(core.Launcher.start_tunnel(me, game), "")
+        self.assertIsNone(me.tunnel)
+        self.assertEqual(me.game_env, {"FH2MP_SERVER_PORT": "5000"})
+
+    def test_automatic_switches_to_tcp_when_the_probe_gets_no_answer(self):
+        from unittest import mock
+        from fh2mp_launcher import core, tunnel
+        me = self.me(False, auto=True)
+        game = {"host": "127.0.0.1", "port": 5000, "tcp": 5000, "probe": 1}
+        try:
+            with mock.patch.object(tunnel, "probe_udp", return_value=False) as probe:
+                note = core.Launcher.start_tunnel(me, game)
+            probe.assert_called_once_with("127.0.0.1", 5000)
+            self.assertIn("blocks UDP", note)
+            self.assertEqual(me.game_env["FH2MP_TUNNEL"], "1")
+        finally:
+            core.Launcher.stop_tunnel(me)
+
+    def test_automatic_never_probes_a_server_that_does_not_answer_probes_or_offers_no_tcp(self):
+        from unittest import mock
+        from fh2mp_launcher import core, tunnel
+        with mock.patch.object(tunnel, "probe_udp", side_effect=AssertionError("probed")):
+            for game in ({"host": "h", "port": 5000, "tcp": 5000},                     # an older server: silence would mean nothing
+                         {"host": "h", "port": 5000, "probe": 1},                       # nothing to switch to
+                         {"host": "h", "port": 5000, "tcp": 5000, "probe": True}):      # only exactly 1 is the advertisement
+                me = self.me(False, auto=True)
+                self.assertEqual(core.Launcher.start_tunnel(me, game), "")
+                self.assertIsNone(me.tunnel)
+        me = self.me(False, auto=False)                                                 # the setting turned off
+        with mock.patch.object(tunnel, "probe_udp", side_effect=AssertionError("probed")):
+            self.assertEqual(core.Launcher.start_tunnel(me, {"host": "h", "port": 5000, "tcp": 5000, "probe": 1}), "")
+
+    def test_the_probe_helper_matches_the_servers_framing(self):
+        import socket
+        import threading
+        from fh2mp_launcher import tunnel
+        sys_path = os.path.join(os.path.dirname(__file__), "..", "..", "server")
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("server_probe", os.path.join(sys_path, "probe.py"))
+        probe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe)
+        self.assertEqual(tunnel.PROBE_MAGIC, probe.MAGIC)
+        srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.settimeout(5)
+        self.addCleanup(srv.close)
+
+        class Hub:
+            tunnel = None
+            sock = srv
+
+        def serve():
+            try:
+                data, addr = srv.recvfrom(256)
+                probe.handle(Hub, data, addr)       # the real responder, answering the real client helper
+            except OSError:
+                pass
+        threading.Thread(target=serve, daemon=True).start()
+        self.assertTrue(tunnel.probe_udp("127.0.0.1", srv.getsockname()[1], tries=1, wait=2.0))
+        dead = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        dead.bind(("127.0.0.1", 0))
+        self.addCleanup(dead.close)
+        self.assertFalse(tunnel.probe_udp("127.0.0.1", dead.getsockname()[1], tries=1, wait=0.2))        # nobody answers
 
 
 class GamerpicSyncTests(unittest.TestCase):
@@ -569,7 +653,7 @@ def platform_dll(version):
     return b"MZ" + u("ProductName\0\0FH2 Mod Platform\0") + u("ProductVersion\0") + b"\x00\x00" + u(version + "\0")
 
 
-def platform_files(version="2.7.4"):
+def platform_files(version="2.8.0"):
     return {"d3dcompiler_47.dll": platform_dll(version), "DWrite.dll": platform_dll(version), "LICENSE-FH2ModPlatform.txt": b"MIT License Trinculo54",
             "LICENSE-MinHook.txt": b"MinHook BSD"}
 
@@ -578,7 +662,7 @@ class ShimTests(unittest.TestCase):
     DLL = b"MZ....FH2MP-SHIM-VERSION:0.1.0:END...."
 
     def setUp(self):
-        patch = mock.patch.object(shim, 'PLATFORM_DLL_SHA256', hashlib.sha256(platform_dll('2.7.4')).hexdigest())
+        patch = mock.patch.object(shim, 'PLATFORM_DLL_SHA256', hashlib.sha256(platform_dll('2.8.0')).hexdigest())
         patch.start()
         self.addCleanup(patch.stop)
 
@@ -597,10 +681,10 @@ class ShimTests(unittest.TestCase):
             did = shim.install(d, self.DLL, platform=platform_files())
             self.assertEqual(shim.installed(d), ("ours", "0.1.0"))
             self.assertEqual(self.read(d, "fh2-mods", "FH2MP.dll"), self.DLL)
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.4"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.8.0"))
             for n in ("LICENSE-FH2ModPlatform.txt", "LICENSE-MinHook.txt"):
                 self.assertTrue(os.path.isfile(os.path.join(d, n)), n)
-            self.assertTrue(any("FH2 Mod Platform 2.7.4" in s for s in did))
+            self.assertTrue(any("FH2 Mod Platform 2.8.0" in s for s in did))
             self.assertFalse(os.path.exists(os.path.join(d, "winmm.dll")))
 
     def locked(self, locked_path):
@@ -695,22 +779,22 @@ class ShimTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self.write(platform_dll("2.8.0"), d, "d3dcompiler_47.dll")
             shim.install(d, self.DLL, platform=platform_files())
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.4"))          # only the supplied build is supported
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.8.0"))          # only the supplied build is supported
             self.write(platform_dll("2.7.2"), d, "d3dcompiler_47.dll")
             self.assertEqual(shim.installed(d), ("old", "0.1.0"))                        # too old for this shim: install again
             shim.install(d, self.DLL, platform=platform_files())
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.4"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.8.0"))
             self.write(b"MZ fh2wheel loader", d, "d3dcompiler_47.dll")                     # fh2wheel's own loader
             self.assertEqual(shim.platform_installed(d), ("foreign", ""))
             did = shim.install(d, self.DLL, platform=platform_files())
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.4"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.8.0"))
             self.assertEqual(self.read(d, "d3dcompiler_47.dll.old"), b"MZ fh2wheel loader")
             self.assertTrue(any("d3dcompiler_47.dll.old" in s for s in did))
 
     @unittest.skipIf(sys.platform in ("win32", "darwin"), "needs a case-sensitive file system")
     def test_another_loader_in_other_letter_case_is_moved_aside(self):
         with tempfile.TemporaryDirectory() as d:
-            self.write(platform_dll("2.7.4"), d, "d3dcompiler_47.dll")
+            self.write(platform_dll("2.8.0"), d, "d3dcompiler_47.dll")
             self.write(b"MZ radio mod loader", d, "D3DCompiler_47.dll")          # Wine would load this one
             self.assertEqual(shim.platform_installed(d), ("foreign", ""))
             shim.install(d, self.DLL, platform=platform_files())
@@ -754,7 +838,7 @@ class ShimTests(unittest.TestCase):
             shim.uninstall(d)
             self.assertEqual(shim.installed(d), ("none", ""))
             self.assertEqual(self.read(d, "winmm.dll"), b"MZ extra options")
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.7.4"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.8.0"))
 
     def test_shim_zip(self):
         from fh2mp_launcher import core, updater
@@ -955,7 +1039,7 @@ class ExtraOptionsTests(unittest.TestCase):
     def test_only_one_extra_options_pin_is_supplied(self):
         from fh2mp_launcher.constants import UPSTREAM
         self.assertEqual(set(UPSTREAM), {'platform', 'extraOptions'})
-        self.assertEqual(UPSTREAM['extraOptions']['version'], '0.3.9')
+        self.assertEqual(UPSTREAM['extraOptions']['version'], '0.4.4')
         with tempfile.TemporaryDirectory() as az:
             self.write(b'MZ-0.3.0-old', az, 'winmm.dll')
             self.assertFalse(shim.extra_options_supported(az))
@@ -1236,7 +1320,7 @@ class SaveAdoptionTests(unittest.TestCase):
 
 class DevModeTests(unittest.TestCase):
     def setUp(self):
-        patch = mock.patch.object(shim, 'PLATFORM_DLL_SHA256', hashlib.sha256(platform_dll('2.7.4')).hexdigest())
+        patch = mock.patch.object(shim, 'PLATFORM_DLL_SHA256', hashlib.sha256(platform_dll('2.8.0')).hexdigest())
         patch.start()
         self.addCleanup(patch.stop)
         self.home = tempfile.TemporaryDirectory()
@@ -1274,7 +1358,7 @@ class DevModeTests(unittest.TestCase):
         from fh2mp_launcher import core
         from fh2mp_launcher.settings import Settings
         with tempfile.TemporaryDirectory() as d:
-            for name, body in (("azimuth.exe", b"MZ"), ("d3dcompiler_47.dll", platform_dll("2.7.4")), ("DWrite.dll", platform_dll("2.7.4"))):     # a bare DLL needs the platform
+            for name, body in (("azimuth.exe", b"MZ"), ("d3dcompiler_47.dll", platform_dll("2.8.0")), ("DWrite.dll", platform_dll("2.8.0"))):     # a bare DLL needs the platform
                 with open(os.path.join(d, name), "wb") as f:
                     f.write(body)
             dll = os.path.join(d, "local.dll")
@@ -1319,6 +1403,98 @@ class DevModeTests(unittest.TestCase):
             self.assertTrue(lc.shim_outdated())
             lc.shim_state = lambda: ("ours", version.__version__)
             self.assertFalse(lc.shim_outdated())
+
+    def test_an_older_shim_of_ours_is_updated_without_play(self):
+        from fh2mp_launcher import core, version
+        from fh2mp_launcher.settings import Settings
+        os.environ.pop("FH2MP_DEV", None)
+        with tempfile.TemporaryDirectory() as d:
+            lc = core.Launcher(Settings(), load_identity=False)
+            lc.settings["azimuth_dir"] = d
+            installed = []
+            lc.install_shim = lambda *a, **k: installed.append(1)
+            lc.game_running = lambda: False
+            lc.manifest = {"tag": "v" + version.__version__, "shim": {"version": version.__version__}, "launcher": {"version": version.__version__}}
+
+            def attempt(state, **kw):
+                installed.clear()
+                lc.shim_state = lambda: state
+                for k, v in kw.items():
+                    setattr(lc, k, v)
+                return lc.auto_update_shim(), len(installed)
+            self.assertEqual(attempt(("ours", "1.0.0-rc4")), (True, 1))                 # our shim, older than this launcher
+            self.assertEqual(attempt(("ours", version.__version__)), (False, 0))        # already current
+            self.assertEqual(attempt(("foreign", "")), (False, 0))                      # somebody else's DLL: only on the player's click
+            self.assertEqual(attempt(("none", "")), (False, 0))
+            self.assertEqual(attempt(("ours", "1.0.0-rc4"), game_running=lambda: True), (False, 0))     # the game has the DLL loaded
+            lc.game_running = lambda: False
+            lc.shim_pinned = lambda *a: True
+            self.assertEqual(attempt(("ours", "1.0.0-rc4")), (False, 0))                # pinned (developer)
+            lc.shim_pinned = lambda *a: False
+            lc.manifest = None
+            self.assertEqual(attempt(("ours", "1.0.0-rc4")), (False, 0))                # nothing known about releases yet
+
+    def test_a_leftover_session_is_removed_unless_the_game_runs(self):
+        from fh2mp_launcher import core, shim
+        from fh2mp_launcher.settings import Settings
+        os.environ.pop("FH2MP_DEV", None)
+        with tempfile.TemporaryDirectory() as d:
+            lc = core.Launcher(Settings(), load_identity=False)
+            lc.settings["azimuth_dir"] = d
+            session = os.path.join(shim.bin_dir(d), shim.SESSION_FILE)
+            shim.write_session(d, 0x9000000000001, "fh2.token", "https://lsp.example")
+            self.assertTrue(os.path.exists(session))
+            lc.game_running = lambda: True
+            self.assertFalse(lc.clear_leftover_session())          # the running game's launcher keeps what the game may still read
+            self.assertTrue(os.path.exists(session))
+            lc.game_running = lambda: False
+            self.assertTrue(lc.clear_leftover_session())           # nothing running: a leftover would let the game online without Play
+            self.assertFalse(os.path.exists(session))
+            self.assertFalse(lc.clear_leftover_session())          # nothing left to remove
+            lc.settings["azimuth_dir"] = ""
+            self.assertFalse(lc.clear_leftover_session())          # no folder chosen yet
+
+    def test_keeping_car_packs_skips_the_database_sync_and_names_none_in_the_session(self):
+        from fh2mp_launcher import core
+        from fh2mp_launcher.settings import Settings
+        lc = core.Launcher(Settings(), load_identity=False)
+        synced = []
+        lc.sync_gamedb = lambda: synced.append(1) or "synced"
+        lc.gamedb_synced = True                                   # left over from an earlier start
+        lc.settings["keep_car_packs"] = True
+        note = lc.car_database_step()
+        self.assertEqual((synced, lc.gamedb_synced), ([], False))   # nothing replaced, and no database named for the shim
+        self.assertIn("car packs are kept", note)
+        lc.settings["keep_car_packs"] = False
+        self.assertEqual((lc.car_database_step(), synced), ("synced", [1]))          # the default is unchanged
+
+    def test_the_setup_check_names_every_component_and_what_is_wrong(self):
+        from fh2mp_launcher import core, shim, version
+        from fh2mp_launcher.settings import Settings
+        os.environ.pop("FH2MP_DEV", None)
+        lc = core.Launcher(Settings(), load_identity=False)
+        lc.server = {"minLauncher": "0.0.0", "minShim": "1.1.2"}
+        lc.settings["azimuth_dir"] = ""
+        rows = {r[0]: r for r in lc.status_lines()}
+        self.assertEqual(rows["Azimuth folder"][3], False)                      # nothing chosen: the first thing to fix
+        with tempfile.TemporaryDirectory() as d:
+            lc.settings["azimuth_dir"] = d
+            lc.shim_state = lambda: ("ours", "1.0.0-rc3")
+            rows = {r[0]: r for r in lc.status_lines()}
+            self.assertEqual(list(rows), ["FH2MP launcher", "Azimuth", "FH2MP shim", "FH2 Mod Platform", "FH2 Extra Options",
+                                          "Session for the game", "Car database", "Connection", "Mode"])
+            self.assertEqual(rows["FH2MP shim"][1:], ("1.0.0-rc3", version.__version__ + " (server needs 1.1.2)", False))   # outdated: marked
+            self.assertEqual(rows["Azimuth"][3], False)                          # no azimuth.exe in the folder
+            self.assertEqual(rows["FH2 Mod Platform"][1], "not installed")
+            self.assertEqual(rows["Session for the game"][1], "none: the game starts offline")
+            lc.shim_state = lambda: ("ours", version.__version__)
+            self.assertEqual({r[0]: r for r in lc.status_lines()}["FH2MP shim"][3], True)
+            shim.write_session(d, 0x9000000000001, "fh2.token", "https://lsp.example")
+            self.assertIn("present", {r[0]: r for r in lc.status_lines()}["Session for the game"][1])
+            lc.settings["keep_car_packs"] = True
+            self.assertIn("no play with other people", {r[0]: r for r in lc.status_lines()}["Car database"][1])
+        text = repr(lc.status_lines())
+        self.assertNotIn("fh2.token", text)                                       # the token never appears in what a player copies
 
     def test_extra_env_reaches_the_game(self):
         from fh2mp_launcher import launch
@@ -1373,3 +1549,143 @@ class DevModeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class AutoRestartOfASkippedOnlineSetup(unittest.TestCase):
+    """The shim writes fh2mp-restart.txt when a game start never began its online setup (it does not recover); the launcher starts it again."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.az = os.path.join(self.tmp.name, "az")
+        os.makedirs(os.path.join(self.az, "data", "bin"))
+        self.lc = core.Launcher(Settings(os.path.join(self.tmp.name, "settings.json")), load_identity=False)
+        self.lc.settings["azimuth_dir"] = self.az
+        self.marker = os.path.join(self.az, "data", "bin", "fh2mp-restart.txt")
+
+    def note(self, text="online setup skipped"):
+        with open(self.marker, "w") as f:
+            f.write(text)
+
+    def running(self):
+        p = mock.Mock()
+        p.poll.return_value = None
+        self.lc.process = p
+
+    def test_only_a_running_online_game_with_a_note_is_restarted(self):
+        self.assertFalse(self.lc.restart_requested())
+        self.running()
+        self.assertFalse(self.lc.restart_requested(), "no note, no restart")
+        self.note()
+        self.assertTrue(self.lc.restart_requested())
+        self.lc.offline_run = True
+        self.assertFalse(self.lc.restart_requested(), "an offline run never has an online setup")
+        self.lc.offline_run = False
+        self.lc.process.poll.return_value = 0
+        self.assertFalse(self.lc.restart_requested(), "a game that has ended is not restarted")
+
+    def test_the_restart_reads_the_note_stops_the_game_and_plays_again_twice_at_most(self):
+        self.running()
+        self.lc.auto_restarts = 0
+        calls = []
+        with mock.patch.object(self.lc, "stop_game", side_effect=lambda: calls.append("stop")), \
+                mock.patch.object(self.lc, "play", side_effect=lambda **kw: calls.append(("play", kw)) or ("acct", [])), \
+                mock.patch("time.sleep"):
+            for n in (1, 2):
+                self.running()
+                self.note()
+                self.assertTrue(self.lc.restart_requested(), f"restart {n}")
+                self.lc.restart_game()
+                self.assertFalse(os.path.exists(self.marker), "the note is read once")
+            self.running()
+            self.note()
+            self.assertFalse(self.lc.restart_requested(), "two automatic restarts per Play, then the player decides")
+        self.assertEqual(calls, ["stop", ("play", {"_auto": True}), "stop", ("play", {"_auto": True})])
+        self.assertEqual(self.lc.auto_restarts, 2)
+
+    def test_pressing_play_clears_an_old_note_and_the_count(self):
+        self.note()
+        self.lc.auto_restarts = 2
+        self.lc.settings["offline_mode"] = True
+        with mock.patch.object(self.lc, "play_offline"):
+            self.lc.play()
+        self.assertEqual(self.lc.auto_restarts, 0)
+        self.assertFalse(os.path.exists(self.marker))
+
+
+class MirroredDownloads(unittest.TestCase):
+    """The pinned third-party zips come from the FH2MP mirror first and the author's release second; both must be exactly the pinned bytes."""
+
+    def setUp(self):
+        from fh2mp_launcher import upstream
+        from fh2mp_launcher.constants import UPSTREAM
+        self.upstream, self.pin = upstream, UPSTREAM['platform']
+
+    def updater(self, outcomes):
+        calls = []
+
+        class Fake:
+            def download_url(_self, url, entry, progress=None, cancelled=lambda: False):
+                calls.append(url)
+                result = outcomes.pop(0)
+                if isinstance(result, Exception):
+                    raise result
+                return result
+        return Fake(), calls
+
+    def test_the_pins_name_the_mirror_first_and_the_same_hashes(self):
+        from fh2mp_launcher.constants import AZIMUTH_ARCHIVE, MIRROR_BASE, UPSTREAM
+        for kind in ('platform', 'extraOptions'):
+            self.assertTrue(UPSTREAM[kind]['mirror'].startswith(MIRROR_BASE))
+            self.assertEqual(UPSTREAM[kind]['mirror'].rsplit('/', 1)[1], UPSTREAM[kind]['url'].rsplit('/', 1)[1])
+        self.assertTrue(AZIMUTH_ARCHIVE['url'].startswith(MIRROR_BASE))
+        self.assertEqual(len(AZIMUTH_ARCHIVE['sha256']), 64)
+
+    def test_the_mirror_is_used_and_the_author_is_the_fallback(self):
+        from fh2mp_launcher.updater import UpdateError
+        with mock.patch.object(self.upstream, 'extract', return_value={'ok': b''}):
+            up, calls = self.updater(['/tmp/x'])
+            with mock.patch('builtins.open', mock.mock_open(read_data=b'zip')):
+                self.assertEqual(self.upstream.fetch('platform', up), {'ok': b''})
+            self.assertEqual(calls, [self.pin['mirror']])
+            up, calls = self.updater([UpdateError('download failed (timed out)'), '/tmp/x'])
+            with mock.patch('builtins.open', mock.mock_open(read_data=b'zip')):
+                self.upstream.fetch('platform', up)
+            self.assertEqual(calls, [self.pin['mirror'], self.pin['url']])
+            up, calls = self.updater([UpdateError('the download does not match its checksum'), UpdateError('download failed (404)')])
+            with self.assertRaises(UpdateError):
+                self.upstream.fetch('platform', up)
+            self.assertEqual(len(calls), 2)
+
+    def test_a_cancelled_download_does_not_try_the_next_source(self):
+        from fh2mp_launcher.updater import UpdateError
+        up, calls = self.updater([UpdateError('cancelled')])
+        with self.assertRaises(UpdateError):
+            self.upstream.fetch('platform', up)
+        self.assertEqual(len(calls), 1)
+
+    def test_no_other_host_is_accepted(self):
+        from fh2mp_launcher.constants import UPSTREAM
+        pin = dict(UPSTREAM['platform'], mirror='https://example.com/x.zip')
+        up, calls = self.updater([])
+        with mock.patch.dict(UPSTREAM, platform=pin), self.assertRaises(self.upstream.UpstreamError):
+            self.upstream.fetch('platform', up)
+        self.assertEqual(calls, [])
+
+    def test_azimuth_comes_from_the_mirror_with_its_pinned_size_and_hash(self):
+        from fh2mp_launcher import setup
+        from fh2mp_launcher.constants import AZIMUTH_ARCHIVE
+        seen = {}
+
+        class Fake:
+            def __init__(self, channel=None):
+                pass
+
+            def download_url(self, url, entry, progress=None, cancelled=lambda: False):
+                seen.update(url=url, entry=entry)
+                return '/cache/azimuth.zip'
+        lc = mock.Mock()
+        lc.settings = {'channel': 'stable'}
+        with mock.patch.object(setup.updater, 'Updater', Fake):
+            self.assertEqual(setup.Packages(lc).get_azimuth(), '/cache/azimuth.zip')
+        self.assertEqual(seen['url'], AZIMUTH_ARCHIVE['url'])
+        self.assertEqual((seen['entry']['sha256'], seen['entry']['size']), (AZIMUTH_ARCHIVE['sha256'], AZIMUTH_ARCHIVE['size']))

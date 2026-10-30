@@ -3,6 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 work=$(mktemp -d)
 trap 'WINEPREFIX="$work/prefix" wineserver -k >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
+. ./wine_prefix.sh; wine_prefix "$work/prefix"
 x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Wno-unused-function test_lighting.c -o "$work/test.exe"
 mkdir -p "$work/prefix"
 WINEPREFIX="$work/prefix" WINEDEBUG=-all wine "$work/test.exe"

@@ -33,7 +33,7 @@
 extern "C" {
 #endif
 
-#define FH2MOD_API_VERSION 8
+#define FH2MOD_API_VERSION 9
 
 #ifdef __cplusplus
 #define FH2MOD_EXPORT extern "C" __declspec(dllexport)
@@ -50,6 +50,9 @@ typedef struct FH2Setting FH2Setting;
 /* A page of your own, and one of its rows (API 8), defined below FH2ModApi. */
 typedef struct FH2Page FH2Page;
 typedef struct FH2PageRow FH2PageRow;
+/* A title-screen entry (API 9), defined below FH2ModApi. */
+typedef struct FH2TitleEntry FH2TitleEntry;
+typedef struct FH2Hotkey FH2Hotkey;
 
 /* The CPU's registers at an instruction hook (API 7): see hook_instruction.
    rsp is what it was at the hooked instruction; changing it has no effect. */
@@ -70,6 +73,13 @@ typedef struct FH2Context {
 } FH2Context;
 typedef void (*FH2InstructionFn)(FH2Context* ctx, void* user);
 
+/* A command (API 9, add_command): runs on the platform's command thread,
+   not the game's, with the rest of the request's line in `args`. Write
+   the answer into `reply` (UTF-8, at most reply_size bytes with its NUL;
+   the platform cuts anything longer). Start it with "error: " for a
+   failure, which fh2mod.exe exits 1 on. */
+typedef void (*FH2CommandFn)(void* user, const char* name, const char* args, char* reply, size_t reply_size);
+
 typedef struct FH2ModInfo {
     uint32_t size;                /* sizeof(FH2ModInfo) */
     const char* name;             /* display name, UTF-8: "WheresMyBuddy" */
@@ -80,6 +90,14 @@ typedef struct FH2ModInfo {
     /* API 6 (platform 2.5.0): what your mod adds, in a sentence or two, for the MODS tab's
        Installed mods page. May be NULL. Leave it out (an older FH2ModInfo) on older platforms. */
     const char* description;
+    /* API 9 (platform 2.8.0): nonzero for a mod that shouldn't run in online play, because it
+       changes driving or what other players see (a nitro boost, say). When the game is started
+       from the FH2MP launcher, register_mod then returns NULL, so return from fh2mod_init
+       straight away (call register_mod first, before you do anything else); from the next
+       launch the platform doesn't load the DLL at all online. Players can still choose for
+       themselves on MODS > Installed mods ("Load when playing online"). Older platforms
+       ignore it. */
+    int offline_only;
 } FH2ModInfo;
 
 typedef struct FH2ModApi {
@@ -374,6 +392,118 @@ typedef struct FH2ModApi {
        reads them each time it's shown. Returns 1, or 0 if you have no page
        called `page_key` or it isn't on a tile. */
     int (*set_page_tile_colors)(FH2Mod* mod, const char* page_key, uint32_t background, uint32_t text);
+
+    /* ==== API version 9 (platform 2.8.0): check api_version >= 9 ======== */
+
+    /* ---- Title-screen entries ----------------------------------------------
+       A line of your own on the title screen, under "PRESS (A) TO START" and
+       its notices, that runs your code when the player presses its button:
+       "(Y) START ON STORM ISLAND". Each entry has a button of its own, Y, X, RB
+       then LB in the order mods add them (or the one you ask for, if it's
+       free): four at most, from every mod together. The lines show while the
+       title screen waits for A, and go with "PRESS (A) TO START" once the
+       game starts signing in. If the platform can't hook the title screen
+       (the game's code isn't as expected), they don't show at all and the
+       log says why. An entry can be a list instead (FH2TitleEntry.choices):
+       its press shows the game's message box over the title screen with the
+       choices and a Back, and the pick calls on_choose. A list of more than
+       10 is shown 8 choices at a time, with Previous and Next.
+
+       Add entries from fh2mod_init: the title screen is written when every
+       mod's fh2mod_init has returned, so one added later only shows from the
+       next launch. Returns 1 if the entry was added, 0 if not (a bad or
+       repeated key, no label, no on_press, no button left, a list without
+       on_choose or with more than FH2_TITLE_MAX_CHOICES; the log says
+       why). */
+    int (*add_title_entry)(FH2Mod* mod, const FH2TitleEntry* entry);
+    /* The key of your entry that started the game (its on_press or
+       on_choose returned FH2_TITLE_START), or NULL if the player started it with A, another
+       mod's entry did, or it hasn't started yet. A later press of A on the
+       title screen sets it back to NULL. Call it from any thread: from your
+       hook on the world loading, say, to know whether this start is yours. */
+    const char* (*title_started_by)(FH2Mod* mod);
+
+    /* ---- Online play -------------------------------------------------------
+       1 when the game was started from the FH2MP launcher (online play on the
+       FH2MP servers), 0 otherwise. It's decided once, before any mod loads,
+       and doesn't change during the session. Use it to turn off just the part
+       of your mod that shouldn't run online; for the whole mod, set
+       FH2ModInfo.offline_only instead. Call it from anywhere, fh2mod_init
+       included. */
+    int (*playing_online)(void);
+
+    /* ---- Sessions ----------------------------------------------------------
+       This run of the game's id, "20261021-203224-1234": when the platform
+       started, and the process id (the game can start twice in one launch,
+       and Restart now starts a new process). The same id is in
+       platform.log's third line, in the copy of it the platform keeps
+       (fh2-mods\platform-logs\platform-<id>.log, the newest 20 sessions'),
+       and in fh2-mods\platform-session.json, which says for tools what's
+       running (docs/api.md). Name your own logs with it, or let
+       session_log_path do that. Call it from anywhere. */
+    const char* (*session_id)(void);
+    /* <azimuth_dir>\<folder>\logs\<session id>.log, with the folder made,
+       where `folder` is your mod's own folder next to azimuth.exe (L"MyMod").
+       The newest `keep` logs there are kept, counting this one (at least 1),
+       and older *.log files in it are deleted. Open the file yourself; the
+       path stays valid for the session. NULL if `folder` isn't a plain folder
+       name or can't be made (the log says why). */
+    const wchar_t* (*session_log_path)(FH2Mod* mod, const wchar_t* folder, uint32_t keep);
+
+    /* ---- Save snapshots ----------------------------------------------------
+       A copy of the saves folder (<azimuth_dir>\data\titles\1A96545B\saves)
+       this session, before the game reads it: for a mod being tested, or one
+       that changes what gets saved. Call it from fh2mod_init. Once every mod's
+       fh2mod_init has returned, the platform copies the folder (once, however
+       many mods ask) to fh2-mods\save-snapshots\<session id>\, keeps the
+       newest `keep` copies (the most any mod asked for, at least 1), and says
+       in the log which mods asked and why. The game reads the saves when A is
+       pressed on the title screen, long after. The platform only reads the
+       saves, never writes to them; to go back, copy a snapshot's contents
+       over the saves folder with the game closed (all of it: Azimuth checks
+       the saves' hashes). Returns 1 if a copy will be made, 0 if there's no
+       saves folder or the call came after fh2mod_init (the log says why). */
+    int (*request_save_snapshot)(FH2Mod* mod, const char* reason, uint32_t keep);
+
+    /* ---- Crash dumps -------------------------------------------------------
+       The minidump the platform writes with every crash report has the
+       writable data (globals) of the DLLs it loaded, yours included. Memory
+       behind your globals, on the heap (your tables, the state your hooks
+       keep), only goes in if you add it here: `n` bytes at `p`, 1 byte to
+       64 MB, in every dump from now on. Keep it to what you'd want to see
+       after a crash; 64 ranges at most, from every mod together. The memory
+       must stay allocated (or the range is skipped at the crash). Any
+       thread. */
+    void (*add_dump_memory)(FH2Mod* mod, const void* p, size_t n);
+
+    /* ---- Hotkeys -----------------------------------------------------------
+       A keyboard key (with FH2_KEY_ modifiers) and a controller chord that
+       call your on_press, for a "mark this spot" key or a live switch while
+       testing. Keys are only watched while the game's window is in front, and
+       the game still gets every key and button: pick ones that do nothing
+       harmful in game (F-keys; LB+RB with a face button). Each hotkey gets two
+       rows on the Mods page, under your mod's: its key (Off, F1 to F12,
+       Ctrl+F1 to F12, or yours if it's none of those) and its controller chord
+       (Off, or LB+RB with Y, X, B, A or a d-pad direction). A change there
+       takes effect straight away and calls on_rebind, so you can save it:
+       the platform doesn't keep bindings, so pass the saved ones in next time.
+       Add hotkeys from fh2mod_init, so their rows show. Returns 1 if added, 0
+       if not (the log says why). See FH2Hotkey below. */
+    int (*add_hotkey)(FH2Mod* mod, const FH2Hotkey* hotkey);
+
+    /* ---- Commands ----------------------------------------------------------
+       A command other programs can run while the game does, to flip a
+       setting, ask for numbers or mark a spot without touching the game:
+       `fh2mod MyMod shadows off` with fh2mod.exe (in the platform's zip), or
+       one line of UTF-8, "<mod> <command> [args]", on the named pipe
+       \\.\pipe\fh2mod-<process id> (platform-session.json has its name).
+       "list" lists every mod's commands with their help. The pipe only
+       starts once a mod adds a command, and only programs this Windows user
+       runs on this PC can connect. `name` is letters, digits and '_', unique
+       within your mod; `help` is a line for "list" (may be NULL). Commands
+       run one at a time, on the platform's command thread (see
+       FH2CommandFn). Returns 1 if added, 0 if not (the log says why). */
+    int (*add_command)(FH2Mod* mod, const char* name, const char* help, FH2CommandFn fn, void* user);
 } FH2ModApi;
 
 /* Called on the game's UI thread when the player changes a row: keep it
@@ -385,6 +515,8 @@ typedef void (*FH2SliderChangedFn)(void* user, const char* key, float value);
 #define FH2_SETTING_ON_OFF 0
 #define FH2_SETTING_SLIDER 1
 #define FH2_SETTING_LINK   2   /* API 6 */
+#define FH2_SETTING_CHOICE 3   /* API 9 */
+#define FH2_SETTING_MAX_CHOICES 32
 
 /* One row on the Mods page (API 4; sliders API 5). */
 struct FH2Setting {
@@ -415,6 +547,16 @@ struct FH2Setting {
        ignored. On an older platform it would come out as an On/Off row, so
        only add one when api_version >= 6. ---- */
     const char* url;               /* "http://..." or "https://..." */
+
+    /* ---- API 9 (platform 2.8.0): choices. With kind = FH2_SETTING_CHOICE the
+       row shows one of `choices` by name, as the game's own option rows do
+       ("Speedometer: Analogue / Digital"), and left and right step through
+       them. `value` is the index of the one chosen (0 = the first), and
+       on_change, get_setting and set_setting use that index. The names are
+       copied. The slider fields are ignored. On an older platform it would
+       come out as an On/Off row, so only add one when api_version >= 9. ---- */
+    const char* const* choices;    /* UTF-8, shown as given: "LB", "RB", "A" ... */
+    uint32_t choice_count;         /* 2 to FH2_SETTING_MAX_CHOICES */
 };
 
 /* Pages (API 8). Every page callback runs on the game's UI thread: keep them
@@ -461,6 +603,81 @@ struct FH2Page {
     /* Pages of your own design (set_page_xaml). Both may be NULL. */
     FH2PageButtonFn on_button;
     FH2PageSlotFn on_slot;
+};
+
+/* Title-screen entries (API 9). Called on the game's UI thread when the
+   player presses the entry's button on the title screen. Keep it short (set
+   a flag, start a thread of your own) and don't call into the game from it.
+   Return FH2_TITLE_HANDLED to stay on the title screen, or FH2_TITLE_START
+   for the platform to press A for the player straight after: the game then
+   signs in, loads the save and loads the world as it always does, and
+   title_started_by names this entry. */
+typedef int (*FH2TitlePressFn)(void* user, const char* key);
+/* The same for an entry with a list (FH2TitleEntry.choices): called when the
+   player picks one, with its position in the list from 0. */
+typedef int (*FH2TitleChooseFn)(void* user, const char* key, uint32_t choice);
+
+#define FH2_TITLE_HANDLED 0
+#define FH2_TITLE_START   1
+#define FH2_TITLE_MAX_CHOICES 100
+
+/* One title-screen entry (API 9). */
+struct FH2TitleEntry {
+    uint32_t size;                 /* sizeof(FH2TitleEntry) */
+    const char* key;               /* unique within your mod: letters, digits and '_', like "Storm" */
+    const char* label;             /* UTF-8, shown in capitals after its button: "Start on Storm Island"; about 24 characters fit */
+    FH2TitlePressFn on_press;      /* may be NULL for an entry with choices (it isn't called then) */
+    void* user;                    /* passed to on_press and on_choose */
+    int button;                    /* FH2_BUTTON_Y, _X, _RB or _LB to ask for that one; 0 = the next free one */
+    /* A list instead of an action: the press shows the game's message box
+       over the title screen with these choices and a Back, and picking one
+       calls on_choose. The choices are copied. */
+    const char* const* choices;    /* UTF-8, shown as given; NULL = no list */
+    uint32_t choice_count;         /* 1 to FH2_TITLE_MAX_CHOICES; over 10, shown in pages */
+    FH2TitleChooseFn on_choose;
+    const char* list_title;        /* the box's title (shown in capitals); NULL = the label */
+    const char* list_message;      /* text over the choices; may be NULL */
+};
+
+/* Hotkeys (API 9). Modifiers for FH2Hotkey.modifiers: */
+#define FH2_KEY_CTRL  1
+#define FH2_KEY_SHIFT 2
+#define FH2_KEY_ALT   4
+/* Controller buttons for FH2Hotkey.pad_chord (XInput's bits): all of them held. */
+#define FH2_PAD_DPAD_UP    0x0001
+#define FH2_PAD_DPAD_DOWN  0x0002
+#define FH2_PAD_DPAD_LEFT  0x0004
+#define FH2_PAD_DPAD_RIGHT 0x0008
+#define FH2_PAD_START      0x0010
+#define FH2_PAD_BACK       0x0020
+#define FH2_PAD_LTHUMB     0x0040
+#define FH2_PAD_RTHUMB     0x0080
+#define FH2_PAD_LB         0x0100
+#define FH2_PAD_RB         0x0200
+#define FH2_PAD_A          0x1000
+#define FH2_PAD_B          0x2000
+#define FH2_PAD_X          0x4000
+#define FH2_PAD_Y          0x8000
+
+/* Called on a platform thread (not the game's) when the key or chord is
+   pressed, once per press. Keep it short, and hand game work to a hook. */
+typedef void (*FH2HotkeyFn)(void* user, const char* key);
+/* The player picked another binding on the Mods page: save it, and pass it
+   in next time (`vk` 0 = no key, `pad_chord` 0 = no chord). On the UI
+   thread. */
+typedef void (*FH2HotkeyRebindFn)(void* user, const char* key, uint32_t vk, uint32_t modifiers, uint32_t pad_chord);
+
+/* One hotkey (API 9). */
+struct FH2Hotkey {
+    uint32_t size;                 /* sizeof(FH2Hotkey) */
+    const char* key;               /* unique within your mod: letters, digits and '_', like "Mark" */
+    const char* label;             /* UTF-8, for its rows on the Mods page: "Mark this spot" */
+    uint32_t vk;                   /* the key, a Windows virtual-key code (VK_F9, 'M'); 0 = none */
+    uint32_t modifiers;            /* FH2_KEY_CTRL | FH2_KEY_SHIFT | FH2_KEY_ALT, held with it */
+    uint32_t pad_chord;            /* FH2_PAD_ bits, held together; 0 = none */
+    FH2HotkeyFn on_press;
+    FH2HotkeyRebindFn on_rebind;   /* may be NULL */
+    void* user;                    /* passed to both */
 };
 
 #define FH2_ROW_NORMAL  0

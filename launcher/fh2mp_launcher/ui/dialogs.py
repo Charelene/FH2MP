@@ -673,14 +673,26 @@ class SettingsDialog(QDialog):
                                    "The pinned build already there is left alone; another winmm.dll is kept in the fh2extra folder.")
         self.extra_opts.setChecked(s["extra_options"])
         lay.addWidget(self.extra_opts)
+        self.packs = QCheckBox("Keep my car packs (no online play with other people)")
+        self.packs.setToolTip("Tunes, liveries, photos and your progress work as usual, with your own car database and the car packs in it. "
+                              "Free Roam, Road Trip and other games with other players are off, because a car the others do not have "
+                              "would crash them. Turn this off and press Play to play with everyone on the server's car database.")
+        self.packs.setChecked(s["keep_car_packs"])
+        lay.addWidget(self.packs)
         self.tcp = QCheckBox("Connect over TCP (experimental, for networks that block UDP)")
-        self.tcp.setToolTip("Use this only if you cannot join games without a VPN. The game's traffic goes through your own machine and over "
-                            "TCP to the server, which adds delay. Needs the server to offer it.")
+        self.tcp.setToolTip("The launcher switches to TCP by itself when the server's UDP probe gets no answer. Tick this to always use TCP "
+                            "(the game's traffic goes through your own machine and over TCP to the server, which adds delay). Needs the "
+                            "server to offer it.")
         self.tcp.setChecked(s["tcp_fallback"])
         lay.addWidget(self.tcp)
         self.crash_ask = QCheckBox("Offer to send a report when the game crashes")
         self.crash_ask.setChecked(s["crash_report_ask"])
         lay.addWidget(self.crash_ask)
+        check = QPushButton("Check my setup...")
+        check.setToolTip("Every component's version against what this launcher needs, and your connection and car database settings. "
+                         "Copy it when you ask for help.")
+        check.clicked.connect(self._show_status)
+        lay.addWidget(check, 0, Qt.AlignmentFlag.AlignLeft)
 
         if sys.platform != "win32":
             lay.addWidget(hrule())
@@ -785,6 +797,26 @@ class SettingsDialog(QDialog):
         lay.addLayout(bottom)
         fixed(self, 560 if not dev else 620)
 
+    def _status_text(self):
+        rows = self.lc.status_lines()
+        width = max(len(r[0]) for r in rows)
+        mark = {True: "ok ", False: "!! ", None: "   "}
+        return "\n".join(f"{mark[ok]}{name.ljust(width)}  {have}" + (f"   (needs {need})" if need not in ("-", have) and ok is not None else "")
+                         for name, have, need, ok in rows)
+
+    def _show_status(self):
+        text = self._status_text()
+        box = QMessageBox(self)
+        box.setWindowTitle("My setup")
+        box.setText("Lines marked !! need attention.")
+        box.setDetailedText(text)
+        box.setInformativeText(text)
+        copy = box.addButton("Copy", QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Close)
+        box.exec()
+        if box.clickedButton() is copy:
+            QGuiApplication.clipboard().setText(text)
+
     def _browse(self):
         d = pick_dir(self, "Folder with azimuth.exe", self.azdir.text() or os.path.expanduser("~"))
         if d:
@@ -835,6 +867,7 @@ class SettingsDialog(QDialog):
         s["azimuth_dir"] = d
         s["offline_mode"] = self.offline.isChecked()
         s["extra_options"] = self.extra_opts.isChecked()
+        s["keep_car_packs"] = self.packs.isChecked()
         s["tcp_fallback"] = self.tcp.isChecked()
         s["crash_report_ask"] = self.crash_ask.isChecked()
         if paths.is_dev():                          # players cannot change the channel or the server

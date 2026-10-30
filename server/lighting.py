@@ -16,6 +16,7 @@ REQUEST_SIZE = BASE + MAC_SIZE
 MAX_RECORDS = 12
 LEASE_SECONDS = 2.0
 MIN_INTERVAL = 0.08
+LOG_EVERY = 60.0         # seconds between two log lines of one player's lights
 
 
 def signed(payload, key):
@@ -57,7 +58,12 @@ def handle(hub, data, addr):
         return
     peer.lighting = {'epoch': epoch, 'seq': seq, 'at': now, 'flags': data[53], 'car': peer.car_id}
     if not old or old['flags'] != data[53] or old['car'] != peer.car_id:
-        getattr(hub, 'log', lambda *_: None)(f"lighting: owner {peer.owner_id} car {peer.car_id} headlights={data[53] & 1} signal={data[53] >> 1}")
+        # A blinking signal changes the flags every second (prod 2026-10-28: 34k of the day's 407k log lines); one line a minute is plenty.
+        peer.lighting_changes = getattr(peer, 'lighting_changes', 0) + 1
+        if now - getattr(peer, 'lighting_logged_at', -LOG_EVERY) >= LOG_EVERY:
+            getattr(hub, 'log', lambda *_: None)(f"lighting: owner {peer.owner_id} car {peer.car_id} headlights={data[53] & 1} "
+                                                 f"signal={data[53] >> 1} ({peer.lighting_changes} change(s) in the last minute)")
+            peer.lighting_logged_at, peer.lighting_changes = now, 0
     records = []
     for other in world.others(peer):
         state = getattr(other, 'lighting', None)

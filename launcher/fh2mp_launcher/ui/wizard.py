@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDialog, QFrame, QHBoxLa
 
 from .. import azimuth, identity
 from ..api import ApiError
-from ..constants import AZIMUTH_PAGE
+from ..constants import AZIMUTH_PAGE, AZIMUTH_VERSION
 from ..core import friendly
 from .dialogs import NameCheck
 from .widgets import Banner, pick_dir, save_file
@@ -378,6 +378,23 @@ class Wizard(AccountWizard):
         height = min(max(160, height), screen.height() - 80)
         if self.width() != width or self.height() != height:
             self.setFixedSize(width, height)
+        self._keep_on_screen()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        QTimer.singleShot(0, self, self._keep_on_screen)      # after the platform has placed the frame (centred on a parent that may be large)
+
+    def _keep_on_screen(self):
+        """A page that grows pushes the bottom of the dialog off the screen, and a taller one than the parent's centre allows its top: both are
+        moved back inside the available area (Windows showed the dialog with its top above the screen)."""
+        if not self.isVisible():
+            return
+        area = self.screen().availableGeometry()
+        frame = self.frameGeometry()
+        x = min(max(frame.x(), area.left()), max(area.left(), area.right() - frame.width() + 1))
+        y = min(max(frame.y(), area.top()), max(area.top(), area.bottom() - frame.height() + 1))
+        if (x, y) != (frame.x(), frame.y()):
+            self.move(x, y)
 
     def _footer_install(self, next_button, callback):
         button = QPushButton('Install')
@@ -508,7 +525,7 @@ class Wizard(AccountWizard):
             return
         if not azimuth.inspect(folder, self.lc.builds()).supported:
             self.update_folder = folder
-            self.acquire_notice.setText('This installation needs Azimuth 1.0.3. Your settings and saves will be kept.')
+            self.acquire_notice.setText(f'This installation needs Azimuth {AZIMUTH_VERSION}. Your settings and saves will be kept.')
             self.stack.setCurrentIndex(self.ACQUIRE)
             return
         self._use_azimuth(folder)
@@ -551,12 +568,12 @@ class Wizard(AccountWizard):
             self._after_multiplayer()
 
     def _acquire_page(self):
-        w, lay = self._page('Get Azimuth 1.0.3', 'Choose how to get Azimuth.')
+        w, lay = self._page(f'Get Azimuth {AZIMUTH_VERSION}', 'Choose how to get Azimuth.')
         self.acquire_notice = w.subtitle
         choices = QHBoxLayout()
         self.auto_az = QRadioButton('Download in launcher')
         self.manual_az = QRadioButton('Use a ZIP file')
-        self.manual_az.setChecked(True)
+        self.auto_az.setChecked(True)
         choices.addWidget(self.auto_az)
         choices.addWidget(self.manual_az)
         choices.addStretch(1)
@@ -565,13 +582,14 @@ class Wizard(AccountWizard):
         automatic = QVBoxLayout(self.auto_box)
         automatic.setContentsMargins(0, 0, 0, 0)
         automatic.setSpacing(8)
-        self.itch_status = self._text(automatic, 'Sign in to itch.io to download Azimuth here.')
+        self.itch_status = self._text(automatic, f'The launcher downloads Azimuth {AZIMUTH_VERSION} from the FH2MP server and checks it.')
         row = QHBoxLayout()
-        self.itch_login = QPushButton('Login with itch.io')
+        self.itch_login = QPushButton('Login with itch.io')              # kept for old tests and tools; the download no longer needs it
         self.itch_login.clicked.connect(self._itch_login)
+        self.itch_login.hide()
         self.itch_get = QPushButton('Download Azimuth')
         self.itch_get.setObjectName('primary')
-        self.itch_get.clicked.connect(self._itch_download)
+        self.itch_get.clicked.connect(self._download_azimuth)
         row.addWidget(self.itch_login)
         row.addWidget(self.itch_get)
         row.addStretch(1)
@@ -610,9 +628,9 @@ class Wizard(AccountWizard):
         automatic = self.auto_az.isChecked()
         self.auto_box.setVisible(automatic)
         self.manual_box.setVisible(not automatic)
-        self.itch_login.setVisible(not bool(self.itch_profile))
-        self.itch_get.setVisible(bool(self.itch_profile))
-        self.itch_get.setEnabled(bool(self.itch_profile))
+        self.itch_login.hide()
+        self.itch_get.setVisible(True)
+        self.itch_get.setEnabled(True)
         self.acquire_banner.hide()
         self.archive = ''
         self._validated_archive = ''
@@ -622,7 +640,7 @@ class Wizard(AccountWizard):
 
     def _zip_browse(self):
         from .widgets import open_file
-        path = open_file(self, 'Select Azimuth 1.0.3 ZIP', os.path.expanduser('~'), 'ZIP files (*.zip)')
+        path = open_file(self, f'Select Azimuth {AZIMUTH_VERSION} ZIP', os.path.expanduser('~'), 'ZIP files (*.zip)')
         if path:
             self._select_archive(path)
 
@@ -634,9 +652,9 @@ class Wizard(AccountWizard):
         self.zip_name.setText('Checking ZIP…')
         def ok(_version):
             self.archive = self._validated_archive = path
-            self.zip_name.setText(os.path.basename(path) + ' (Azimuth 1.0.3)')
+            self.zip_name.setText(os.path.basename(path) + f' (Azimuth {AZIMUTH_VERSION})')
             if self.auto_az.isChecked():
-                self.itch_status.setText('Azimuth 1.0.3 is ready to install.')
+                self.itch_status.setText(f'Azimuth {AZIMUTH_VERSION} is ready to install.')
                 self.itch_get.hide()
             self.acquire_next.setEnabled(True)
             if self.auto_az.isChecked():
@@ -669,6 +687,11 @@ class Wizard(AccountWizard):
             self.itch_get.setEnabled(True)
         self._operation(work, ok, self.acquire_banner, self.acquire_progress)
 
+    def _download_azimuth(self):
+        def ok(path):
+            self._select_archive(path)
+        self._operation(lambda job: self.packages.get_azimuth(job.progress, lambda: job.cancelled), ok, self.acquire_banner, self.acquire_progress)
+
     def _itch_download(self):
         import tempfile
         from .. import paths
@@ -682,7 +705,7 @@ class Wizard(AccountWizard):
 
     def _archive_next(self):
         if not self.archive or self.archive != self._validated_archive:
-            self.acquire_banner.show_message('Select an Azimuth 1.0.3 ZIP first.', 'warn')
+            self.acquire_banner.show_message(f'Select an Azimuth {AZIMUTH_VERSION} ZIP first.', 'warn')
             return
         if self.update_folder:
             self._install_azimuth(self.update_folder, self.acquire_banner, self.acquire_progress)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Publishes a reviewed commit: checks, pushes, stores the signing key as a GitHub secret, tags, and lets the
+# Publishes a reviewed commit: pushes it, waits for its ci.yml checks, stores the signing key as a GitHub secret, tags, and lets the
 # workflow (.github/workflows/release.yml) build Windows + Linux, sign the manifest and create the GitHub release (pre-release if the tag has a '-').
 #   release/publish.sh v1.0.0-rc1
 # Requires a clean, already committed tree; never stages or commits files.
@@ -30,39 +30,6 @@ if [ "$hits" != 0 ]; then
 fi
 echo "reviewed commit $release_head"
 
-echo "== tests"
-# Each suite runs on its own and its exit status decides (security audit 2026-10-25 F13: `echo "$(tests | tail -1)"` always succeeded).
-failed=0
-check() {
-  local out
-  if out=$("$@" 2>&1); then echo "  ok   $*"; else echo "  FAIL $*"; echo "$out" | tail -25 | sed 's/^/       /'; failed=1; fi
-}
-check env FH2MP_NO_KEYRING=1 launcher/.venv/bin/python -m unittest discover -s launcher/tests
-check python3 -I -m unittest discover -s ops -p test_release_flow.py
-check launcher/.venv/bin/python -I release/check_test_mutations.py --area launcher
-check shim/test_sha256.sh
-check shim/test_inflate.sh
-check shim/test_gamedb_keep.sh
-check shim/test_gamedb_files.sh
-check shim/test_game_image.sh
-check shim/test_title_scope.sh
-check shim/test_xhr_config.sh
-check shim/test_torque_scale.sh
-check shim/test_net_strings.sh
-check shim/test_torque_load.sh
-check shim/test_speed_pb.sh
-check shim/test_restricted_tools.sh
-check shim/test_lighting.sh
-check .venv-pg/bin/python -W ignore -I release/run_server_tests.py
-check .venv-pg/bin/python -I release/check_test_mutations.py --area server
-if [ -n "${FH2MP_TEST_PG_DSN:-}" ]; then
-  check .venv-pg/bin/python -I release/run_server_tests.py --lane postgres
-  check .venv-pg/bin/python -I release/check_test_mutations.py --area postgres
-else
-  echo "  PostgreSQL checks are required by release CI; local lane not run (FH2MP_TEST_PG_DSN is unset)."
-fi
-if [ "$failed" != 0 ]; then echo "tests failed: nothing was published"; exit 1; fi
-
 # The commit message comes from release/notes/<tag>.commit.txt (the old fixed text is gone). No authorship trailers: this is the maintainer's release.
 msgfile="release/notes/$tag.commit.txt"
 if [ -f "$msgfile" ] && grep -qiE '^(co-authored-by|generated (with|by))' "$msgfile"; then
@@ -78,6 +45,19 @@ fi
 [ "$(git rev-parse HEAD)" = "$release_head" ] && [ -z "$(git status --porcelain)" ] || { echo 'Release files changed during checks; review and retry.'; exit 1; }
 
 git push origin HEAD
+
+echo "== checks: ci.yml on $release_head"
+# The commit's own ci.yml run decides (release/ci.sh in the image GitHub and `release/ci.sh --container` share). This machine does not
+# run the suites any more, so its Python, Wine or PostgreSQL cannot pass or fail a release that GitHub would judge differently.
+id=
+for _ in $(seq 60); do
+  id=$(gh run list --workflow ci.yml --commit "$release_head" --event push --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || true)
+  [ -n "$id" ] && break
+  sleep 5
+done
+[ -n "$id" ] || { echo "no ci.yml run found for $release_head: nothing was tagged"; exit 1; }
+gh run watch "$id" --exit-status >/dev/null || { echo "checks failed (gh run view $id): nothing was tagged"; exit 1; }
+echo "  ci.yml run $id passed"
 gh secret set RELEASE_SIGNING_KEY < "$key"
 if [ -n "${FH2MP_PUBLISH_NO_TAG:-}" ]; then        # ops/ship.sh: it merges develop into main and tags main itself
   echo "Pushed (not tagged)."; exit 0
