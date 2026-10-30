@@ -1,0 +1,15 @@
+# Rotation for the game server and LSP logs (installed as /etc/logrotate.d/fh2mp by ops/deploy.sh prod).
+# Both services keep their log file open (the game server opens it itself, the LSP writes through systemd's append:), so the file is
+# copied and truncated in place. Prod 2026-10-29: server.log 597 MB and lsp.log 2.7 GB after ten days, searched by hand with grep.
+/var/log/fh2mp/server.log /var/log/fh2mp/lsp.log /var/log/fh2mp/events.jsonl {
+    su root root
+    daily
+    maxsize 200M
+    rotate 14
+    dateext
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

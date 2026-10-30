@@ -464,6 +464,36 @@ class RentalChoices(unittest.TestCase):
         a.rental_car = self.JAG                                    # a stale rental flag must not touch a real class
         self.assertEqual(w.note_choices(a, bits, ch), ch)
 
+    def test_an_owned_upgraded_car_of_a_rentable_model_keeps_its_class(self):
+        """Prod 2026-10-28 06:57, lobby 3f7a67b9: an owned car 289 (a RentalCars model) sent class B PI 616 and was told to be C 509, so the
+        B event its owner set up was refused ("the leader's car does not meet the event restrictions") and the grid showed C."""
+        import fh2mp_server as S
+        import gameopts
+        from unittest import mock
+        w, (a, _b) = self.world()
+        bits, ch = choices_bits(4, 0.80)                           # S1 800: the JAG upgraded past its stock A 730
+        values = {k: raw for k, (_p, _w, raw) in C.fields(bits, ch).items()}
+        size, v = serialized_object(stock_car(self.JAG), values)
+        with mock.patch.object(w, "send") as send:
+            bad, hide, size2, v2 = w.check_parts(a, size, v)
+        self.assertEqual(v2, v)                                     # relayed as its game sent it
+        send.assert_not_called()                                    # and its owner is not told otherwise
+        self.assertEqual(a.choices[0], 4)
+        self.assertAlmostEqual(a.choices[1], 0.80, places=4)
+        self.assertTrue(gameopts.accepts_car((4, 0, 0), a.choices))
+        self.assertFalse(gameopts.accepts_car((S.CAR_CHOICES[self.JAG][0], 0, 0), a.choices))
+
+    def test_an_owned_car_picked_later_gets_no_correction_after_its_parts(self):
+        w, (a, _b) = self.world()
+        relayed = []
+        w.remember_and_relay = lambda *x: relayed.append(x)
+        bits, ch = choices_bits(4, 0.80)
+        w.note_choices(a, bits, ch)                                 # the real class first ...
+        size, v = serialized_object(stock_car(self.JAG))            # ... then the part list of a rentable model
+        w.check_parts(a, size, v)
+        self.assertEqual(relayed, [])
+        self.assertEqual(a.choices[0], 4)
+
 
 class CarChangeUpdates(unittest.TestCase):
     """#42: an update that changes the car carries the part list at bit 48 (dev captures: 1462 and 1502 bits, every one of them)."""
@@ -540,6 +570,8 @@ class CarPacks(unittest.TestCase):
         self.assertEqual((bad, hide, a.kick_reason, a.model_id), (True, False, None, self.PACK))
         self.assertEqual(decoded_words(size, v2), parts.stock_list(self.S.STANDIN_CAR))
         self.assertEqual(parts.stock_list(1215)[2], 1215000)                     # NUL_Car_00 has a body row
+        self.assertGreater(a.car_doubt_at, 0)                                    # and the likeliest blocker if nobody finishes loading
+        self.assertEqual(b.car_doubt_at, 0)
 
     def test_kick_policy_removes_the_owner(self):
         self.S.UNKNOWN_CAR_POLICY = "kick"

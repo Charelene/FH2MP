@@ -7,6 +7,7 @@ cleanup() {
   rm -rf "$tmp"
 }
 trap cleanup EXIT
+. ./wine_prefix.sh; wine_prefix "$tmp/prefix"
 mkdir -p "$tmp/prefix"
 x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -municode -I ../third_party/fh2-mod-platform test_title_scope.c -o "$tmp/test.exe"
 x86_64-w64-mingw32-gcc -O2 -shared -nostartfiles -Wl,--entry=DllMain -static-libgcc \

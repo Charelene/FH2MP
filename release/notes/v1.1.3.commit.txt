@@ -1,0 +1,8 @@
+Prepare 1.1.3 online-setup recovery and Azimuth 1.0.4 dependency update
+
+Restart a game that never started its online setup, pair co-op bucket-list
+players, and shorten online search waits. Serve pinned downloads from FH2MP's
+server first and open the launcher inside the screen.
+
+Pin Azimuth 1.0.4, Extra Options 0.4.4 and Mod Platform 2.8.0 with their
+mirrored copies; hook Azimuth 1.0.4's relocated command-line function.

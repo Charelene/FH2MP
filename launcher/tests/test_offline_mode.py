@@ -184,6 +184,19 @@ class OfflineWindowTests(OfflineFixture, unittest.TestCase):
             dialog._save()
             self.assertFalse(Settings(self.settings.path)["offline_mode"])
 
+    def test_the_car_pack_choice_and_the_setup_check_are_in_the_settings(self):
+        from fh2mp_launcher.ui.dialogs import SettingsDialog
+        with mock.patch.object(launch, "find_proton", return_value=""), mock.patch.object(launch, "detect_prefix", return_value=""):
+            dialog = SettingsDialog(self.lc)
+            self.addCleanup(dialog.deleteLater)
+            self.assertFalse(dialog.packs.isChecked())                       # the default is the server's car database
+            dialog.packs.setChecked(True)
+            dialog._save()
+            self.assertTrue(Settings(self.settings.path)["keep_car_packs"])
+            text = dialog._status_text()
+            self.assertIn("FH2MP shim", text)
+            self.assertIn("your own car packs kept", text)
+
 
 if __name__ == "__main__":
     unittest.main()

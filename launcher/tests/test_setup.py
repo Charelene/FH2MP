@@ -130,12 +130,12 @@ class SetupFiles(unittest.TestCase):
         self.assertFalse((self.folder / 'data/bin/runtime.dll').exists())
 
     def test_only_the_supplied_host_is_accepted_and_server_cannot_add_builds(self):
-        self.assertTrue(setup.version_ok('1.0.3'))
-        for version in ['0.9.10', '1.0.1', '1.0.2', '2.0.0', '']:
+        self.assertTrue(setup.version_ok('1.0.4'))
+        for version in ['0.9.10', '1.0.1', '1.0.2', '1.0.3', '2.0.0', '']:
             self.assertFalse(setup.version_ok(version))
         lc = core.Launcher(Settings(str(self.root / 'settings.json')), load_identity=False)
         lc.server = {'supportedAzimuth': [{'version': '9.0.0', 'sha256': '0' * 64}]}
-        self.assertEqual([b['version'] for b in lc.builds()], ['1.0.3'])
+        self.assertEqual([b['version'] for b in lc.builds()], ['1.0.4'])
 
     def test_get_requires_current_signed_release_and_install_is_separate(self):
         lc = core.Launcher(Settings(str(self.root / 'settings.json')), load_identity=False)
@@ -239,12 +239,14 @@ class WizardFlow(unittest.TestCase):
     def test_download_methods_show_only_the_selected_controls(self):
         self.w.stack.setCurrentIndex(self.w.ACQUIRE)
         self.w.show()
-        self.assertTrue(self.w.auto_box.isHidden())
-        self.assertTrue(self.w.manual_box.isVisible())
-        self.w.auto_az.setChecked(True)
+        self.assertTrue(self.w.auto_az.isChecked(), 'the download from the FH2MP server is the default: it needs no sign-in')
         self.assertTrue(self.w.manual_box.isHidden())
         self.assertTrue(self.w.auto_box.isVisible())
-        self.assertFalse(self.w.itch_get.isVisible())
+        self.assertTrue(self.w.itch_get.isVisible() and self.w.itch_get.isEnabled())
+        self.assertFalse(self.w.itch_login.isVisible())
+        self.w.manual_az.setChecked(True)
+        self.assertTrue(self.w.auto_box.isHidden())
+        self.assertTrue(self.w.manual_box.isVisible())
 
     def test_bad_zip_is_rejected_on_selection_before_destination_or_install(self):
         from PySide6.QtTest import QTest
@@ -414,6 +416,41 @@ class WizardFlow(unittest.TestCase):
         with mock.patch.object(win.community, 'refresh'), mock.patch('fh2mp_launcher.ui.main_window.QTimer.singleShot') as schedule:
             win.start()
             schedule.assert_called_once_with(0, win.run_wizard)
+
+    def test_the_setup_wizard_never_opens_a_second_time_on_top_of_itself(self):
+        # Windows, 2026-10-30: start() ran again while the first wizard was installing the add-ons; the second opened on the next page and the two
+        # windows overlapped. It runs its own event loop, so the second run_wizard happens inside the first one's exec().
+        from fh2mp_launcher.ui.main_window import MainWindow
+        self.lc.settings['offline_mode'] = True
+        self.lc.settings['azimuth_dir'] = str(self.root)
+        self.lc.identity_loaded = True
+        win = MainWindow(self.lc)
+        self.addCleanup(win.deleteLater)
+        win.poll.stop()
+        win.status_timer.stop()
+        built = []
+
+        class FakeWizard:
+            raised = 0
+
+            def __init__(self, lc, parent=None, **kw):
+                built.append(self)
+
+            def exec(self):
+                win.run_wizard()
+                win._signup_existing()
+                return 0
+
+            def raise_(self):
+                self.raised += 1
+
+            def activateWindow(self):
+                pass
+        with mock.patch('fh2mp_launcher.ui.main_window.Wizard', FakeWizard), mock.patch('fh2mp_launcher.ui.main_window.QMessageBox'):
+            win.run_wizard()
+        self.assertEqual(len(built), 1)
+        self.assertEqual(built[0].raised, 2)
+        self.assertIsNone(win._wizard)
 
 
 class UpgradeLeftovers(SetupFiles):

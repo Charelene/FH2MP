@@ -158,6 +158,12 @@ class Packages:
         self.shim_package = None
         self.manifest = None
 
+    def get_azimuth(self, progress=None, cancelled=lambda: False):
+        """Azimuth's pinned ZIP from the FH2MP mirror (constants.AZIMUTH_ARCHIVE) -> its path; size and SHA-256 are checked by the download, the
+        contents by validate_archive()."""
+        from .constants import AZIMUTH_ARCHIVE
+        return updater.Updater(channel=self.lc.settings['channel']).download_url(AZIMUTH_ARCHIVE['url'], AZIMUTH_ARCHIVE, progress, cancelled)
+
     def get_dependency(self, kind, progress=None, cancelled=lambda: False):
         key = upstream.extra_options_kind(self.lc.settings['azimuth_dir']) if kind == 'extra' else 'platform'
         self.dependencies[kind] = upstream.fetch(key, updater.Updater(channel=self.lc.settings['channel']), progress, cancelled)

@@ -31,6 +31,7 @@ SESSION_IDLE_SECONDS = 6 * 3600.0   # a session nobody read, wrote or matched in
 EMPTY_SESSION_IDLE_SECONDS = 900.0  # do not poll it); one without members goes sooner
 TICKET_SECONDS = 900.0
 MAX_TICKETS_PER_PLAYER = 8
+TICKET_WAIT_TIME = int(os.environ.get("FH2MP_TICKET_WAIT", "0"))
 _last_sweep = 0.0
 NAME_LOOKUP = lambda xuid: ""   # xuid -> gamertag, set by fh2mp_lsp; the real MPSD fills a member's gamertag itself, the game never sends it
 
@@ -643,7 +644,9 @@ def create_ticket(path, body, xuid=None):
     _TICKETS[tid] = {"scid": scid, "hopper": hopper, "ref": ref,
                      "attrs": attrs, "preserve": req.get("preserveSession", "never"),
                      "xuid": xuid, "at": time.time()}
-    return 200, {"ticketId": tid, "waitTime": 1}
+    # waitTime is the estimated wait in seconds. The game's first poll of the ticket came 5-6 s after the POST whatever it said (1 until
+    # 2026-10-29), which is most of a Free Roam search that is otherwise answered instantly: FH2MP_TICKET_WAIT tries other values on dev.
+    return 200, {"ticketId": tid, "waitTime": TICKET_WAIT_TIME}
 
 
 def get_ticket(path, xuid=None):

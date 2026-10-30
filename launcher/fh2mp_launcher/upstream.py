@@ -1,5 +1,5 @@
-"""Third-party mods FH2MP needs, fetched from their authors' own GitHub releases (constants.UPSTREAM): the FH2 Mod Platform (Trinculo54, MIT)
-that loads the shim, and FH2 Extra Options (RokkuDayo, GPL-3.0). FH2MP does not redistribute either. Each release is pinned by the SHA-256 of
+"""Third-party mods FH2MP needs (constants.UPSTREAM): the FH2 Mod Platform (Trinculo54, MIT) that loads the shim, and FH2 Extra Options
+(RokkuDayo, GPL-3.0). Fetched from FH2MP's mirror of the exact pinned release (constants.MIRROR_BASE), or from the authors' own GitHub release. Each release is pinned by the SHA-256 of
 its zip and of the DLL inside it, so nothing else is installed; the launcher only fetches one when the copy in the Azimuth folder is
 missing or not the pinned build (shim.py decides)."""
 import hashlib
@@ -7,7 +7,8 @@ import io
 import os
 import zipfile
 
-from .constants import UPSTREAM
+from .constants import MIRROR_BASE, UPSTREAM
+from .updater import UpdateError
 
 
 def extra_options_kind(folder):
@@ -37,14 +38,25 @@ def extract(kind, data, pin=None):
 
 def fetch(kind, updater, progress=None, cancelled=lambda: False):
     """Downloads the pinned release of `kind` ("platform" | "extraOptions") with `updater` (updater.Updater: certificates, size and hash
-    checks, cache) and returns extract()'s files."""
+    checks, cache) and returns extract()'s files. The FH2MP mirror is tried first, the author's GitHub release second; both must be exactly the
+    pinned bytes."""
     pin = UPSTREAM[kind]
-    if not pin["url"].startswith("https://github.com/"):
-        raise UpstreamError(f"refusing to download {pin['name']} from anywhere but GitHub")
-    path = updater.download_url(pin["url"], {"name": pin["url"].rsplit("/", 1)[1], "sha256": pin["sha256"], "size": pin["size"]},
-                                progress, cancelled)
-    with open(path, "rb") as f:
-        return extract(kind, f.read(), pin)
+    sources = [u for u in (pin.get("mirror"), pin["url"]) if u]
+    for url in sources:
+        if not (url.startswith("https://github.com/") or url.startswith(MIRROR_BASE)):
+            raise UpstreamError(f"refusing to download {pin['name']} from anywhere but GitHub or the FH2MP mirror")
+    last = None
+    for url in sources:
+        try:
+            path = updater.download_url(url, {"name": pin["url"].rsplit("/", 1)[1], "sha256": pin["sha256"], "size": pin["size"]}, progress, cancelled)
+        except UpdateError as e:                      # unreachable, moved, or not the pinned bytes: the next source
+            if str(e) == "cancelled":
+                raise
+            last = e
+            continue
+        with open(path, "rb") as f:
+            return extract(kind, f.read(), pin)
+    raise last or UpstreamError(f"no source for {pin['name']}")
 
 
 def read_zip(kind, path):

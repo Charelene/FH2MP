@@ -5,6 +5,7 @@ cd "$(dirname "$0")"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 export WINEPREFIX="$tmp/prefix" WINEDEBUG=-all
+. ./wine_prefix.sh; wine_prefix "$WINEPREFIX"
 python3 -I - "$tmp" <<'PY'
 import pathlib, sqlite3, sys
 d = pathlib.Path(sys.argv[1])

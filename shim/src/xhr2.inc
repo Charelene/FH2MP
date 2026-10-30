@@ -355,6 +355,54 @@ static ULONG STDMETHODCALLTYPE xhr_release(void *self)
     return (ULONG)r;
 }
 
+/*
+ * "The online setup never ran" watchdog (dev 2026-10-30; issue 48). After the Logon the game's cloud configuration normally asks the game server
+ * directory (gameserverds.xboxlive.com: the variants and the QoS servers) within a second or two. In roughly one game start in six that load
+ * fails before any HTTP request is made and stays failed for the whole process: every search then sits on "Finding session" and the banner says
+ * "Unable to connect to the Live configuration servers"; only a new start fixes it. Memory of a good and a bad process was compared (the
+ * Xbox Live context exists in both; the cloud-config state is 3 in a good one, 4 in the bad one); the cause inside the game is not known.
+ * option_monitor writes fh2mp-restart.txt when the first LSP request is 20 s old and no game-server directory request was ever made; the
+ * launcher then restarts the game once.
+ */
+static volatile LONG g_gsds_seen;
+static volatile DWORD g_lsp_first_tick;
+
+static int wide_has_ascii(const wchar_t *hay, const char *needle)
+{
+    int n = (int)lstrlenA(needle), i, j;
+
+    if (!hay) {
+        return 0;
+    }
+    for (i = 0; hay[i]; i++) {
+        for (j = 0; j < n; j++) {
+            wchar_t c = hay[i + j];
+            if (!c) {
+                return 0;
+            }
+            if (c >= L'A' && c <= L'Z') {
+                c = (wchar_t)(c + 32);
+            }
+            if (c != (wchar_t)needle[j]) {
+                break;
+            }
+        }
+        if (j == n) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void online_setup_note_url(const wchar_t *url)
+{
+    if (wide_has_ascii(url, "gameserverds.xboxlive.com")) {
+        InterlockedExchange(&g_gsds_seen, 1);
+    } else if (!g_lsp_first_tick && wide_has_ascii(url, "forzamotorsport.net")) {
+        g_lsp_first_tick = GetTickCount() | 1;
+    }
+}
+
 static HRESULT STDMETHODCALLTYPE xhr_open(void *self, const wchar_t *method, const wchar_t *url, void *cb,
                                           const wchar_t *user, const wchar_t *pass, const wchar_t *puser,
                                           const wchar_t *ppass)
@@ -371,6 +419,7 @@ static HRESULT STDMETHODCALLTYPE xhr_open(void *self, const wchar_t *method, con
     }
     x->method[n] = 0;
     x->url = xhr_wdup(url);
+    online_setup_note_url(url);
     x->cb = (com_obj *)cb;
     if (cb) {
         ((unk_addref_fn)x->cb->vtbl[1])(x->cb);

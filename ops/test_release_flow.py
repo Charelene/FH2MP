@@ -127,6 +127,34 @@ esac
         self.assertEqual(self.git('diff', '--cached'), before)
         self.assertIn('?? scratch.txt', self.git('status', '--porcelain'))
 
+    def test_publisher_tags_only_a_commit_whose_ci_run_passed(self):
+        shutil.copyfile(ROOT / 'release/publish.sh', self.repo / 'release/publish.sh')
+        self.git('add', 'release/publish.sh')
+        self.git('commit', '-qm', 'Use actual publisher')
+        head = self.git('rev-parse', 'HEAD')
+        self.tool('gh', '''echo "gh $*" >> "$TRACE"
+case "$1 $2" in
+  "auth status") ;;
+  "run list") case "$*" in *"--workflow ci.yml"*"--commit $CI_COMMIT"*) echo 42;; esac;;
+  "run watch") [ "${CI_FAIL:-0}" = 0 ];;
+  "secret set") cat >/dev/null;;
+esac
+''')
+        publish = lambda **env: subprocess.run(['bash', 'release/publish.sh', 'v1.1.0'], cwd=self.repo, capture_output=True,
+                                               text=True, timeout=20, env=dict(self.env, CI_COMMIT=head, **env))
+        failed = publish(CI_FAIL='1')
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn('checks failed', failed.stdout)
+        trace = self.trace.read_text()
+        self.assertNotIn('secret set', trace)
+        self.assertEqual(self.git('tag', '--list'), '')
+        self.trace.write_text('')
+        passed = publish()
+        self.assertEqual(passed.returncode, 0, passed.stdout + passed.stderr)
+        self.assertEqual(self.git('rev-parse', 'v1.1.0^{commit}'), head)
+        trace = self.trace.read_text()
+        self.assertLess(trace.index('run watch'), trace.index('secret set'))
+
 
 class VersionedEntryPoint(unittest.TestCase):
     def test_saved_target_supports_no_argument_plan_and_explicit_execution(self):

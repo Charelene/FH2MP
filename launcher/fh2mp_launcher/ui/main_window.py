@@ -3,12 +3,12 @@ import sys
 
 from PySide6.QtCore import QEvent, QTimer, QUrl, Qt
 from PySide6.QtGui import QDesktopServices, QPixmap
-from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar,
+from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar, QScrollArea,
                                QVBoxLayout, QWidget, QWidgetAction)
 
 from .. import azimuth, crashreport, keystore, launch, paths, saves, shim, updater
 from ..api import ApiError
-from ..constants import AZIMUTH_PAGE, GITHUB_REPO
+from ..constants import AZIMUTH_PAGE, AZIMUTH_VERSION, GITHUB_REPO
 from ..core import Launcher, PlayBlocked, friendly
 from ..version import __version__
 from . import images, theme
@@ -31,13 +31,16 @@ class MainWindow(QMainWindow):
     def __init__(self, lc: Launcher):
         super().__init__()
         self.lc = lc
+        lc.clear_leftover_session()
         self.setWindowTitle("FH2MP Dev" if paths.is_dev() else "FH2MP")
-        self.setMinimumSize(980, 660)
+        self._content_size = (980, 660)       # what the layout needs; a smaller screen scrolls instead of pushing the window off the monitor
+        self._apply_screen_limits()
         self._busy = False
         self._msg = None                     # (text, kind) of the last say(); shown in the status box instead of the status
         self._server_state = "checking"      # checking | ok | down
         self._images = {}                    # url -> QPixmap (None while loading or after a failed load)
         self._update_asked = False
+        self._wizard = None                # the setup wizard that is open, if any (it runs its own event loop: a second one would open on top of it)
         self._avatar_png = None
         self._launched_at = 0
         self._crash_dialog = False
@@ -57,7 +60,12 @@ class MainWindow(QMainWindow):
     # ---- layout
     def _build(self):
         root = QWidget()
-        self.setCentralWidget(root)
+        self._content = root
+        scroll = QScrollArea()                # the window may be smaller than the layout (small screen, Windows display scaling): it scrolls
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(root)
+        self.setCentralWidget(scroll)         # overlays use it as their host: it never scrolls under them
         outer = QVBoxLayout(root)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -282,7 +290,7 @@ class MainWindow(QMainWindow):
         if not info.found:
             return "bad", "azimuth.exe not found.", "Change...", self.open_settings
         if not info.supported:
-            return "warn", "This launcher requires Azimuth 1.0.3 and its supplied mod versions.", "Run setup", self.run_wizard
+            return "warn", f"This launcher requires Azimuth {AZIMUTH_VERSION} and its supplied mod versions.", "Run setup", self.run_wizard
         if not info.game_folder:
             return "warn", "Azimuth can't find the game files.", "Azimuth setup", self._azimuth_clicked
         if s["offline_mode"]:
@@ -338,17 +346,23 @@ class MainWindow(QMainWindow):
         if self.sheet.isVisible():
             self.sheet.place()
 
+    def _apply_screen_limits(self):
+        """The window can be as small as the screen's usable area (less a margin for the frame) but never larger: the content scrolls inside."""
+        area = self.screen().availableGeometry()
+        self.setMinimumSize(min(self._content_size[0], max(480, area.width() - 40)), min(self._content_size[1], max(360, area.height() - 80)))
+
     def _sync_minimum_height(self):
-        layout = self.centralWidget().layout()
-        height = layout.totalHeightForWidth(self.centralWidget().width())
+        layout = self._content.layout()
+        height = layout.totalHeightForWidth(max(self._content.width(), self._content_size[0]))
         if height < 0:
             height = layout.minimumSize().height()
         height = max(660, height)
-        if self.minimumHeight() != height:
-            self.setMinimumHeight(height)
+        self._content_size = (980, height)
+        self._content.setMinimumSize(980, height)       # the scroll area shows a bar when the window is smaller than this
+        self._apply_screen_limits()
 
     def eventFilter(self, obj, e):
-        if obj is self.centralWidget() and e.type() == QEvent.Type.LayoutRequest:
+        if obj is self._content and e.type() == QEvent.Type.LayoutRequest:
             self._sync_minimum_height()
         if obj is self.version and e.type() == QEvent.Type.MouseButtonPress:
             self._tap()
@@ -466,9 +480,25 @@ class MainWindow(QMainWindow):
             return crash, crash and crashreport.build(lc, crash)
         run_async(find, shown, lambda e: None)
 
+    def _open_wizard(self, **kwargs):
+        """Runs the setup wizard -> whether it was accepted, or None when one is already open (that one is raised instead). Seen on Windows
+        (2026-10-30): start() ran again while the first wizard was installing the add-ons, so a second wizard opened on top of the busy one,
+        at the next page, and the two overlapped."""
+        if self._wizard is not None:
+            self._wizard.raise_()
+            self._wizard.activateWindow()
+            return None
+        self._wizard = Wizard(self.lc, self, **kwargs)
+        try:
+            return bool(self._wizard.exec())
+        finally:
+            self._wizard = None
+
     def run_wizard(self):
-        w = Wizard(self.lc, self)
-        if w.exec():
+        accepted = self._open_wizard()
+        if accepted is None:
+            return
+        if accepted:
             self.lc.ensure_game()
             self.say("")
             self.refresh_all()
@@ -526,7 +556,13 @@ class MainWindow(QMainWindow):
         def fail(e):
             if "no release key" not in str(e):
                 self.say(f"Could not check for updates: {friendly(e)}", theme.WARN)
-        run_async(lambda j: self.lc.check_updates(), lambda _m: self.render(), fail)
+        def check(_job):
+            self.lc.check_updates()
+            try:
+                return self.lc.auto_update_shim()
+            except Exception:  # noqa: BLE001 - the update button and Play still offer it, with the reason
+                return False
+        run_async(check, lambda _m: self.render(), fail)
 
     def _load_avatar(self):
         if self.lc.settings["offline_mode"] or getattr(self.lc, "offline_run", False):
@@ -769,14 +805,34 @@ class MainWindow(QMainWindow):
         run_async(lambda j: lc.prepare_session_only(), ok, fail)
 
     def _signup_existing(self):
+        if self._wizard is not None:
+            return self._open_wizard()
         QMessageBox.information(self, "New server", "This server doesn't know you yet. Pick a gamertag.")
-        w = Wizard(self.lc, self, existing_key=True)
-        if w.exec():
+        if self._open_wizard(existing_key=True):
             self.render()
             self.on_play()
 
+    def _auto_restart(self):
+        """The game never started its online setup (the shim says so): it does not recover, so start it again."""
+        lc = self.lc
+        self.set_busy(True, "The game didn't start its online features. Restarting it...")
+
+        def ok(_res):
+            import time
+            self._launched_at = time.time()
+            self.set_busy(False, "Game restarted. Have fun!")
+            self.render()
+
+        def fail(e):
+            self.set_busy(False)
+            self.render()
+            self.say(str(e) if isinstance(e, (PlayBlocked, launch.LaunchError)) else friendly(e), theme.BAD)
+        run_async(lambda j: lc.restart_game(), ok, fail)
+
     def _tick(self):
         lc = self.lc
+        if not self._busy and lc.process is not None and lc.restart_requested():
+            return self._auto_restart()
         if lc.process is not None and not lc.game_running():
             import time
             code = lc.process.returncode
@@ -798,4 +854,5 @@ class MainWindow(QMainWindow):
             if QMessageBox.question(self, "Game is running", "The game keeps running. Close the launcher?") != QMessageBox.StandardButton.Yes:
                 e.ignore()
                 return
+        lc.clear_leftover_session()
         e.accept()

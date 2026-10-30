@@ -11,7 +11,7 @@ What is here:
 
 | File | What |
 |---|---|
-| `fh2mod.h` | The platform's API header from official release v2.7.4; API declarations are unchanged from v2.7.3. The shim compiles against it. |
+| `fh2mod.h` | The platform's API header from official release v2.8.0 (API 9). The shim compiles against it. |
 | `LICENSE` | The platform's MIT licence. It applies to `fh2mod.h` (and to the platform DLL, which FH2MP does not ship). |
 | `VERSION` | The platform release FH2MP is built and tested against. |
 

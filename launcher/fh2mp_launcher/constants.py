@@ -18,14 +18,14 @@ AZIMUTH_PAGE = "https://almost-there-games.itch.io/azimuth"
 RELEASE_PUBKEY_B64 = os.environ.get("FH2MP_RELEASE_PUBKEY") or "zo6hBWSZYaeL9YsZOC03kHJ8MR9f4awtgndgWR9h0Ic="
 
 # One supplied compatibility set per launcher release. Server metadata cannot broaden it.
-AZIMUTH_VERSION = "1.0.3"
+AZIMUTH_VERSION = "1.0.4"
 BUILTIN_AZIMUTH_BUILDS = [
-    {"version": AZIMUTH_VERSION, "sha256": "ebfd5d43a165dcec5d4007b9d41ed5b2ed122fcd02ecfef7e4ed35b40826821f"},
+    {"version": AZIMUTH_VERSION, "sha256": "56d2c9cb6ccf3ae1836dee9676b64285f3a247efa2d12cf02c6c742696b3b092"},
 ]
-# Per-title helpers from the same supplied Azimuth 1.0.3 installation.
+# Per-title helpers from the same supplied Azimuth 1.0.4 installation.
 AZIMUTH_TLS_HELPERS = {
-    "azimuth-tls-1.dll": "b1f3138966eeb19de38692f2e974b7465828023ab61bf9c5fed2699f92a715f8",
-    "azimuth-tls-2.dll": "22da610dcd0191049c102d3c58d6d56f296af5643ef42f1dfd92fea62d9b4f31",
+    "azimuth-tls-1.dll": "c672413a9b068bbe789ecd6a5bd86c0548719e7e4bec72948fad9021f205107c",
+    "azimuth-tls-2.dll": "dac7202cdf9643172b5100ab7ee83b126b24ceab58c7208501b22dd86732c547",
 }
 
 # The shim is a mod for the FH2 Mod Platform (Trinculo54, MIT): fh2-mods\FH2MP.dll, loaded by the platform's DWrite.dll next to
@@ -39,138 +39,79 @@ PLATFORM_DLL = "d3dcompiler_47.dll"
 PLATFORM_LOADERS = (PLATFORM_DLL, "DWrite.dll")
 PLATFORM_FILES = (*PLATFORM_LOADERS, "LICENSE-FH2ModPlatform.txt", "LICENSE-MinHook.txt")
 
-# Third-party mods the launcher downloads from their authors' own GitHub releases (FH2MP does not redistribute them), pinned by the
+# Where FH2MP keeps copies of the exact pinned third-party files. The authors replace release assets in place and move tags, which breaks a
+# pin by hash; the copies here never change. Every download is still checked against the pinned SHA-256 (and size), wherever it came from.
+MIRROR_BASE = "https://forza.scuffed.af/media/forza-mirror/"
+AZIMUTH_ARCHIVE = {"name": "azimuth-windows-1.0.4.zip", "url": MIRROR_BASE + "azimuth-windows-1.0.4.zip", "size": 6835590,
+                   "sha256": "f0e603a4548ae7c40c1cef584ce691dbeae0bc178666bed896ab87ab6cd52994"}
+
+# Third-party mods the launcher downloads from the FH2MP mirror, falling back to their authors' own GitHub releases, pinned by the
 # release zip's SHA-256 and the DLL's inside it. `files` maps a file in the zip to where it goes in the Azimuth folder.
 UPSTREAM = {
     "platform": {
-        "name": "FH2 Mod Platform", "author": "Trinculo54", "license": "MIT", "version": "2.7.4",
-        "url": "https://github.com/Trinculo54/fh2-mod-platform/releases/download/v2.7.4/FH2-Mod-Platform-v2.7.4.zip",
-        "sha256": "f951c129839a99150f816193282184b0a4b1a4458d271d4d5e367d46838b080f", "size": 1903212,
-        "dll": "d3dcompiler_47.dll", "dllSha256": "6793aabef746614d849a9db584e475a6e24186bb163c425f48f7a9831427fcd0",
+        "name": "FH2 Mod Platform", "author": "Trinculo54", "license": "MIT", "version": "2.8.0",
+        "url": "https://github.com/Trinculo54/fh2-mod-platform/releases/download/v2.8.0/FH2-Mod-Platform-v2.8.0.zip",
+        "mirror": MIRROR_BASE + "FH2-Mod-Platform-v2.8.0.zip",
+        "sha256": "24606e6578eebcbc2d831ad48041ff74cf615c2f36160f0950e1045fd7caddd7", "size": 2339464,
+        "dll": "d3dcompiler_47.dll", "dllSha256": "a7db4a14de47cd7af98fce036877a72a88ea65498818bb2ecb755628fc99d357",
         "files": {"d3dcompiler_47.dll": "d3dcompiler_47.dll", "DWrite.dll": "DWrite.dll", "LICENSE.txt": "LICENSE-FH2ModPlatform.txt",
                   "LICENSE-MinHook.txt": "LICENSE-MinHook.txt"},
     },
-    "extraOptions": {'name': 'FH2 Extra Options',
-     'author': 'RokkuDayo',
-     'license': 'GPL-3.0',
-     'version': '0.3.9',
-     'url': 'https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions/releases/download/Azimuth_v1.0.0/FH2_Extra_Options_0.3.9-release.zip',
-     'sha256': 'b4b4e31fcc26baec569146c50aee9c060426a7c825fb1dce2641385d9547e058',
-     'size': 864058,
-     'dll': 'Azimuth/winmm.dll',
-     'dllSha256': 'e5bbec928982c9495217522811acd39096e7c8bf994aa0062d82614c8cea64bd',
-     'files': {'Azimuth/FH2_ExtraOptions.ini': 'FH2_ExtraOptions.ini',
-               'Azimuth/mods/Extra Options - Garage Revving/mod.json': 'mods/Extra Options - Garage Revving/mod.json',
-               'Azimuth/mods/Extra Options - Garage Revving/plugins/EO_GarageEngineRev.dll': 'mods/Extra Options - Garage '
-                                                                                             'Revving/plugins/EO_GarageEngineRev.dll',
-               'Azimuth/mods/Extra Options - Garage Revving/plugins/EO_GarageEngineRev.ini': 'mods/Extra Options - Garage '
-                                                                                             'Revving/plugins/EO_GarageEngineRev.ini',
-               'Azimuth/mods/Extra Options - Weather Control/mod.json': 'mods/Extra Options - Weather Control/mod.json',
-               'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_BR.xaml': 'mods/Extra '
-                                                                                                                                          'Options '
-                                                                                                                                          '- '
-                                                                                                                                          'Weather '
-                                                                                                                                          'Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_BR.xaml',
-               'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_CHT.xaml': 'mods/Extra '
-                                                                                                                                           'Options '
-                                                                                                                                           '- '
-                                                                                                                                           'Weather '
-                                                                                                                                           'Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_CHT.xaml',
-               'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_CZ.xaml': 'mods/Extra '
-                                                                                                                                          'Options '
-                                                                                                                                          '- '
-                                                                                                                                          'Weather '
-                                                                                                                                          'Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_CZ.xaml',
-               'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_DE.xaml': 'mods/Extra '
-                                                                                                                                          'Options '
-                                                                                                                                          '- '
-                                                                                                                                          'Weather '
-                                                                                                                                          'Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_DE.xaml',
-               'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_EN.xaml': 'mods/Extra '
-                                                                                                                                          'Options '
-                                                                                                                                          '- '
-                                                                                                                                          'Weather '
-                                                                                                                                          'Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_EN.xaml',
-               'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_ES.xaml': 'mods/Extra '
-                                                                                                                                          'Options '
-                                                                                                                                          '- '
-                                                                                                                                          'Weather '
-                                                                                                                                          'Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_ES.xaml',
-               'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_FR.xaml': 'mods/Extra '
-                                                                                                                                          'Options '
-                                                                                                                                          '- '
-                                                                                                                                          'Weather '
-                                                                                                                                          'Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_FR.xaml',
-               'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_GB.xaml': 'mods/Extra '
-                                                                                                                                          'Options '
-                                                                                                                                          '- '
-                                                                                                                                          'Weather '
-                                                                                                                                          'Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_GB.xaml',
-               'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_HU.xaml': 'mods/Extra '
-                                                                                                                                          'Options '
-                                                                                                                                          '- '
-                                                                                                                                          'Weather '
-                                                                                                                                          'Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_HU.xaml',
-               'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_IT.xaml': 'mods/Extra '
-                                                                                                                                          'Options '
-                                                                                                                                          '- '
-                                                                                                                                          'Weather '
-                                                                                                                                          'Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_IT.xaml',
-               'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_JP.xaml': 'mods/Extra '
-                                                                                                                                          'Options '
-                                                                                                                                          '- '
-                                                                                                                                          'Weather '
-                                                                                                                                          'Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_JP.xaml',
-               'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_KO.xaml': 'mods/Extra '
-                                                                                                                                          'Options '
-                                                                                                                                          '- '
-                                                                                                                                          'Weather '
-                                                                                                                                          'Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_KO.xaml',
-               'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_MX.xaml': 'mods/Extra '
-                                                                                                                                          'Options '
-                                                                                                                                          '- '
-                                                                                                                                          'Weather '
-                                                                                                                                          'Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_MX.xaml',
-               'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_NL.xaml': 'mods/Extra '
-                                                                                                                                          'Options '
-                                                                                                                                          '- '
-                                                                                                                                          'Weather '
-                                                                                                                                          'Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_NL.xaml',
-               'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_PL.xaml': 'mods/Extra '
-                                                                                                                                          'Options '
-                                                                                                                                          '- '
-                                                                                                                                          'Weather '
-                                                                                                                                          'Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_PL.xaml',
-               'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_RU.xaml': 'mods/Extra '
-                                                                                                                                          'Options '
-                                                                                                                                          '- '
-                                                                                                                                          'Weather '
-                                                                                                                                          'Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_RU.xaml',
-               'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl.dll': 'mods/Extra Options - Weather '
-                                                                                             'Control/plugins/EO_WeatherControl.dll',
-               'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl.ini': 'mods/Extra Options - Weather '
-                                                                                             'Control/plugins/EO_WeatherControl.ini',
-               'Azimuth/winmm.dll': 'winmm.dll'},
-     'fileSha256': {'mods/Extra Options - Garage Revving/mod.json': '4f70c5538490f61011f854c7afcdcea91658417aa54bafad98c5e61ea28af00f',
-                    'mods/Extra Options - Garage Revving/plugins/EO_GarageEngineRev.dll': 'ba6b6df6446c1c0d9f6045759b57e215ba00fe26b9d40e075907dffd56e98031',
-                    'mods/Extra Options - Weather Control/mod.json': 'd5e10b1ae3c33e414d2a21a41887bf3c6bd5436192afa726d118297ff3bce547',
-                    'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_BR.xaml': '7b142d09832022e0e791efb2e6b5c16f6dc8645bb21dcc0dc3a7e7bd8481c5d5',
-                    'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_CHT.xaml': 'f8e1c537da2b7ca6f62db36a5a92f712731b4dc94144279b0d618e0ab32a6c28',
-                    'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_CZ.xaml': '15362ef2324ae8ba943e410a3ea19335461f75d7dbb16471c3a8bf426b357eca',
-                    'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_DE.xaml': '7a3498a42bc60e9d74f634e74a0f935398b372795d8cb2d596a324cf0bc5195e',
-                    'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_EN.xaml': 'ad4a6bf5b51418f64d666ae37d506e01fc49c454f72a7088a1d3be002f440611',
-                    'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_ES.xaml': '56331483d178f20e7c1ab1e374cdf6618753214874289bfe00c9aa0ed7d80c30',
-                    'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_FR.xaml': 'be6a094fcac82014e53256c3da88cc6d0348f1438992fca0b32a5be0f15f50e6',
-                    'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_GB.xaml': 'ad4a6bf5b51418f64d666ae37d506e01fc49c454f72a7088a1d3be002f440611',
-                    'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_HU.xaml': 'e2f346d00cec861206fe950b33481320545d0593f68f3a68f54c6e1204ee3750',
-                    'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_IT.xaml': 'e7795a018af51214b35da87898e55b4cfd93a3fec4b841fe2dcbaef9a19d61d9',
-                    'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_JP.xaml': '1c06d79e4b6fa870c232d3c55a36078896005faaa0a4c19679c66977283198e4',
-                    'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_KO.xaml': '898a92651ceff28185ffdc554e3b5b6103529c8edeae9879dc430ebf3d1f5558',
-                    'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_MX.xaml': '56331483d178f20e7c1ab1e374cdf6618753214874289bfe00c9aa0ed7d80c30',
-                    'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_NL.xaml': '192acd5cb44b7f7afbf483e3633c1054c7866d49ed6f9896f48c0b46bdf45bb4',
-                    'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_PL.xaml': '71a299061137dc6f6462b1ce199d7fb15eea9bae65fe1c194b1de8c1ee6725f1',
-                    'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_RU.xaml': 'b71bd9a8b95ab13487aaab89ffef3b1d60eed48cc7cd83d6c089a1d49e55ad71',
-                    'mods/Extra Options - Weather Control/plugins/EO_WeatherControl.dll': '238f446d5d8453e22193c9880f7bbbf2453319fd53415edbe06777ce34c09b47'}},
+    "extraOptions": {
+        'name': 'FH2 Extra Options', 'author': 'RokkuDayo', 'license': 'GPL-3.0', 'version': '0.4.4',
+        'url': 'https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions/releases/download/Azimuth_v1.0.0/FH2_Extra_Options_0.4.4-azimuth.zip',
+        'mirror': MIRROR_BASE + 'FH2_Extra_Options_0.4.4-azimuth.zip',
+        'sha256': '42502c2befa06b17d1ba45b1cde5e6311b786ce8f6a15b179023a1be79f0147d', 'size': 309144,
+        'dll': 'Azimuth/winmm.dll', 'dllSha256': 'c69697d015416973fdd763005bbe23d5b68f9c8acfef1165db0bbf02b8493213',
+        'files': {
+            'Azimuth/FH2_ExtraOptions.ini': 'FH2_ExtraOptions.ini',
+            'Azimuth/mods/Extra Options - Garage Revving/mod.json': 'mods/Extra Options - Garage Revving/mod.json',
+            'Azimuth/mods/Extra Options - Garage Revving/plugins/EO_GarageEngineRev.dll': 'mods/Extra Options - Garage Revving/plugins/EO_GarageEngineRev.dll',
+            'Azimuth/mods/Extra Options - Garage Revving/plugins/EO_GarageEngineRev.ini': 'mods/Extra Options - Garage Revving/plugins/EO_GarageEngineRev.ini',
+            'Azimuth/mods/Extra Options - Weather Control/mod.json': 'mods/Extra Options - Weather Control/mod.json',
+            'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_BR.xaml': 'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_BR.xaml',
+            'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_CHT.xaml': 'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_CHT.xaml',
+            'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_CZ.xaml': 'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_CZ.xaml',
+            'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_DE.xaml': 'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_DE.xaml',
+            'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_EN.xaml': 'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_EN.xaml',
+            'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_ES.xaml': 'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_ES.xaml',
+            'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_FR.xaml': 'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_FR.xaml',
+            'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_GB.xaml': 'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_GB.xaml',
+            'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_HU.xaml': 'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_HU.xaml',
+            'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_IT.xaml': 'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_IT.xaml',
+            'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_JP.xaml': 'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_JP.xaml',
+            'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_KO.xaml': 'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_KO.xaml',
+            'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_MX.xaml': 'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_MX.xaml',
+            'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_NL.xaml': 'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_NL.xaml',
+            'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_PL.xaml': 'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_PL.xaml',
+            'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_RU.xaml': 'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_RU.xaml',
+            'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl.dll': 'mods/Extra Options - Weather Control/plugins/EO_WeatherControl.dll',
+            'Azimuth/mods/Extra Options - Weather Control/plugins/EO_WeatherControl.ini': 'mods/Extra Options - Weather Control/plugins/EO_WeatherControl.ini',
+            'Azimuth/winmm.dll': 'winmm.dll',
+        },
+        'fileSha256': {
+            'mods/Extra Options - Garage Revving/mod.json': '4f70c5538490f61011f854c7afcdcea91658417aa54bafad98c5e61ea28af00f',
+            'mods/Extra Options - Garage Revving/plugins/EO_GarageEngineRev.dll': 'eb48f446f22eca24d6cc93f25d6a70bd60c387a8d3ef675921cc3ab1d1bc5e17',
+            'mods/Extra Options - Weather Control/mod.json': 'd5e10b1ae3c33e414d2a21a41887bf3c6bd5436192afa726d118297ff3bce547',
+            'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_BR.xaml': 'b123f1706f8838c2d49b27bb8c995c2ec18c2cb1d04a44bff1f44e6a3d8cc4bc',
+            'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_CHT.xaml': 'b4b9d1dbe708c01f408aac94ee3ae74145a6cef219e76900a05b552e4a4c5c0b',
+            'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_CZ.xaml': 'f360b02218c19748b18e7e06c232d6cd026d3213a099f5cd6d0dec8cce0b249f',
+            'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_DE.xaml': '512198de83cd0440d5b68a8fc8dc3b74ed3674f5c949d73a55a170e9e3b5923a',
+            'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_EN.xaml': '314aa157f18f42f9ec36ae4c38cd2a78da627608770363db275afd86a7a36102',
+            'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_ES.xaml': '000a5e4ff23899eee5e2d77e8d378ddbfad4f0e6349ed8c550c8369f3fc18115',
+            'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_FR.xaml': '4b182ff6f60cfc672bb406c48813bd37978c3b56cd20c87816b81f12c386d5e1',
+            'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_GB.xaml': '314aa157f18f42f9ec36ae4c38cd2a78da627608770363db275afd86a7a36102',
+            'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_HU.xaml': '608c91827e84445ba0ae1f56884a9abfd302a77debe87821b1cf3605c743665b',
+            'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_IT.xaml': 'b881efda0d35b8eb49dafcf6fdb25e1f75a40e36d8e0163b6e74f2ca77398abe',
+            'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_JP.xaml': '596cc2b192369c076bea72eccf9ab318fbffc3fd71b679d6eff643804ea44bf1',
+            'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_KO.xaml': '59fef45cea1fc0276c05bbbfc2e03478cce51f73c2e92b65c17746b713223bf0',
+            'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_MX.xaml': '000a5e4ff23899eee5e2d77e8d378ddbfad4f0e6349ed8c550c8369f3fc18115',
+            'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_NL.xaml': '6acbb97480ff59800f9017d83ac72ef96034376880faf63ab5e5d7efde233499',
+            'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_PL.xaml': '5f9b9b0f76ba658547c55c15f7a320ce325655d8f3426bd51ec019b416138557',
+            'mods/Extra Options - Weather Control/plugins/EO_WeatherControl/Media/UI/Scenes/Anthem/EO_WeatherControl_RU.xaml': '7481aca0221de0f62b15030ebc0073d7cb0d6d36f673883b59203b76bf182923',
+            'mods/Extra Options - Weather Control/plugins/EO_WeatherControl.dll': '4df33e3bc229e43c00bb631f4c8543e6803a9cc677721df2883342831d67dc24',
+        },
+    },
 }
 # The exact platform build in this release's supported combination.
 PLATFORM_VERSION = UPSTREAM["platform"]["version"]

@@ -36,6 +36,7 @@ typedef struct {
 } hook_build;
 static const hook_build g_hook_builds[] = {
     {0x2909b0u, 9u, 0x4288f958fe9625cfull}, /* azimuth.exe 1.0.3 (sha256 ebfd5d43...26821f); resolver +2918d2 */
+    {0x17fd80u, 9u, 0x4288f958fe9625cfull}, /* azimuth.exe 1.0.4 (sha256 56d2c9cb...b3b092); resolver +180ca2: the same code, new addresses */
 };
 
 /* forza_durango_release_final.exe 1.0.0.64 (image identity, as checked by the Extra Options mod) */
@@ -245,7 +246,7 @@ static int line_has(const char *l, int n, const char *pat)
 static int line_wanted(const char *l, int n)
 {
     static const char *const keep[] = {"attached", "session:", "identity:", "late:", "not patched", "NOT ", "unexpected", "fail", "error", "could not",
-                                       "refus", "crash", "xsbody", "bindfix", "gamedb:", "rivalsleave", "probe:", "lighting:", 0};
+                                       "refus", "crash", "xsbody", "xstoken", "mmtimeout", "mmtoast", "online-setup", "bindfix", "gamedb:", "rivalsleave", "bucketcars", "crowns", "matchpoll", "sample", "carprobe", "probe:", "lighting:", 0};
     int i;
     for (i = 0; keep[i]; i++) {
         if (line_has(l, n, keep[i])) {
@@ -1391,6 +1392,287 @@ static int patch_mp_difficulty(void)
 }
 
 /*
+ * Bucket-list car manager probe (diagnostics, env FH2MP_CARPROBE=1): the per-frame update of the BucketListCarLoadingManager (RVA 0x3fc0f0)
+ * decides per car whether it is near enough to be loaded. Every 3 s the manager's bytes and the first cars of its list are logged, to be
+ * compared between an offline and an online run (the parked car shows offline only, 2026-10-29). Reads only.
+ */
+typedef void (*car_mgr_update_fn)(void *mgr);
+static car_mgr_update_fn g_car_mgr_update;
+static DWORD g_car_probe_tick;
+
+static void car_probe_dump(const char *label, unsigned char *p, unsigned n)
+{
+    unsigned i;
+
+    if (!p || IsBadReadPtr(p, n)) {
+        return;
+    }
+    log_begin();
+    log_raw("carprobe ");
+    log_raw(label);
+    log_raw(":");
+    for (i = 0; i < n; i += 8) {
+        log_raw(" ");
+        log_hex(*(unsigned long long *)(p + i), 16);
+    }
+    log_raw("\n");
+}
+
+static void car_mgr_update_stub(void *mgr)
+{
+    DWORD now = GetTickCount();
+
+    if (now - g_car_probe_tick >= 3000) {
+        unsigned char *m = (unsigned char *)mgr, **node;
+        int k;
+
+        g_car_probe_tick = now;
+        car_probe_dump("manager+0x38", m + 0x38, 0x88);
+        node = (m && !IsBadReadPtr(m + 0x50, 8)) ? *(unsigned char ***)(m + 0x50) : NULL;       /* circular list: sentinel at +0x50 */
+        for (k = 0; node && node != (unsigned char **)(m + 0x50) && k < 4 && !IsBadReadPtr(node, 0x48); k++) {
+            unsigned char *car = (unsigned char *)node[4];
+            char label[16];
+
+            label[0] = 'n'; label[1] = (char)('0' + k); label[2] = 0;
+            car_probe_dump(label, (unsigned char *)node, 0x48);
+            if (car && !IsBadReadPtr(car, 0x1c0)) {
+                car_probe_dump("car+0x120", car + 0x120, 0x60);
+                car_probe_dump("car+0x160", car + 0x160, 0x10);
+                car_probe_dump("car+0x1b0", car + 0x1b0, 0x10);
+            }
+            node = (unsigned char **)node[0];
+        }
+    }
+    g_car_mgr_update(mgr);
+}
+
+static int install_car_probe(void)
+{
+    unsigned char *img = find_fh2_image();
+
+    if (!img) {
+        return 0;
+    }
+    return plat_hook("carprobe: bucket-list car manager update", img + 0x3fc0f0, (void *)car_mgr_update_stub, (void **)&g_car_mgr_update);
+}
+
+/*
+ * Stall sampler (diagnostics, env FH2MP_SAMPLE=1): once a second every thread of the process is stopped for a moment and, when its
+ * instruction pointer is inside the game's image, "sample tid=<n> game+0x<rva>" is logged. A search that stalls for 30 s with no network traffic
+ * (dev 2026-10-29) shows where the game waits. Nothing is written to the game.
+ */
+#include <tlhelp32.h>
+
+static DWORD WINAPI stall_sampler(LPVOID unused)
+{
+    unsigned char *img = NULL;
+    DWORD self = GetCurrentThreadId(), pid = GetCurrentProcessId();
+    (void)unused;
+
+    for (;;) {
+        HANDLE snap;
+        THREADENTRY32 te;
+        DWORD tids[96];
+        ULONG_PTR rvas[96], rip[96], callers[96][6];
+        int ncall[96];
+        int n = 0, i, j;
+
+        Sleep(1000);
+        if (!img) {
+            img = find_fh2_image();
+            if (!img) {
+                continue;
+            }
+        }
+        snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (snap == INVALID_HANDLE_VALUE) {
+            continue;
+        }
+        te.dwSize = sizeof te;
+        if (Thread32First(snap, &te)) {
+            do {
+                HANDLE h;
+                CONTEXT ctx;
+
+                if (te.th32OwnerProcessID != pid || te.th32ThreadID == self) {
+                    continue;
+                }
+                h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, te.th32ThreadID);
+                if (!h) {
+                    continue;
+                }
+                if (SuspendThread(h) != (DWORD)-1) {
+                    ctx.ContextFlags = CONTEXT_CONTROL;
+                    if (n < 96 && GetThreadContext(h, &ctx)) {
+                        /* the game's code addresses on the top of the stack: who the thread is waiting for */
+                        ULONG_PTR *sp = (ULONG_PTR *)ctx.Rsp;
+                        int k, nc = 0;
+
+                        for (k = 0; k < 256 && nc < 6; k++) {
+                            ULONG_PTR v;
+                            SIZE_T got = 0;
+                            if (!ReadProcessMemory(GetCurrentProcess(), sp + k, &v, sizeof v, &got) || got != sizeof v) {
+                                break;
+                            }
+                            if (v >= (ULONG_PTR)img && v < (ULONG_PTR)img + 0x3A18000u) {
+                                callers[n][nc++] = v - (ULONG_PTR)img;
+                            }
+                        }
+                        if (nc || (ctx.Rip >= (ULONG_PTR)img && ctx.Rip < (ULONG_PTR)img + 0x3A18000u)) {
+                            tids[n] = te.th32ThreadID;      /* logged after every thread runs again: a stopped one may hold the log's lock */
+                            rip[n] = ctx.Rip;
+                            rvas[n] = (ctx.Rip >= (ULONG_PTR)img && ctx.Rip < (ULONG_PTR)img + 0x3A18000u) ? ctx.Rip - (ULONG_PTR)img : 0;
+                            ncall[n++] = nc;
+                        }
+                    }
+                    ResumeThread(h);
+                }
+                CloseHandle(h);
+            } while (Thread32Next(snap, &te));
+        }
+        CloseHandle(snap);
+        for (i = 0; i < n; i++) {
+            log_begin();
+            log_raw("sample tid=");
+            log_dec(tids[i]);
+            if (rvas[i]) {
+                log_raw(" game+0x");
+                log_hex(rvas[i], 8);
+            } else {
+                HMODULE m = NULL;
+                char name[64];
+                name[0] = 0;
+                if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)rip[i], &m) && m) {
+                    GetModuleFileNameA(m, name, sizeof name);
+                }
+                log_raw(" in ");
+                log_raw(name[0] ? name : "?");
+                log_raw("+0x");
+                log_hex(name[0] ? rip[i] - (ULONG_PTR)m : rip[i], 8);
+            }
+            log_raw(" via");
+            for (j = 0; j < ncall[i]; j++) {
+                log_raw(" 0x");
+                log_hex(callers[i][j], 7);
+            }
+            log_raw("\n");
+        }
+    }
+    return 0;
+}
+
+/*
+ * Match ticket polling. The game asks the matchmaking service for the state of a ticket every 5000 ms (FUN_14183fc20 and the status
+ * handler FUN_14183ae80 each write next_poll = network_time + 5000 at ticket + 0xa4), so a search that the service answers at once still
+ * waits 5 to 6 s for its first poll and the same again for the next step; the service's waitTime is ignored (dev 2026-10-29: waitTime 0
+ * and 1 both gave 5 s; "lobbies were finding for a fucking eternity"). The immediates of the two `add eax, 5000` (RVAs 0x183aff2 and
+ * 0x183fc3f) become 500. Disable with env FH2MP_NO_MATCHPOLL.
+ */
+#define FH2_MATCHPOLL_RVA_A 0x183aff2u
+#define FH2_MATCHPOLL_RVA_B 0x183fc3fu
+#define FH2_MATCHPOLL_RVA_C 0x183afcdu
+static int patch_match_poll(void)
+{
+    static const unsigned char want[] = {0x05, 0x88, 0x13, 0x00, 0x00};     /* add eax, 5000 */
+    static const unsigned char now[] = {0x05, 0xF4, 0x01, 0x00, 0x00};      /* add eax, 500 */
+    static const unsigned rvas[3] = {FH2_MATCHPOLL_RVA_A, FH2_MATCHPOLL_RVA_B, FH2_MATCHPOLL_RVA_C};
+    unsigned char *img = find_fh2_image();
+    int i, done = 0;
+
+    if (!img) {
+        return 0;
+    }
+    for (i = 0; i < 3; i++) {
+        unsigned char *at = img + rvas[i];
+
+        if (memcmp(at, now, sizeof now) == 0) {
+            done++;
+        } else if (memcmp(at, want, sizeof want) == 0 &&
+                   plat_patch(i == 1 ? "matchpoll: ticket poll interval (poll timer)" : i ? "matchpoll: ticket retry interval" : "matchpoll: ticket poll interval (status handler)",
+                              at + 1, want + 1, now + 1, 4)) {
+            done++;
+        }
+    }
+    log_begin();
+    log_raw(done == 3 ? "matchpoll: the game polls a match ticket every 0.5 s instead of every 5 s\n"
+                      : "matchpoll: unexpected bytes at the ticket poll timers, not patched\n");
+    return done == 3;
+}
+
+/*
+ * Slow "Finding session" (dev 2026-10-29). The request that starts an online search (the object ticked by FUN_1417b3330) has a first state that
+ * gives up after 10 s and a second that gives up after 30 s (`sub eax,[rbx+0x2ec] ; cmp eax,10000` / `... [rbx+0x2f0] ; cmp eax,30000`, then
+ * target state 6, the same path as success). A healthy search never gets there: the secure-association state-change event (FUN_1417925d0 sets
+ * +0x2f4) moves it on within a second. In some processes that event never comes (3 of 33 game starts in a day of dev logs: every search of the
+ * process took 30 s; 20 of 33 had a first search of 11-17 s), and nothing in the request needs the QoS result here, so the wait was dead time.
+ * Both limits become 3 s. Disable with env FH2MP_NO_MMTIMEOUT.
+ */
+#define FH2_MMTIMEOUT_A_RVA 0x17B3361u /* 3d 10 27 00 00 : cmp eax, 10000 (then jbe) */
+#define FH2_MMTIMEOUT_B_RVA 0x17B33B1u /* 3d 30 75 00 00 : cmp eax, 30000 (then jbe) */
+static int patch_mm_timeouts(void)
+{
+    static const unsigned char a_old[] = {0x3D, 0x10, 0x27, 0x00, 0x00, 0x76, 0x5B};
+    static const unsigned char a_new[] = {0x3D, 0xB8, 0x0B, 0x00, 0x00, 0x76, 0x5B};
+    static const unsigned char b_old[] = {0x3D, 0x30, 0x75, 0x00, 0x00, 0x76, 0x0B};
+    static const unsigned char b_new[] = {0x3D, 0xB8, 0x0B, 0x00, 0x00, 0x76, 0x0B};
+    unsigned char *img = find_fh2_image();
+    int done = 0;
+
+    if (!img) {
+        return 0;
+    }
+    if (memcmp(img + FH2_MMTIMEOUT_A_RVA, a_new, sizeof a_new) == 0 ||
+        (memcmp(img + FH2_MMTIMEOUT_A_RVA, a_old, sizeof a_old) == 0 &&
+         plat_patch("mmtimeout: first-state limit of the match request 10 s -> 3 s", img + FH2_MMTIMEOUT_A_RVA + 1, a_old + 1, a_new + 1, 4))) {
+        done++;
+    }
+    if (memcmp(img + FH2_MMTIMEOUT_B_RVA, b_new, sizeof b_new) == 0 ||
+        (memcmp(img + FH2_MMTIMEOUT_B_RVA, b_old, sizeof b_old) == 0 &&
+         plat_patch("mmtimeout: second-state limit of the match request 30 s -> 3 s", img + FH2_MMTIMEOUT_B_RVA + 1, b_old + 1, b_new + 1, 4))) {
+        done++;
+    }
+    log_begin();
+    log_raw(done == 2 ? "mmtimeout: a match request that waits for an event that never comes gives up after 3 s, not 10 s / 30 s\n"
+                      : "mmtimeout: unexpected bytes in the match request tick, not patched\n");
+    return done == 2;
+}
+
+/*
+ * "Matchmaking failed due to losing your connection to Xbox Live" after a cancelled Car Meet search (user 2026-10-29). The matchmaking-failure
+ * handler (RVA 0x80c0a0..) picks the text per reason; for the Live case it shows the toast only when a state byte +0x12d is set and +0x12e is
+ * clear (`cmp byte [rax+0x12e],0 ; jne skip`, 75 4b / 75 44 at RVA 0x80c10f / 0x80c285). The game is never really signed in to Xbox Live, so the
+ * byte is always clear. Both jumps become unconditional (EB), so that toast is skipped; matchmaking itself is unaffected (it kept working
+ * with the toast showing). Disable with env FH2MP_NO_MMTOAST.
+ */
+static int patch_mm_failed_toast(void)
+{
+    static const unsigned char cmp12e[] = {0x80, 0xB8, 0x2E, 0x01, 0x00, 0x00, 0x00};
+    static const unsigned rvas[2] = {0x80C10Fu - 7, 0x80C285u - 7};
+    static const unsigned char jne_a[] = {0x75, 0x4B}, jmp_a[] = {0xEB, 0x4B}, jne_b[] = {0x75, 0x44}, jmp_b[] = {0xEB, 0x44};
+    unsigned char *img = find_fh2_image();
+    int i, done = 0;
+
+    if (!img) {
+        return 0;
+    }
+    for (i = 0; i < 2; i++) {
+        unsigned char *at = img + rvas[i];
+        const unsigned char *want = i ? jne_b : jne_a, *now = i ? jmp_b : jmp_a;
+
+        if (memcmp(at, cmp12e, sizeof cmp12e) != 0) {
+            continue;
+        }
+        if (memcmp(at + 7, now, 2) == 0 ||
+            (memcmp(at + 7, want, 2) == 0 && plat_patch("mmtoast: no \"lost Xbox Live\" toast on a failed matchmaking", at + 7, want, now, 2))) {
+            done++;
+        }
+    }
+    log_begin();
+    log_raw(done == 2 ? "mmtoast: the \"matchmaking failed, lost Xbox Live\" toast is off\n" : "mmtoast: unexpected bytes at the failure handler, not patched\n");
+    return done == 2;
+}
+
+/*
  * Traffic ownership on collisions. A client sends RequestOwnership for a traffic car it hit (FUN_140717410, called from the collision
  * handler FUN_140408af0) only if the car's "can take" flag (+0xaa) is set, and that flag is set only by FUN_140723b40 (the
  * CanTakeOwnership sender), which rarely runs, so most collisions asked for nothing and the car stayed with its owner: the hitter saw
@@ -2191,10 +2473,21 @@ static void *xs_find_import(unsigned char *img, const char *want)
 
 static void *g_xs_auth; /* the shared Authentication object returned by the stub */
 
+/* How many token requests XSAPI made through the stub, and when the first came (diagnostics for "the online setup after Logon never ran":
+ * no request at all means the game never asked XSAPI, a late one means XSAPI waited for something else). */
+static volatile LONG g_xs_calls;
+static DWORD g_xs_hooked_at;
+
 static void *xs_token_stub(void *a, void *b, void *c, void *d)
 {
     void **vt;
     (void)a; (void)b; (void)c; (void)d;
+    if (InterlockedIncrement(&g_xs_calls) == 1) {
+        char msg[96];
+        wsprintfA(msg, "xstoken: first token request %lu ms after the hook\n", (unsigned long)(GetTickCount() - g_xs_hooked_at));
+        log_begin();
+        log_raw(msg);
+    }
     vt = *(void ***)g_xs_auth;
     ((ULONG(*)(void *))vt[1])(g_xs_auth); /* AddRef, as a returned reference */
     return g_xs_auth;
@@ -2300,6 +2593,7 @@ static int patch_xsapi_token(void)
         return 2;
     }
     log_begin();
+    g_xs_hooked_at = GetTickCount();
     log_raw("xstoken: XSAPI GetTokenAndSignature(+ForAllUsers) now return a placeholder token\n");
     return 1;
 }
@@ -2890,26 +3184,32 @@ static const char RIVALS_LAUNCH_NEW[] =
     "    <behavior id=\"ModuleMethodCall\" module_id=\"RivalsModule\" method=\"RequestLaunchRivalsEventFromMenu\" />\r\n"
     "  </state>";
 
-static int stateflow_rivals_leave_session(void)
+/* One exact replacement in a file of one of the game's media zips (stateflow.zip, UI.zip), handed to the platform (set_file <set_path>).
+ * Nothing is changed unless the old text occurs exactly once. `tag` starts the log lines. */
+static int stateflow_replace(const WCHAR *zip_name, const char *file, const char *set_path, const char *old, size_t olen, const char *neu, size_t nlen,
+                             const char *tag, const char *done)
 {
     WCHAR zip[MAX_PATH];
     unsigned char *orig, *out;
-    size_t size = 0, at, olen = sizeof RIVALS_LAUNCH_OLD - 1, nlen = sizeof RIVALS_LAUNCH_NEW - 1, i, hits = 0;
+    size_t size = 0, at = 0, i, hits = 0;
     int ok;
 
-    if (!g_api->game_dir[0] || lstrlenW(g_api->game_dir) + 32 >= MAX_PATH) {
+    if (!g_api->game_dir[0] || lstrlenW(g_api->game_dir) + lstrlenW(zip_name) + 8 >= MAX_PATH) {
         return 0;
     }
     lstrcpyW(zip, g_api->game_dir);
-    lstrcatW(zip, L"\\media\\stateflow.zip");
-    orig = zip_read_file(zip, "global.xml", &size);
+    lstrcatW(zip, zip_name);
+    orig = zip_read_file(zip, file, &size);
     if (!orig) {
         log_begin();
-        log_raw("rivalsleave: could not read global.xml from the game's stateflow.zip, not changed\n");
+        log_raw(tag);
+        log_raw(": could not read ");
+        log_raw(file);
+        log_raw(" from the game's stateflow.zip, not changed\n");
         return 0;
     }
-    for (i = 0, at = 0; i + olen <= size; i++) {
-        if (orig[i] == RIVALS_LAUNCH_OLD[0] && mem_equal(orig + i, (const unsigned char *)RIVALS_LAUNCH_OLD, olen)) {
+    for (i = 0; i + olen <= size; i++) {
+        if (orig[i] == (unsigned char)old[0] && mem_equal(orig + i, (const unsigned char *)old, olen)) {
             at = i;
             hits++;
         }
@@ -2917,19 +3217,84 @@ static int stateflow_rivals_leave_session(void)
     if (hits != 1 || !(out = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, size - olen + nlen))) {
         HeapFree(GetProcessHeap(), 0, orig);
         log_begin();
-        log_raw("rivalsleave: the Rivals launch state in global.xml is not as expected, not changed\n");
+        log_raw(tag);
+        log_raw(": the state in ");
+        log_raw(file);
+        log_raw(" is not as expected, not changed\n");
         return 0;
     }
     mem_copy(out, orig, at);
-    mem_copy(out + at, RIVALS_LAUNCH_NEW, nlen);
+    mem_copy(out + at, neu, nlen);
     mem_copy(out + at + nlen, orig + at + olen, size - at - olen);
-    ok = g_api->set_file(g_mod, "stateflow/global.xml", out, size - olen + nlen);
+    ok = g_api->set_file(g_mod, set_path, out, size - olen + nlen);
     HeapFree(GetProcessHeap(), 0, out);
     HeapFree(GetProcessHeap(), 0, orig);
     log_begin();
-    log_raw(ok ? "rivalsleave: a Rival started inside an online session leaves the session first\n"
-               : "rivalsleave: global.xml was not changed (another mod replaces it, see fh2-mods\\platform.log)\n");
+    log_raw(tag);
+    if (ok) {
+        log_raw(": ");
+        log_raw(done);
+        log_raw("\n");
+    } else {
+        log_raw(": ");
+        log_raw(file);
+        log_raw(" was not changed (another mod replaces it, see fh2-mods\\platform.log)\n");
+    }
     return ok;
+}
+
+static int stateflow_rivals_leave_session(void)
+{
+    return stateflow_replace(L"\\media\\stateflow.zip", "global.xml", "stateflow/global.xml", RIVALS_LAUNCH_OLD, sizeof RIVALS_LAUNCH_OLD - 1, RIVALS_LAUNCH_NEW,
+                             sizeof RIVALS_LAUNCH_NEW - 1, "rivalsleave", "a Rival started inside an online session leaves the session first");
+}
+
+/*
+ * Leader crowns in the player lists ("Players", "Game Party"): the list control shows the leader icon of every player whose IsLeader is
+ * true (PlayerListControl.xaml, style A_Style_FZMaterial_LeaderIcon), and everybody is a leader in an FH2MP Free Roam, so the crown told
+ * nothing (user 2026-10-29). The icon's Visibility binding becomes a constant Collapsed in UI.zip's Controls\PlayerListControl.xaml, handed to
+ * the platform like the stateflow edits. Disable with env FH2MP_NO_NOCROWNS.
+ */
+static const char CROWN_OLD[] =
+    "<Setter Property=\"Visibility\" Value=\"{Binding IsLeader, Converter={StaticResource A_FZBooleanToVisibilityConverter}}\"/>";
+static const char CROWN_NEW[] =
+    "<Setter Property=\"Visibility\" Value=\"Collapsed\"/>";
+
+/* the in-game "Players" list (HUDMiniLeaderboardControl.xaml) shows its crown through a trigger instead: opacity 1 on LeaderIcon */
+static const char CROWN2_OLD[] = "<Setter Property=\"Opacity\" Value=\"1\" TargetName=\"LeaderIcon\"/>";
+static const char CROWN2_NEW[] = "<Setter Property=\"Opacity\" Value=\"0\" TargetName=\"LeaderIcon\"/>";
+
+static int ui_no_leader_crowns(void)
+{
+    stateflow_replace(L"\\media\\UI.zip", "Controls/HUDMiniLeaderboardControl.xaml", "UI/Controls/HUDMiniLeaderboardControl.xaml", CROWN2_OLD,
+                      sizeof CROWN2_OLD - 1, CROWN2_NEW, sizeof CROWN2_NEW - 1, "crowns", "the in-game player list shows no leader crown");
+    return stateflow_replace(L"\\media\\UI.zip", "Controls/PlayerListControl.xaml", "UI/Controls/PlayerListControl.xaml", CROWN_OLD,
+                             sizeof CROWN_OLD - 1, CROWN_NEW, sizeof CROWN_NEW - 1, "crowns", "the player lists show no leader crowns");
+}
+
+/*
+ * Bucket-list cars in online Free Roam. The game parks a car at every bucket-list location once the BucketListCarLoadingManager has
+ * been told EnableBucketListCarLoading (native 0x43ef60). Only the offline flow (stateflow free_roam_start.xml, enter_offline and
+ * finalise_free_roam_offline) broadcasts it; network.xml's enter_free_roam, the online entry, never does, so online there are slots
+ * and markers but no parked cars (user 2026-10-29: "still no parked cars in online"). The same broadcast goes into the online entry, at the
+ * same place as offline: before the wait for streaming around the player's car. Off by default (retail online Free Roam shows no parked bucket-list cars; user footage 2026-10-29); opt in with env FH2MP_BUCKETCARS=1. (Probe 2026-10-29: the loader goes to state 3 then 4
+ * and all 12 car components are added after it, yet no car showed; the per-car event EnableBucketListCar is sent too now.)
+ */
+static const char BUCKET_CARS_OLD[] =
+    "    <node state=\"global.wait_for_streaming_around_local_human_car\" />\r\n"
+    "    <node state=\"finalise_free_roam_online\" />";
+static const char BUCKET_CARS_NEW[] =
+    "    <node state=\"global.broadcast_event\" event=\"EnableBucketListCarLoading\" />\r\n"
+    "    <node state=\"global.broadcast_event\" event=\"EnableBucketListCar\" />\r\n"
+    "    <node state=\"global.wait_for_streaming_around_local_human_car\" />\r\n"
+    "    <node state=\"finalise_free_roam_online\" />\r\n"
+    "    <node state=\"global.broadcast_event\" event=\"EnableBucketListCarLoading\" />\r\n"
+    "    <node state=\"global.broadcast_event\" event=\"EnableBucketListCar\" />";
+
+static int stateflow_bucket_cars_online(void)
+{
+    return stateflow_replace(L"\\media\\stateflow.zip", "network.xml", "stateflow/network.xml", BUCKET_CARS_OLD, sizeof BUCKET_CARS_OLD - 1, BUCKET_CARS_NEW,
+                             sizeof BUCKET_CARS_NEW - 1, "bucketcars", "online Free Roam enables the bucket-list cars like offline Free Roam");
 }
 
 /*
@@ -3107,6 +3472,13 @@ static DWORD WINAPI option_monitor(LPVOID unused)
     (void)wd_env;
     weather_dump = 0;
 #endif
+    {
+        wchar_t rp[MAX_PATH];
+
+        lstrcpyW(rp, g_dir);
+        lstrcatW(rp, L"\\fh2mp-restart.txt");
+        DeleteFileW(rp);                     /* a leftover of an earlier run is not this run's */
+    }
     have_want = arg_value_ascii(L"NetSessionDirectIpFreeRoam=", want, sizeof want);
     have_want_rt = arg_value_ascii(L"NetSessionDirectIpRoadTrip=", want_rt, sizeof want_rt);
     have_single_events = has_arg_prefix(L"NetSessionEnableSinglePlayerFreeRoamEvents");
@@ -3140,6 +3512,35 @@ static DWORD WINAPI option_monitor(LPVOID unused)
             wchar_t xs_env[8];
             if (xs_state == 0 && GetEnvironmentVariableW(L"FH2MP_NO_XSTOKEN", xs_env, 8) == 0) {
                 xs_state = patch_xsapi_token();
+            } else if (xs_state == 1 && g_xs_calls == 0 && g_xs_hooked_at && GetTickCount() - g_xs_hooked_at > 45000) {
+                static int told;
+                if (!told) {
+                    told = 1;
+                    log_begin();
+                    log_raw("xstoken: no XSAPI token request 45 s after the hook (the game has not started its online setup)\n");
+                }
+            }
+        }
+        {
+            static int restart_written;
+            DWORD first = g_lsp_first_tick;
+
+            if (!restart_written && first && !g_gsds_seen && GetTickCount() - first > 20000 && !GetEnvironmentVariableW(L"FH2MP_OFFLINE", NULL, 0)) {
+                wchar_t rp[MAX_PATH];
+                HANDLE rf;
+                DWORD got;
+                static const char why[] = "online setup skipped: no game-server directory request 20 s after the first server request\r\n";
+
+                restart_written = 1;
+                lstrcpyW(rp, g_dir);
+                lstrcatW(rp, L"\\fh2mp-restart.txt");
+                rf = CreateFileW(rp, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                if (rf != INVALID_HANDLE_VALUE) {
+                    WriteFile(rf, why, (DWORD)sizeof why - 1, &got, NULL);
+                    CloseHandle(rf);
+                }
+                log_begin();
+                log_raw("online-setup: the game never started its online setup (the cloud configuration failed before any request); restart requested\n");
             }
         }
         {
@@ -4833,6 +5234,30 @@ static DWORD WINAPI late_init(LPVOID unused)
             }
         }
         {
+            wchar_t mp_env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_MATCHPOLL", mp_env, 8) == 0) {
+                patch_match_poll();
+            }
+        }
+        {
+            wchar_t mt_env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_MMTOAST", mt_env, 8) == 0) {
+                patch_mm_failed_toast();
+            }
+        }
+        {
+            wchar_t mo_env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_MMTIMEOUT", mo_env, 8) == 0) {
+                patch_mm_timeouts();
+            }
+        }
+        {
+            wchar_t cp_env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_CARPROBE", cp_env, 8) != 0) {
+                install_car_probe();
+            }
+        }
+        {
             wchar_t to_env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_TRAFFICOWN", to_env, 8) == 0) {
                 patch_traffic_request_ownership();
@@ -4848,14 +5273,18 @@ static DWORD WINAPI late_init(LPVOID unused)
     return option_monitor(NULL);
 }
 
+#include "session_age.inc"
+
 /*
  * Session handed over by the launcher: fh2mp-session.txt next to the log, "key=value" lines:
  *   xuid=<hex>      the Xbox user id the server assigned to the account (replaces the random per-install id)
  *   token=fh2.xxxx  the session token (the server derives the player's identity from it)
  *   gamedb=<path>   the car database the launcher synced (UTF-8, relative to the Azimuth folder or a Windows path), put in mediaoverride
  *                   (gamedb_place) and hashed there for every request (gamedb_hash)
- * Env FH2MP_TOKEN / FH2MP_XUID override the file (tests, rigs). The file is not deleted here (Azimuth may start the game in a second
- * process that loads this DLL again); the launcher removes it when the game exits. Returns 1 when an xuid was given.
+ * Env FH2MP_TOKEN / FH2MP_XUID override the file (tests, rigs). The file is not deleted when it is used (Azimuth may start the game in a
+ * second process that loads this DLL again); the launcher removes it when the game exits. A file older than SESSION_MAX_AGE_TICKS
+ * (session_age.inc, 30 minutes; FH2MP_SESSION_MAX_AGE_S in seconds overrides, 0 = no limit) is a leftover of an earlier Play: it is ignored and
+ * removed, so a game started without Play is offline. Returns 1 when an xuid was given.
  */
 static int session_load(void)
 {
@@ -4873,7 +5302,40 @@ static int session_load(void)
     }
     lstrcpyW(path, g_dir);
     lstrcatW(path, L"\\fh2mp-session.txt");
-    f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f != INVALID_HANDLE_VALUE) {
+        FILETIME written, now_ft;
+        ULARGE_INTEGER w, n;
+        unsigned long long max_age = SESSION_MAX_AGE_TICKS;
+        WCHAR limit[16];
+        DWORD len = GetEnvironmentVariableW(L"FH2MP_SESSION_MAX_AGE_S", limit, 16);
+        if (len && len < 16) {
+            unsigned long long secs = 0;
+            DWORD k;
+            for (k = 0; limit[k] >= L'0' && limit[k] <= L'9'; k++) {
+                secs = secs * 10 + (unsigned)(limit[k] - L'0');
+            }
+            max_age = secs * 10000000ULL;
+        }
+        w.QuadPart = 0;
+        GetSystemTimeAsFileTime(&now_ft);
+        n.LowPart = now_ft.dwLowDateTime, n.HighPart = now_ft.dwHighDateTime;
+        if (GetFileTime(f, NULL, NULL, &written)) {
+            w.LowPart = written.dwLowDateTime, w.HighPart = written.dwHighDateTime;
+        }
+        if (session_is_stale(w.QuadPart, n.QuadPart, max_age)) {
+            CloseHandle(f);
+            f = INVALID_HANDLE_VALUE;
+            DeleteFileW(path);       /* best effort: the launcher also removes leftovers when it starts and quits */
+            log_begin();
+            log_raw("session: the launcher's session file is ");
+            log_dec((unsigned long)((n.QuadPart - w.QuadPart) / 600000000ULL));
+            log_raw(" minutes old, a leftover of an earlier Play: ignored, so this game is offline\n");
+            if (g_api && g_api->set_notice) {
+                g_api->set_notice(g_mod, "FH2MP: not signed in\nPress Play in the FH2MP launcher to play online");
+            }
+        }
+    }
     if (f != INVALID_HANDLE_VALUE) {
         if (ReadFile(f, buf, sizeof buf - 1, &got, NULL)) {
             buf[got] = 0;
@@ -5068,12 +5530,16 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
     if (!fh2_launch_selected(api->azimuth_dir, GetCommandLineW()) || !fh2_launch_executable(api->game_dir)) {
         return 0;
     }
+    memset(&info, 0, sizeof info);
     info.size = sizeof info;
     info.name = "FH2MP";
     info.version = FH2MP_SHIM_VERSION;
-    info.github_repo = NULL;                 /* the FH2MP launcher updates this DLL */
+    /* The launcher still replaces this DLL on every Play; the platform's own check is for players who start the game without it (a Steam
+     * shortcut to azimuth.exe, 256 of 530 refused IPs in one day of prod logs): it puts "new release" on the title screen and a ! on the MODS tab
+     * (at most every 6 hours, from api.github.com, and only for this mod). */
+    info.github_repo = "Charelene/FH2MP";
     info.platform_version = FH2MOD_PLATFORM_VERSION;
-    info.check_updates = 0;
+    info.check_updates = 1;
     info.description = "Forza Horizon 2 online on the FH2MP servers: Free Roam, Road Trip, Rivals, Car Clubs and more. "
                        "Start the game from the FH2MP launcher to play online.";
     g_mod = api->register_mod(&info);
@@ -5152,6 +5618,20 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
         wchar_t tmp[8];
         if (GetEnvironmentVariableW(L"FH2MP_NO_RIVALSLEAVE", tmp, 8) == 0) {
             stateflow_rivals_leave_session();    /* now: the game reads its stateflow once, early */
+        }
+        if (GetEnvironmentVariableW(L"FH2MP_BUCKETCARS", tmp, 8) != 0) {    /* opt-in: retail online Free Roam parks no bucket-list cars */
+            stateflow_bucket_cars_online();
+        }
+        if (GetEnvironmentVariableW(L"FH2MP_NO_NOCROWNS", tmp, 8) == 0) {
+            ui_no_leader_crowns();
+        }
+    }
+    {
+        wchar_t cp_env[8];
+        wchar_t sm_env[8];
+        (void)cp_env;
+        if (GetEnvironmentVariableW(L"FH2MP_SAMPLE", sm_env, 8) != 0) {
+            CloseHandle(CreateThread(NULL, 0, stall_sampler, NULL, 0, NULL));
         }
     }
     {

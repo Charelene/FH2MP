@@ -22,6 +22,8 @@ DEFAULTS = {
     "xuid": 0,
     "extra_args": "",
     "tcp_fallback": False,          # experimental: carry the game's UDP over TCP (for networks that drop UDP)
+    "keep_car_packs": False,        # sign in and use the services (tunes, liveries, photos) with the player's own car database; no play with other people
+    "tcp_auto": True,               # switch to TCP for this start when the server's UDP probe gets no answer (the server must advertise probes)
     "crash_report_ask": True,       # offer to send a report when the game crashed
     "crash_handled": 0.0,           # crashes recorded before this time (epoch) were already offered; 0 = not set up yet
     "extra_options": True,          # put FH2 Extra Options (GPL-3.0, RokkuDayo) next to the shim when the player has no copy

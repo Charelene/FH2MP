@@ -3,6 +3,8 @@ import json
 import os
 from pathlib import Path
 import struct
+import threading
+import time
 import sys
 import unittest
 from unittest import mock
@@ -134,6 +136,33 @@ class Policies(unittest.TestCase):
         bad, hide, size, payload = self.w.check_parts(self.a, *wire(words))
         self.assertEqual((bad, hide), (True, False))
         self.assertEqual(C.part_words(values(size, payload)[C.PARTS]), parts.stock_list(368))
+
+    def test_the_player_is_told_once_in_a_while_that_its_parts_were_replaced(self):
+        sent = []
+        done = threading.Event()
+
+        def sink(xuid, text, log):
+            sent.append((xuid, text))
+            done.set()
+        self.a.xuid = 0x9000000000a01
+        words = parts.stock_list(368)
+        words[12] = parts.NONE
+        with mock.patch.object(S, 'NOTICE_SINK', sink):
+            self.w.check_parts(self.a, *wire(words))
+            self.assertTrue(done.wait(5))
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(sent[0][0], 0x9000000000a01)
+            self.assertIn("car 368", sent[0][1])
+            self.a.parts_repair_car = None
+            self.w.check_parts(self.a, *wire(words))                      # the same car again right away: not a second notice
+            time.sleep(0.05)
+            self.assertEqual(len(sent), 1)
+            self.a.repair_notified[368] -= S.NOTICE_REPAIR_SECONDS + 1    # ten minutes later
+            done.clear()
+            self.a.parts_repair_car = None
+            self.w.check_parts(self.a, *wire(words))
+            self.assertTrue(done.wait(5))
+            self.assertEqual(len(sent), 2)
 
     def test_required_camshaft_and_cross_owner_rows_trigger_repair(self):
         for slot, value in [(12, parts.NONE), (0, 1110000), (4, parts.P.STOCK['Brakes'][1110])]:

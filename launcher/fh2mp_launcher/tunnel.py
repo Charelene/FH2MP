@@ -191,3 +191,30 @@ def free_udp_port(candidates=range(5200, 5300)):
         finally:
             s.close()
     return 0
+
+
+PROBE_MAGIC = b"FH2MPPN1"
+
+
+def probe_udp(host, port, tries=3, wait=1.2):
+    """Whether the game server's UDP port answers: one datagram (the game's 11-byte header, the probe magic, 8 random bytes) that the server
+    sends back unchanged (server/probe.py). False after `tries` unanswered tries: a network that drops UDP, or a server that does not
+    answer probes (the caller only asks one that says it does). Never raises."""
+    import os
+    for _ in range(tries):
+        nonce = os.urandom(8)
+        data = bytes(11) + PROBE_MAGIC + nonce
+        s = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(wait)
+            s.sendto(data, (host, port))
+            reply, _addr = s.recvfrom(256)
+            if reply == data:
+                return True
+        except (OSError, UnicodeError):
+            pass
+        finally:
+            if s is not None:
+                s.close()
+    return False

@@ -89,7 +89,10 @@ def main(argv=None):
         win.raise_()
         win.activateWindow()
     app._instance_server.activated.connect(activate)
-    win.resize(1280, 760)
+    area = win.screen().availableGeometry()          # never open larger than the screen: a laptop at 125 % display scaling is about 1093x614
+    size = (min(1280, area.width() - 40), min(760, area.height() - 80))
+    win.resize(*size)
+    win.move(area.left() + (area.width() - size[0]) // 2, area.top() + (area.height() - size[1]) // 2)
     win.show()
     win.start()
     if "--screenshot" in argv:                      # headless smoke test: render, save, quit

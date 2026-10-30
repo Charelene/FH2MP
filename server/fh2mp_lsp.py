@@ -74,6 +74,12 @@ TAGS = {}                 # xuid -> gamertag, learned at Logon
 
 
 def log(msg):
+    """One log line. A line the handler of a request writes below its "#N POST ..." line (indented two spaces) carries that request's number
+    too: the server handles requests in parallel threads, so before this "-> error result" and "no such livery" lines could not be
+    matched to the player whose request they answered (prod 2026-10-29)."""
+    seq = getattr(CTX, "seq", None)
+    if seq and msg.startswith("  ") and not msg.startswith("  #"):
+        msg = f"  #{seq}{msg[1:]}"
     print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
 
 
@@ -143,6 +149,8 @@ def logon(req):
 # ---------------------------------------------------------------- notifications (Message Center)
 
 POLL_SECONDS = 5
+# The hosts through which a client finds or joins other people (matchmaking, session documents, the game servers it is sent to).
+MULTIPLAYER_HOSTS = ("momatch.xboxlive.com", "sessiondirectory.xboxlive.com", "gameserverds.xboxlive.com", "gameserverms.xboxlive.com")
 MSG_TYPE = 0x200    # notificationType carrying MessageNotificationParameters (to be confirmed in game)
 filetime = notifstore.filetime
 
@@ -264,6 +272,37 @@ def notif_retrieve(req):
             "reconcileActiveNotifications": True, "activeNotificationIds": [n["id"] for n in vis]}
 
 
+OUTDATED_NOTICE_ID = 0x7FFFFF00      # never stored: only out-of-date clients see it
+_OUTDATED_SENT = filetime()          # one fixed date, so every poll shows the same notice rather than a new one
+
+
+def outdated_notice(need):
+    """The Message Center reply for a client below minShim, in place of the HTTP 426 its game cannot show: prod 2026-10-28, ~33k refused
+    requests a day from shims 1.0.0-rc4 to 1.1.1, and those players saw only "network error". Shown on the Community News page
+    (type 0x200, confirmed visible 2026-10-16); whether the game also raises a pop-up for it is unverified."""
+    ntype = 0x200
+    fields = notif_fields(ntype)
+    val = xls.default_struct(SC, fields)
+    val["Message"] = (f"FH2MP is out of date, so online play is off. Close the game, open the FH2MP launcher and press Play: "
+                      f"it updates FH2MP to {need}. Starting azimuth.exe directly skips the update.")
+    pb = xls.encode(SC, fields, val)
+    result = {"results": [{"id": OUTDATED_NOTICE_ID, "xuidRecipient": 0, "notificationType": ntype, "hasThumbnail": False,
+                           "isRead": False, "deleteAction": 0, "expirationDate": filetime(time.time() + 86400),
+                           "sentDate": _OUTDATED_SENT, "cbParameters": len(pb)}],
+              "parameterBlock": pb, "nextRetrieveSeconds": 60, "reconcileActiveNotifications": True,
+              "activeNotificationIds": [OUTDATED_NOTICE_ID]}
+    _name, rfields = find_struct("Xls.WebServices.Notifications, Xls.WebServices", "RetrieveForUser", "_Results")
+    return frame(xls.encode(SC, rfields, result))
+
+
+def outdated_logon():
+    """Logon for a client below minShim: the schema's empty result and nothing else. Its first call is Logon, and a refused Logon made the game
+    retry it with growing pauses and never poll the Message Center (prod 2026-10-29: refusals back off 2, 3, 4, 9, 16 s, then every 2 minutes).
+    Nothing is registered: no session, no UDP ticket, no profile; every other call it makes is still refused."""
+    _name, rfields = find_struct("Forza.WebServices.User, Forza.WebServices", "Logon", "_Results")
+    return frame(xls.encode(SC, rfields, xls.default_struct(SC, rfields)))
+
+
 def notif_mark_read(req):
     NOTIF.mark_read(getattr(CTX, "xuid", 0), req["notificationId"])
     return None
@@ -337,8 +376,15 @@ def _score_row(sc_row, rowdict):
     return rowdict
 
 
+def _own_cars():
+    return getattr(CTX, "own_cars", False)
+
+
 def sb_submit_score(req):
     xuid, tag = _me()
+    if _own_cars():
+        log(f"  SubmitScore board=({req['data']['scoreboardType']},{req['type']}): not stored, the player runs its own car database")
+        return None
     d = req["data"]
     s = SB.submit(xuid, tag, req["type"], d)
     if s is None:
@@ -442,6 +488,9 @@ def sb_download_file(req):
 
 def sb_submit_xp(req):
     xuid, _ = _me()
+    if _own_cars():
+        log(f"  SubmitXpScore +{req['xp']:g}: not stored, the player runs its own car database")
+        return None
     total, verdict, reason = SB.add_xp(xuid, req["xp"])
     if verdict == "ok":
         log(f"  SubmitXpScore +{req['xp']:g} -> total {total:g} user={xuid:#x}")
@@ -1083,10 +1132,29 @@ def store_photo_create(req):
     return {"contentFileId": fid}
 
 
+def _shown(files):
+    """Community files this reader may be listed. A tune, livery or photo of a car the server's car database does not have (a player's own car
+    pack) is hidden from everyone who does not run their own database: the game would try to show a car it has not got. The owner and other
+    players with their own database see it, and every direct request for a known file id is unchanged."""
+    if _own_cars() or CARS is None:
+        return files
+    known, out = {}, []
+    for f in files:
+        cid = f["car_id"]
+        if cid is None or cid <= 0:
+            out.append(f)
+            continue
+        if cid not in known:
+            known[cid] = CARS.row(cid) is not None
+        if known[cid]:
+            out.append(f)
+    return out
+
+
 def _search_files(kind, results_struct, label, req):
     p = req["searchParameters"]
-    files = UGC.search(kind, p["MakeId"], p["ModelId"], p["ClassId"], p["KeywordOneId"], p["KeywordTwoId"], p["EnvironmentId"],
-                       p["TrackId"], p["NumberOfLayers"], p["GamerTag"], p["ManualSearchKeywords"], min(max(req["maxFiles"], 0), 100) or 50)
+    files = _shown(UGC.search(kind, p["MakeId"], p["ModelId"], p["ClassId"], p["KeywordOneId"], p["KeywordTwoId"], p["EnvironmentId"],
+                              p["TrackId"], p["NumberOfLayers"], p["GamerTag"], p["ManualSearchKeywords"], min(max(req["maxFiles"], 0), 100) or 50))
     tmpl = _elem_template(results_struct, "searchResults")
     log(f"  {label} make={p['MakeId']} model={p['ModelId']} class={p['ClassId']} kw={p['KeywordOneId']}/{p['KeywordTwoId']} "
         f"env={p['EnvironmentId']} track={p['TrackId']} tag={p['GamerTag']!r} text={p['ManualSearchKeywords']!r}: {len(files)} found")
@@ -1116,14 +1184,14 @@ def _photo_list(results_struct, field, label, files, req):
 
 def store_popular_photos(req):
     """Storefront.GetPopularPhotos (the "Top Rated" tab)."""
-    files = UGC.popular("photo", min(max(req["maxFiles"], 0), 100) or 50)
+    files = _shown(UGC.popular("photo", min(max(req["maxFiles"], 0), 100) or 50))
     return _photo_list("ForzaStorefrontGetPopularPhotos_Results", "PopularPhotos", "GetPopularPhotos", files, req)
 
 
 def store_featured_photos(req):
     """Storefront.GetFeaturedPhotos (the curated tab): nobody curates, so the week's most liked photos stand in."""
     n = min(max(req["maxFiles"], 0), 100) or 50
-    files = UGC.popular("photo", n, since=time.time() - PHOTO_PICKS_DAYS * 86400) or UGC.popular("photo", n)
+    files = _shown(UGC.popular("photo", n, since=time.time() - PHOTO_PICKS_DAYS * 86400) or UGC.popular("photo", n))
     return _photo_list("ForzaStorefrontGetFeaturedPhotos_Results", "FeaturedPhotos", "GetFeaturedPhotos", files, req)
 
 
@@ -1197,7 +1265,7 @@ def store_redescribe(req):
 
 def store_featured_liveries(req):
     files, seen = [], set()
-    for f in UGC.search("livery", limit=200):
+    for f in _shown(UGC.search("livery", limit=200)):
         if f["car_id"] not in seen:
             seen.add(f["car_id"])
             files.append(f)
@@ -1216,7 +1284,7 @@ def store_drivatar_liveries(req):
 def store_curated(req):
     """Storefront.GetCuratedContent (the "Recommended Designs" page): community files of the asked type for the player's car."""
     p = req["curationParameters"]
-    files = UGC.curated(p["ContentType"], p["CarId"], min(max(req["maxContentResults"], 1), 100))
+    files = _shown(UGC.curated(p["ContentType"], p["CarId"], min(max(req["maxContentResults"], 1), 100)))
     tmpl = _elem_template("ForzaStorefrontGetCuratedContent_Results", "curatedContent")
     log(f"  GetCuratedContent type={p['ContentType']} car={p['CarId']} track={p['TrackId']} pi={p['PiTargetValue']}: {len(files)} found")
     return {"curatedContent": [_light(f, tmpl) for f in files]}
@@ -2269,10 +2337,12 @@ class Handler(BaseHTTPRequestHandler):
         on_revoke(acct.xuid)
 
     def _gamedb_ok(self, acct):
-        """A game whose car database is not the server's (X-FH2MP-GameDb, the shim's hash of the copy the launcher synced) is refused and
-        taken out of the game until it signs in again: a car the others do not have crashes them. A configured database requires a hash,
-        including from clients that omit the header. Replace the database during maintenance: everyone in the game is removed and gets the new copy at
-        the next Play."""
+        """A game whose car database is not the server's (X-FH2MP-GameDb, the shim's hash of the database it runs) may use every service
+        (tunes, liveries, photos, its own progress) but not play with other people: a car the others do not have crashes them. The request is
+        marked (CTX.own_cars); the multiplayer entry points and the public boards refuse marked requests (_multiplayer_request, _own_cars).
+        A client that omits the hash counts as not matching. Only a server whose database cannot be read refuses everything. A player
+        that was matching and no longer is, is taken out of the game once; replace the database during maintenance: everyone in the game
+        is removed and gets the new copy at the next Play."""
         have = self.headers.get("X-FH2MP-GameDb", "")
         if LAUNCHER is None:
             return True
@@ -2283,16 +2353,17 @@ class Handler(BaseHTTPRequestHandler):
                 return False
             return True
         if have.strip().lower() == m["sha256"]:
+            _OWN_CARS.pop(acct.xuid, None)
             return True
-        now = time.monotonic()
-        if now - _GAMEDB_REMOVED.get(acct.xuid, -1e9) >= 60:
-            _GAMEDB_REMOVED[acct.xuid] = now
-            if len(_GAMEDB_REMOVED) > 20000:
-                _GAMEDB_REMOVED.clear()
-            log(f"  car database {have.strip()[:16]!r} is not the server's {m['sha256'][:16]}: removing {acct.gamertag!r} {acct.xuid:#x} from the game")
-            on_revoke(acct.xuid)
-        self._reply_json(409, {"error": "gamedb_mismatch", "message": "Your car database is not the server's. Press Play in the FH2MP launcher."})
-        return False
+        CTX.own_cars = True
+        if acct.xuid not in _OWN_CARS:
+            if len(_OWN_CARS) > 20000:
+                _OWN_CARS.clear()
+            _OWN_CARS[acct.xuid] = time.monotonic()
+            log(f"  car database {have.strip()[:16]!r} is not the server's {m['sha256'][:16]}: {acct.gamertag!r} {acct.xuid:#x} keeps the "
+                f"services but is out of play with other people")
+            on_revoke(acct.xuid)            # a game in progress had the server's database: it must not carry on with another one
+        return True
 
     def _restricted_tools_ok(self, acct):
         value = self.headers.get("X-FH2MP-Tools", "")
@@ -2325,12 +2396,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def _identify(self):
         """Sets CTX.xuid / CTX.authed / CTX.tag from the session token. False (after answering) when the request must not go on."""
-        CTX.authed, CTX.tag = False, ""
+        CTX.authed, CTX.tag, CTX.own_cars = False, "", False
         CTX.shim = self.headers.get("X-FH2MP-Shim", "")          # the client's shim version ("1.0.0-rc2"); empty for clients that do not send it
         need = LAUNCHER.config.get()["minShim"] if LAUNCHER is not None else "0.0.0"
         if not launcher_api.version_at_least(CTX.shim, need):
             log(f"  refused: shim {CTX.shim or '(none)'!r} is older than {need}")
             self._remove_old_client()
+            cls, method = self.headers.get("X-ClassName", ""), self.headers.get("X-Method", "")
+            if SC is not None and cls.startswith("Xls.WebServices.Notifications") and method == "RetrieveForUser":
+                self._reply_json(200, outdated_notice(need), "bin/xtsw")      # the game shows this, unlike the 426 below
+                return False
+            if SC is not None and cls.startswith("Forza.WebServices.User") and method == "Logon":
+                self._reply_json(200, outdated_logon(), "bin/xtsw")           # so that it reaches the Message Center at all
+                return False
             self._reply_json(426, {"error": "shim_too_old", "message": f"FH2MP is out of date. Update the launcher and press Play (needs {need})."})
             return False
         token = self.headers.get("X-FH2MP-Token", "")
@@ -2346,7 +2424,8 @@ class Handler(BaseHTTPRequestHandler):
                     return False
                 if not self._gamedb_ok(acct):
                     return False
-                announce_auth(acct.xuid, self.client_ip(), token)
+                if not CTX.own_cars:
+                    announce_auth(acct.xuid, self.client_ip(), token)      # the game server only admits the server's car database
                 return True
             if AUTH.mode == "required":
                 self._reply_json(401, {"error": "login_required", "message": "start the game from the FH2MP launcher"})
@@ -2360,6 +2439,7 @@ class Handler(BaseHTTPRequestHandler):
     def _handle(self):
         global SEQ
         SEQ += 1
+        CTX.seq = SEQ                  # log() numbers the indented lines of this request with it
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -2393,6 +2473,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         social.touch(CTX.xuid or int(xbl_xuid(self.headers) or 0))
         log(f"#{SEQ} {self.command} {host}{self.path} {cls} {method} body={len(body)} user={CTX.xuid:#x}")
+        if CTX.own_cars and host in MULTIPLAYER_HOSTS:
+            log("  multiplayer refused: this player's car database is not the server's")
+            return self._reply_json(409, {"error": "gamedb_mismatch", "message": "Playing with other people needs the server's car database. "
+                                          "Press Play in the FH2MP launcher without keeping your own car packs."})
         out = b""
         if host.endswith("forzamotorsport.net") and cls:
             try:
@@ -2537,10 +2621,11 @@ class Handler(BaseHTTPRequestHandler):
             out = json.dumps({"name": name, "template": template}) + "\n"
             log(f"  game-mode session created: {name} ({template}) type {q.get('type', '1')}")
         elif u.path == "/admin/send":
-            fixed = {"text", "sra", "type"}
+            fixed = {"text", "sra", "type", "xuid"}
             n = add_notification(q.get("text", ""), q.get("sra", ""), int(q["type"], 0) if "type" in q else None,
                                  notif_params(int(q["type"], 0) if "type" in q else MSG_TYPE,
-                                              {k: v for k, v in q.items() if k not in fixed}))
+                                              {k: v for k, v in q.items() if k not in fixed}),
+                                 xuid=int(q["xuid"], 0) if "xuid" in q else 0)       # xuid: that player only (the game server's notices)
             out = f"queued #{n['id']}\n"
         elif u.path == "/admin/drivatar" and "remove" in q:
             out = "removed\n" if DRV.remove(int(q.get("xuid", "0"), 0)) else "no such drivatar\n"
@@ -2646,7 +2731,7 @@ def announce_auth(xuid, ip, token=""):
 
 
 _OLD_REMOVED = {}
-_GAMEDB_REMOVED = {}
+_OWN_CARS = {}                # xuid -> when a player's car database was first seen not matching the server's
 _TOOLS_ANNOUNCED = {}
 
 
@@ -2702,6 +2787,8 @@ def setup_auth():
     game_public = {"host": host, "port": int(os.environ.get("FH2MP_GAME_PORT", "5000"))}
     if os.environ.get("FH2MP_GAME_TCP_PORT"):
         game_public["tcp"] = int(os.environ["FH2MP_GAME_TCP_PORT"])         # the game server's experimental TCP carrier (FH2MP_TUNNEL_PORT)
+    if os.environ.get("FH2MP_GAME_PROBE") == "1":
+        game_public["probe"] = 1       # the game server answers UDP reachability probes (probe.py): launchers may then switch to TCP by themselves
     LAUNCHER = launcher_api.Ctx(
         AUTH, SOCIAL, launcher_api.LauncherConfig(), online_count, log=log, on_login=on_login, on_logout=on_logout,
         lsp_public={"url": os.environ.get("FH2MP_LSP_URL", f"http://{host}:{os.environ.get('FH2MP_LSP_PUBLIC_PORT', '5080')}")},
