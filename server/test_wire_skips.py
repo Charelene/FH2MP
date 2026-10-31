@@ -1,6 +1,8 @@
 """Client messages the server has no use for must not cost it the rest of their datagram: the packet is acked, so the client never sends the
 tail again. On prod 1,127 datagrams lost their tail in 16 h to messages 24, 52 and 60."""
+import math
 import os
+import struct
 import sys
 import unittest
 
@@ -82,7 +84,9 @@ def chat(count):
 def prediction(w):
     w.bits(S.MSG_CAR_PREDICTION_FULL, 7)
     key(w, S.CAR_KEY_ID_BITS)
-    w.bits((1 << S.CAR_PREDICTION_BODY_BITS) - 1 - (1 << 96) * 7, S.CAR_PREDICTION_BODY_BITS)
+    w.bits(int.from_bytes(struct.pack("<fff", 100.0, 5.0, 200.0), "little"), 96)
+    w.bits(0, S.CAR_PREDICTION_BODY_BITS - 128)
+    w.bits(1000, 32)
 
 
 class SkippedMessages(unittest.TestCase):
@@ -128,6 +132,35 @@ class SkippedMessages(unittest.TestCase):
             w.bits(S.MSG_OBJECT_DELETE, 7)
             w.bits(15, 4)
         self.assertFalse(self.relayed_after(bad).relayed)
+
+
+class UnusablePositions(unittest.TestCase):
+    def relayed(self, x, y=10.0, z=20.0):
+        w, (a, b) = world()
+        position = int.from_bytes(struct.pack("<fff", x, y, z), "little")
+
+        def msg(wr):
+            wr.bits(S.MSG_CAR_PREDICTION_FULL, 7)
+            key(wr, S.CAR_KEY_ID_BITS)
+            wr.bits(position, 96)
+            wr.bits(0, S.CAR_PREDICTION_BODY_BITS - 128)
+            wr.bits(1000, 32)
+        w.handle(S.build_packet([msg]), a.addr)
+        return bool(b.outbox), a
+
+    def test_a_normal_car_is_relayed(self):
+        sent, a = self.relayed(1200.0)
+        self.assertTrue(sent)
+        self.assertEqual(a.pos[0], 1200.0)
+
+    def test_a_position_far_outside_the_world_box_but_plausible_is_only_logged(self):
+        self.assertTrue(self.relayed(60000.0)[0])
+
+    def test_nan_infinity_and_absurd_positions_are_withheld(self):
+        for x in (math.nan, math.inf, -math.inf, 2e6):
+            sent, a = self.relayed(x)
+            self.assertFalse(sent, x)
+            self.assertIsNone(a.pos)
 
 
 if __name__ == "__main__":

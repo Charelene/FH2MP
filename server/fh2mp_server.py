@@ -255,6 +255,7 @@ SPEED_SECONDS = 3.0                 # how long a speed must hold before it is re
 FLIGHT_CLIMB_KMH = 150.0            # vertical speed a car cannot hold: a ramp jump decays under gravity within a second (v0 would have to be 250 km/h straight up)
 FLIGHT_SECONDS = 3.0                # climbing faster than that for this long = flying (reported 2026-10-22: F2GR, "literally flying")
 POSITION_LIMIT = 50000.0            # metres: a car further from the origin than this (or a NaN) is logged as out of range
+POSITION_WITHHOLD_LIMIT = 1e6       # metres: no client can reach this honestly (the world box is +-16000), and receivers do not validate positions (0x12e27d0)
 WIPE_MIN_DROPS = 3                  # this many clients removed within WIPE_WINDOW_S seconds is reported as a wipe
 WIPE_WINDOW_S = 3.0
 WIPE_CONTEXT_S = 14.0               # a wipe report shows what happened this long before the clients went silent
@@ -3440,14 +3441,18 @@ class Server:
                 peer.cars_relayed += 1
                 pos = car_position(rest) if rest_bits >= 96 else None
                 far = max(abs(pos[0]), abs(pos[1]), abs(pos[2])) if pos is not None else math.nan
+                unusable = pos is not None and (not all(math.isfinite(c) for c in pos) or far > POSITION_WITHHOLD_LIMIT)
                 if pos is not None and a == 0 and b == 0:
-                    peer.pos = pos
+                    if not unusable:
+                        peer.pos = pos
                     if math.isfinite(far):
                         peer.max_abs = max(peer.max_abs, far)
                         peer.max_y = max(peer.max_y, pos[1])
                     if not peer.pos_flagged and (not all(math.isfinite(c) for c in pos) or far > POSITION_LIMIT):
                         peer.pos_flagged = True
                         self.log(f"{addr[1]} car position out of range: ({pos[0]:.1f},{pos[1]:.1f},{pos[2]:.1f}) owner {peer.owner_id} xuid {peer.xuid:#x}")
+                if unusable:
+                    continue
                 if peer.cars_relayed <= 3 or peer.cars_relayed % 500 == 0:
                     ps = '' if pos is None else f' pos=({pos[0]:.0f},{pos[1]:.0f},{pos[2]:.0f})'
                     self.log(f"{addr[1]} car prediction #{peer.cars_relayed} flags={a}{b} id={cid} "
