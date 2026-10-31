@@ -161,7 +161,7 @@ def record_history(lsp):
         now = time.monotonic()
         if cache and now - cache["checked"] < HISTORY_RECHECK:
             return cache["data"]
-        stamp = tuple(lsp.DB.one("SELECT COUNT(*), MAX(id) FROM score_submissions"))
+        stamp = tuple(lsp.DB.one("SELECT COUNT(*), MAX(id), (SELECT COUNT(*) FROM hidden_scores) FROM score_submissions"))
         if not cache or cache["stamp"] != stamp:
             cache = {"stamp": stamp, "data": _scan(lsp)}
         cache["checked"] = now
@@ -531,7 +531,7 @@ def totals(lsp):
     km += sum((r["length"] or 0) * (r["laps"] or 1) / 1000.0 * r["n"] for r in db.query(
         "SELECT e.length, e.laps, COUNT(*) AS n FROM score_submissions s JOIN rival_events e ON e.id = s.gsid WHERE s.sb = ? AND s.st = ? "
         "GROUP BY e.id, e.length, e.laps", MONTHLY))
-    seconds = db.one("SELECT COALESCE(SUM(score), 0) FROM score_submissions WHERE st = 1 AND sb IN (1, 3)")[0]
+    seconds = db.one(f"SELECT COALESCE(SUM(s.score), 0) FROM score_submissions s WHERE s.st = 1 AND s.sb IN (1, 3) AND {score_reports.VISIBLE}")[0]
     fast = db.one("SELECT s.xuid, s.score, s.car, s.gsid, COALESCE(p.gamertag, '') AS tag FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid "
                   f"WHERE s.sb = 9 AND {score_reports.VISIBLE} AND s.score <= ? ORDER BY s.score DESC, s.id LIMIT 1", (scoreboard.SPEED_CAP,))
     designs = {r["kind"]: r["n"] for r in db.query("SELECT kind, COUNT(*) AS n FROM ugc_files WHERE removed = 0 GROUP BY kind")}

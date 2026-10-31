@@ -28,9 +28,12 @@ CREATE TABLE score_submissions (id INTEGER PRIMARY KEY AUTOINCREMENT, xuid INTEG
     autobrake INTEGER NOT NULL DEFAULT 0, autoshift INTEGER NOT NULL DEFAULT 0, clutch INTEGER NOT NULL DEFAULT 0, submitted REAL, score_id BLOB);
 CREATE TABLE score_reports (submission_id INTEGER, browser TEXT, ip TEXT, created REAL, dismissed INTEGER DEFAULT 0,
     PRIMARY KEY(submission_id, browser), UNIQUE(submission_id, ip));
-CREATE TABLE hidden_scores (submission_id INTEGER PRIMARY KEY, hidden_at REAL);
+CREATE TABLE hidden_scores (submission_id INTEGER PRIMARY KEY, hidden_at REAL, source TEXT NOT NULL DEFAULT 'operator', reason TEXT NOT NULL DEFAULT '');
+CREATE TABLE score_verdicts (submission_id INTEGER PRIMARY KEY, version INTEGER, verdict TEXT, reasons TEXT, measurements TEXT, decided_at REAL, reviewed INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE score_overrides (submission_id INTEGER PRIMARY KEY, at REAL);
 CREATE TABLE score_ghosts (submission_id INTEGER PRIMARY KEY, data BLOB, uploaded REAL);
 CREATE TABLE player_xp (xuid INTEGER PRIMARY KEY, xp REAL NOT NULL, updated REAL NOT NULL);
+CREATE TABLE xp_awards (id INTEGER PRIMARY KEY AUTOINCREMENT, xuid INTEGER, xp REAL, at REAL, verdict TEXT, reason TEXT);
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE auth_events (id INTEGER PRIMARY KEY AUTOINCREMENT, at REAL, kind TEXT, ip TEXT, xuid INTEGER, detail TEXT);
 CREATE TABLE clubs (id INTEGER PRIMARY KEY);

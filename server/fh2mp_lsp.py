@@ -295,14 +295,6 @@ def outdated_notice(need):
     return frame(xls.encode(SC, rfields, result))
 
 
-def outdated_logon():
-    """Logon for a client below minShim: the schema's empty result and nothing else. Its first call is Logon, and a refused Logon made the game
-    retry it with growing pauses and never poll the Message Center (prod 2026-10-29: refusals back off 2, 3, 4, 9, 16 s, then every 2 minutes).
-    Nothing is registered: no session, no UDP ticket, no profile; every other call it makes is still refused."""
-    _name, rfields = find_struct("Forza.WebServices.User, Forza.WebServices", "Logon", "_Results")
-    return frame(xls.encode(SC, rfields, xls.default_struct(SC, rfields)))
-
-
 def notif_mark_read(req):
     NOTIF.mark_read(getattr(CTX, "xuid", 0), req["notificationId"])
     return None
@@ -380,8 +372,20 @@ def _own_cars():
     return getattr(CTX, "own_cars", False)
 
 
+SCORE_LIMIT = (120, 60)           # SubmitScore per account per second window: the busiest player sends a few a minute, counters included
+GHOST_LIMITS = ((10, 60), (300, 86400))   # UploadFile: the busiest day of 17,330 runs was 64
+
+
+def _within(name, limits):
+    xuid = getattr(CTX, "xuid", 0)
+    return AUTH is None or all(AUTH.hit((name, xuid, window), limit, window) for limit, window in limits)
+
+
 def sb_submit_score(req):
     xuid, tag = _me()
+    if not _within("score", (SCORE_LIMIT,)):
+        log(f"  SubmitScore user={xuid:#x}: over the rate limit, ignored")
+        return None
     if _own_cars():
         log(f"  SubmitScore board=({req['data']['scoreboardType']},{req['type']}): not stored, the player runs its own car database")
         return None
@@ -399,10 +403,11 @@ def sb_submit_score(req):
         return None
     log(f"  SubmitScore board=({d['scoreboardType']},{req['type']}) track={d['trackId']} car={d['carId']} "
         f"score={s['score']:.3f} clean={d['isClean']} -> ghost upload for score {s['score_id'].hex()[:8]}")
-    try:
-        notify_beaten(xuid, tag, req["type"], d, s)
-    except Exception as ex:          # a notification problem must never fail the score submission
-        log(f"  notify_beaten failed: {ex!r}")
+    if SB.ghost_policy != "enforce" or d["scoreboardType"] not in scoreboard.GHOST_BOARDS:
+        try:
+            notify_beaten(xuid, tag, req["type"], d, s)
+        except Exception as ex:          # a notification problem must never fail the score submission
+            log(f"  notify_beaten failed: {ex!r}")
     return {"scoreId": s["score_id"], "uploadFiles": True}
 
 
@@ -447,6 +452,11 @@ def sb_notify_rival(req):
     log(f"  NotifyRival event={req['rivalEventId']} rival={req['rivalXuid']:#x} score={'%.3f' % sub['score'] if sub else '?'}")
     if sub is None or e is None or not req["rivalXuid"] or req["rivalXuid"] == xuid or SB.fake_name(req["rivalXuid"]):
         return None
+    if sub["xuid"] != xuid or sub["gsid"] != e["id"] or not SB.is_visible(sub["id"]):
+        return None                  # only your own, public run on that event
+    theirs = SB.best_of(req["rivalXuid"], sub["sb"], sub["st"], -1, e["id"])
+    if theirs is None or not SB.better(sub["st"], sub["score"], theirs["score"]):
+        return None
     send_beaten(req["rivalXuid"], xuid, tag or sub["tag"], e, sub["car"], sub["cls"], sub["st"], sub["score"])
     return None
 
@@ -473,13 +483,23 @@ def announce_rotation():
 
 
 def sb_upload_file(req):
-    sid = SB.attach_ghost(req["scoreId"], req["data"])
+    xuid, tag = _me()
+    if not _within("ghost", GHOST_LIMITS):
+        log(f"  UploadFile user={xuid:#x}: over the rate limit, ignored")
+        return None
+    sid, public = SB.attach_ghost(req["scoreId"], req["data"], xuid)
     log(f"  UploadFile scoreId={bytes(req['scoreId']).hex()[:8]} {len(req['data'])} bytes -> ghost #{sid}")
+    if public and SB.ghost_policy == "enforce":
+        sub = SB.by_score_id(req["scoreId"])
+        try:
+            notify_beaten(xuid, tag, sub["st"], {"scoreboardType": sub["sb"], "gameScoreboardId": sub["gsid"], "carId": sub["car"], "carClassId": sub["cls"]}, sub)
+        except Exception as ex:          # a notification problem must never fail the upload
+            log(f"  notify_beaten failed: {ex!r}")
     return None
 
 
 def sb_download_file(req):
-    data = SB.ghost(req["id"]) if req["id"] > 0 else None
+    data = SB.public_ghost(req["id"]) if req["id"] > 0 else None
     log(f"  DownloadFile id={req['id']} maxSize={req['maxSize']}: {len(data) if data else 'no ghost'}")
     if data is None or len(data) > req["maxSize"]:
         return {"data": b""}
@@ -2406,9 +2426,9 @@ class Handler(BaseHTTPRequestHandler):
             if SC is not None and cls.startswith("Xls.WebServices.Notifications") and method == "RetrieveForUser":
                 self._reply_json(200, outdated_notice(need), "bin/xtsw")      # the game shows this, unlike the 426 below
                 return False
-            if SC is not None and cls.startswith("Forza.WebServices.User") and method == "Logon":
-                self._reply_json(200, outdated_logon(), "bin/xtsw")           # so that it reaches the Message Center at all
-                return False
+            # Logon is refused like the rest. An empty Logon result was tried (prod 2026-10-30 05:07) so that the game would reach the Message
+            # Center: every shim 1.1.2 that sent a crash report afterwards (12 of 12, 05:14-15:29) died 10-30 s after starting at game+0x9c898f,
+            # a null CGameplayLog in CGameplayLogManager's event handler.
             self._reply_json(426, {"error": "shim_too_old", "message": f"FH2MP is out of date. Update the launcher and press Play (needs {need})."})
             return False
         token = self.headers.get("X-FH2MP-Token", "")

@@ -27,6 +27,7 @@ XP_SCALE = float(os.environ.get("FH2MP_XP_SCALE", "10"))
 MAX_AWARD = float(os.environ.get("FH2MP_XP_MAX", str(56000 * XP_SCALE)))
 RARE_USERS = 10          # an amount fewer accounts than this ever received is "rare"
 REPEATS = 20             # ... and one account receiving it this often is a suspect
+HOUR_BUDGET = float(os.environ.get("FH2MP_XP_HOUR_BUDGET", str(MAX_AWARD * 3)))  # reported only, until real play shows where honest hours end
 BEFORE_PLAUSIBLE = 5e6   # a balance carried into the log above this is reported (the honest leader had under 1M on 2026-10-20, issue 18)
 
 OK, REJECTED = "ok", "rejected"

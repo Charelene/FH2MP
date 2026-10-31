@@ -195,7 +195,7 @@ class ScoreTests(Base):
     def test_top_player_races_their_own_ghost(self):
         for xuid, t in ((10, 60.0), (11, 70.0)):
             self.sc.submit(xuid, "p%d" % xuid, 1, sub(t, sb=3))
-            self.sc.attach_ghost(self.sc.db.one("SELECT score_id FROM score_submissions WHERE xuid=?", (xuid,))[0], b"g")
+            self.sc.attach_ghost(self.sc.db.one("SELECT score_id FROM score_submissions WHERE xuid=?", (xuid,))[0], b"g", xuid)
         args = (3, 1, 7, 1)
         self.assertEqual(self.sc.rival_for(11, *args)["xuid"], 10)                    # the row just above
         self.assertEqual(self.sc.rival_for(10, *args)["xuid"], 10)                    # #1: nobody above, so their own best
@@ -225,10 +225,10 @@ class ScoreTests(Base):
         self.assertEqual((r["score"], r["tag"], sc.fake_name(r["xuid"]), r["ghost"] if "ghost" in r else 0),
                          (44.564, "World Record", "World Record", 0))                 # never a player's name, no ghost
         self.assertEqual(sc.rival_for(10, 1, 1, 856, 4)["score"], 44.564)            # S1 has no record: the next faster class
-        self.assertIsNone(sc.rival_for(10, 1, 1, 900, 3))                            # only slower classes: no record to race
+        self.assertTrue(sc.rival_for(10, 1, 1, 900, 3)["fake"])                      # only slower classes: a made-up time, never an all-zero answer
         self.assertEqual(sc.rival_for(10, 3, 1, 856, 2441)["score"], 50.0)           # Monthly: the event's track and class
         self.assertEqual(sc.rival_for(10, 3, 1, 856, 2442)["score"], 44.564)         # open class: the track's fastest record
-        self.assertIsNone(sc.rival_for(10, 3, 1, 857, 2443))                         # no record on that track
+        self.assertTrue(sc.rival_for(10, 3, 1, 857, 2443)["fake"])                   # no record on that track
         self.assertEqual(sc.rival_for(10, 6, 1, 856, 7)["score"], 44.564)            # Showcase: the request's track
         self.assertEqual(sc.rows(10, 1, 1, 856, 1, 100, 5)[0], [])                   # not listed on the board
         sc.submit(10, "p10", 1, dict(sub(50.0, sb=1, track=856), carClassId=5))

@@ -12,7 +12,8 @@ not carry proxy headers, so nothing reachable through the public reverse proxy c
     GET    /ops/v1/reports[?limit=&offset=]    reports queue and permanently hidden submissions
     POST   /ops/v1/reports/<id>               {"browser": "<hash>", "ip": "<hash>}, duplicate protected
     POST   /ops/v1/reports/<id>/hide          permanently suppress a run; preserve its data and ghost
-    POST   /ops/v1/reports/<id>/dismiss       archive reports, clearing the public warning
+    POST   /ops/v1/reports/<id>/dismiss       archive reports and a verdict's flag, clearing the public warning
+    POST   /ops/v1/reports/<id>/unhide        restore a hidden run; no verdict can hide it again
     GET    /ops/v1/overview                    counters for the dashboard and the public stats
     GET    /ops/v1/online                      players who polled the LSP in the last 40 s
     GET    /ops/v1/challenges[?top=3]          this rotation's Monthly Rivals events (+ best real times)

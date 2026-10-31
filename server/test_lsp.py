@@ -117,9 +117,9 @@ class LayerCountTests(unittest.TestCase):
         self.assertEqual([f(v) for v in ("", "junk", "1.0.0-rc1", "1.0.0-rc2")], [False] * 4)
         self.assertEqual([f(v) for v in ("1.0.0-rc3", "1.0.0-rc10", "1.0.0", "1.0.1", "1.1.0-rc1", "1.0.0-rc2-debug")], [True] * 6)
 
-    def test_an_outdated_clients_logon_is_answered_without_admitting_it(self):
-        """Prod 2026-10-29: a refused Logon made the game retry it forever and never poll the Message Center, so the update notice could not
-        be read. Logon is answered with the empty result; no ticket is announced, and every other call stays refused."""
+    def test_an_outdated_clients_logon_is_refused_like_every_other_call(self):
+        """Prod 2026-10-30: answering an outdated client's Logon with the empty result crashed every such game 10-30 s after it started
+        (game+0x9c898f, a null CGameplayLog). Logon gets the 426 again; no ticket is announced."""
         cfg = L.launcher_api.LauncherConfig()
         cfg.overlay = {"minShim": "1.1.2"}
         old = (L.LAUNCHER, L.AUTH)
@@ -134,7 +134,7 @@ class LayerCountTests(unittest.TestCase):
             _reply_json = lambda self, status, obj, ctype="application/json", *a, **k: replies.append((status, ctype, obj))   # noqa: E731
         try:
             with mock.patch.object(L, "announce_auth", lambda *a: announced.append(a)), \
-                    mock.patch.object(L, "outdated_logon", lambda: frame), mock.patch.object(L, "SC", object()):
+                    mock.patch.object(L, "SC", object()):
                 def ask(cls, method, shim="1.1.1"):
                     replies.clear()
                     r = Req()
@@ -142,8 +142,7 @@ class LayerCountTests(unittest.TestCase):
                     return L.Handler._identify(r), list(replies)
                 ok, got = ask("Forza.WebServices.User, Forza.WebServices", "Logon")
                 self.assertFalse(ok)                                     # the request is answered here and goes no further
-                self.assertEqual((got[0][0], got[0][1]), (200, "bin/xtsw"))
-                self.assertEqual(struct.unpack(">III", got[0][2][:12])[0], 0)
+                self.assertEqual(got[0][0], 426)
                 self.assertEqual(announced, [])
                 ok, got = ask("Forza.WebServices.Scoreboard, Forza.WebServices", "GetRowsAnthem")
                 self.assertEqual((ok, got[0][0]), (False, 426))          # everything else is still refused

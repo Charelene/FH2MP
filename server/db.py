@@ -463,6 +463,27 @@ CREATE TABLE invites (
         PRIMARY KEY (xuid, channel)
     );
     """,
+
+    # Rivals verdicts from the ghost (ghost_check.py). hidden_scores.source: operator, auto (a hard verdict), pending (the ghost has not arrived).
+    # score_overrides: runs an operator restored, which no rescan may hide again.
+    """
+    ALTER TABLE hidden_scores ADD COLUMN source TEXT NOT NULL DEFAULT 'operator';
+    ALTER TABLE hidden_scores ADD COLUMN reason TEXT NOT NULL DEFAULT '';
+    CREATE TABLE score_verdicts (
+        submission_id BIGINT PRIMARY KEY REFERENCES score_submissions(id),
+        version BIGINT NOT NULL,
+        verdict TEXT NOT NULL,
+        reasons TEXT NOT NULL,
+        measurements TEXT NOT NULL,
+        decided_at DOUBLE PRECISION NOT NULL,
+        reviewed BIGINT NOT NULL DEFAULT 0
+    );
+    CREATE INDEX score_verdicts_open ON score_verdicts (verdict, reviewed);
+    CREATE TABLE score_overrides (
+        submission_id BIGINT PRIMARY KEY REFERENCES score_submissions(id),
+        at DOUBLE PRECISION NOT NULL
+    );
+    """,
 ]
 
 ADVISORY_LOCK = 7240001          # serialises write transactions (see tx)

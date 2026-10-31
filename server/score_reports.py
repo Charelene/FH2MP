@@ -1,10 +1,18 @@
 """Submission moderation. Runs and ghosts are never deleted; reports and decisions remain available for analysis."""
+import json
 import re
 import time
 
 THRESHOLD = 10
 VISIBLE = "NOT EXISTS (SELECT 1 FROM hidden_scores hs WHERE hs.submission_id = s.id)"
 COUNTS = "(SELECT COUNT(*) FROM score_reports sr WHERE sr.submission_id = s.id AND sr.dismissed = 0)"
+OWN_PENDING = "(s.xuid = ? AND EXISTS (SELECT 1 FROM hidden_scores hs WHERE hs.submission_id = s.id AND hs.source = 'pending'))"
+REVIEW_BOARDS = '(1,3,6,9)'
+
+
+def visible_to(viewer):
+    """VISIBLE plus `viewer`'s own run that is waiting for its ghost: the game asks for its best right after submitting, before the upload."""
+    return (f'({VISIBLE} OR {OWN_PENDING})', [viewer]) if viewer is not None else (VISIBLE, [])
 
 
 def fields(row):
@@ -20,7 +28,7 @@ def report(lsp, submission_id, payload):
         raise OpsError(400, 'bad_request', 'invalid reporter identity')
     now = time.time()
     with lsp.DB.tx() as c:
-        row = c.execute(f'SELECT s.id FROM score_submissions s WHERE s.id = ? AND s.sb IN (1,3,9) AND {VISIBLE}', (submission_id,)).fetchone()
+        row = c.execute(f'SELECT s.id FROM score_submissions s WHERE s.id = ? AND s.sb IN (1,3,6,9) AND {VISIBLE}', (submission_id,)).fetchone()
         if row is None:
             raise OpsError(404, 'not_found', 'this run is no longer available')
         duplicate = c.execute('SELECT 1 FROM score_reports WHERE submission_id = ? AND (browser = ? OR ip = ?)',
@@ -38,33 +46,45 @@ def report(lsp, submission_id, payload):
 
 
 def queue(lsp, limit=50, offset=0):
+    """Reported runs, runs hidden by a person or a verdict, and runs a verdict flagged. A run still waiting for its ghost is not a decision."""
     from ops_api import _gamertag
     rows = lsp.DB.query(f'''SELECT s.*, COALESCE(p.gamertag, '') AS tag, {COUNTS} AS report_count,
-        (SELECT hidden_at FROM hidden_scores hs WHERE hs.submission_id = s.id) AS hidden_at
-        FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid
+        (SELECT hidden_at FROM hidden_scores hs WHERE hs.submission_id = s.id AND hs.source <> 'pending') AS hidden_at,
+        (SELECT hs.source FROM hidden_scores hs WHERE hs.submission_id = s.id) AS hidden_by,
+        v.verdict, v.reasons
+        FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid LEFT JOIN score_verdicts v ON v.submission_id = s.id
         WHERE EXISTS (SELECT 1 FROM score_reports sr WHERE sr.submission_id = s.id AND sr.dismissed = 0)
-        OR EXISTS (SELECT 1 FROM hidden_scores hs WHERE hs.submission_id = s.id)
+        OR EXISTS (SELECT 1 FROM hidden_scores hs WHERE hs.submission_id = s.id AND hs.source <> 'pending')
+        OR (v.verdict = 'flag' AND v.reviewed = 0)
         ORDER BY report_count DESC, s.id DESC LIMIT ? OFFSET ?''', (limit + 1, offset))
     import rivals
     names = lsp.RIV.names()['car']
     out = [{'submissionId': r['id'], 'gamertag': _gamertag(lsp, r), 'xuid': r['xuid'], 'score': r['score'],
             'unit': 's' if r['st'] == 1 else 'm/s', 'car': names.get(r['car'], ''), 'class': rivals.CLASS_LETTERS[r['cls']] if 0 <= r['cls'] < len(rivals.CLASS_LETTERS) else str(r['cls']),
             'boardType': r['sb'], 'track': r['track'], 'event': r['gsid'], 'at': int(r['submitted']),
-            'reports': r['report_count'], 'hidden': r['hidden_at'] is not None} for r in rows[:limit]]
+            'reports': r['report_count'], 'hidden': r['hidden_at'] is not None, 'hiddenBy': r['hidden_by'] if r['hidden_at'] is not None else None,
+            'verdict': r['verdict'], 'reasons': json.loads(r['reasons']) if r['reasons'] else []} for r in rows[:limit]]
     return {'entries': out, 'hasNext': len(rows) > limit}
 
 
 def moderate(lsp, submission_id, action):
     from ops_api import OpsError
-    if action not in ('hide', 'dismiss'):
+    if action not in ('hide', 'dismiss', 'unhide'):
         raise OpsError(400, 'bad_request', 'unknown moderation action')
+    now = time.time()
     with lsp.DB.tx() as c:
-        if c.execute('SELECT id FROM score_submissions WHERE id = ? AND sb IN (1,3,9)', (submission_id,)).fetchone() is None:
+        if c.execute(f'SELECT id FROM score_submissions WHERE id = ? AND sb IN {REVIEW_BOARDS}', (submission_id,)).fetchone() is None:
             raise OpsError(404, 'not_found', 'unknown run')
         if action == 'hide':
-            c.execute('INSERT INTO hidden_scores (submission_id, hidden_at) VALUES (?,?) ON CONFLICT (submission_id) DO NOTHING',
-                      (submission_id, time.time()))
+            c.execute("INSERT INTO hidden_scores (submission_id, hidden_at, source) VALUES (?,?,'operator') ON CONFLICT (submission_id) "
+                      "DO UPDATE SET source = 'operator'", (submission_id, now))
+            c.execute('DELETE FROM score_overrides WHERE submission_id = ?', (submission_id,))
+        elif action == 'unhide':
+            c.execute('DELETE FROM hidden_scores WHERE submission_id = ?', (submission_id,))
+            c.execute('INSERT INTO score_overrides (submission_id, at) VALUES (?,?) ON CONFLICT (submission_id) DO NOTHING', (submission_id, now))
+            c.execute('UPDATE score_verdicts SET reviewed = 1 WHERE submission_id = ?', (submission_id,))
         else:
             c.execute('UPDATE score_reports SET dismissed = 1 WHERE submission_id = ?', (submission_id,))
+            c.execute('UPDATE score_verdicts SET reviewed = 1 WHERE submission_id = ?', (submission_id,))
     lsp._site_history = None
     return {'ok': True}
