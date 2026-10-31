@@ -163,5 +163,70 @@ class UnusablePositions(unittest.TestCase):
             self.assertIsNone(a.pos)
 
 
+class RelayValidation(unittest.TestCase):
+    """What a receiver would crash on or lose its place on must stop here (0x17a2040, ReadStringVarLen 0x1767150)."""
+    def sent_to_other(self, *messages):
+        w, (a, b) = world()
+        w.handle(S.build_packet(list(messages)), a.addr)
+        return w, b
+
+    @staticmethod
+    def create(router, oid, tid=None):
+        id_bits, type_bits = S.ROUTER_BITS[router]
+
+        def write(w):
+            w.bits(S.MSG_OBJECT_CREATE, 7)
+            w.bits(router, 4)
+            key(w, id_bits, oid)
+            if type_bits:
+                w.bits(tid, type_bits)
+            w.bits(0, 8)
+            w.bits(8, 14)
+            w.bits(0x5A, 8)
+        return write
+
+    @staticmethod
+    def score(mtype, sizes):
+        def write(w):
+            w.bits(mtype, 7)
+            key(w, S.CAR_KEY_ID_BITS)
+            for n in sizes:
+                w.varlen(n)
+                for _ in range(n):
+                    w.bits(0, 8)
+            w.bits(1, 32)
+            w.bits(0, 2 if mtype == S.MSG_LAP_SCORE else 27)
+        return write
+
+    def test_objects_inside_the_limits_are_relayed(self):
+        for message in (self.create(2, 63), self.create(9, 12, 2), self.create(12, 12, 1)):
+            self.assertTrue(self.sent_to_other(message)[1].outbox)
+
+    def test_an_id_or_type_past_the_game_table_stops_the_datagram(self):
+        for message in (self.create(2, 64), self.create(1, 127), self.create(9, 13, 0), self.create(9, 0, 3), self.create(12, 0, 2)):
+            w, b = self.sent_to_other(message, prediction)
+            self.assertEqual(b.outbox, [])
+            self.assertEqual(len([l for l in w.lines if "malformed" in l]), 1)
+
+    def test_a_client_owned_object_on_the_lobby_router_is_not_relayed(self):
+        self.assertEqual(self.sent_to_other(self.create(6, 0, 1))[1].outbox, [])
+
+    def test_scores_of_the_game_size_are_relayed(self):
+        self.assertTrue(self.sent_to_other(self.score(S.MSG_LAP_SCORE, [8] * 3))[1].outbox)
+        self.assertTrue(self.sent_to_other(self.score(S.MSG_SCORE_KEYFRAME, [8] * 5))[1].outbox)
+
+    def test_a_score_field_of_another_size_stops_the_datagram(self):
+        for mtype, sizes in ((S.MSG_LAP_SCORE, [8, 9, 8]), (S.MSG_LAP_SCORE, [7, 8, 8]), (S.MSG_SCORE_KEYFRAME, [8, 8, 8, 8, 0])):
+            w, b = self.sent_to_other(self.score(mtype, sizes), prediction)
+            self.assertEqual(b.outbox, [])
+            self.assertEqual(len([l for l in w.lines if "malformed" in l]), 1)
+
+    def test_malformed_is_logged_once_per_client(self):
+        w, (a, b) = world()
+        for _ in range(3):
+            w.handle(S.build_packet([self.create(2, 64)]), a.addr)
+        self.assertEqual(len([l for l in w.lines if "malformed" in l]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

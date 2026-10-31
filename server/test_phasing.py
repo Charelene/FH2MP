@@ -89,19 +89,15 @@ class Phasing(unittest.TestCase):
         self.server.end_event("test")
         self.assertEqual(self.last_body(self.a) & self.STATE_MASK, self.c.car_prediction[1] & self.STATE_MASK)
 
-    def test_collisions_stay_within_the_roster_boundary(self):
+    def test_collisions_are_not_relayed(self):
+        # A receiver matches only its own cars by the full key (0x9c4bf0): a relayed collision does nothing.
         def collision(w):
             w.bits(S.MSG_CAR_COLLISION, 7)
             w.bits(0, 2)
             w.bits(7, 7)
             w.bits(0, 192)
         self.server.handle(S.build_packet([collision]), self.a.addr)
-        self.assertTrue(self.b.outbox)
-        self.assertFalse(self.c.outbox)
-        self.assertFalse(self.d.outbox)
-        self.server.handle(S.build_packet([collision]), self.c.addr)
-        self.assertTrue(self.d.outbox)
-        self.assertFalse(self.c.outbox)
+        self.assertFalse(self.b.outbox)
 
     def test_other_worlds_never_receive_predictions(self):
         self.d.world = ("elsewhere",)

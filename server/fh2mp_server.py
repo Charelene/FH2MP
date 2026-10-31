@@ -225,8 +225,6 @@ MSG_OBJECT_TRANSFER_OWNERSHIP = 12  # server -> client: router:4 | key (A=1,B=0 
                                     # is answered "denied", a current owner must ask again (ClientSyncedObjectManager::ReceiveObjectTransferOwnership
                                     # 0x17ab9b0 -> SyncedObject::ApplyOwnershipTransfer 0x17b24c0 -> SetOwner 0x17a7290 clears the pending request)
 MSG_CAR_PREDICTION_FULL = 15
-COLLISION_TO_RECEIVER_CAR = False   # experiment: apply a reported hit to the receiver's own car (True) or to
-                                    # its copy of the sender's car (False, the first version: "better")
 MSG_CAR_COLLISION = 21             # key | 6 x u32 (contact point, 3 values)  (FUN_141804e20)
 MSG_IN_PROGRESS_SCORE_UPDATE = 43   # key | u32 | bool                       (FUN_1418041b0)
 MSG_LAP_SCORE = 44                  # key | 3 x blob | u32 lap | bool | bool  (FUN_141804380)
@@ -380,12 +378,17 @@ RT_VARS = {"CurrentLocationId": (0, 32), "CompletedEventCount": (1, 3), "EventRa
 # RoadTripServerState (FUN_140113da0)
 RT_INITIALISING, RT_DESTINATION_VOTE, RT_CAR_SELECT, RT_STATE_3, RT_DRIVE_TO_EVENT = 0, 1, 2, 3, 4
 RT_ARRIVED_AT_DESTINATION, RT_PREPARE_FOR_EVENT, RT_IN_EVENT, RT_FINALISE_EVENT = 5, 6, 7, 8
-RELAY_ROUTERS = (1, 2, 3, 6, 9, 12)   # player / console / car / bucket-list player-state objects other clients must see
+RELAY_ROUTERS = (1, 2, 3, 9, 12)      # player / console / car / bucket-list player-state objects other clients must see
+# (maxObjects, numTypes) of the routers clients own objects on [C, docs/exe/netv2.md]: the wire fields are wider than these, and a receiver indexes
+# its factory table with them unchecked (0x17a2040), so one bad create would hit everybody.
+ROUTER_LIMITS = {1: (0x40, 1), 2: (0x40, 1), 3: (0x40, 1), 9: (13, 3), 12: (13, 2)}
+SCORE_DOUBLES = {MSG_IN_PROGRESS_SCORE_UPDATE: 0, MSG_LAP_SCORE: 3, MSG_SCORE_KEYFRAME: 5}   # the game writes each as 8 bytes (FUN_14176abb0)
 RELAY_HISTORY_CAP = 8000       # stored messages per object, replayed to late joiners (compacted, see replay.py); a memory guard
 _log_day = None                # day of the year of the last log line (see Server.log)
 # Outgoing messages are queued per client and sent together: one datagram per client every few ms instead of one per relayed car update.
 # On prod (2026-10-21, 72 players) half the server's time went into sendto (~12k datagrams/s), the receive queue overflowed and races rubberbanded.
 RELAY_FLUSH_SECONDS = float(os.environ.get("FH2MP_RELAY_FLUSH_MS", "10")) / 1000.0   # longest a relayed message waits for company
+WORLD_TICK_SECONDS = 0.02   # world timers are all coarser than this; ticking on every loop pass cost 7 % of a core on prod
 MAX_PACKET_BYTES = int(os.environ.get("FH2MP_MAX_PACKET_BYTES", "1000"))          # late-join replays already send ~1 KB datagrams
 REPLY_HOLD_SECONDS = 0.002     # replies leave >= 2 ms after the client's packet (see Server.send)
 STALE_SECONDS = 20.0
@@ -835,8 +838,9 @@ def read_car_key(r):
 # Client messages the server has no use for: parsed so the messages behind them in the datagram are not lost, never relayed. Layouts from the
 # Receive and Send functions (docs/server-review-plan.md section 2): key id bits (None = no key) and fixed bits after it. 24, 52 and 60 occur in
 # real sessions; the rest were never seen on prod. 13 is absent: its width depends on the object type, so nothing behind it can be located.
-UNUSED_MESSAGE_LAYOUT = {20: (7, 352), 46: (2, 64), 52: (2, 32), 54: (None, 384), 56: (None, 224), 58: (None, 96), 59: (7, 0), 60: (None, 0),
-                         70: (2, 0)}
+# 21 and 35 name the sender's own car, and a receiver only matches its own cars by the full key (0x9c4bf0, 0x9c92c0): a relayed one does nothing.
+UNUSED_MESSAGE_LAYOUT = {20: (7, 352), MSG_CAR_COLLISION: (CAR_KEY_ID_BITS, 192), MSG_REPAIR_DAMAGE: (CAR_KEY_ID_BITS, 0), 46: (2, 64), 52: (2, 32),
+                         54: (None, 384), 56: (None, 224), 58: (None, 96), 59: (7, 0), 60: (None, 0), 70: (2, 0)}
 MSG_COLLOBJ_DETACH_PART = 24        # kind:4 | count:11 | bytes. The client reads it into a 1024-byte stack buffer unchecked (0x17ddbd0): never relay it
 MSG_CHAT_MANAGEMENT = 33            # u64 | count:7 | bytes. Same bug with a 64-byte buffer (0x17f5120): never relay it
 UNUSED_MESSAGES = frozenset(UNUSED_MESSAGE_LAYOUT) | {MSG_OBJECT_DELETE, MSG_COLLOBJ_DETACH_PART, MSG_CHAT_MANAGEMENT}
@@ -896,13 +900,6 @@ def tag_buckets_message(entries):
             write_car_key(w, kind, cid, owner)
         for _, _, _, bucket in entries:
             w.bits(bucket, 8)
-    return write
-
-
-def relay_repair_message(car_id, owner):
-    def write(w: BitWriter):
-        w.bits(MSG_REPAIR_DAMAGE, 7)
-        write_car_key(w, "relay", car_id, owner)
     return write
 
 
@@ -1312,6 +1309,7 @@ class Peer:
         self.pos = None            # last (x, y, z) of this client's car (CarPredictionFull), see car_position
         self.pos_flagged = False   # an out-of-range position was already logged for this client
         self.unknown_logged = set()   # message ids already logged as unparsable for this client
+        self.malformed_logged = False
         self.model_id = None       # the car this client uses (CarInitSynced.ModelId), see car_model_id
         self.model_logged = None
         self.max_y = -math.inf     # highest car position seen (y is up): 'flying' shows here
@@ -1941,8 +1939,10 @@ class Server:
         """send(fast=True) of one message to everybody else in the sender's world: the hot path (every car update)."""
         baked = bake(msg)
         due = time.monotonic() + RELAY_FLUSH_SECONDS
+        people = self.event["people"] if same_event and self.event else ()
+        inside = sender in people
         for q in self.others(sender):
-            if same_event and not self.same_event(sender, q):
+            if (q in people) != inside:
                 continue
             q.outbox.append(baked)
             if due < q.due:
@@ -1980,9 +1980,11 @@ class Server:
         visible = bake(relay_car_prediction(cid, sender.owner_id, body, size))
         hidden = None
         due = time.monotonic() + RELAY_FLUSH_SECONDS
+        people = self.event["people"] if self.event else ()
+        inside = sender in people
         for q in self.others(sender):
             msg = visible
-            if not self.same_event(sender, q):
+            if (q in people) != inside:
                 # Keep the object and its live physics state, but put it in its owner's
                 # unique private universe on the opposite side of the event boundary.
                 # Dropping predictions would leave a solid car at its last position.
@@ -3099,6 +3101,12 @@ class Server:
         pending = [a for a, p in self.peers.items() if not p.connected]
         return len(pending) < MAX_PENDING_PEERS and sum(1 for a in pending if a[0] == addr[0]) < MAX_PENDING_PER_IP
 
+    def malformed(self, peer: Peer, what: str) -> None:
+        """A message no real client writes: the rest of its datagram is not trusted either."""
+        if not peer.malformed_logged:
+            peer.malformed_logged = True
+            self.log(f"{peer.addr[1]} malformed {what}; dropped with the rest of its datagram (xuid {peer.xuid:#x})")
+
     def handle(self, data: bytes, addr) -> None:
         # Nothing is remembered about an address until its datagram parses and starts with an OpenConnection that passes the
         # identity check: junk, empty and stale packets get at most a CloseConnection.
@@ -3138,7 +3146,62 @@ class Server:
             except ValueError:
                 break
             types.append(mtype)
-            if mtype == MSG_OPEN_CONNECTION:
+            # Nearly every message is a prediction, so it goes first: this chain was the largest single cost in the prod profile.
+            if mtype == MSG_CAR_PREDICTION_FULL:
+                a, b = r.bits(1), r.bits(1)
+                cid = r.bits(CAR_KEY_ID_BITS)
+                # The body is a fixed 710 bits (FUN_141822400, the message's size function: 96 + 326 + 4 x 64 + 32); the
+                # client appends its other messages (traffic updates ...) after it, so it must not be read to the end.
+                rest_bits = CAR_PREDICTION_BODY_BITS if r.size - r.pos >= CAR_PREDICTION_BODY_BITS else r.size - r.pos
+                rest = r.bits(rest_bits)
+                peer.cars_relayed += 1
+                pos = car_position(rest) if rest_bits >= 96 else None
+                far = max(abs(pos[0]), abs(pos[1]), abs(pos[2])) if pos is not None else math.nan
+                unusable = pos is not None and (not all(math.isfinite(c) for c in pos) or far > POSITION_WITHHOLD_LIMIT)
+                if pos is not None and a == 0 and b == 0:
+                    if not unusable:
+                        peer.pos = pos
+                    if math.isfinite(far):
+                        peer.max_abs = max(peer.max_abs, far)
+                        peer.max_y = max(peer.max_y, pos[1])
+                    if not peer.pos_flagged and (not all(math.isfinite(c) for c in pos) or far > POSITION_LIMIT):
+                        peer.pos_flagged = True
+                        self.log(f"{addr[1]} car position out of range: ({pos[0]:.1f},{pos[1]:.1f},{pos[2]:.1f}) owner {peer.owner_id} xuid {peer.xuid:#x}")
+                if unusable:
+                    continue
+                if peer.cars_relayed <= 3 or peer.cars_relayed % 500 == 0:
+                    ps = '' if pos is None else f' pos=({pos[0]:.0f},{pos[1]:.0f},{pos[2]:.0f})'
+                    self.log(f"{addr[1]} car prediction #{peer.cars_relayed} flags={a}{b} id={cid} "
+                             f"rest={rest_bits} bits -> {len(self.others(peer))} peer(s){ps}")
+                if pos is not None and a == 0 and b == 0 and SPEED_POLICY != "off" and math.isfinite(far):
+                    self.track_speed(peer, pos, (rest >> (CAR_PREDICTION_BODY_BITS - 32)) if rest_bits == CAR_PREDICTION_BODY_BITS else None)
+                if peer.cars_relayed % 20 == 1 and pos is not None:
+                    self.note("car", peer.owner_id, f"pos=({pos[0]:.0f},{pos[1]:.0f},{pos[2]:.0f}) id={cid}")
+                if a == 0 and b == 0 and not peer.kick_reason:
+                    peer.car_id = cid
+                    if rest_bits == CAR_PREDICTION_BODY_BITS:
+                        old = peer.car_prediction
+                        stamp_offset = CAR_PREDICTION_BODY_BITS - 32
+                        if old is None or old[0] != cid:
+                            peer.car_prediction_stamp = None
+                            peer.car_prediction_refreshable = True
+                        elif not 0 < (((rest >> stamp_offset) - (old[1] >> stamp_offset)) & 0xFFFFFFFF) < 0x80000000:
+                            # Freshness belongs to each receiving car instance. Its
+                            # clock baseline is reset on scene/grid transitions
+                            # (0x9ec230); the relay's old high-water mark is not that
+                            # baseline. Forward live physics unchanged and let the
+                            # native receiver (0x9ecf00) reject genuine reordering.
+                            # Keep old frames out of the cache and do not manufacture
+                            # a newer timestamp for cached pre-transition physics.
+                            if rest != old[1]:
+                                peer.car_prediction_refreshable = False
+                            self.relay_prediction(peer, prediction=(cid, rest, rest_bits))
+                            continue
+                        else:
+                            peer.car_prediction_refreshable = True
+                        peer.car_prediction = (cid, rest, rest_bits)
+                        self.relay_prediction(peer)
+            elif mtype == MSG_OPEN_CONNECTION:
                 version, game = r.string(), r.string()
                 flag2 = r.bits(2)
                 player_id = r.bits(64)
@@ -3342,6 +3405,10 @@ class Server:
                 seq = r.bits(8)
                 size = r.bits(14)
                 payload = r.bits(size) if size else 0
+                limits = ROUTER_LIMITS.get(router) if a == 0 and b == 0 else None
+                if limits and (oid >= limits[0] or (tid is not None and tid >= limits[1])):
+                    self.malformed(peer, f"object router={router} id={oid} type={tid}")
+                    break
                 if mtype == MSG_OBJECT_CREATE or CAR_CAPTURE:          # tools/decode_creates.py reads the create lines
                     self.log(f"{addr[1]} obj {'create' if mtype == 7 else 'update'} router={router} "
                              f"flags={a}{b} id={oid} type={tid} seq={seq} varbits={size}")
@@ -3520,27 +3587,6 @@ class Server:
                 if a == 0 and b == 1:
                     r.bits(8)
                 self.rt_vote(peer, r.bits(32))
-            elif mtype == MSG_CAR_COLLISION:
-                # The sender reports a hit on its own car (key flags 00); the other clients apply it to
-                # their copy of that car, so a pushed car actually moves instead of being a fixed obstacle.
-                a, b = r.bits(1), r.bits(1)
-                cid = r.bits(CAR_KEY_ID_BITS)
-                if a == 0 and b == 1:
-                    r.bits(8)
-                rest = r.bits(192)
-                if COLLISION_TO_RECEIVER_CAR:
-                    def msg(w, cid=cid, rest=rest):     # key left as the plain id: the receiver's own car
-                        w.bits(MSG_CAR_COLLISION, 7)
-                        w.bits(0, 2)
-                        w.bits(cid, CAR_KEY_ID_BITS)
-                        w.value |= rest << w.pos
-                        w.pos += 192
-                else:
-                    msg = relay_score_message(mtype, cid, peer.owner_id, rest, 192)
-                self.relay(peer, msg, same_event=True)
-                peer.collisions_relayed = getattr(peer, "collisions_relayed", 0) + 1
-                if peer.collisions_relayed <= 3 or peer.collisions_relayed % 200 == 0:
-                    self.log(f"{addr[1]} car collision #{peer.collisions_relayed} relayed")
             elif mtype in (MSG_IN_PROGRESS_SCORE_UPDATE, MSG_LAP_SCORE, MSG_SCORE_KEYFRAME):
                 a, b = r.bits(1), r.bits(1)
                 cid = r.bits(CAR_KEY_ID_BITS)
@@ -3548,21 +3594,21 @@ class Server:
                     r.bits(8)
                 start = r.pos
                 blobs = []
-
-                def blob():
-                    n = r.varlen()
-                    blobs.append(r.bits(n * 8))
+                for _ in range(SCORE_DOUBLES[mtype]):
+                    if r.varlen() != 8:
+                        break
+                    blobs.append(r.bits(64))
+                if len(blobs) != SCORE_DOUBLES[mtype]:
+                    self.malformed(peer, f"score message {mtype}")     # relayed, it would put receivers out of step
+                    break
                 if mtype == MSG_IN_PROGRESS_SCORE_UPDATE:
                     r.bits(32), r.bits(1)
                 elif mtype == MSG_LAP_SCORE:
-                    blob(), blob(), blob()
                     lap = r.bits(32)
                     r.bits(2)
                     self.log(f"{addr[1]} LapScore lap={lap} times="
                              f"{[round(struct.unpack('<d', x.to_bytes(8, 'little'))[0], 3) for x in blobs]}")
                 else:
-                    for _ in range(5):
-                        blob()
                     r.bits(32 + 24 + 3)
                 end = r.pos
                 r.pos = start
@@ -3573,65 +3619,6 @@ class Server:
                     self.note_lap_score(peer, lap, blobs)
                 elif mtype == MSG_SCORE_KEYFRAME:
                     self.note_score_keyframe(peer)
-            elif mtype == MSG_CAR_PREDICTION_FULL:
-                a, b = r.bits(1), r.bits(1)
-                cid = r.bits(CAR_KEY_ID_BITS)
-                # The body is a fixed 710 bits (FUN_141822400, the message's size function: 96 + 326 + 4 x 64 + 32); the
-                # client appends its other messages (traffic updates ...) after it, so it must not be read to the end.
-                rest_bits = CAR_PREDICTION_BODY_BITS if r.size - r.pos >= CAR_PREDICTION_BODY_BITS else r.size - r.pos
-                rest = r.bits(rest_bits)
-                peer.cars_relayed += 1
-                pos = car_position(rest) if rest_bits >= 96 else None
-                far = max(abs(pos[0]), abs(pos[1]), abs(pos[2])) if pos is not None else math.nan
-                unusable = pos is not None and (not all(math.isfinite(c) for c in pos) or far > POSITION_WITHHOLD_LIMIT)
-                if pos is not None and a == 0 and b == 0:
-                    if not unusable:
-                        peer.pos = pos
-                    if math.isfinite(far):
-                        peer.max_abs = max(peer.max_abs, far)
-                        peer.max_y = max(peer.max_y, pos[1])
-                    if not peer.pos_flagged and (not all(math.isfinite(c) for c in pos) or far > POSITION_LIMIT):
-                        peer.pos_flagged = True
-                        self.log(f"{addr[1]} car position out of range: ({pos[0]:.1f},{pos[1]:.1f},{pos[2]:.1f}) owner {peer.owner_id} xuid {peer.xuid:#x}")
-                if unusable:
-                    continue
-                if peer.cars_relayed <= 3 or peer.cars_relayed % 500 == 0:
-                    ps = '' if pos is None else f' pos=({pos[0]:.0f},{pos[1]:.0f},{pos[2]:.0f})'
-                    self.log(f"{addr[1]} car prediction #{peer.cars_relayed} flags={a}{b} id={cid} "
-                             f"rest={rest_bits} bits -> {len(self.others(peer))} peer(s){ps}")
-                if pos is not None and a == 0 and b == 0 and SPEED_POLICY != "off" and math.isfinite(far):
-                    self.track_speed(peer, pos, (rest >> (CAR_PREDICTION_BODY_BITS - 32)) if rest_bits == CAR_PREDICTION_BODY_BITS else None)
-                if peer.cars_relayed % 20 == 1 and pos is not None:
-                    self.note("car", peer.owner_id, f"pos=({pos[0]:.0f},{pos[1]:.0f},{pos[2]:.0f}) id={cid}")
-                if a == 0 and b == 0 and not peer.kick_reason:
-                    peer.car_id = cid
-                    if rest_bits == CAR_PREDICTION_BODY_BITS:
-                        old = peer.car_prediction
-                        stamp_offset = CAR_PREDICTION_BODY_BITS - 32
-                        if old is None or old[0] != cid:
-                            peer.car_prediction_stamp = None
-                            peer.car_prediction_refreshable = True
-                        elif not 0 < (((rest >> stamp_offset) - (old[1] >> stamp_offset)) & 0xFFFFFFFF) < 0x80000000:
-                            # Freshness belongs to each receiving car instance. Its
-                            # clock baseline is reset on scene/grid transitions
-                            # (0x9ec230); the relay's old high-water mark is not that
-                            # baseline. Forward live physics unchanged and let the
-                            # native receiver (0x9ecf00) reject genuine reordering.
-                            # Keep old frames out of the cache and do not manufacture
-                            # a newer timestamp for cached pre-transition physics.
-                            if rest != old[1]:
-                                peer.car_prediction_refreshable = False
-                            self.relay_prediction(peer, prediction=(cid, rest, rest_bits))
-                            continue
-                        else:
-                            peer.car_prediction_refreshable = True
-                        peer.car_prediction = (cid, rest, rest_bits)
-                        self.relay_prediction(peer)
-            elif mtype == MSG_REPAIR_DAMAGE:
-                kind, cid, _ = read_car_key(r)
-                if kind == "own":
-                    msg = relay_repair_message(cid, peer.owner_id)
-                    self.relay(peer, msg)
             elif mtype == MSG_TAG_COLLISION:
                 k1, k2 = read_car_key(r), read_car_key(r)
                 olds_news = [r.bits(3) for _ in range(4)]
@@ -4658,6 +4645,7 @@ class Hub:
         if self.tunnel:
             sel.register(self.tunnel.listener, selectors.EVENT_READ)
         last_sweep = 0.0
+        next_tick = 0.0
         nxt = math.inf
         while stop is None or not stop.is_set():
             events = sel.select(timeout=min(0.01, max(0.0, nxt - time.monotonic())))
@@ -4675,12 +4663,15 @@ class Hub:
                         self.handle(data, addr)
                     except Exception as exc:  # keep serving
                         self.log(f"error handling {data.hex()}: {exc!r} at {where(exc)}")
-            for w in list(self.worlds.values()):
-                try:
-                    w.tick()
-                except Exception as exc:  # one broken world must not stop the others
-                    w.log(f"tick error: {exc!r} at {where(exc)}")
             now = time.monotonic()
+            if now >= next_tick:
+                next_tick = now + WORLD_TICK_SECONDS
+                for w in list(self.worlds.values()):
+                    try:
+                        w.tick()
+                    except Exception as exc:  # one broken world must not stop the others
+                        w.log(f"tick error: {exc!r} at {where(exc)}")
+                now = time.monotonic()
             nxt = self.idle.flush(now)
             for w in self.worlds.values():
                 nxt = min(nxt, w.flush(now))
