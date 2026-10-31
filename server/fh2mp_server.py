@@ -805,6 +805,48 @@ def read_car_key(r):
     return ("own" if (a, b) == (0, 0) else "other"), cid, 0
 
 
+# Client messages the server has no use for: parsed so the messages behind them in the datagram are not lost, never relayed. Layouts from the
+# Receive and Send functions (docs/server-review-plan.md section 2): key id bits (None = no key) and fixed bits after it. 24, 52 and 60 occur in
+# real sessions; the rest were never seen on prod. 13 is absent: its width depends on the object type, so nothing behind it can be located.
+UNUSED_MESSAGE_LAYOUT = {20: (7, 352), 46: (2, 64), 52: (2, 32), 54: (None, 384), 56: (None, 224), 58: (None, 96), 59: (7, 0), 60: (None, 0),
+                         70: (2, 0)}
+MSG_COLLOBJ_DETACH_PART = 24        # kind:4 | count:11 | bytes. The client reads it into a 1024-byte stack buffer unchecked (0x17ddbd0): never relay it
+MSG_CHAT_MANAGEMENT = 33            # u64 | count:7 | bytes. Same bug with a 64-byte buffer (0x17f5120): never relay it
+UNUSED_MESSAGES = frozenset(UNUSED_MESSAGE_LAYOUT) | {MSG_OBJECT_DELETE, MSG_COLLOBJ_DETACH_PART, MSG_CHAT_MANAGEMENT}
+
+
+def skip_key(r, id_bits):
+    a, b = r.bits(1), r.bits(1)
+    r.bits(id_bits)
+    if a == 0 and b == 1:
+        r.bits(8)
+
+
+def skip_unused_message(r, mtype) -> bool:
+    """Reads past a message of UNUSED_MESSAGES; False when what follows cannot be trusted."""
+    if mtype == MSG_OBJECT_DELETE:
+        router = r.bits(4)
+        if router not in ROUTER_BITS:
+            return False
+        skip_key(r, ROUTER_BITS[router][0])
+        r.bits(8)
+    elif mtype == MSG_COLLOBJ_DETACH_PART:
+        r.bits(4)
+        count = r.bits(11)
+        if count > 1024:
+            return False
+        r.bits(count * 8)
+    elif mtype == MSG_CHAT_MANAGEMENT:
+        r.bits(64)
+        r.bits(r.bits(7) * 8)
+    else:
+        id_bits, tail = UNUSED_MESSAGE_LAYOUT[mtype]
+        if id_bits is not None:
+            skip_key(r, id_bits)
+        r.bits(tail)
+    return True
+
+
 def write_car_key(w, kind, cid, owner=0):
     if kind == "relay":
         w.bits(0, 1)
@@ -1240,6 +1282,7 @@ class Peer:
         self.world = None          # (lobby type, lobby name): clients only see each other inside one world
         self.pos = None            # last (x, y, z) of this client's car (CarPredictionFull), see car_position
         self.pos_flagged = False   # an out-of-range position was already logged for this client
+        self.unknown_logged = set()   # message ids already logged as unparsable for this client
         self.model_id = None       # the car this client uses (CarInitSynced.ModelId), see car_model_id
         self.model_logged = None
         self.max_y = -math.inf     # highest car position seen (y is up): 'flying' shows here
@@ -3481,10 +3524,14 @@ class Server:
                 out, other = self.coop.ended(peer, bool(ok), self.bl_world(peer))
                 self.bl_apply(peer, f"ChallengeEnded ok={ok}", (out, f"partner {other.owner_id if other is not None else 'none'}"))
                 self.ev("bucketlist_end", owner=peer.owner_id, ok=bool(ok), partner=other.owner_id if other is not None else None)
+            elif mtype in UNUSED_MESSAGES and skip_unused_message(r, mtype):
+                pass
             else:
-                # message layouts beyond the transport layer are not decoded yet
-                self.log(f"{addr[1]} id={hdr['ack_id']} types={types} first-unknown={mtype} "
-                         f"bits-left={r.size - r.pos} raw={data.hex()}")
+                # the rest of this datagram cannot be located; the packet is still acked, so the client will not send it again
+                if mtype not in peer.unknown_logged:
+                    peer.unknown_logged.add(mtype)
+                    self.log(f"{addr[1]} id={hdr['ack_id']} types={types} first-unknown={mtype} "
+                             f"bits-left={r.size - r.pos} raw={data.hex()}")
                 break
         else:
             left = r.size - r.pos
