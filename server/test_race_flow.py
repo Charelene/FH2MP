@@ -472,6 +472,7 @@ class RaceFlow(unittest.TestCase):
     def test_returning_host_snapshot_is_delivered_before_invite(self):
         self.grant(self.a)
         self.options(self.a, {4: 1001, 30: 3})
+        self.advance(S.LEADER_SETUP_SECONDS + 1)       # a's setup lapses, or b's grant would be refused while a leads
         self.grant(self.b)
         self.options(self.b, {4: 1002, 30: 4})
         # Production ordering: former owner writes without a new grant.
@@ -488,6 +489,7 @@ class RaceFlow(unittest.TestCase):
     def test_returning_host_can_wait_in_setup_before_requesting_race(self):
         self.grant(self.a)
         self.options(self.a, {4: 1001, 30: 3})
+        self.advance(S.LEADER_SETUP_SECONDS + 1)       # a's setup lapses, or b's grant would be refused while a leads
         self.grant(self.b)
         self.options(self.b, {4: 1002, 30: 4})
         self.options(self.a, {4: 1003, 30: 5})
