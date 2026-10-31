@@ -84,6 +84,20 @@ class StringValidationTests(unittest.TestCase):
             self.assertEqual(status, 400, body)
 
 
+class GiftingFailsSafelyTests(unittest.TestCase):
+    def test_sending_a_car_is_refused_so_the_game_puts_it_back(self):
+        for cls, method in (("Forza.WebServices.Gifting, Forza.WebServices", "SendCarGift"),
+                            ("Forza.WebServices.Auction, Forza.WebServices", "UploadAuctionTextures"),
+                            ("Forza.WebServices.GiftLivery, Forza.WebServices", "Create")):
+            self.assertEqual(struct.unpack(">I", L.handle_xls(cls, method, b"")[:4])[0], 2, method)
+
+
+class NotificationSessionTests(unittest.TestCase):
+    def test_the_fallback_session_never_asks_for_an_immediate_poll(self):
+        handler = L.HANDLERS[("Xls.WebServices.Notifications", "StartNewSession")][1]
+        self.assertGreater(handler({})["nextRetrieveSeconds"], 0)
+
+
 class LayerCountTests(unittest.TestCase):
     def test_operator_preview_content_type_matches_the_stored_image(self):
         handler = object.__new__(L.Handler)

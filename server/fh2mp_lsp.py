@@ -300,6 +300,11 @@ def notif_mark_read(req):
     return None
 
 
+def notif_new_session(req):
+    # The default result says "poll again in 0 s", a tight loop (0xf0c4b0). Logon normally supplies these, this call is the client's fallback.
+    return {"nonce": 1, "nextRetrieveSeconds": POLL_SECONDS}
+
+
 def notif_clear(req):
     NOTIF.clear(getattr(CTX, "xuid", 0), req["notificationId"])      # clears it for this player only
     return None
@@ -2071,6 +2076,7 @@ HANDLERS = {
     ("Xls.WebServices.Notifications", "RetrieveForUser"): ("", notif_retrieve),
     ("Xls.WebServices.Notifications", "MarkRead"): ("", notif_mark_read),
     ("Xls.WebServices.Notifications", "Clear"): ("", notif_clear),
+    ("Xls.WebServices.Notifications", "StartNewSession"): ("", notif_new_session),
 }
 
 
@@ -2079,6 +2085,12 @@ HANDLERS = {
 # data they fail, so the client keeps using what it ships with.
 FAIL_UNTIL_IMPLEMENTED = {
     ("Forza.WebServices.Drivatar", "GetDrivatarInformationForTrack"),
+    # Sending a car deletes it locally; an error makes the game put it back (0xa25d40), a default OK loses it for good.
+    ("Forza.WebServices.Gifting", "SendCarGift"),
+    ("Forza.WebServices.Auction", "UploadAuctionTextures"),
+    ("Forza.WebServices.GiftLivery", "Create"),
+    ("Forza.WebServices.GiftTuning", "Create"),
+    ("Forza.WebServices.GiftLayerGroup", "Create"),
 }
 
 
