@@ -1884,9 +1884,10 @@ class Server:
             # Lines carry only the time of day; a date line at start and at every midnight keeps a multi-day log unambiguous.
             _log_day = now.tm_yday
             line = f"{time.strftime('%H:%M:%S', now)} date {time.strftime('%Y-%m-%d %Z', now)}\n" + line
-        print(line, flush=True)
         if self.log_file:
             self.log_file.write(line + "\n")
+        else:
+            print(line, flush=True)
 
     def send(self, peer: Peer, messages, fast: bool = False) -> None:
         """Queues messages (writers or baked) for one client; flush() sends them. An empty list still sends a datagram (an ack).
@@ -3200,8 +3201,9 @@ class Server:
                 seq = r.bits(8)
                 size = r.bits(14)
                 payload = r.bits(size) if size else 0
-                self.log(f"{addr[1]} obj {'create' if mtype == 7 else 'update'} router={router} "
-                         f"flags={a}{b} id={oid} type={tid} seq={seq} varbits={size}")
+                if mtype == MSG_OBJECT_CREATE or CAR_CAPTURE:          # tools/decode_creates.py reads the create lines
+                    self.log(f"{addr[1]} obj {'create' if mtype == 7 else 'update'} router={router} "
+                             f"flags={a}{b} id={oid} type={tid} seq={seq} varbits={size}")
                 if mtype == MSG_OBJECT_CREATE or size >= 500:
                     self.note("obj", peer.owner_id, f"{'create' if mtype == 7 else 'update'} router={router} id={oid} bits={size}")
                 suppress = False
