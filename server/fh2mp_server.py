@@ -3315,13 +3315,8 @@ class Server:
                             self.log(f"{addr[1]} GameOptions NumLaps corrected to {laps} (maximum {gameopts.MAX_LAPS})")
                     self.log(f"{addr[1]} GameOptions {'create' if first else 'update'} relayed "
                              f"({size} bits, own seq {seq}, mtype {mtype})")
-                    # debug: raw bits (LSB first) and where small ids (e.g. the event id 1412 = 0x584) appear
-                    bitstr = "".join(str((payload >> i) & 1) for i in range(size))
-                    self.log(f"  GameOptions payload hex={payload.to_bytes((size + 7) // 8, 'little').hex()}")
-                    for width in range(8, 17):
-                        for off in range(0, max(0, size - width + 1)):
-                            if (payload >> off) & ((1 << width) - 1) == 1412:
-                                self.log(f"  GameOptions: value 1412 at bit offset {off} width {width}")
+                    if CAR_CAPTURE:
+                        self.log(f"  GameOptions payload hex={payload.to_bytes((size + 7) // 8, 'little').hex()}")
                     unchanged = self.game_options == (size, payload)
                     self.game_options = (size, payload)
                     if not self.roadtrip:
