@@ -246,7 +246,7 @@ static int line_has(const char *l, int n, const char *pat)
 static int line_wanted(const char *l, int n)
 {
     static const char *const keep[] = {"attached", "session:", "identity:", "late:", "not patched", "NOT ", "unexpected", "fail", "error", "could not",
-                                       "refus", "crash", "xsbody", "xstoken", "mmtimeout", "mmtoast", "online-setup", "bindfix", "gamedb:", "rivalsleave", "bucketcars", "crowns", "matchpoll", "sample", "carprobe", "probe:", "lighting:", 0};
+                                       "refus", "crash", "xsbody", "xstoken", "mmtimeout", "mmtoast", "online-setup", "bindfix", "gamedb:", "rivalsleave", "bucketcars", "matchpoll", "sample", "carprobe", "probe:", "lighting:", 0};
     int i;
     for (i = 0; keep[i]; i++) {
         if (line_has(l, n, keep[i])) {
@@ -3250,29 +3250,6 @@ static int stateflow_rivals_leave_session(void)
 }
 
 /*
- * Leader crowns in the player lists ("Players", "Game Party"): the list control shows the leader icon of every player whose IsLeader is
- * true (PlayerListControl.xaml, style A_Style_FZMaterial_LeaderIcon), and everybody is a leader in an FH2MP Free Roam, so the crown told
- * nothing (user 2026-10-29). The icon's Visibility binding becomes a constant Collapsed in UI.zip's Controls\PlayerListControl.xaml, handed to
- * the platform like the stateflow edits. Disable with env FH2MP_NO_NOCROWNS.
- */
-static const char CROWN_OLD[] =
-    "<Setter Property=\"Visibility\" Value=\"{Binding IsLeader, Converter={StaticResource A_FZBooleanToVisibilityConverter}}\"/>";
-static const char CROWN_NEW[] =
-    "<Setter Property=\"Visibility\" Value=\"Collapsed\"/>";
-
-/* the in-game "Players" list (HUDMiniLeaderboardControl.xaml) shows its crown through a trigger instead: opacity 1 on LeaderIcon */
-static const char CROWN2_OLD[] = "<Setter Property=\"Opacity\" Value=\"1\" TargetName=\"LeaderIcon\"/>";
-static const char CROWN2_NEW[] = "<Setter Property=\"Opacity\" Value=\"0\" TargetName=\"LeaderIcon\"/>";
-
-static int ui_no_leader_crowns(void)
-{
-    stateflow_replace(L"\\media\\UI.zip", "Controls/HUDMiniLeaderboardControl.xaml", "UI/Controls/HUDMiniLeaderboardControl.xaml", CROWN2_OLD,
-                      sizeof CROWN2_OLD - 1, CROWN2_NEW, sizeof CROWN2_NEW - 1, "crowns", "the in-game player list shows no leader crown");
-    return stateflow_replace(L"\\media\\UI.zip", "Controls/PlayerListControl.xaml", "UI/Controls/PlayerListControl.xaml", CROWN_OLD,
-                             sizeof CROWN_OLD - 1, CROWN_NEW, sizeof CROWN_NEW - 1, "crowns", "the player lists show no leader crowns");
-}
-
-/*
  * Bucket-list cars in online Free Roam. The game parks a car at every bucket-list location once the BucketListCarLoadingManager has
  * been told EnableBucketListCarLoading (native 0x43ef60). Only the offline flow (stateflow free_roam_start.xml, enter_offline and
  * finalise_free_roam_offline) broadcasts it; network.xml's enter_free_roam, the online entry, never does, so online there are slots
@@ -5621,9 +5598,6 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
         }
         if (GetEnvironmentVariableW(L"FH2MP_BUCKETCARS", tmp, 8) != 0) {    /* opt-in: retail online Free Roam parks no bucket-list cars */
             stateflow_bucket_cars_online();
-        }
-        if (GetEnvironmentVariableW(L"FH2MP_NO_NOCROWNS", tmp, 8) == 0) {
-            ui_no_leader_crowns();
         }
     }
     {
