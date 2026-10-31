@@ -355,6 +355,9 @@ class RaceRestrictions(unittest.TestCase):
     def former_owner(self):
         self.w.ownership_grant(self.host, S.ROUTER_LOBBY, S.TYPE_GAME_OPTIONS, 0, S.LOBBY_ID_BITS)
         self.write_options(*gameopts.encode_fields({30: (8, 3)}))
+        # the host leaves the setup (DropLeadership) and the server takes the options back from it; this client missed that, as a
+        # stale or older one would, and keeps writing as if it still owned them
+        self.w.handle(S.build_packet([lambda w: w.bits(S.MSG_DROP_LEADERSHIP, 7)]), self.host.addr)
         self.w.ownership_grant(self.guest, S.ROUTER_LOBBY, S.TYPE_GAME_OPTIONS, 0, S.LOBBY_ID_BITS)
 
     def test_returning_host_uses_its_own_class_before_inviting_guests(self):

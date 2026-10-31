@@ -192,6 +192,7 @@ WEATHER_VARS = {
 CONSOLE_VAR_ID_BITS = 4
 CONSOLE_VAR_SESSION_ENTRY_FINALISED = 1
 MSG_REQUEST_RACE = 38               # no payload: the leader asks for an event
+MSG_DROP_LEADERSHIP = 60            # no payload: "request to drop leadership" (Nerd::Msg::DropLeadership, Send 0x17f7a50)
 MSG_READY_REQUEST = 41              # key (idBits 2) | ready:1
 SESSION_HOST_VAR_ID_BITS = 4        # 13 vars
 SH_RACE_READY = 4
@@ -214,11 +215,15 @@ RACE_JOIN_GRACE_SECONDS = 45.0      # ...but keep waiting this long for clients 
 BL_REQUEST_GRACE_SECONDS = 0.8        # a bucket-list RequestingPartner state counts as a request if its RequestSynchronize message has not come by then
 RACE_OWN_REQUEST_SECONDS = 3.0      # a client that wrote its own GameOptions this close to the request was starting its own event
 LOAD_SUSPECT_STEP_SECONDS = float(os.environ.get("FH2MP_LOAD_SUSPECT_STEP", "10"))   # nobody loaded: one suspect dropped per step
+LEADER_SETUP_SECONDS = 120.0        # a leader that neither requested a race nor sent DropLeadership stops being the leader after this long
 EVENT_BLOCK_MAX_SECONDS = 1200.0    # a running event stops blocking new race requests after this long
 EVENT_LOAD_TIMEOUT_SECONDS = float(os.environ.get("FH2MP_EVENT_LOAD_TIMEOUT", "60"))   # a participant that has not reported HasLoadedCars this long after the event start is dropped from it
 MSG_OBJECT_DELETE = 9
 MSG_OBJECT_REQUEST_OWNERSHIP = 10   # client -> server: router:4 | typeId | key (A=1,B=0 transfer id)
 MSG_OBJECT_GRANT_OWNERSHIP = 11     # server -> client: router:4 | key | seq:8 | size:14 (+size bits)
+MSG_OBJECT_TRANSFER_OWNERSHIP = 12  # server -> client: router:4 | key (A=1,B=0 transfer id) | seq:8. The client stops being the owner: a pending request
+                                    # is answered "denied", a current owner must ask again (ClientSyncedObjectManager::ReceiveObjectTransferOwnership
+                                    # 0x17ab9b0 -> SyncedObject::ApplyOwnershipTransfer 0x17b24c0 -> SetOwner 0x17a7290 clears the pending request)
 MSG_CAR_PREDICTION_FULL = 15
 COLLISION_TO_RECEIVER_CAR = False   # experiment: apply a reported hit to the receiver's own car (True) or to
                                     # its copy of the sender's car (False, the first version: "better")
@@ -297,6 +302,14 @@ LOBBY_PLAYER_PLAYER_HOST = 1     # var index in Nerd::LobbyPlayer (FUN_14180bf50
 # 82-87 and 93 with these widths]. Race setup (FUN_140930540) copies every participant's TeamId into its car (race data +0x2a9), which the grid,
 # HUD and team scoring read. No client sets it, so the server assigns the teams (dev 2026-10-22: without this everybody was on red).
 PLAYER_VAR_TEAM_ID = 90
+# PlayerData.IsLeader (SyncedBool<0,1>, ctor FUN_1417f3470): the 6th registered var of the player object, after BufChoices 0, HasLivery 1,
+# IsNewLivery 2, NetworkName 3 and a 64-bit id 4 (player_setup._WIDTHS agrees: 64,1,1,-16,64,1,...). The game's "is that player the leader" test
+# (IPlayer vslot 0x1a0 -> CPlayer secondary vtable 0xf8 -> FUN_1417f4270) reads its value, NOT LobbyPlayer.PlayerHost. [C for the field and
+# the reader, I for the id from the registration order]
+PLAYER_VAR_IS_LEADER = 5
+# LobbyPlayer.PlayerFlags (8 bits, var 31 of the player object; var 30 is LocalSyncedId): CPlayer::vfunc_23 (0x3264d0) sets bit 0 when the profile's Main/IsVip is true, and the player
+# lists draw a crown for it. Extra Options makes every player a VIP, so the crown told nothing: the server clears the bit (hide_vip). FH2MP_KEEP_VIP=1 keeps it.
+PLAYER_VAR_FLAGS, PLAYER_FLAG_VIP = 31, 1
 # Nerd::LobbyPlayer's vars start at 12 in the player object (network order FUN_14180bb10: Ready 12, PlayerHost 13, ... PlayerStatus 19,
 # ... PrivateUniverseId 40) [C: Ready (1 bit) arrives as var 12 on arrival, PlayerStatus (4 bits, 1..4 through car select / drive /
 # arrival) as var 19]. PrivateUniverseId (SyncedEnum<UniverseIds>, 5 bits: 0 OfflineDefault, 1-17 OnlinePrivate0-16, 18-23 BucketList1-6,
@@ -686,6 +699,19 @@ def grant_ownership(router, obj_id, id_bits, seq=0, size=0, payload=0):
         if size:
             w.value |= payload << w.pos
             w.pos += size
+    return write
+
+
+def transfer_ownership(router, obj_id, id_bits, seq):
+    """Message 12: takes the ownership of a transfer object away from the receiving client (the dedicated server's "OwnershipDenied" and
+    "ownership moved on"). Same key as the grant; ProcessInOrder reads only the sequence number, the body is skipped."""
+    def write(w: BitWriter):
+        w.bits(MSG_OBJECT_TRANSFER_OWNERSHIP, 7)
+        w.bits(router, 4)
+        w.bits(1, 1)
+        w.bits(0, 1)
+        w.bits(obj_id, id_bits)
+        w.bits(seq, 8)
     return write
 
 
@@ -1266,6 +1292,8 @@ class Peer:
         self.compact_at = {}       # (router, id) -> history length at which it is compacted next
         self.console_vars = {}     # latest bool Console vars reported by this client
         self.gopts_seq = 0         # numbering of the server-owned GameOptions object sent to this client
+        self.vip_hidden = None        # (width, value) of PlayerFlags with the VIP bit cleared, to tell the owner once it has entered
+        self.gopts_released = False   # message 12 was sent to this client and it has not been granted the options since
         self.gopts_own_seq = None  # sequence number of the last GameOptions write this client made itself (it applied that to its own copy)
         self.gopts_created = False
         self.console_oid = None    # id of this client's ConsoleSynced object (router 3)
@@ -1405,6 +1433,8 @@ class Server:
         self.race_hard_deadline = 0.0
         self.game_options = None   # (size, payload) latest GameOptionsSynced written by the leader
         self.game_options_owner = None
+        self.leader_since = 0.0
+        self.leader = None         # the player whose PlayerData.IsLeader is set: the one setting up or running the online event (set_leader)
         self.free_roam_laps = 1    # authoritative bounded count, retained across sparse options updates
         self.free_roam_end_condition = 1 # explicit NumLaps by default; preserve timed/tag modes
         self.event = None          # {"people": [Peer], "begun": bool, "start_at": float|None}
@@ -2134,14 +2164,54 @@ class Server:
         the grant can replace the settings it selected while requesting ownership.
         An empty transfer keeps that state and still advances the native sequence.
         """
+        if router == ROUTER_LOBBY and tid == TYPE_GAME_OPTIONS and not self.roadtrip and not os.environ.get("FH2MP_NO_LEADER"):
+            other = self.leader if self.leader is not peer and self.leader is not None and self.leader.connected else None
+            if other is not None or self.request_race_blocked(peer):
+                # one event is set up at a time: the game answers a refused request with "setup in progress" (state flow
+                # network.get_game_options_ownership: owner / not_owner) and keeps the tile for the one who leads
+                self.log(f"{peer.addr[1]} GameOptions ownership refused: "
+                         + (f"owner {other.owner_id} is setting up an event" if other is not None else "an event is pending or running"))
+                return self.ownership_transfer(peer, router, oid, id_bits)
+            old = self.game_options_owner
+            if old is not None and old is not peer:
+                self.release_options(old, f"owner {peer.owner_id} took the event options")
         if router == ROUTER_LOBBY and tid == TYPE_GAME_OPTIONS:
             self.game_options_owner = peer
-        if router == ROUTER_LOBBY and tid == TYPE_GAME_OPTIONS and self.game_options and peer.gopts_seq > 0:
+            if not self.request_race_blocked(peer):      # the game asks for the options when the player starts setting up an event
+                self.set_leader(peer, "asked for the event options")
+        if router == ROUTER_LOBBY and tid == TYPE_GAME_OPTIONS and (self.game_options or peer.gopts_released) and peer.gopts_seq > 0:
+            peer.gopts_released = False
             seq = peer.gopts_seq
             peer.gopts_seq = (peer.gopts_seq + 1) % 0xFF
             self.log(f"{peer.addr[1]} GameOptions ownership grant (seq {seq}, preserve local selections)")
             return grant_ownership(router, oid, id_bits, seq)
+        if router == ROUTER_LOBBY and tid == TYPE_GAME_OPTIONS and peer.gopts_seq == 0:
+            # the grant is the client's message 0 of this object: it applies only the message that follows the last one it processed
+            # (PendingObjectMessages::ProcessInOrder 0x17b1e70, anything older is "Dropping message as messageId is old"), so whatever comes
+            # next, a take-back (message 12) included, must not be numbered 0 again
+            peer.gopts_seq = 1
         return grant_ownership(router, oid, id_bits)
+
+    def ownership_transfer(self, peer: Peer, router: int, oid: int, id_bits: int):
+        """Message 12 for a client, numbered like the other server messages of its GameOptions object (after its own last write)."""
+        if peer.gopts_own_seq is not None and (peer.gopts_seq - peer.gopts_own_seq - 1) % 0xFF >= 0x80:
+            peer.gopts_seq = (peer.gopts_own_seq + 1) % 0xFF
+        seq = peer.gopts_seq
+        peer.gopts_seq = (peer.gopts_seq + 1) % 0xFF
+        peer.gopts_released = True        # the next grant continues the numbering even when no options are stored
+        return transfer_ownership(router, oid, id_bits, seq)
+
+    def release_options(self, peer, why: str) -> None:
+        """Takes the GameOptions ownership back from a client, so that its next event setup asks for it again (and the server sees that, and
+        can refuse it while somebody else leads). Without this a client that was granted the object once never asks again."""
+        if peer is None or self.roadtrip or os.environ.get("FH2MP_NO_LEADER"):
+            return
+        if self.game_options_owner is peer:
+            self.game_options_owner = None
+        if not (peer.connected and peer.entered):
+            return
+        self.send(peer, [self.ownership_transfer(peer, ROUTER_LOBBY, self.GAME_OPTIONS_TRANSFER_ID, LOBBY_ID_BITS)])
+        self.log(f"{peer.addr[1]} GameOptions ownership taken back ({why})")
 
     def send_game_options(self, q: Peer, options=None) -> None:
         """Forwards the leader's GameOptions to a client under the same transfer-object key the leader wrote
@@ -2217,6 +2287,66 @@ class Server:
         self.remember_and_relay(peer, MSG_OBJECT_UPDATE, 3, peer.console_oid, None, 0, vb.pos, vb.value)
         self.log(f"{peer.addr[1]} Console.{CONSOLE_BOOL_VAR_NAMES.get(var_id, var_id)} = {value} ({why})")
 
+    def set_leader(self, peer, why: str) -> None:
+        """PlayerData.IsLeader (var PLAYER_VAR_IS_LEADER): the one player who is setting up or running the online event, None = nobody.
+
+        Retail leadership is the dedicated server's: RequestLeaderChange / DropLeadership are "sent from the client to the server" and the
+        client's receive handlers are empty stubs (IPlayerRouter slots 9 and 10 are Misc no-ops), so only the server writes the flag. Every
+        client reacts to a change of any player's IsLeader (CPlayer::vfunc_12_vt8 0x32a8c0 raises the NetworkBecameLeader event with that
+        player): NetworkFreeRoamLeaderChangedHudComponent (helper 0x7dc790) then shows "<gamertag> IS SETTING UP AN EVENT" to every client
+        that is not itself the leader while the session is public, and the activation tile of a bystander turns into EventSetupInProgress
+        (network.is_any_remote_player_leader, race_trigger_activation.xml). The previous leader is cleared first so a client never sees
+        two leaders. Not in Road Trip (its own flow). FH2MP_NO_LEADER=1 turns it off."""
+        if self.roadtrip or os.environ.get("FH2MP_NO_LEADER"):
+            return
+        old = self.leader
+        if old is peer:
+            return
+        if peer is not None and not (peer.connected and peer.entered):
+            return
+        self.leader = peer
+        self.leader_since = time.monotonic()
+        if old is not None and old.connected and old.entered:
+            self.send_leader_flag(old, 0)
+        if peer is not None:
+            self.send_leader_flag(peer, 1)
+        self.log(f"event leader: {'owner ' + str(peer.owner_id) if peer is not None else 'nobody'} ({why})"
+                 + (f"; owner {old.owner_id} dropped" if old is not None and old is not peer else ""))
+
+    def send_leader_flag(self, peer: Peer, flag: int) -> None:
+        """IsLeader of a player: to the owner (server update of its player object) and relayed to the others (like set_player_team)."""
+        self.send_player_var(peer, PLAYER_VAR_IS_LEADER, 1, flag)
+
+    def hide_vip(self, peer: Peer, oid: int, size: int, payload: int):
+        """Clears the VIP bit of PlayerFlags in a client's player-object write, so that the crown is not drawn for anybody: the relayed copy and the
+        stored history carry the cleared value, and the owner is told the same (a server update of its own object) so its own list loses the crown too."""
+        try:
+            field = player_setup.fields(size, payload).get(PLAYER_VAR_FLAGS)
+        except ValueError:
+            return size, payload
+        if field is None or not field[2] & PLAYER_FLAG_VIP:
+            return size, payload
+        offset, width, value = field
+        cleared = value & ~PLAYER_FLAG_VIP
+        payload = (payload & ~(((1 << width) - 1) << offset)) | (cleared << offset)
+        if peer.entered:
+            self.send_player_var(peer, PLAYER_VAR_FLAGS, width, cleared, relay=False)
+        else:
+            peer.vip_hidden = (width, cleared)       # told to the owner when it has entered
+        return size, payload
+
+    def send_player_var(self, peer: Peer, var: int, width: int, value: int, relay: bool = True) -> None:
+        """One variable of a player's object written by the server: to the owner and (unless relay=False) relayed to the others."""
+        def vars_(w):
+            w.bits(var, 8)
+            w.bits(value, width)
+        self.send(peer, [server_update(1, 0, ROUTER_BITS[1][0], peer.player_seq, vars_)])
+        peer.player_seq = (peer.player_seq + 1) % 0xFF
+        if relay:
+            vb = BitWriter()
+            vars_(vb)
+            self.remember_and_relay(peer, MSG_OBJECT_UPDATE, 1, 0, None, 0, vb.pos, vb.value)
+
     def assign_private_universe(self, peer: Peer) -> None:
         """LobbyPlayer.PrivateUniverseId: an OnlinePrivateN no other player in this world has (to the owner and relayed to the others).
         FH2MP_NO_PRIVATE_UNIVERSE=1 skips it (experiment 2026-10-29: the parked bucket-list cars are visible offline, not online; the player's car
@@ -2252,7 +2382,7 @@ class Server:
         vars_(vb)
         self.remember_and_relay(peer, MSG_OBJECT_UPDATE, 1, 0, None, 0, vb.pos, vb.value)
 
-    def end_event(self, why: str) -> None:
+    def end_event(self, why: str, keep_leader: bool = False) -> None:
         """Back to the idle lobby: clear the SessionHost race flags so the next event starts clean."""
         ev = self.event
         self.ev("event_end", why=why, participants=len(ev["people"]) if ev else 0, begun=bool(ev and ev.get("begun")),
@@ -2265,6 +2395,10 @@ class Server:
                     q.console_vars[CONSOLE_VAR_PARTICIPATING_IN_RACE] = 0
         self.event = None
         self.pending_race = None
+        if not keep_leader:
+            former = self.leader or self.game_options_owner
+            self.set_leader(None, f"event over: {why}")
+            self.release_options(former, f"event over: {why}")
         self.refresh_car_phasing()
         for var in (SH_IN_RACE, SH_RACE_PARTICIPANTS_SELECTED, SH_RACE_READY):
             self.set_session_host_bool(var, 0, f"event over: {why}")
@@ -2551,7 +2685,7 @@ class Server:
         if not ev or self.roadtrip:
             return set()
         busy = {q for q in ev["people"] if q.connected and q.console_vars.get(3)}
-        self.end_event("a new race was requested")
+        self.end_event("a new race was requested", keep_leader=True)      # the requester keeps the flag: no off-and-on for the others
         return busy
 
     def participant_left(self, peer: Peer) -> None:
@@ -2888,6 +3022,8 @@ class Server:
     def drop_peer(self, peer: Peer, why: str) -> None:
         if self.game_options_owner is peer:
             self.game_options_owner = None
+        if self.leader is peer:
+            self.leader = None          # its player object is deleted for everybody else, so there is no flag to clear
         self.peers.pop(peer.addr, None)
         if peer in self.dirty:
             self.flush_peer(peer)   # what was queued for it, e.g. the CloseConnection of a kick
@@ -3109,6 +3245,9 @@ class Server:
                     self.send_game_options(peer)
                     self.traffic.join(peer)
                     self.assign_private_universe(peer)
+                    if peer.vip_hidden is not None:
+                        self.send_player_var(peer, PLAYER_VAR_FLAGS, *peer.vip_hidden, relay=False)
+                        peer.vip_hidden = None
 
                 def console_vars(w: BitWriter):
                     w.bits(CONSOLE_VAR_SESSION_ENTRY_FINALISED, CONSOLE_VAR_ID_BITS)
@@ -3144,6 +3283,7 @@ class Server:
                 self.accept_requested_options(peer)
                 if not self.roadtrip:
                     self.game_options_owner = peer
+                    self.set_leader(peer, "requested the race")      # close_finished_event may have cleared it a moment ago
                 self.log(f"{addr[1]} MsgRequestRace (owner {peer.owner_id}) -> RaceReady=1")
                 self.set_session_host_bool(SH_RACE_READY, 1, "race requested")
                 self.pending_race = (time.monotonic() + RACE_INVITE_SECONDS, peer)
@@ -3211,6 +3351,8 @@ class Server:
                 if CAR_CAPTURE and router == 1 and size:        # the LobbyPlayer object: gamertag, car, setup, livery ids (dev only)
                     self.log(f"{addr[1]} CAPTURE player {'create' if mtype == 7 else 'update'} id={oid} seq={seq} bits={size} "
                              f"xuid={peer.xuid:#x} hex={payload.to_bytes((size + 7) // 8, 'little').hex()}")
+                if router == 1 and a == 0 and b == 0 and size and not os.environ.get("FH2MP_KEEP_VIP"):
+                    size, payload = self.hide_vip(peer, oid, size, payload)
                 if router == 1 and a == 0 and b == 0:
                     bad_parts, suppress, size, payload = self.check_parts(peer, size, payload, oid)
                     if suppress:
@@ -3526,6 +3668,14 @@ class Server:
                 out, other = self.coop.ended(peer, bool(ok), self.bl_world(peer))
                 self.bl_apply(peer, f"ChallengeEnded ok={ok}", (out, f"partner {other.owner_id if other is not None else 'none'}"))
                 self.ev("bucketlist_end", owner=peer.owner_id, ok=bool(ok), partner=other.owner_id if other is not None else None)
+            elif mtype == MSG_DROP_LEADERSHIP:
+                # the player left the event setup (States::NetworkDropLeadership runs when a public activation is cancelled)
+                if self.leader is peer and self.event is None:
+                    self.set_leader(None, "dropped leadership")
+                    self.release_options(peer, "dropped leadership")
+                else:
+                    self.log(f"{addr[1]} DropLeadership (owner {peer.owner_id}) ignored: "
+                             + ("an event is running" if self.leader is peer else "it is not the leader"))
             elif mtype in UNUSED_MESSAGES and skip_unused_message(r, mtype):
                 pass
             else:
@@ -3810,8 +3960,8 @@ class Server:
                             o.es_seq = (o.es_seq + 1) % 0xFF
             msgs = []
             if q.owner_id == host:
-                # the game's "local player is the leader" test reads LobbyPlayer.PlayerHost (var 1 of 162, 8-bit var
-                # ids, SyncedBool)
+                # NOTE: var 1 of the player object is PlayerData.HasLivery; LobbyPlayer.PlayerHost is var 13 and the game's "is the leader"
+                # test reads PlayerData.IsLeader (var 5, set_leader). Left as it was: Road Trip is not affected by the leader flag.
                 def host_flag(w: BitWriter):
                     w.bits(LOBBY_PLAYER_PLAYER_HOST, 8)
                     w.bits(1, 1)
@@ -3892,6 +4042,10 @@ class Server:
         if self.event and self.event.get("go_at") and now >= self.event["go_at"]:
             self.go_race()
         self.check_race_end(now)
+        if self.leader is not None and not self.event and not self.pending_race and now - self.leader_since > LEADER_SETUP_SECONDS:
+            former = self.leader
+            self.set_leader(None, "setup abandoned")
+            self.release_options(former, "setup abandoned")
         if self.carmeet or any(q.lobby_type == LOBBY_TYPE_CAR_MEET for q in self.peers.values()):
             self.cm_tick(self.now_ms())
         if self.roadtrip:

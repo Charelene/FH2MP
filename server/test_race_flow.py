@@ -112,6 +112,8 @@ class Receiver:
         self.slot_messages = []  # (kind, type, id, seq, body) of the server's own router 12 object
         self.bucket = []        # bucket-list messages 61 and 65 to 68, as the client reads them
         self.bucket_owner = {}  # (router 12 object id) -> relay owner of the objects this client was given
+        self.taken = []         # message 12 (ownership taken back): (router, key flags, object id, seq)
+        self.players = []       # router 1 messages: (kind, (A, B), object id, relay owner or None, body copy)
 
     def receive(self, data):
         _ack, _remote, _bits, count, length = struct.unpack('<HHIBH', data[:11])
@@ -131,6 +133,8 @@ class Receiver:
                     self.bucket_owner[oid] = owner
                 seq, size = r.take(8), r.take(14)
                 body = Bits(r.take(size), size)
+                if router == 1:
+                    self.players.append((kind, (a, b), oid, owner, Bits(body.value, body.size)))
                 if router == 12 and (a, b) == (0, 0):
                     self.slot_messages.append((kind, tid12, oid, seq, body))      # the server-owned slot array
                 if router == 6 and (a, b, oid) == (1, 0, 0):
@@ -150,6 +154,11 @@ class Receiver:
                     self.events.append(('console', dict(self.console)))
                 # Relay player/console objects, Weather and initial SessionHost
                 # are length-delimited; their contents aren't this contract.
+            elif kind == 12:      # TransferOwnership: router | A | B | id | seq (ClientSyncedObjectManager::ReceiveObjectTransferOwnership)
+                router = r.take(4)
+                a, b = r.take(1), r.take(1)
+                oid = r.take({1: 7, 3: 7, 6: 2, 10: 1, 12: 4}[router])
+                self.taken.append((router, (a, b), oid, r.take(8)))
             elif kind == 1:
                 r.take(2)
                 assert r.take(3) == 0, 'handshake rejected'
