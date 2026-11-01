@@ -310,9 +310,9 @@ class ScoreTests(Base):
     def test_club_ladder_counts_this_weeks_accepted_awards_since_joining(self):
         import clubs
         store = clubs.ClubStore(self.db)
-        now = 1_793_664_005.0                                   # Monday 2026-11-02 00:00:05 UTC
+        now = 1_793_577_605.0                                   # Monday 2026-11-02 00:00:05 UTC
         week = store.week_start(now)
-        self.assertEqual(week, 1_793_664_000.0)
+        self.assertEqual(week, 1_793_577_600.0)
         cid = store.create(1, "WEEK", "Weekly", "", 1, 0, 0, 0)
         with self.db.tx() as c:
             c.execute("INSERT INTO club_members (xuid, club_id, role, joined, status_changed, xp_base) VALUES (2, ?, 1, ?, 0, 0)", (cid, week + 1))

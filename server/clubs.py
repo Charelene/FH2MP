@@ -161,8 +161,16 @@ class ClubStore:
     def total(self):
         return self.db.one("SELECT COUNT(*) FROM clubs")[0]
 
-    # Ladder tiers: (XP threshold, credit reward); the client lists them under "TIER n REWARD". The values are mine [guess].
-    TIERS = ((1000, 10000), (5000, 25000), (20000, 50000), (60000, 100000), (150000, 250000))
+    # Ladder tiers, Tier 1 first: (weekly XP threshold, credit reward). The client sorts the rows into tiers by walking this list in order
+    # (the row score must be >= the threshold and below the previous tier's), so Tier 1 has to be the highest; the lowest tab (Tier 6) takes
+    # everyone under the last threshold. The values are mine [guess].
+    TIERS = ((50000, 250000), (25000, 100000), (10000, 50000), (2500, 25000), (500, 10000))
+
+    @staticmethod
+    def week_start(now=None):
+        """Start of the ladder week: Monday 00:00 UTC [guess; the original reset time is unknown]."""
+        now = time.time() if now is None else now
+        return now - (now + 3 * 86400) % (7 * 86400)
 
     def ladder(self):
         """Every club with its XP, best first: [(club id, xp)]."""
@@ -170,11 +178,13 @@ class ClubStore:
             f"SELECT c.id, COALESCE(SUM({self.GAIN}), 0) AS xp FROM clubs c LEFT JOIN club_members m ON m.club_id = c.id "
             "LEFT JOIN player_xp x ON x.xuid = m.xuid GROUP BY c.id ORDER BY xp DESC, c.id")]
 
-    def member_ladder(self, club_id):
-        """The club's members ranked by the XP they earned since joining: [(xuid, xp)]."""
+    def member_ladder(self, club_id, now=None):
+        """The club's members ranked by the XP they earned this week (never from before they joined): [(xuid, xp)]. The accepted awards of
+        the XP ledger, so the tiers start over every week instead of filling up for good."""
         return [(r["xuid"], float(r["xp"])) for r in self.db.query(
-            f"SELECT m.xuid, COALESCE({self.GAIN}, 0) AS xp FROM club_members m LEFT JOIN player_xp x ON x.xuid = m.xuid "
-            "WHERE m.club_id=? ORDER BY xp DESC, m.joined", (club_id,))]
+            "SELECT m.xuid, COALESCE((SELECT SUM(a.xp) FROM xp_awards a WHERE a.xuid = m.xuid AND a.verdict = 'ok' "
+            "AND a.at >= GREATEST(m.joined, ?)), 0) AS xp FROM club_members m WHERE m.club_id=? ORDER BY xp DESC, m.joined",
+            (self.week_start(now), club_id))]
 
     # ---------------------------------------------------------------- history
     def _history(self, c, xuid, club, action, role=0):

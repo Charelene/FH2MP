@@ -644,6 +644,8 @@ class LspTests(unittest.TestCase):
         self.assertEqual((r, [x["user"]["qwXuid"] for x in res["rows"]], res["userRow"]["rank"], res["available"], len(res["ladderTiers"])),
                          (0, [A], 1, 1, 5))                                      # the club's members, ranked by XP earned in it
         self.assertEqual(res["rows"][0]["user"]["clubTag"], "ZOOM")
+        th = [t["xpThreshold"] for t in res["ladderTiers"]]
+        self.assertEqual((th, [t["tierNumber"] for t in res["ladderTiers"]]), (sorted(th, reverse=True), [1, 2, 3, 4, 5]))   # Tier 1 = highest
         r, res = call("Forza.WebServices.Scoreboard", "GetRows", {"scoreboardType": 8, "scoreType": 4, "view": 0, "isClubBoard": True,
                                                                   "startAt": 1, "maxResults": 20})
         self.assertEqual([(x["rank"], x["clubData"]["clubTag"], x["clubData"]["memberCount"]) for x in res["rows"]], [(1, "ZOOM", 1)])
