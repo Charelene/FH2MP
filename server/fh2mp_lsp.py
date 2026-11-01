@@ -42,6 +42,7 @@ import clubs  # noqa: E402
 import social  # noqa: E402
 import xbl  # noqa: E402
 import auth  # noqa: E402
+import diag  # noqa: E402
 import gamedb_sync  # noqa: E402
 import home  # noqa: E402
 import crash_reports  # noqa: E402
@@ -76,14 +77,40 @@ LEVELS = {}               # xuid -> currentCareerLevel as sent at Logon (career 
 TAGS = {}                 # xuid -> gamertag, learned at Logon
 
 
-def log(msg):
+VERBOSITY = diag.Verbosity()     # FH2MP_LOG_LEVEL / FH2MP_LOG_SUB
+RATE = diag.RateLimit()
+
+
+def log(msg, level="INFO", sub=None):
     """One log line. A line the handler of a request writes below its "#N POST ..." line (indented two spaces) carries that request's number
     too: the server handles requests in parallel threads, so before this "-> error result" and "no such livery" lines could not be
-    matched to the player whose request they answered (prod 2026-10-29)."""
+    matched to the player whose request they answered (prod 2026-10-29). INFO carries no level word (xp_audit and others parse these
+    lines); WARN / ERROR / DEBUG start with theirs. See diag.py."""
+    if not VERBOSITY.enabled(level, sub):
+        return
     seq = getattr(CTX, "seq", None)
     if seq and msg.startswith("  ") and not msg.startswith("  #"):
         msg = f"  #{seq}{msg[1:]}"
-    print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
+    print(f"{time.strftime('%H:%M:%S')} {'' if level == 'INFO' else level + ' '}{diag.scrub(msg)}", flush=True)
+
+
+def warn(msg, sub=None):
+    log(msg, "WARN", sub)
+
+
+def log_exc(msg, exc, level="ERROR"):
+    """A caught exception: what was being done, then type, message and innermost frame; the stack follows at ERROR."""
+    log(f"{msg}: {diag.where(exc)}", level)
+    if level == "ERROR":
+        for row in diag.stack(exc).splitlines():
+            log("  " + row, "ERROR")
+
+
+def log_every(key, interval, msg, level="WARN", sub=None):
+    """A repeating condition: one line per `interval` seconds per key, saying how many it stood in for."""
+    ok, skipped = RATE.allow(key, interval)
+    if ok:
+        log(msg + (f" (and {skipped} more in the last {interval:.0f} s)" if skipped else ""), level, sub)
 
 
 def candidates(cls, method, suffix):
