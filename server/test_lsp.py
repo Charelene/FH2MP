@@ -604,6 +604,101 @@ class LspTests(unittest.TestCase):
         r, res = call(S, "GetFileKeywords", {"fileType": 0, "maxKeywordResults": 50})
         self.assertIn("Drift", [k["Keyword"] for k in res["keywords"]])
 
+    def test_keyword_lists_follow_fh4_in_two_pickers(self):
+        S = "Forza.WebServices.Storefront"
+        want = {0: (7, 11, "Top Speed", "Wide-Ratio Gearbox"), 1: (10, 11, "Logo", "Wide"), 2: (9, 10, "Racing", "Drift"),
+                4: (5, 4, "Racing", "Untouched")}
+        for ftype, (n1, n2, first, last) in want.items():
+            r, res = call(S, "GetFileKeywords", {"fileType": ftype, "maxKeywordResults": 128})
+            kws = res["keywords"]
+            self.assertEqual([k["KeywordId"] for k in kws], list(range(1, n1 + n2 + 1)), ftype)
+            self.assertEqual([k["Bucket"] for k in kws], [0] * n1 + [1] * n2, ftype)
+            self.assertEqual((kws[0]["Keyword"], kws[-1]["Keyword"]), (first, last), ftype)
+
+    def test_downloads_and_likes_count_once_per_other_player(self):
+        S = "Forza.WebServices.Storefront"
+        owner, other, third = L.CTX.xuid, 0x0009000000000043, 0x0009000000000044
+        r, res = call("Forza.WebServices.ContentVersioning", "CreateVersionedTuneFromStructs", {"carId": 325})
+        vid = res["versionedTuneId"]
+        r, res = call("Forza.WebServices.StorefrontTuning", "Create", {
+            "fileHeader": {"Title": "Grip tune", "Type": 0, "PayloadSize": 10, "KeywordOne": 3, "KeywordTwo": 13},
+            "tuningDescription": {"base": {"VersionedTuneId": vid, "MakeId": 21, "ModelId": 325, "ClassId": 3, "PerformanceIndex": 700}},
+            "fileName": "tune", "previewData": b"\x89PNG"})
+        fid = res["contentFileId"]
+
+        def counts():
+            f = L.UGC.file_get(fid)
+            return f["downloads"], f["likes"]
+        call(S, "GetFileHeavyWeightData", {"fileCount": 1, "fileIds": [fid]})
+        call(S, "SearchTuningFiles", {"searchParameters": {"ClassId": -1}, "maxFiles": 10})
+        self.assertEqual(counts(), (0, 0))                                            # browsing is not downloading
+        retrieve = lambda: call("Forza.WebServices.ContentVersioning", "RetrieveVersionedTuneById", {"versionedTuneId": vid})  # noqa: E731
+        retrieve()
+        call(S, "IncrementLikes", {"fileId": fid})
+        self.assertEqual(counts(), (0, 0))                                            # the creator's own fetch and like do not count
+        L.CTX.xuid = other
+        retrieve()
+        retrieve()
+        call(S, "IncrementLikes", {"fileId": fid})
+        call(S, "IncrementLikes", {"fileId": fid})
+        self.assertEqual(counts(), (1, 1))                                            # once per player
+        L.CTX.xuid = third
+        retrieve()
+        call(S, "IncrementLikes", {"fileId": fid})
+        self.assertEqual(counts(), (2, 2))
+        L.CTX.xuid = owner
+        r, res = call(S, "GetMyFileList", {"fileType": 0, "maxFiles": 10})
+        mine = [x for x in res["files"] if x["Id"] == fid][0]
+        self.assertEqual((mine["DownloadCount"], mine["LikeCount"], mine["PopularityRating"]), (2, 2, ugc.popularity(L.UGC.file_get(fid))))
+        self.assertEqual(mine["PopularityRating"], 2)                                 # score 2*3 + 2 = 8 -> two stars
+
+    def test_a_design_seen_in_a_lobby_is_not_a_download(self):
+        owner, other = L.CTX.xuid, 0x0009000000000043
+        vid = L.UGC.versioned_create("livery", owner, "Stripe", 325, b"", layers=0)
+        fid = L.UGC.file_create("livery", owner, "Stripe", "", 2, vid, 0, b"\x89PNG", None, 325)
+        L.CTX.xuid = other
+        with mock.patch.dict(os.environ, {"FH2MP_LIVERY_GATE_OFF": "1"}):
+            call("Forza.WebServices.ContentVersioning", "RetrieveVersionedLiveryById", {"versionedLiveryId": vid, "returnThumbnail": True})
+            self.assertEqual(L.UGC.file_get(fid)["downloads"], 0)
+            call("Forza.WebServices.ContentVersioning", "RetrieveVersionedLiveryById", {"versionedLiveryId": vid, "returnThumbnail": False})
+        self.assertEqual(L.UGC.file_get(fid)["downloads"], 1)
+
+    def test_popular_files_come_first(self):
+        owner = L.CTX.xuid
+        quiet = L.UGC.file_create("livery", owner, "Quiet", "", 2, None, 0, b"x")
+        loved = L.UGC.file_create("livery", owner, "Loved", "", 2, None, 0, b"x")
+        for _ in range(3):
+            L.UGC.bump(loved, "likes")
+        self.assertEqual([f["id"] for f in L.UGC.search("livery")][:2], [loved, quiet])
+        self.assertEqual([ugc.popularity({"likes": n, "uses": 0, "downloads": 0}) for n in (0, 1, 2, 7, 20, 50)], [0, 1, 2, 3, 4, 5])
+
+    def test_vinyl_group_share_search_and_download(self):
+        S = "Forza.WebServices.Storefront"
+        owner, other = L.CTX.xuid, 0x0009000000000043
+        name, blob = b"Flames", os.urandom(300)
+        body = (struct.pack(">I", len(name)) + name + struct.pack(">H", 4) + b"\x00" + struct.pack(">Q", owner)
+                + struct.pack(">I", len(blob)) + blob)
+        self.assertEqual(ugc.parse_layergroup_upload(body), {"name": "Flames", "layers": 4, "payload": blob})
+        self.assertIsNone(ugc.parse_layergroup_upload(body[:-1]))                     # shorter than it declares
+        L.profile_update_layergroup(body)
+        vid = L.cv_create_layergroup({"name": "Flames", "thumbnail": b"\x89PNG"})["versionedLayerGroupId"]
+        v = L.UGC.versioned_get(vid)
+        self.assertEqual((v["data"], v["layers"]), (blob, 4))
+        r, res = call("Forza.WebServices.StorefrontLayerGroup", "Create", {
+            "fileHeader": {"Title": "Flames", "Type": 1, "PayloadSize": len(blob), "KeywordOne": 2, "KeywordTwo": 13},
+            "layerGroupDescription": {"base": {"VersionedLayerGroupId": vid, "NumberOfLayers": 4}},
+            "fileName": "Flames", "previewData": b"\x89PNG"})
+        self.assertEqual(r, 0)
+        fid = res["contentFileId"]
+        L.CTX.xuid = other
+        for kw, found in ((0, True), (2, True), (3, False)):
+            r, res = call(S, "SearchLayerGroupFiles", {"searchParameters": {"ClassId": -1, "KeywordOneId": kw}, "maxFiles": 10})
+            self.assertEqual(fid in [x["Id"] for x in res["searchResults"]], found, kw)
+        r, res = call("Forza.WebServices.ContentVersioning", "RetrieveVersionedLayerGroupById", {"versionedLayerGroupId": vid})
+        d = res["versionedLayerGroupData"]
+        self.assertEqual((bytes(d["data"]), d["numberOfLayers"], d["creatorXuid"]), (blob, 4, owner))
+        self.assertEqual(L.UGC.file_get(fid)["downloads"], 1)
+
     def test_photo_share_upload_list_and_download(self):
         S = "Forza.WebServices.Storefront"
         X = "Xls.WebServices.Content"

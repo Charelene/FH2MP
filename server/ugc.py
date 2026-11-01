@@ -153,6 +153,26 @@ def strip_livery_prefix(data):
     return data
 
 
+def parse_layergroup_upload(body):
+    """`OnlineProfile.UpdateLiveryGroup` request body: u32 name length + name, u16 layer count, u8 flag, u64 creator xuid, then the blob
+    (u32 length + bytes). The client builds the call like UpdateLivery's without the car id (FUN_140f07ce0 against FUN_140f07b50); the blob is
+    kept and served exactly as sent, as a design's is. Returns {"name", "layers", "payload"} or None when the body does not fit that layout."""
+    try:
+        n = struct.unpack(">I", body[:4])[0]
+        name = body[4:4 + n].decode("utf-8", "replace")
+        if len(name.encode()) > 4096:
+            return None
+        (layers,) = struct.unpack(">H", body[4 + n:6 + n])
+        p = 6 + n + 1 + 8
+        ln = struct.unpack(">I", body[p:p + 4])[0]
+        blob = body[p + 4:p + 4 + ln]
+        if len(blob) != ln or ln == 0:
+            return None
+        return {"name": name, "layers": layers, "payload": blob}
+    except (struct.error, ValueError):
+        return None
+
+
 def parse_livery_upload(body):
     """`OnlineProfile.UpdateLivery` request body (no descriptor in the exe, layout read from the real uploads and the client's own
     reader): u32 name length + name, i32 carId, u16 layer count, u8 flag, u64 creator xuid, then a blob (u32 BE length + bytes) in the
@@ -181,6 +201,18 @@ COMPLETE = (f"(f.blob_id IS NULL OR f.kind NOT IN ({', '.join(repr(k) for k in C
 # ugc_files columns except `preview` (a packed blob): list queries never carry it, file_get / files() unpack and return it
 LIST_COLS = ("id, kind, type, owner, title, description, created, payload_size, versioned_id, blob_id, car_id, make_id, model_id, "
              "class_id, keyword1, keyword2, env, track, pi, downloads, likes, uses, views, popularity, removed")
+
+
+# how well a file is liked, for ordering lists and for the star rating: a like says the most, a use (the item was put on a car or in a race)
+# less, a download least
+SCORE_SQL = "(f.likes * 3 + f.uses * 2 + f.downloads)"
+STAR_STEPS = (1, 6, 20, 60, 150)
+
+
+def popularity(f):
+    """The 0-5 PopularityRating the client shows (a byte in the file lists): one more star at each step of the like/use/download score."""
+    score = f["likes"] * 3 + f["uses"] * 2 + f["downloads"]
+    return sum(score >= t for t in STAR_STEPS)
 
 
 class UgcStore:
@@ -329,7 +361,7 @@ class UgcStore:
             f"SELECT {LIST_COLS} FROM ugc_files WHERE owner=? AND type=? AND removed=0 ORDER BY id DESC LIMIT ?", (owner, ftype, limit))]
 
     def search(self, kind, make=0, model=0, cls=-1, kw1=0, kw2=0, env=0, track=0, layers=0, gamertag="", text="", limit=50):
-        """Public files of a kind, newest first; 0 / -1 mean "any" [guess: the client's "no filter" values are unknown]."""
+        """Public files of a kind, best liked first (then newest); 0 / -1 mean "any" [guess: the client's "no filter" values are unknown]."""
         where, args = ["f.kind=?", "f.removed=0", COMPLETE], [kind]
         for col, val in (("make_id", make), ("model_id", model), ("keyword1", kw1), ("keyword2", kw2), ("env", env), ("track", track)):
             if val and val > 0:
@@ -345,28 +377,48 @@ class UgcStore:
             where.append("f.owner IN (SELECT xuid FROM players WHERE lower(gamertag)=lower(?))")
             args.append(gamertag)
         return [dict(r) for r in self.db.query(
-            f"SELECT {', '.join('f.' + c.strip() for c in LIST_COLS.split(','))} FROM ugc_files f WHERE {' AND '.join(where)} ORDER BY f.likes DESC, f.id DESC LIMIT ?", args + [limit])]
+            f"SELECT {', '.join('f.' + c.strip() for c in LIST_COLS.split(','))} FROM ugc_files f WHERE {' AND '.join(where)} ORDER BY {SCORE_SQL} DESC, f.id DESC LIMIT ?", args + [limit])]
 
     def curated(self, ctype, car_id, limit):
         """Recommended content: files of a type for a car (any car when `car_id` <= 0), most liked first."""
         return [dict(r) for r in self.db.query(
-            f"SELECT {LIST_COLS} FROM ugc_files WHERE removed=0 AND type=? AND (?<=0 OR car_id=?) ORDER BY likes DESC, id DESC LIMIT ?",
+            f"SELECT {', '.join('f.' + c.strip() for c in LIST_COLS.split(','))} FROM ugc_files f WHERE f.removed=0 AND f.type=? "
+            f"AND (?<=0 OR f.car_id=?) ORDER BY {SCORE_SQL} DESC, f.id DESC LIMIT ?",
             (ctype, car_id, car_id, limit))]
 
     def popular(self, kind, limit, since=None):
-        """Complete public files of a kind, most liked first (then most viewed, newest); `since` keeps files shared after that time."""
+        """Complete public files of a kind, best liked first (then most viewed, newest); `since` keeps files shared after that time."""
         where, args = ["f.kind=?", "f.removed=0", COMPLETE], [kind]
         if since is not None:
             where.append("f.created >= ?")
             args.append(since)
         return [dict(r) for r in self.db.query(
             f"SELECT {', '.join('f.' + c.strip() for c in LIST_COLS.split(','))} FROM ugc_files f WHERE {' AND '.join(where)} "
-            "ORDER BY f.likes DESC, f.views DESC, f.id DESC LIMIT ?", args + [limit])]
+            f"ORDER BY {SCORE_SQL} DESC, f.views DESC, f.id DESC LIMIT ?", args + [limit])]
 
     def bump(self, fid, column):
         assert column in ("views", "likes", "uses", "downloads")
         with self.db.tx() as c:
             c.execute(f"UPDATE ugc_files SET {column}={column}+1 WHERE id=?", (fid,))
+
+    def record_action(self, fid, xuid, action, column):
+        """Counts `column` of file `fid` once for this player and action; True when it counted, False for a repeat, the file's own creator
+        or an unknown / removed file. (A download or a like is one per player and file, whatever the client sends again.)"""
+        assert action in ("download", "like") and column in ("downloads", "likes")
+        with self.db.tx() as c:
+            f = c.execute("SELECT owner FROM ugc_files WHERE id=? AND removed=0", (fid,)).fetchone()
+            if f is None or f["owner"] == xuid:
+                return False
+            if not c.execute("INSERT INTO ugc_actions (file_id, xuid, action, at) VALUES (?,?,?,?) ON CONFLICT DO NOTHING",
+                             (fid, xuid, action, time.time())).rowcount:
+                return False
+            c.execute(f"UPDATE ugc_files SET {column}={column}+1 WHERE id=?", (fid,))
+            return True
+
+    def file_of_versioned(self, vid):
+        """The newest public file that lists a versioned item (a design shared twice counts for its latest listing), or None."""
+        r = self.db.one("SELECT id FROM ugc_files WHERE versioned_id=? AND removed=0 ORDER BY id DESC LIMIT 1", (vid,))
+        return r["id"] if r else None
 
     def remove(self, fid, owner):
         with self.db.tx() as c:
