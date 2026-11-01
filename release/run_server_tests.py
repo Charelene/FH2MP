@@ -26,7 +26,7 @@ PLAN = {
         'test_leader', 'test_vip', 'test_lobby_packing', 'test_lighting', 'test_ops', 'test_parts', 'test_phasing', 'test_probe', 'test_event_log', 'test_bucketlist',
         'test_player_setup', 'test_progress_boards', 'test_race_end', 'test_race_flow', 'test_replay',
         'test_restricted_tools', 'test_road_trip', 'test_score_reports',
-        'test_security', 'test_send_queue', 'test_site_stats', 'test_speedcheck',
+        'test_reliable', 'test_security', 'test_send_queue', 'test_site_stats', 'test_speedcheck',
         'test_tunnel', 'test_wire_skips', 'test_world_capacity', 'test_xp_audit', 'test_xls',
     ), 'portable'),
     'test_auth': 'postgres', 'test_gamedb_sync': 'postgres', 'test_community_pg': 'postgres',

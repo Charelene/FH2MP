@@ -34,6 +34,7 @@ import bucketlist  # noqa: E402
 import traffic as traffic_mod  # noqa: E402
 import gameopts  # noqa: E402
 import player_setup  # noqa: E402
+import reliable  # noqa: E402
 import replay  # noqa: E402
 import tunnel as tunnel_mod  # noqa: E402
 try:
@@ -399,8 +400,9 @@ MAX_PENDING_PER_IP = 8
 # The game's player list skips any player whose id equals the local player's, so two instances
 # on one profile never see each other in "Players". Relayed copies get a per-connection id.
 XUID_PATTERN = 0x0009000000000000
-UNRELIABLE_ID = 0xFFFF
+UNRELIABLE_ID = reliable.UNRELIABLE_ID
 NO_ID = 0xFFFE
+RELIABLE = os.environ.get("FH2MP_RELIABLE", "0") == "1"     # resend lost reliable messages (reliable.py); 0 sends exactly what it always did
 
 # The Road Trip event tables (AnthemOnlineEvents, RaceModes) of the game's database, cut out by tools/make_roadtrip_db.py; kept
 # next to the server so a deployment needs no game install.
@@ -1330,6 +1332,9 @@ class Peer:
         self.speed_flagged = set() # which reports were already made for this client
         self.max_abs = 0.0         # largest |coordinate| seen
         self.outbox = []           # baked messages waiting for the next datagram to this client (Server.send / flush_peer)
+        self.window = reliable.Window()
+        self.rx_seq = {}           # (router, id) -> newest sequence this client wrote, to count its resends
+        self.dup_objects = self.dup_requests = 0
         self.due = math.inf        # when the queued messages must leave
         self.hold = 0.0            # not before this (a reply: 2 ms after the client's packet)
         self.ack_cache = None
@@ -2011,14 +2016,17 @@ class Server:
         self.dirty.discard(peer)
         ack, bits = peer.ack_fields()
         limit = MAX_PACKET_BYTES * 8 - HEADER_BITS
+        reliable_now = RELIABLE and peer.connected      # before that the handshake resends itself
+        now = time.monotonic() if reliable_now else 0.0
         i = 0
         while True:
             j, size = i, 0
             while j < len(out) and j - i < 255 and (j == i or size + out[j][1] <= limit):
                 size += out[j][1]
                 j += 1
+            pid = peer.window.stamp(out[i:j], now) if reliable_now else UNRELIABLE_ID
             try:
-                self.sock.sendto(pack_messages(out[i:j], UNRELIABLE_ID, ack, bits), peer.addr)
+                self.sock.sendto(pack_messages(out[i:j], pid, ack, bits), peer.addr)
             except OSError as exc:
                 self.noise(f"{peer.addr[1]} send failed: {exc!r}")
             i = j
@@ -3050,6 +3058,11 @@ class Server:
         if peer.cars_relayed:
             self.log(f"{peer.addr[1]} session summary: xuid {peer.xuid:#x} car {peer.model_id} (stock {TOP_SPEED_KMH.get(peer.model_id)} km/h), "
                      f"top measured speed {peer.top_kmh:.0f} km/h, farthest position {peer.max_abs:.0f}, highest point {peer.max_y:.0f}, fastest climb {peer.top_climb:.0f} km/h")
+        win = peer.window
+        if win.sent or peer.dup_objects or peer.dup_requests:
+            self.log(f"{peer.addr[1]} delivery: {win.sent} reliable packets, {win.resent} messages resent ({win.resent_creates} creates), "
+                     f"peak {win.peak} waiting, {win.lost} given up, unacked at the end {len(win.pending)}; "
+                     f"client resends seen: {peer.dup_objects} objects, {peer.dup_requests} race requests")
         now_m = time.monotonic()
         self.drops.append((now_m, peer.owner_id, peer.xuid, peer.last_rx, peer.pos, peer.car_id, why))
         if (not self.wipe_at and now_m - self.wipe_last > 30.0
@@ -3070,6 +3083,9 @@ class Server:
             else:
                 self.maybe_begin_race()
                 self.maybe_go_race()
+        if RELIABLE and peer.owner_id:
+            for q in self.peers.values():
+                q.window.forget_owner(peer.owner_id, ROUTER_BITS)
         for (router, oid) in peer.objs:
             id_bits, _ = ROUTER_BITS[router]
             n = peer.relay_next.get((router, oid), 0)
@@ -3136,6 +3152,7 @@ class Server:
                 return
             peer = self.peers[addr] = Peer(addr)
         peer.note_packet_id(hdr["ack_id"])
+        peer.window.ack(hdr["remote_ack"], hdr["ack_bits"])
         peer.last_rx = time.monotonic()
         replies = []
         types = []
@@ -3342,6 +3359,8 @@ class Server:
             elif mtype == MSG_REQUEST_RACE and self.request_race_blocked(peer):
                 self.log(f"{addr[1]} MsgRequestRace (owner {peer.owner_id}) ignored: an event is already being set up or running in this lobby")
             elif mtype == MSG_REQUEST_RACE:
+                if self.pending_race and self.pending_race[1] is peer:
+                    peer.dup_requests += 1
                 busy = self.close_finished_event()      # players still on the previous event's results screen cannot take an invite
                 self.accept_requested_options(peer)
                 if not self.roadtrip:
@@ -3405,6 +3424,12 @@ class Server:
                 seq = r.bits(8)
                 size = r.bits(14)
                 payload = r.bits(size) if size else 0
+                if a == 0 and b == 0:
+                    last = peer.rx_seq.get((router, oid))
+                    if last is not None and not 0 < (seq - last) % 0xFF < 0x80:
+                        peer.dup_objects += 1           # the client resends a packet whose ack it missed; counted until we know how often
+                    else:
+                        peer.rx_seq[(router, oid)] = seq
                 limits = ROUTER_LIMITS.get(router) if a == 0 and b == 0 else None
                 if limits and (oid >= limits[0] or (tid is not None and tid >= limits[1])):
                     self.malformed(peer, f"object router={router} id={oid} type={tid}")
@@ -4066,6 +4091,11 @@ class Server:
             if peer.connected and now - peer.last_rx > STALE_SECONDS:
                 self.drop_peer(peer, f"no packets for {STALE_SECONDS:.0f} s")
                 continue
+            if peer.window.pending:
+                again = peer.window.due(now, peer.last_rx)
+                if again:
+                    peer.outbox[:0] = again
+                    self.send(peer, [])
             if peer.connected and now - peer.last_keepalive >= KEEPALIVE_SECONDS:
                 peer.last_keepalive = now
                 msgs = [ping_live(self.now_ms)]
