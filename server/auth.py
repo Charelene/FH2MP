@@ -210,6 +210,7 @@ class AuthService:
         self.blocked_words = ()
         self._cache = {}                 # token hash -> dict
         self._cache_lock = threading.Lock()
+        self._ban_cache = {}             # xuid -> (checked, message or None), for requests that carry no token
         self._secret = self._load_secret()
         self.scale = float(os.environ.get("FH2MP_RATE_SCALE", "1"))      # load tests on the dev stack raise every limit (never on prod)
         self.per_ip_daily = int(os.environ.get("FH2MP_REG_PER_IP_DAY", "5")) * max(1, int(self.scale))
@@ -452,6 +453,7 @@ class AuthService:
             n = c.execute("UPDATE accounts SET banned_at=?, ban_until=?, ban_reason=? WHERE xuid=?",
                           (None if reason is None else self.clock(), None if reason is None else until, reason or "", xuid)).rowcount
         with self._cache_lock:
+            self._ban_cache.pop(xuid, None)
             for h, ent in list(self._cache.items()):
                 if ent["xuid"] == xuid:
                     del self._cache[h]
@@ -461,6 +463,22 @@ class AuthService:
         if reason is not None and self.on_revoke:
             self.on_revoke(xuid)
         return n > 0
+
+    def ban_text(self, xuid):
+        """The ban message while the account is banned, else None. For requests identified by X-UserId alone (no token), which must be
+        refused for a banned account like any other: nothing a banned player sends is accepted."""
+        now = self.clock()
+        with self._cache_lock:
+            hit = self._ban_cache.get(xuid)
+        if hit is None or now - hit[0] > CACHE_SECONDS:
+            r = self.db.one("SELECT banned_at, ban_until, ban_reason FROM accounts WHERE xuid=?", (xuid,))
+            text = ban_message(r["ban_reason"], r["ban_until"]) if r and ban_active(r["banned_at"], r["ban_until"], now) else None
+            hit = (now, text)
+            with self._cache_lock:
+                if len(self._ban_cache) > 20000:
+                    self._ban_cache.clear()
+                self._ban_cache[xuid] = hit
+        return hit[1]
 
     def revoke(self, xuid):
         with self.db.tx() as c:

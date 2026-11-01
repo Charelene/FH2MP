@@ -284,6 +284,17 @@ class SessionTests(AuthCase):
             self.svc.login(**self.d.login_args(self.svc))
         self.assertEqual(cm.exception.message, "This account is banned permanently. Reason: cheating")
 
+    def test_a_banned_xuid_is_refused_without_a_token_until_the_ban_ends(self):
+        self.assertIsNone(self.svc.ban_text(self.acct.xuid))
+        self.svc.set_banned(self.acct.xuid, "cheating", until=self.clock.t + 3600)
+        self.assertIn("banned until", self.svc.ban_text(self.acct.xuid))
+        self.clock.t += 3601
+        self.assertIsNone(self.svc.ban_text(self.acct.xuid))                # lapsed (the cached answer ages out at once too)
+        self.svc.set_banned(self.acct.xuid, "cheating")
+        self.assertIn("permanently", self.svc.ban_text(self.acct.xuid))
+        self.svc.set_banned(self.acct.xuid, None)
+        self.assertIsNone(self.svc.ban_text(self.acct.xuid))                # an unban shows at once
+
     def test_ban_must_end_in_the_future(self):
         self.assertEqual(self.code(self.svc.set_banned, self.acct.xuid, "x", self.clock.t - 1), "bad_request")
 
