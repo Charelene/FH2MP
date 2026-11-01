@@ -422,6 +422,7 @@ def _own_cars():
 
 SCORE_LIMIT = (120, 60)           # SubmitScore per account per second window: the busiest player sends a few a minute, counters included
 GHOST_LIMITS = ((10, 60), (300, 86400))   # UploadFile: the busiest day of 17,330 runs was 64
+GHOST_UPLOAD = ("Forza.WebServices.Scoreboard", "UploadFile")
 
 
 def _within(name, limits):
@@ -532,9 +533,6 @@ def announce_rotation():
 
 def sb_upload_file(req):
     xuid, tag = _me()
-    if not _within("ghost", GHOST_LIMITS):
-        log(f"  UploadFile user={xuid:#x}: over the rate limit, ignored")
-        return None
     sid, public = SB.attach_ghost(req["scoreId"], req["data"], xuid)
     log(f"  UploadFile scoreId={bytes(req['scoreId']).hex()[:8]} {len(req['data'])} bytes -> ghost #{sid}")
     if public and SB.ghost_policy == "enforce":
@@ -2197,7 +2195,10 @@ def handle_xls(cls, method, body):
         return frame(result=2, error=0x0001, text=b"fh2mp: not implemented")
     pname, pfields = find_struct(cls, method, "_Parameters")
     req = None
-    if pfields is not None and body and key in HANDLERS:
+    limited = key == GHOST_UPLOAD and not _within("ghost", GHOST_LIMITS)       # before the decode: the body is what is expensive
+    if limited:
+        log("  UploadFile over the rate limit, ignored")
+    elif pfields is not None and body and key in HANDLERS:
         try:
             req, rem = xls.decode(SC, pfields, body)
             if rem:
@@ -2211,7 +2212,7 @@ def handle_xls(cls, method, body):
         log(f"  no schema for {cls} {method}; answering OK with empty body")
         return frame()
     try:
-        result = HANDLERS[key][1](req) if key in HANDLERS else None
+        result = HANDLERS[key][1](req) if key in HANDLERS and not limited else None
     except XlsError as e:
         log(f"  -> error result: {e.text}")
         return frame(result=2, error=e.code, text=e.text.encode())

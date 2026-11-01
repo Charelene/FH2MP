@@ -12,10 +12,12 @@ import collections
 import struct
 import zlib
 
-MAX_BLOB = 1 << 20        # stored ghost; the largest of 17,000 real ones is 362 KB (2026-10-30)
+MAX_BLOB = 0x80000        # the wire limit for an uploaded blob; the largest of 17,000 real ones is 362 KB (2026-10-30)
+MAX_SERVED = 0x3E800      # the client downloads into a buffer this size (0xa3fc00); a larger ghost must not be offered
 MAX_RAW = 8 << 20         # both sections inflated
 MAX_CHUNK_RAW = 1 << 16   # the game writes 4096-byte chunks
 MAX_KEYFRAME_PACKETS = 4096
+MAX_NESTING = 4           # a keyframe holds packets; the game writes them one level deep
 
 MSG_CAR_POS = 0           # CMsgCarPosRaw
 MSG_CAR_KEYFRAME = 2      # CMsgCarKeyframe
@@ -75,8 +77,10 @@ def sections(blob):
     return _chunks(blob[8:8 + head]), _chunks(blob[8 + head:])
 
 
-def _packet_end(d, o):
+def _packet_end(d, o, depth=0):
     """Offset just past the packet at `o` (its header byte)."""
+    if depth > MAX_NESTING:
+        raise GhostError("keyframes nested too deep")
     if o >= len(d):
         raise GhostError("truncated packet")
     h = d[o]
@@ -91,7 +95,7 @@ def _packet_end(d, o):
             raise GhostError("keyframe too large")
         end = o + 4
         for _ in range(n):
-            end = _packet_end(d, end)
+            end = _packet_end(d, end, depth + 1)
     elif kind == 2:
         size = MSG_SIZES.get(h >> 3, 0)
         o += 2

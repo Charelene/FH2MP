@@ -174,6 +174,10 @@ class ScoreStore:
             return None, False
         if r["stored"] is not None:
             return (r["id"], False) if bytes(r["stored"]) == data else (None, False)
+        try:
+            ghost.parse(data)        # every one of 17,011 real ghosts parses; what does not is never stored or served
+        except ghost.GhostError:
+            return None, False
         judged = r["sb"] in GHOST_BOARDS and r["st"] in ASCENDING
         verdict = self.judge_run(dict(zip(r.keys(), r)), data) if judged else None    # outside the transaction: a parse must never hold the lock
         now = time.time()
@@ -272,7 +276,7 @@ class ScoreStore:
         # Record ties retain their first submission; save snapshots follow submission order.
         order = 's.id DESC' if limit is not None else f"s.score {'ASC' if asc else 'DESC'}, s.id"
         sql = (f"SELECT * FROM (SELECT s.*, {score_reports.COUNTS} AS report_count, COALESCE(p.gamertag, '') AS tag, "
-               "CASE WHEN g.submission_id IS NULL THEN 0 ELSE s.id END AS ghost, ROW_NUMBER() OVER "
+               f"CASE WHEN g.submission_id IS NULL OR length(g.data) > {ghost.MAX_SERVED} THEN 0 ELSE s.id END AS ghost, ROW_NUMBER() OVER "
                f"(PARTITION BY s.xuid ORDER BY {order}) AS rn "
                "FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid "
                f"LEFT JOIN score_ghosts g ON g.submission_id = s.id WHERE {where}) ranked WHERE rn = 1")
