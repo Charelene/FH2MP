@@ -3425,6 +3425,68 @@ static void weather_sample(unsigned char *img)
     log_raw("\n");
 }
 
+#include "eo_timelock.inc"
+
+/* The plugin as far as this code knows it: each global's use, byte for byte, so another build is left alone */
+static unsigned char *eo_timelock_plugin(void)
+{
+    static const struct { unsigned rva; unsigned char code[13]; unsigned n; } known[] = {
+        {0x2d90, {0x31, 0xc0, 0x83, 0x3d, 0x43, 0x79, 0x00, 0x00, 0x00, 0x0f, 0x95, 0xc0, 0xc3}, 13},  /* enabled */
+        {0x2dd0, {0x8b, 0x05, 0x0a, 0x79, 0x00, 0x00, 0xc3}, 7},                                       /* generation */
+        {0x32b0, {0x8b, 0x05, 0x2e, 0x74, 0x00, 0x00, 0xc3}, 7},                                       /* weather */
+        {0x36d8, {0x48, 0x3b, 0x1d, 0x29, 0x70, 0x00, 0x00}, 7},                                       /* held clock */
+    };
+    static int refused;
+    unsigned char *wc;
+    unsigned char code[13];
+    unsigned i;
+
+    if (refused || !(wc = (unsigned char *)GetModuleHandleW(L"EO_WeatherControl.dll"))) {
+        return NULL;
+    }
+    for (i = 0; i < sizeof known / sizeof known[0]; i++) {
+        if (!read_game_memory(wc + known[i].rva, code, known[i].n) || memcmp(code, known[i].code, known[i].n)) {
+            refused = 1;
+            log_begin();
+            log_raw("timelock: unknown EO_WeatherControl.dll, its time lock is not parked online\n");
+            return NULL;
+        }
+    }
+    return wc;
+}
+
+static void eo_timelock_tick(unsigned char *img)
+{
+    static struct eo_lock state;
+    unsigned char *wc = eo_timelock_plugin();
+    unsigned char *manager = NULL, *session = NULL, *root = NULL, *players = NULL, *world = NULL, *clock = NULL;
+    int did;
+
+    if (!wc) {
+        return;
+    }
+    if (read_game_memory(img + FH2_NET_GAME_MANAGER_RVA, &manager, 8) && manager) {
+        read_game_memory(manager + 0xd0, &session, 8);
+    }
+    if (read_game_memory(img + FH2_WORLD_ROOT_RVA, &root, 8) && root && read_game_memory(root + 0x48, &players, 8) && players &&
+        read_game_memory(players + 0x98, &world, 8) && world) {
+        read_game_memory(world + 0x480, &clock, 8);
+    }
+    did = eo_lock_step(&state, wc, session != NULL, clock);
+    if (did & EO_LOCK_RESTORED) {
+        log_begin();
+        log_raw("timelock: session over, EO's time and weather settings are back\n");
+    }
+    if (did & EO_LOCK_PARKED) {
+        log_begin();
+        log_raw("timelock: EO's time and weather settings are parked for this session\n");
+    }
+    if (did & EO_LOCK_CLOCK_RELEASED) {
+        log_begin();
+        log_raw("timelock: the clock EO held follows the network clock again\n");
+    }
+}
+
 static DWORD WINAPI option_monitor(LPVOID unused)
 {
     unsigned char *img = NULL;
@@ -3623,6 +3685,7 @@ static DWORD WINAPI option_monitor(LPVOID unused)
         if (weather_dump) {
             weather_sample(img);
         }
+        eo_timelock_tick(img);
         if (g_gamedb_started && tick % 10 == 0) {
             gamedb_place();               /* a copy that failed, or a mod's apply_database putting the platform's copy back */
         }

@@ -68,6 +68,7 @@ lane_server() {
     run "shim inflate" shim/test_inflate.sh
     run "shim gamedb keep" shim/test_gamedb_keep.sh
     run "shim session age" shim/test_session_age.sh
+    run "shim eo timelock" shim/test_eo_timelock.sh
 }
 
 pg_root=
