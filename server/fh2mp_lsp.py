@@ -24,7 +24,6 @@ import re
 import struct
 import sys
 import time
-import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -36,7 +35,6 @@ import xp_audit  # noqa: E402
 import rivals  # noqa: E402
 import ugc  # noqa: E402
 import pngtool  # noqa: E402
-import xls_schema as S  # noqa: E402
 import cardb  # noqa: E402
 import db  # noqa: E402
 import notifstore  # noqa: E402
@@ -172,7 +170,7 @@ NOTIF_STRUCTS = {
     0x600: "BannedNotificationParameters", 0x601: "UnbannedNotificationParameters",
     0x602: "MessageNotificationParameters",
     0x8000: "UserBadgeGrantedNotificationParameters", 0x8001: "SetCreditsNotificationParameters",
-    0x8301: "SharedCarNotificationParameters", 0x8302: "CurationPayoutNotificationParameters",
+    0x8302: "CurationPayoutNotificationParameters",
     0x8303: "DrivatarPayoutNotificationParameters", 0x8401: "MessageNotificationParameters",
     0x8402: "TimeTrialRecommendNotificationParameters", 0x8403: "TimeTrialTimeBeatenNotificationParameters",
     0x8500: "GiftReceiveMoneyNotificationParameters", 0x8501: "GiftReceiveItemNotificationParameters",
@@ -950,16 +948,6 @@ def content_download(req):
     return {"isLastBuffer": last, "downloadData": chunk, "totalSize": total}
 
 
-def large_file_create(req):
-    xuid, _ = _me()
-    try:
-        bid = UGC.blob_create(xuid, req["userFileName"], req["payloadSize"])
-    except ugc.LimitError as e:
-        raise XlsError(str(e))
-    log(f"  LargeFileUpload.Create name={req['userFileName']!r} size={req['payloadSize']} -> content id {bid}")
-    return {"contentFileId": bid}
-
-
 def profile_update_livery(body):
     """OnlineProfile.UpdateLivery: the real upload of a design (layout in ugc.parse_livery_upload). It is kept under (owner, name) until
     CreateVersionedLivery names it."""
@@ -1032,13 +1020,6 @@ def cv_create_layergroup(req):
     vid = UGC.versioned_create("layergroup", xuid, req["name"], None, bytes(req["thumbnail"]))
     log(f"  CreateVersionedLayerGroup {req['name']!r} thumb={len(req['thumbnail'])}B -> versioned {vid}")
     return {"versionedLayerGroupId": vid}
-
-
-def cv_create_tune(req):
-    xuid, _ = _me()
-    vid = UGC.versioned_create("tune", xuid, req["name"], req["carId"])
-    log(f"  CreateVersionedTune {req['name']!r} car={req['carId']} -> versioned {vid}")
-    return {"versionedTuneId": vid}
 
 
 def cv_create_tune_structs(req):
@@ -1370,27 +1351,9 @@ def _bump_handler(column, field="fileId"):
     return h
 
 
-def store_batch_views(req):
-    for i in req["fileIds"][:max(0, req["fileCount"])]:
-        UGC.bump(i, "views")
-    return None
-
-
 def store_remove(req):
     xuid, _ = _me()
     log(f"  RemoveFile #{req['fileId']}: {'removed' if UGC.remove(req['fileId'], xuid) else 'not yours / unknown'}")
-    return None
-
-
-def store_retitle(req):
-    xuid, _ = _me()
-    UGC.retitle(req["fileId"], xuid, title=req["newTitle"])
-    return None
-
-
-def store_redescribe(req):
-    xuid, _ = _me()
-    UGC.retitle(req["fileId"], xuid, description=req["newDescription"])
     return None
 
 
@@ -1419,18 +1382,6 @@ def store_curated(req):
     tmpl = _elem_template("ForzaStorefrontGetCuratedContent_Results", "curatedContent")
     log(f"  GetCuratedContent type={p['ContentType']} car={p['CarId']} track={p['TrackId']} pi={p['PiTargetValue']}: {len(files)} found")
     return {"curatedContent": [_light(f, tmpl) for f in files]}
-
-
-def store_curated_data(req):
-    f = UGC.file_get(req["contentId"])
-    if f is None:
-        raise XlsError(f"no such content {req['contentId']}")
-    v = UGC.versioned_get(f["versioned_id"]) if f["versioned_id"] else None
-    res = xls.default_struct(SC, SC.call_struct("ForzaStorefrontGetCuratedContentData_Results"))
-    res["contentData"].update({"Id": f["id"], "PreviewPayload": bytes(f["preview"] or b"")[:409600],
-                               "Payload": bytes((v or {}).get("data") or b"")[:1048576]})
-    log(f"  GetCuratedContentData #{f['id']}: payload {len(res['contentData']['Payload'])}B, preview {len(res['contentData']['PreviewPayload'])}B")
-    return res
 
 
 def store_noop(req):
@@ -1498,18 +1449,6 @@ def club_details(req):
     return res
 
 
-@_club_errors
-def club_full_info(req):
-    club = CLUBS.club(req["clubId"])
-    if not club:
-        raise clubs.ClubError("club not found", clubs.CODES["not_found"])
-    res = xls.default_struct(SC, SC.call_struct("ForzaCarClubGetClubFullInfo_Results"))
-    res["clubDetails"] = _club_struct(res["clubDetails"], club)
-    leader_tmpl = _elem_template("ForzaCarClubGetClubFullInfo_Results", "leaders")
-    res["leaders"] = [_owner(leader_tmpl, x) for x in CLUBS.leaders(club["id"], max(1, req["maxLeaders"]))]
-    return res
-
-
 def club_keywords(req):
     return {"keywords": clubs.keyword_list()[:max(1, req["maxKeywordResults"])]}
 
@@ -1547,11 +1486,6 @@ def club_search_tag(req):
     res = xls.default_struct(SC, SC.call_struct("ForzaCarClubSearchForClubByTag_Results"))
     res["clubDetails"] = _club_struct(res["clubDetails"], club)
     return res
-
-
-def club_status(req):
-    club_id, _, _ = CLUBS.member_info(req["xuid"])
-    return {"clubStatus": {"acceptsClubInvites": CLUBS.accepts_invites(req["xuid"]), "clubId": club_id}}
 
 
 def club_members(req):
@@ -1626,13 +1560,6 @@ def club_request_join(req):
     return _after_request(club, xuid, approved)
 
 
-@_club_errors
-def club_request_join_name(req):
-    xuid, _ = _me()
-    club, approved = CLUBS.request_join(xuid, tag=req["clubTag"])
-    return _after_request(club, xuid, approved)
-
-
 def _after_request(club, xuid, approved):
     if approved:
         _joined(club, xuid)
@@ -1668,17 +1595,6 @@ def club_invite(req):
     xuid, _ = _me()
     club, iid = CLUBS.invite(xuid, req["userToInvite"])
     _invite(club, iid, xuid, req["userToInvite"])
-    return None
-
-
-@_club_errors
-def club_invite_name(req):
-    xuid, _ = _me()
-    r = DB.one("SELECT xuid FROM players WHERE lower(gamertag)=lower(?)", (req["usernameToInvite"],))
-    if not r:
-        raise clubs.ClubError("no such player", clubs.CODES["not_found"])
-    club, iid = CLUBS.invite(xuid, r["xuid"])
-    _invite(club, iid, xuid, r["xuid"])
     return None
 
 
@@ -1743,16 +1659,6 @@ def club_leave(req):
 
 
 @_club_errors
-def club_recommend_removal(req):
-    xuid, _ = _me()
-    club = CLUBS.recommend_removal(xuid, req["userToRemove"])
-    _notify_leaders(club, 0x702, {"recommendingRemovalXuid": xuid, "recommendingRemovalGamertag": _tag(xuid),
-                                  "recommendedForRemovalXuid": req["userToRemove"],
-                                  "recommendedForRemovalGamertag": _tag(req["userToRemove"]), "clubId": club["id"]})
-    return None
-
-
-@_club_errors
 def club_post_notice(req):
     xuid, _ = _me()
     club, role = CLUBS.membership(xuid)
@@ -1771,38 +1677,6 @@ def club_delete_notice(req):
     for nid in CLUBS.delete_notice(xuid, req["notificationId"]):
         NOTIF.delete(nid)
     return None
-
-
-def club_history(req):
-    el = _elem_template("ClubGetClubHistory_Results", "userClubHistory")
-    out = []
-    for r in CLUBS.history(req["userXuid"], req["maxEntries"]):
-        h = _clone(el)
-        h.update({"clubName": r["club_name"][:49], "date": _stamp(r["created"]), "user": _owner(el["user"], req["userXuid"]),
-                  "role": clubs.wire_role(r["role"]), "action": r["action"]})
-        out.append(h)
-    return {"userClubHistory": out}
-
-
-def club_users_to_invite(req):
-    el = _elem_template("ClubGetUsersToInvite_Results", "candidatesForInvite")
-    out = []
-    for r in CLUBS.users_to_invite(getattr(CTX, "xuid", 0), req["maxResults"]):
-        c = _clone(el)
-        c.update({"user": _owner(el["user"], r["xuid"]), "acceptsClubInvites": bool(r["accepts"]), "hasEverLoggedIn": True, "clubName": ""})
-        out.append(c)
-    return {"candidatesForInvite": out}
-
-
-def club_users_to_join(req):
-    el = _elem_template("ClubGetUsersToJoin_Results", "usersInClubs")
-    out = []
-    for r in CLUBS.users_to_join(getattr(CTX, "xuid", 0), req["maxResults"]):
-        c = _clone(el)
-        c.update({"user": _owner(el["user"], r["xuid"]), "clubMemberCount": r["members"], "clubName": r["name"][:49],
-                  "clubIsOpenForMembership": r["privacy"] == clubs.PRIVACY_OPEN})
-        out.append(c)
-    return {"usersInClubs": out}
 
 
 def club_accept_invites_pref(req):
@@ -1856,107 +1730,6 @@ def _car_info(car_id):
     return DB.one("SELECT c.makeid, c.familymodelid, c.familybodyid, c.cartypeid, c.regionid, c.countryid, c.familyspecialid, "
                   "c.engineplacementid, c.contentid, c.year, v.make, v.name FROM game.data_car c JOIN game.v_cars v ON v.id = c.id WHERE c.id=?",
                   (car_id,))
-
-
-def _shared_notify(club, action, car, xuid, targets):
-    info = _car_info(car["model_id"])
-    params = {"sharedCarAction": action, "playerXuid": xuid, "playerGamertag": _tag(xuid), "MakeName": (info["make"] if info else "")[:61],
-              "ModelName": (info["name"] if info else "")[:161], "perfIndex": json.loads(car["car"]).get("perfIndex", 0.0),
-              "Year": info["year"] if info else 0}
-    for t in targets:
-        if t != xuid:
-            _club_notify(t, 0x8301, params)
-
-
-@_club_errors
-def shared_upload_textures(req):
-    xuid, _ = _me()
-    tid = CLUBS.textures_create(xuid, req["liveryTexture"], req["LiveryThumbnail"])
-    log(f"  SharedCar.UploadCarTextures -> #{tid} (livery {len(req['liveryTexture'])}B, thumbnail {len(req['LiveryThumbnail'])}B)")
-    return {"texturesId": tid}
-
-
-@_club_errors
-def shared_create(req):
-    xuid, _ = _me()
-    d = dict(req["completeCarData"])
-    guid, profile, model_id = d.pop("gameCarId"), d.pop("ProfileId"), d["modelId"]
-    cid, version, club = CLUBS.share_car(xuid, guid, profile, model_id, d, req["texturesId"], req["liveryDetails"], req["tuning"],
-                                         req["overWriteExisting"])
-    car = CLUBS.shared_car(cid)
-    _shared_notify(club, 0, car, xuid, [r["xuid"] for r in CLUBS.members(club["id"], 1000)] if version == 1 else [])
-    log(f"  SharedCar.Create car {model_id} by {xuid:#x} -> shared car #{cid} v{version} in [{club['tag']}] "
-        f"(overwrite={req['overWriteExisting']}, livery {len(req['liveryDetails'])}B, tuning {len(req['tuning'])}B)")
-    return {"carId": cid}
-
-
-def shared_club_cars(req):
-    xuid, _ = _me()
-    el = _elem_template("ForzaSharedCarGetClubCars_Results", "carData")
-    out = []
-    for r in CLUBS.club_cars(xuid, req["maxResults"]):
-        car = json.loads(r["car"])
-        info = _car_info(r["model_id"])
-        c = _clone(el)
-        c.update({"owner": _owner(el["owner"], r["owner"]), "sharedDate": _stamp(r["shared"]), "lastUsedDate": _stamp(r["last_used"]),
-                  "sharedCarId": r["id"], "modelId": r["model_id"], "raceCount": r["race_count"], "version": r["version"],
-                  "performanceIndex": car.get("perfIndex", 0.0), "simulationPeakPower": car.get("simPeakPower", 0.0),
-                  "simulationPeakTorque": car.get("simPeakTorque", 0.0), "curbWeight": car.get("curbWeight", 0.0),
-                  "weightDistribution": car.get("weightDistribution", 0.0), "isStock": car.get("isStock", False)})
-        for k in ("classId", "driveTypeId", "engineConfigId", "cylinderId", "aspirationTypeId", "displacementId", "speedRating",
-                  "accelerationRating", "launchRating", "brakingRating", "handlingRating"):
-            c[k] = car.get(k, c[k])
-        if info:
-            c.update({"year": info["year"], "makeId": info["makeid"], "modelFamilyId": info["familymodelid"], "bodyFamilyId": info["familybodyid"],
-                      "carTypeId": info["cartypeid"], "regionId": info["regionid"], "countryId": info["countryid"],
-                      "familySpecialId": info["familyspecialid"], "enginePlacementId": info["engineplacementid"],
-                      "contentId": info["contentid"], "makeName": info["make"][:61], "modelName": info["name"][:161]})
-        out.append(c)
-    log(f"  SharedCar.GetClubCars by {xuid:#x}: {len(out)} cars")
-    return {"carData": out}
-
-
-def shared_details(req):
-    el = _elem_template("ForzaSharedCarGetCarDetails_Results", "carData")
-    out = []
-    for cid in req["carIds"][:max(0, req["carCount"])]:
-        r = CLUBS.shared_car(cid)
-        if not r:
-            continue
-        car = json.loads(r["car"])
-        c = _clone(el)
-        c.update({"sharedCarId": cid, "thumbnail": CLUBS.textures(r["textures_id"])[1][:230400],
-                  "manufacturerColorIndex": car.get("manufacturerColorIndex", 0), "carColorRGB": car.get("carColorRGB", 0),
-                  "isMetallic": car.get("isMetallic", False), "specialColorIndex": car.get("specialColorIndex", 0)})
-        out.append(c)
-    return {"carData": out}
-
-
-def shared_download(req):
-    r = CLUBS.shared_car(req["carId"])
-    if not r:
-        raise XlsError(f"no such shared car {req['carId']}")
-    log(f"  SharedCar.Download #{req['carId']} v{r['version']} (asked v{req['version']}): livery {len(r['livery'])}B, tuning {len(r['tuning'])}B")
-    return {"liveryDetails": r["livery"][:req["maxLiveryLength"] or None], "tuningDetails": r["tuning"][:req["maxTuningLength"] or None]}
-
-
-@_club_errors
-def shared_remove(req):
-    xuid, _ = _me()
-    log(f"  SharedCar.Remove #{req['carId']} by {xuid:#x}: {'removed' if CLUBS.remove_car(xuid, req['carId']) else 'unknown car'}")
-    return None
-
-
-def shared_race(req):
-    xuid, _ = _me()
-    r = CLUBS.shared_car(req["carId"])
-    if r:
-        CLUBS.count_race(req["carId"])
-        if r["owner"] != xuid:
-            club, _ = CLUBS.membership(r["owner"])
-            if club:
-                _shared_notify(club, 1, r, xuid, [r["owner"]])           # someone raced the owner's shared car [action 1 = used: guess]
-    return None
 
 
 def _also_xls_club():
@@ -2088,20 +1861,13 @@ RAW_HANDLERS[("Forza.WebServices.OnlineProfile", "UpdateLivery")] = lambda body:
 HANDLERS = {
     ("Xls.WebServices.Content", "UploadContent"): ("", content_upload),
     ("Xls.WebServices.Content", "DownloadContent"): ("", content_download),
-    ("Forza.WebServices.LargeFileUpload", "Create"): ("", large_file_create),
     ("Forza.WebServices.ContentVersioning", "CreateVersionedLivery"): ("", cv_create_livery),
     ("Forza.WebServices.ContentVersioning", "CreateVersionedLayerGroup"): ("", cv_create_layergroup),
-    ("Forza.WebServices.ContentVersioning", "CreateVersionedTune"): ("", cv_create_tune),
     ("Forza.WebServices.ContentVersioning", "CreateVersionedTuneFromStructs"): ("", cv_create_tune_structs),
     ("Forza.WebServices.ContentVersioning", "RetrieveVersionedLiveryById"): ("", cv_get_livery),
     ("Forza.WebServices.ContentVersioning", "RetrieveVersionedLayerGroupById"): ("", cv_get_layergroup),
     ("Forza.WebServices.ContentVersioning", "RetrieveVersionedTuneById"): ("", cv_get_tune),
-    ("Forza.WebServices.ContentVersioning", "AddReferenceToVersionedLivery"): ("", _cv_ref("versionedLiveryId", 1)),
     ("Forza.WebServices.ContentVersioning", "RemoveReferenceToVersionedLivery"): ("", _cv_ref("versionedLiveryId", -1)),
-    ("Forza.WebServices.ContentVersioning", "AddReferenceToVersionedLayerGroup"): ("", _cv_ref("versionedLayerGroupId", 1)),
-    ("Forza.WebServices.ContentVersioning", "RemoveReferenceToVersionedLayerGroup"): ("", _cv_ref("versionedLayerGroupId", -1)),
-    ("Forza.WebServices.ContentVersioning", "AddReferenceToVersionedTune"): ("", _cv_ref("versionedTuneId", 1)),
-    ("Forza.WebServices.ContentVersioning", "RemoveReferenceToVersionedTune"): ("", _cv_ref("versionedTuneId", -1)),
     ("Forza.WebServices.StorefrontLivery", "Create"): ("", store_livery_create),
     ("Forza.WebServices.StorefrontTuning", "Create"): ("", store_tuning_create),
     ("Forza.WebServices.Storefront", "SearchLiveryFiles"): ("", store_search_liveries),
@@ -2113,23 +1879,17 @@ HANDLERS = {
     ("Forza.WebServices.Storefront", "GetFileHeavyWeightData"): ("", store_heavy),
     ("Forza.WebServices.Storefront", "GetMyFileList"): ("", store_my_files),
     ("Forza.WebServices.Storefront", "GetFileDataIfShared"): ("", store_if_shared),
-    ("Forza.WebServices.Storefront", "SynchronizeSharedFiles"): ("", store_noop),
     ("Forza.WebServices.Storefront", "IncrementLikes"): ("", _bump_handler("likes")),
     ("Forza.WebServices.Storefront", "IncrementUsage"): ("", _bump_handler("uses")),
     ("Forza.WebServices.Storefront", "IncrementViews"): ("", _bump_handler("views")),
-    ("Forza.WebServices.Storefront", "BatchIncrementViews"): ("", store_batch_views),
     ("Forza.WebServices.Storefront", "RemoveFile"): ("", store_remove),
-    ("Forza.WebServices.Storefront", "ChangeFileTitle"): ("", store_retitle),
-    ("Forza.WebServices.Storefront", "ChangeFileDescription"): ("", store_redescribe),
     ("Forza.WebServices.Storefront", "GetFileKeywords"): ("", ugc_keywords),
     ("Forza.WebServices.Storefront", "GetFeaturedLiveriesForRandomCars"): ("", store_featured_liveries),
     ("Forza.WebServices.Storefront", "GetLiveriesForDrivatar"): ("", store_drivatar_liveries),
     ("Forza.WebServices.Storefront", "GetCuratedContent"): ("", store_curated),
-    ("Forza.WebServices.Storefront", "GetCuratedContentData"): ("", store_curated_data),
     ("Forza.WebServices.Storefront", "ReportContent"): ("", store_noop),
     ("Forza.WebServices.Storefront", "ToggleFollowedCreator"): ("", store_noop),
     ("Forza.WebServices.CarClub", "GetClubDetails"): ("", club_details),
-    ("Forza.WebServices.CarClub", "GetClubFullInfo"): ("", club_full_info),
     ("Forza.WebServices.CarClub", "GetClubKeywords"): ("", club_keywords),
     ("Forza.WebServices.CarClub", "GetFriendsClubs"): ("", club_friends),
     ("Forza.WebServices.CarClub", "GetRecommendedClubs"): ("", club_recommended),
@@ -2139,31 +1899,17 @@ HANDLERS = {
     ("Forza.WebServices.Club", "CreateClub"): ("", club_create),
     ("Forza.WebServices.Club", "ChangeClubDetails"): ("", club_change_details),
     ("Forza.WebServices.Club", "GetClubMembers"): ("", club_members),
-    ("Forza.WebServices.Club", "GetClubStatus"): ("", club_status),
     ("Forza.WebServices.Club", "ChangeMemberRole"): ("", club_change_role),
     ("Forza.WebServices.Club", "InviteToClub"): ("", club_invite),
-    ("Forza.WebServices.Club", "InviteToClubByName"): ("", club_invite_name),
     ("Forza.WebServices.Club", "AcceptClubInvite"): ("", club_accept_invite),
     ("Forza.WebServices.Club", "RequestJoiningClub"): ("", club_request_join),
-    ("Forza.WebServices.Club", "RequestJoiningClubByName"): ("", club_request_join_name),
     ("Forza.WebServices.Club", "ApproveRequestToJoin"): ("", club_approve),
     ("Forza.WebServices.Club", "RemoveFromClub"): ("", club_remove),
     ("Forza.WebServices.Club", "LeaveClub"): ("", club_leave),
-    ("Forza.WebServices.Club", "RecommendMemberForRemoval"): ("", club_recommend_removal),
     ("Forza.WebServices.Club", "CreateNoticeBoardNotification"): ("", club_post_notice),
     ("Forza.WebServices.Club", "DeleteNoticeBoardNotification"): ("", club_delete_notice),
-    ("Forza.WebServices.Club", "GetClubHistory"): ("", club_history),
-    ("Forza.WebServices.Club", "GetUsersToInvite"): ("", club_users_to_invite),
-    ("Forza.WebServices.Club", "GetUsersToJoin"): ("", club_users_to_join),
     ("Forza.WebServices.User", "AcceptClubInvites"): ("", club_accept_invites_pref),
     ("Xls.WebServices.User", "AcceptClubInvites"): ("", club_accept_invites_pref),
-    ("Forza.WebServices.SharedCar", "GetClubCars"): ("", shared_club_cars),
-    ("Forza.WebServices.SharedCar", "UploadCarTextures"): ("", shared_upload_textures),
-    ("Forza.WebServices.SharedCar", "Create"): ("", shared_create),
-    ("Forza.WebServices.SharedCar", "GetCarDetails"): ("", shared_details),
-    ("Forza.WebServices.SharedCar", "DownloadSharedCar"): ("", shared_download),
-    ("Forza.WebServices.SharedCar", "RemoveSharedCar"): ("", shared_remove),
-    ("Forza.WebServices.SharedCar", "IncrementRaceCount"): ("", shared_race),
     ("Forza.WebServices.Scoreboard", "GetLadderRows"): ("", club_ladder),
     ("Xls.WebServices.User", "GetUserData"): ("", user_get_user_data),
     ("Forza.WebServices.User", "GetUserData"): ("", user_get_user_data),
@@ -2753,7 +2499,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b)
 
     def _admin(self, body=b""):
-        """GET /admin/send?text=...[&type=512][&sra=...]  |  /admin/list  |  /admin/clear  |
+        """GET /admin/send?text=...[&type=512][&sra=...]  |
         POST /admin/result  {"mode", "detail"}  (an online event result from the game server, site_stats.add_result)  |
         /admin/drivatar?tag=NAME[&xuid=0x..][&skill=0..4][&wristband=N]  (add a player)  |
         /admin/drivatar?xuid=0x..&set=sideswipeMean=0.8,blockingMean=0.9[&lock=1]  (hand-tune)"""
@@ -2797,11 +2543,9 @@ class Handler(BaseHTTPRequestHandler):
             evs = RIV.rotate() if u.path == "/admin/rotate" else RIV.events()
             announce_rotation()
             out = "".join(f"#{e['id']} track {e['track']} {e['kind']} {e['attrs']} :: {e['name']}\n" for e in evs)
-        elif u.path == "/admin/clear":
-            NOTIF.delete_all()
-            out = "cleared\n"
         else:
-            out = "".join(f"#{n['id']} type={n['type']:#x} read={n['read']} {n['message']!r}\n" for n in NOTIF.all())
+            self.send_error(404)
+            return
         b = out.encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")

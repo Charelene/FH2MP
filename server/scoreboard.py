@@ -36,7 +36,7 @@ SPEED_CAP = 127.4        # m/s (285 mph): highest speed a trap can really show (
 GHOST_BOARDS = {1, 3, 6}  # scoreboardType of the time boards every run of which uploads a ghost: 97-99% of 17,330 stored runs, p99 2.4 s after the score
 GHOST_POLICY = os.environ.get("FH2MP_GHOST_POLICY", "log")   # log: verdicts are stored, nothing is hidden; enforce: a run shows once its ghost passes
 # Top PI of classes D..S2, and the rest up to 1 for X and rentals. Every one of 17,011 runs lies inside the band of its class.
-CLASS_TOP_PI = (0.4350, 0.5265, 0.6181, 0.7488, 0.8464, 0.9971, 1.0, 1.0)
+CLASS_TOP_PI = (0.4345, 0.525628, 0.6179, 0.748432, 0.846368, 0.997086, 1.0, 1.1)     # CarClasses.MaxPerformanceIndex, D to R
 CLASS_PI_SLACK = 0.002
 MAX_ROUTE_SPEED = SPEED_CAP   # m/s, average over a route. All 4 of 11,376 Festival runs faster than this are cheats.
 BIG_IMPROVEMENT = 0.6     # a new best under this share of the old one, same car and PI: 76.0 to 38.0 s, 96.5 to 31.1 s. Honest gains are far smaller.

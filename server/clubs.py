@@ -8,7 +8,6 @@ leaves disbands the club). Wire values that the exe does not spell out are marke
 import json
 import time
 
-import ugc
 
 # Roles are stored (and compared) by power: member 1 < co-leader 2 < leader 3. The wire numbers run the other way, confirmed in game:
 # 1 = LEADER, 2 = CO-LEADER, 3 = MEMBER, 0 = [Unknown] / none. Convert with wire_role / power_role at the protocol edge.
@@ -191,9 +190,6 @@ class ClubStore:
         c.execute("INSERT INTO club_history (xuid, club_id, club_name, action, role, created) VALUES (?,?,?,?,?,?)",
                   (xuid, club["id"], club["name"], HISTORY_ACTIONS[action], role, time.time()))
 
-    def history(self, xuid, limit):
-        return self.db.query("SELECT * FROM club_history WHERE xuid=? ORDER BY id DESC LIMIT ?", (xuid, max(1, limit)))
-
     # ---------------------------------------------------------------- create / change / disband
     def create(self, xuid, tag, name, description, privacy, region, attitude, interest):
         tag, name = (tag or "").strip(), (name or "").strip()
@@ -355,17 +351,6 @@ class ClubStore:
             self._remove(c, target, club, "kicked")
             return club, "kicked", []
 
-    def recommend_removal(self, voter, target):
-        with self.db.tx() as c:
-            club, _ = self.membership(voter, c)
-            tclub, _ = self.membership(target, c)
-            if not club or not tclub or club["id"] != tclub["id"]:
-                raise ClubError("not in your club", CODES["not_in_club"])
-            if c.execute("SELECT 1 FROM club_removal_votes WHERE club_id=? AND target=? AND voter=?", (club["id"], target, voter)).fetchone():
-                raise ClubError("already recommended", CODES["already_recommended"])
-            c.execute("INSERT INTO club_removal_votes (club_id, target, voter, created) VALUES (?,?,?,?)", (club["id"], target, voter, time.time()))
-            return club
-
     # ---------------------------------------------------------------- noticeboard
     def post_notice(self, xuid, message, notification_ids):
         """Records a notice; `notification_ids` are the per-member Message Center rows created for it. Returns the notice id."""
@@ -391,79 +376,4 @@ class ClubStore:
             return json.loads(n["notification_ids"])
 
     # ---------------------------------------------------------------- invitation / join candidates
-    def users_to_invite(self, xuid, limit):
-        """Players who could be invited: have logged in, not in a club. (No friends list yet: every known player.)"""
-        return self.db.query(
-            "SELECT p.xuid, p.gamertag, COALESCE(cp.accepts, 1) AS accepts FROM players p LEFT JOIN club_prefs cp ON cp.xuid = p.xuid "
-            "WHERE p.xuid <> ? AND p.career_level > 0 AND p.gamertag <> '' AND NOT EXISTS (SELECT 1 FROM club_members m WHERE m.xuid = p.xuid) "
-            "ORDER BY p.last_seen DESC LIMIT ?", (xuid, max(1, limit)))
-
-    def users_to_join(self, xuid, limit):
-        """Players who are in a club, with that club's size and privacy (so one can ask to join their club)."""
-        return self.db.query(
-            "SELECT m.xuid, c.name, c.privacy, (SELECT COUNT(*) FROM club_members mm WHERE mm.club_id = c.id) AS members "
-            "FROM club_members m JOIN clubs c ON c.id = m.club_id WHERE m.xuid <> ? ORDER BY m.joined DESC LIMIT ?", (xuid, max(1, limit)))
-
     # ---------------------------------------------------------------- Club Garage (shared cars)
-    def textures_create(self, owner, livery, thumbnail):
-        with self.db.tx() as c:
-            return c.execute("INSERT INTO shared_textures (owner, livery, thumbnail, created) VALUES (?,?,?,?)",
-                             (owner, ugc.pack(bytes(livery)), ugc.pack(bytes(thumbnail)), time.time())).lastrowid
-
-    def textures(self, textures_id):
-        r = self.db.one("SELECT * FROM shared_textures WHERE id=?", (textures_id,))
-        return (ugc.unpack(r["livery"]), ugc.unpack(r["thumbnail"])) if r else (b"", b"")
-
-    def share_car(self, xuid, game_car_id, profile_id, model_id, car, textures_id, livery, tuning, overwrite):
-        """Puts a car in the player's club garage. Sharing the same garage car again replaces the shared one (version + 1) when
-        `overwrite`, otherwise leaves it as it is. Returns (car id, version, club)."""
-        with self.db.tx() as c:
-            club, _ = self.membership(xuid, c)
-            if not club:
-                raise ClubError("not in a club", CODES["not_in_club"])
-            old = c.execute("SELECT id, version FROM shared_cars WHERE owner=? AND game_car_id=?", (xuid, bytes(game_car_id))).fetchone()
-            now = time.time()
-            if old:
-                if overwrite:
-                    c.execute("UPDATE shared_cars SET club_id=?, car=?, model_id=?, textures_id=?, livery=?, tuning=?, version=version+1, "
-                              "shared=? WHERE id=?", (club["id"], json.dumps(car), model_id, textures_id, ugc.pack(bytes(livery)),
-                                                      ugc.pack(bytes(tuning)), now, old["id"]))
-                    return old["id"], old["version"] + 1, club
-                return old["id"], old["version"], club
-            if c.execute("SELECT COUNT(*) FROM shared_cars WHERE club_id=?", (club["id"],)).fetchone()[0] >= MAX_GARAGE:
-                raise ClubError("the club garage is full", CODES["garage_full"])
-            cid = c.execute("INSERT INTO shared_cars (club_id, owner, game_car_id, profile_id, model_id, car, textures_id, livery, tuning, "
-                            "shared, last_used) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                            (club["id"], xuid, bytes(game_car_id), bytes(profile_id), model_id, json.dumps(car), textures_id,
-                             ugc.pack(bytes(livery)), ugc.pack(bytes(tuning)), now, now)).lastrowid
-            return cid, 1, club
-
-    def club_cars(self, xuid, limit):
-        club, _ = self.membership(xuid)
-        if not club:
-            return []
-        return self.db.query("SELECT id, club_id, owner, model_id, car, version, shared, last_used, race_count, textures_id FROM shared_cars "
-                             "WHERE club_id=? ORDER BY shared DESC LIMIT ?", (club["id"], max(1, limit)))
-
-    def shared_car(self, car_id):
-        r = self.db.one("SELECT * FROM shared_cars WHERE id=?", (car_id,))
-        if not r:
-            return None
-        d = dict(r)
-        d["livery"], d["tuning"] = ugc.unpack(d["livery"]), ugc.unpack(d["tuning"])
-        return d
-
-    def remove_car(self, xuid, car_id):
-        with self.db.tx() as c:
-            car = c.execute("SELECT owner, club_id FROM shared_cars WHERE id=?", (car_id,)).fetchone()
-            if not car:
-                return False
-            club, role = self.membership(xuid, c)
-            if car["owner"] != xuid and not (club and club["id"] == car["club_id"] and role >= ROLE_CO_LEADER):
-                raise ClubError("insufficient privileges", CODES["no_privilege"])
-            c.execute("DELETE FROM shared_cars WHERE id=?", (car_id,))
-            return True
-
-    def count_race(self, car_id):
-        with self.db.tx() as c:
-            c.execute("UPDATE shared_cars SET race_count = race_count + 1, last_used=? WHERE id=?", (time.time(), car_id))

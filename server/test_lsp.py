@@ -651,15 +651,8 @@ class LspTests(unittest.TestCase):
         cid = res["clubId"]
         r, _ = call(C, "CreateClub", {"clubTag": "zoom", "clubName": "Other"})
         self.assertEqual(r, 2)                                                 # tag exists (case-insensitive)
-        r, res = call("Xls.WebServices.Club", "GetClubStatus", {"xuid": A})        # the client's class name for the Club* calls
-        self.assertEqual(res["clubStatus"]["clubId"], cid)
         r, res = call("Xls.WebServices.User", "GetUserData")                        # the client's own club tag / role after a change
         self.assertEqual((res["userData"]["clubTag"], res["userData"]["roleInClub"], res["userData"]["clubId"]), ("ZOOM", clubs_role("leader"), cid))
-        r, res = call(K, "GetClubFullInfo", {"clubId": cid, "maxLeaders": 5})
-        d = res["clubDetails"]
-        self.assertEqual((d["clubTag"], d["memberCount"], d["clubLeader"]["qwXuid"], d["regionKeyword"]["Keyword"]),
-                         ("ZOOM", 1, A, "Europe"))
-        self.assertEqual([u["qwXuid"] for u in res["leaders"]], [A])
         r, res = call("Forza.WebServices.Scoreboard", "GetLadderRows", {"clubId": cid, "startAt": 1, "maxResults": 10, "maxTiers": 5})
         self.assertEqual((r, [x["user"]["qwXuid"] for x in res["rows"]], res["userRow"]["rank"], res["available"], len(res["ladderTiers"])),
                          (0, [A], 1, 1, 5))                                      # the club's members, ranked by XP earned in it
@@ -701,51 +694,18 @@ class LspTests(unittest.TestCase):
         r, _ = call(C, "InviteToClub", {"userToInvite": E})
         self.assertEqual(r, 2)                                                 # a plain member may not invite
 
-        asx(B)                                                                 # Club Garage: B shares a car, A sees and borrows it
-        S = "Forza.WebServices.SharedCar"
-        r, res = call(S, "UploadCarTextures", {"liveryTexture": b"T" * 300, "LiveryThumbnail": b"P" * 200})
-        tid = res["texturesId"]
-        guid = bytes(range(16))
-        data = {"gameCarId": guid, "ProfileId": bytes(24), "modelId": 325, "perfIndex": 0.74, "classId": 3, "carColorRGB": 255, "isStock": False,
-                "speedRating": 6.5, "simPeakPower": 400.0}
-        r, res = call(S, "Create", {"completeCarData": data, "texturesId": tid, "liveryDetails": b"LIV" * 10, "tuning": b"TUN" * 5,
-                                    "overWriteExisting": False})
-        self.assertEqual(r, 0)
-        car_id = res["carId"]
-        r, res = call(S, "Create", {"completeCarData": data, "texturesId": tid, "liveryDetails": b"NEW", "tuning": b"NEW", "overWriteExisting": True})
-        self.assertEqual(res["carId"], car_id)                                 # sharing the same car again overwrites it
-        asx(A)
-        r, res = call(S, "GetClubCars", {"maxResults": 10})
-        c = res["carData"][0]
-        self.assertEqual((len(res["carData"]), c["sharedCarId"], c["modelId"], c["makeName"], c["modelName"], c["owner"]["qwXuid"], c["version"]),
-                         (1, car_id, 325, "Lamborghini", "Diablo SV", B, 2))
-        self.assertAlmostEqual(c["performanceIndex"], 0.74, places=2)
-        r, res = call(S, "GetCarDetails", {"carCount": 1, "carIds": [car_id]})
-        self.assertEqual((bytes(res["carData"][0]["thumbnail"]), res["carData"][0]["carColorRGB"]), (b"P" * 200, 255))
-        r, res = call(S, "DownloadSharedCar", {"carId": car_id, "version": 2, "maxLiveryLength": 1000, "maxTuningLength": 1000})
-        self.assertEqual((bytes(res["liveryDetails"]), bytes(res["tuningDetails"])), (b"NEW", b"NEW"))
-        r, _ = call(S, "IncrementRaceCount", {"carId": car_id})
-        self.assertIn(0x8301, [t for t, _ in notes(B)])                        # the owner hears that someone raced the car
-        self.assertEqual(L.CLUBS.club_cars(A, 5)[0]["race_count"], 1)
-
         asx(A)                                                                 # roles
         r, _ = call(C, "ChangeMemberRole", {"userToChange": B, "newRole": clubs_role("co")})
         self.assertEqual(r, 0)
         self.assertIn(0x708, [t for t, _ in notes(B)])
         r, _ = call(C, "ChangeMemberRole", {"userToChange": B, "newRole": clubs_role("member")})
         self.assertIn(0x704, [t for t, _ in notes(B)])
-        r, _ = call(C, "RecommendMemberForRemoval", {"userToRemove": D})
-        self.assertEqual(r, 0)
-        r, _ = call(C, "RecommendMemberForRemoval", {"userToRemove": D})
-        self.assertEqual(r, 2)                                                 # already recommended
         r, res = call(C, "CreateNoticeBoardNotification", {"noticeBoardMessage": "race at 9"})
         self.assertEqual(r, 0)
         self.assertIn(0x709, [t for t, _ in notes(B)])
         r, _ = call(C, "DeleteNoticeBoardNotification", {"notificationId": res["notificationId"]})
         self.assertNotIn(0x709, [t for t, _ in notes(B)])
 
-        r, res = call("Forza.WebServices.SharedCar", "GetClubCars", {"maxResults": 10})
-        self.assertEqual(len(res["carData"]), 1)
         r, _ = call(C, "RemoveFromClub", {"userToRemove": D})                    # kick
         self.assertEqual(r, 0)
         self.assertIn(0x703, [t for t, _ in notes(D)])
@@ -753,9 +713,6 @@ class LspTests(unittest.TestCase):
         r, _ = call(C, "LeaveClub")                                              # quit (the Leave Club button; RemoveFromClub on oneself does the same)
         self.assertEqual(r, 0)
         self.assertEqual(L.CLUBS.member_info(B), (0, "", 0))
-        self.assertEqual(L.CLUBS.club_cars(A, 5), [])                          # a member's shared cars leave with them
-        r, res = call(C, "GetClubHistory", {"userXuid": B, "maxEntries": 10})
-        self.assertEqual(len(res["userClubHistory"]), 4)                       # joined, promoted, demoted, quit
         asx(A)
         r, _ = call(C, "LeaveClub")                                              # the game's Leave Club button: a leader leaving disbands the club
         self.assertEqual((r, L.CLUBS.club(cid)), (0, None))
