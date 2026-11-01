@@ -202,7 +202,9 @@ MSG_STARTING_GRID = 39              # count:4 | key(idBits 7) x count (FUN_14182
 MSG_START_RACE = 40                 # start time:32 on the server clock (FUN_1418241e0)
 MSG_READY_REQUEST_RESPONSE = 42     # response:2 (FUN_141824250)
 RACE_COUNTDOWN_MS = 5000
-RACE_GRID_TIMEOUT_SECONDS = 45.0     # starting grid sent: wait this long for every Console.RenderReady, then go anyway
+RACE_GRID_REPORT_SECONDS = 10.0      # starting grid sent: while a participant's client has not reported RenderReady, say who it is waiting for this often
+RACE_GRID_BACKSTOP_SECONDS = 240.0   # the race waits for every connected participant's RenderReady (a client that goes silent is dropped after
+                                     # STALE_SECONDS); only a client that stays connected, answering and never ready is left behind after this long
 CONSOLE_VAR_PARTICIPATING_IN_RACE = 2
 CONSOLE_VAR_HAS_LOADED_CARS = 5     # HasLoadedCarsForAllParticipants (the grid waits for it, see maybe_begin_race)
 CONSOLE_VAR_HAS_GRID = 6
@@ -2859,14 +2861,55 @@ class Server:
             # The starting-grid screen already says who is infected / who holds the crown, so the first It car is drawn while the grid
             # is up (dev 2026-10-20: it was drawn at "GO" and everybody read "You're a survivor" on the grid).
             ev["tag"]["assign_at"] = time.monotonic() + TAG_GRID_ASSIGN_DELAY
-        ev["go_at"] = time.monotonic() + RACE_GRID_TIMEOUT_SECONDS
+        now = time.monotonic()
+        ev["grid_at"], ev["grid_report_at"], ev["grid_ready_after"] = now, now + RACE_GRID_REPORT_SECONDS, {}
+        ev["go_at"] = now + RACE_GRID_BACKSTOP_SECONDS
+        self.log(f"grid: sent to {len(ev['people'])} participant(s), slots " + " ".join(f"{i + 1}=owner{q.owner_id}" for i, q in enumerate(order))
+                 + f"; the race starts when every one reports RenderReady (backstop {RACE_GRID_BACKSTOP_SECONDS:.0f} s)")
+        self.ev("grid_sent", participants=[q.owner_id for q in ev["people"]])
 
     def maybe_go_race(self) -> None:
         """Everyone's starting-grid screen is up (Console.RenderReady): release InRace + MsgStartRace."""
         ev = self.event
         if ev and ev.get("go_at") and all(q.connected and q.console_vars.get(0) for q in ev["people"]):
-            self.log("all participants render-ready")
-            self.go_race()
+            self.go_race("all ready")
+
+    def note_render_ready(self, peer: Peer, value: int) -> None:
+        """A participant's Console.RenderReady changed. Says how long its client took after the grid, who is still missing, and, after the
+        race has started, that the client reached the grid too late to take part."""
+        ev, now = self.event, time.monotonic()
+        if not ev or peer not in ev["people"] or "grid_at" not in ev:
+            return
+        if ev.get("go_at"):
+            ready = ev["grid_ready_after"]
+            if value and peer not in ready:
+                ready[peer] = now - ev["grid_at"]
+                missing = [q for q in ev["people"] if q.connected and not q.console_vars.get(0)]
+                self.log(f"grid: owner{peer.owner_id} RenderReady {ready[peer]:.1f} s after the grid, {len(ready)}/{len(ev['people'])} ready"
+                         + (f", waiting for {' '.join(f'owner{q.owner_id}' for q in missing)}" if missing else ""))
+                self.ev("grid_ready", owner=peer.owner_id, seconds=round(ready[peer], 1), ready=len(ready), of=len(ev["people"]))
+            elif not value and peer in ready:
+                self.log(f"grid: owner{peer.owner_id} cleared RenderReady {now - ev['grid_at']:.1f} s after the grid (it was ready after "
+                         f"{ready.pop(peer):.1f} s): its client restarted its pre-race flow")
+        elif value and peer in ev.get("left_behind", ()):
+            ev["left_behind"].discard(peer)
+            self.log(f"grid: owner{peer.owner_id} RenderReady {now - ev['grid_at']:.1f} s after the grid, {now - ev['go_time']:.1f} s AFTER the race "
+                     f"started without it: that client missed the start and stays on the grid screen")
+            self.ev("grid_ready_late", owner=peer.owner_id, seconds=round(now - ev["grid_at"], 1), after_go=round(now - ev["go_time"], 1))
+
+    def grid_wait_report(self, now: float) -> None:
+        """While the grid waits: who it waits for and what that client has been doing. Every RACE_GRID_REPORT_SECONDS, not per packet."""
+        ev = self.event
+        if now < ev["grid_report_at"]:
+            return
+        ev["grid_report_at"] = now + RACE_GRID_REPORT_SECONDS
+        waiting = [q for q in ev["people"] if not q.console_vars.get(0)]
+        if not waiting:
+            return
+        self.log(f"grid: {now - ev['grid_at']:.0f} s after the grid, waiting for " + "; ".join(
+            f"owner{q.owner_id} xuid {q.xuid:#x} " + (f"last packet {now - q.last_rx:.1f} s ago, vars " + (" ".join(
+                f"{CONSOLE_BOOL_VAR_NAMES[k]}={v}" for k, v in sorted(q.console_vars.items()) if k in CONSOLE_BOOL_VAR_NAMES) or "none reported")
+                                                        if q.connected else "not connected") for q in waiting))
 
     def note_lap_score(self, peer: Peer, lap: int, blobs) -> None:
         """MsgLapScore starts with elapsed race time, followed by the lap timings and lap number. Use the accepted GameOptions count
@@ -2956,10 +2999,20 @@ class Server:
             self.rt_broadcast(CompletedEventCount=min(self.rt_idx + 1, 4), State=RT_FINALISE_EVENT,
                               StateEndTime=self.rt_end_ms)
 
-    def go_race(self) -> None:
+    def go_race(self, why: str = "") -> None:
         ev = self.event
         if not self.validate_event_cars():
             return
+        now = time.monotonic()
+        late = [q for q in ev["people"] if not q.console_vars.get(0)]
+        if "grid_at" in ev:
+            ready = ev.get("grid_ready_after", {})
+            self.log(f"grid: race starts ({why}) {now - ev['grid_at']:.1f} s after the grid; ready "
+                     + (" ".join(f"owner{q.owner_id}+{t:.1f}s" for q, t in ready.items()) or "none")
+                     + (f"; LEFT BEHIND " + " ".join(f"owner{q.owner_id} xuid {q.xuid:#x} (last packet {now - q.last_rx:.1f} s ago)" for q in late)
+                        if late else ""))
+            self.ev("race_go", why=why, seconds=round(now - ev["grid_at"], 1), ready=len(ready), left_behind=[q.owner_id for q in late])
+            ev["go_time"], ev["left_behind"] = now, set(late)
         ev["go_at"] = None
         ev["racing"] = True
         if self.roadtrip and self.rt_state != RT_IN_EVENT:
@@ -3563,6 +3616,9 @@ class Server:
                         pass
                     if seen:
                         self.log(f"{addr[1]} Console vars: {' '.join(seen)}")
+                        for item in seen:
+                            if item.startswith("RenderReady="):
+                                self.note_render_ready(peer, int(item[-1]))
                         if self.event and peer in self.event["people"] and peer.console_vars.get(3) == 0 \
                                 and "RaceInProgress=0" in seen:
                             self.participant_left(peer)
@@ -4026,8 +4082,11 @@ class Server:
         if ev and not ev["begun"] and not ev.get("load_checked") and not self.roadtrip \
                 and now - ev.get("started", now) > EVENT_LOAD_TIMEOUT_SECONDS and now >= ev.get("load_next", 0.0):
             self.drop_unloaded(now)
-        if self.event and self.event.get("go_at") and now >= self.event["go_at"]:
-            self.go_race()
+        if self.event and self.event.get("go_at"):
+            if now >= self.event["go_at"]:
+                self.go_race(f"backstop after {RACE_GRID_BACKSTOP_SECONDS:.0f} s")
+            else:
+                self.grid_wait_report(now)
         self.check_race_end(now)
         if self.leader is not None and not self.event and not self.pending_race and now - self.leader_since > LEADER_SETUP_SECONDS:
             former = self.leader
