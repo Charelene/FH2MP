@@ -10,6 +10,49 @@ import fh2mp_server as S  # noqa: E402
 import xbl  # noqa: E402
 
 
+GUID = "11111111-2222-3333-4444-555555555555"
+
+
+class LobbyDocument(unittest.TestCase):
+    """The first ticket session seeds the lobby every later joiner parses (0x183bb50), so only checked keys may pass."""
+    def test_a_normal_ticket_session_keeps_what_the_game_reads(self):
+        custom = xbl._lobby_custom({"hopperId": 7, "EnableFullArbitration": True,
+                                    "gameServerPlatform": {"gameVariantId": GUID, "gsiSetId": GUID, "location": "east"}}, {})
+        self.assertEqual(custom, {"hopperId": 7, "EnableFullArbitration": True,
+                                  "gameServerPlatform": {"gameVariantId": GUID, "gsiSetId": GUID, "location": "east",
+                                                         "maxAllowedPlayers": xbl.LOBBY_CAPACITY}})
+
+    def test_hostile_values_become_the_defaults(self):
+        for bad in (None, 5, "x", [], {"gameServerPlatform": "x"}, {"hopperId": "1", "EnableFullArbitration": 1, "extra": {"a": 1},
+                    "gameServerPlatform": {"gameVariantId": 5, "gsiSetId": "' OR", "location": {"a": 1}, "maxAllowedPlayers": 999, "x": 1}}):
+            custom = xbl._lobby_custom(bad, {"hopperId": 3})
+            self.assertEqual(set(custom), {"hopperId", "gameServerPlatform"}, bad)
+            self.assertEqual(custom["hopperId"], 3)
+            self.assertEqual(set(custom["gameServerPlatform"]), {"gameVariantId", "gsiSetId", "maxAllowedPlayers"}, bad)
+            self.assertEqual(custom["gameServerPlatform"]["maxAllowedPlayers"], xbl.LOBBY_CAPACITY)
+
+    def test_the_gsi_set_falls_back_to_the_ticket_attributes(self):
+        self.assertEqual(xbl._lobby_custom(None, {"gsiSetId": GUID})["gameServerPlatform"]["gsiSetId"], GUID)
+
+    def test_a_hostile_seed_does_not_reach_the_lobby(self):
+        xbl._SESSIONS.clear()
+        xbl._SESSIONS[("s", "t", "n")] = {"constants": {"custom": {"gameServerPlatform": {"gsiSetId": 5}, "x": 1}}}
+        name = xbl._new_lobby("s", {}, {"scid": "s", "templateName": "t", "name": "n"})
+        rec = xbl._SESSIONS[("s", xbl.TARGET_TEMPLATE.lower(), name.lower())]
+        self.assertNotIn("x", rec["constants"]["custom"])
+        self.assertTrue(xbl._GUID.fullmatch(rec["constants"]["custom"]["gameServerPlatform"]["gsiSetId"]))
+        xbl._SESSIONS.clear()
+
+
+class TicketsDoNotQueue(unittest.TestCase):
+    def test_the_lobby_lock_is_free_while_the_game_server_is_asked(self):
+        orig, held = xbl.hub_populations, []
+        xbl.hub_populations = lambda: held.append(xbl._LOBBY_LOCK.locked()) or {}
+        self.addCleanup(setattr, xbl, "hub_populations", orig)
+        xbl._lobby_for("s", "h", {}, None, "1000")
+        self.assertEqual(held, [False])
+
+
 class Packing(unittest.TestCase):
     def setUp(self):
         xbl._SESSIONS.clear()

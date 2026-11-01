@@ -92,6 +92,32 @@ class GiftingFailsSafelyTests(unittest.TestCase):
             self.assertEqual(struct.unpack(">I", L.handle_xls(cls, method, b"")[:4])[0], 2, method)
 
 
+class AuthShareTests(unittest.TestCase):
+    def test_one_line_an_hour_with_requests_and_players_on_each_side(self):
+        now, lines = [0.0], []
+        share = L.AuthShare(clock=lambda: now[0], sink=lines.append)
+        for xuid, authed in ((1, True), (1, True), (2, True), (3, False), (3, False), (4, False), (5, False)):
+            share.note(xuid, authed)
+        self.assertEqual(lines, [])
+        now[0] = 3600.0
+        share.note(1, True)
+        self.assertEqual(lines, ["auth share: last hour 3 requests with a token from 2 players, 4 without from 3"])
+        now[0] = 7200.0
+        share.note(9, False)
+        self.assertEqual(lines[1], "auth share: last hour 1 requests with a token from 1 players, 0 without from 0")
+
+
+class HandlerDecodeTests(unittest.TestCase):
+    def test_a_method_without_a_handler_is_not_decoded(self):
+        key = ("Forza.WebServices.OnlineProfile", "UpdateAllNoHandler")
+        self.assertNotIn(key, L.HANDLERS)
+        with mock.patch.object(L, "SC", mock.Mock()), mock.patch.object(L, "find_struct", return_value=("x", [])), \
+                mock.patch.object(L.xls, "decode", side_effect=AssertionError("decoded")), \
+                mock.patch.object(L.xls, "default_struct", return_value={}), mock.patch.object(L.xls, "encode", return_value=b""):
+            out = L.handle_xls(key[0], key[1], b"\x00" * 64)
+        self.assertEqual(struct.unpack(">III", out[:12]), (0, 0, 0))
+
+
 class NotificationSessionTests(unittest.TestCase):
     def test_the_fallback_session_never_asks_for_an_immediate_poll(self):
         handler = L.HANDLERS[("Xls.WebServices.Notifications", "StartNewSession")][1]
@@ -391,6 +417,50 @@ class LspTests(unittest.TestCase):
         self.assertIn("open the FH2MP launcher and press Play", params["Message"])
         self.assertIn("1.1.2", params["Message"])
         self.assertEqual(L.NOTIF.visible(0), L.NOTIF.visible(0))           # nothing was stored for anybody
+
+    def retrieve(self, **limits):
+        for i in range(limits.pop("rows")):
+            L.NOTIF.add(f"news {i}", "", 0x200)
+        out = L.notif_retrieve(limits)
+        _name, rf = L.find_struct("Xls.WebServices.Notifications", "RetrieveForUser", "_Results")
+        res, rest = xls.decode(L.SC, rf, xls.encode(L.SC, rf, out))
+        self.assertEqual(rest, 0)
+        self.assertEqual(sum(r["cbParameters"] for r in res["results"]), len(res["parameterBlock"]))
+        return res, [r["id"] for r in res["results"]]
+
+    def test_the_message_center_reply_keeps_to_the_count_the_client_asked_for(self):
+        res, ids = self.retrieve(rows=8, maxResults=5, cbParameterBlockSize=L.NOTIF_MAX_BLOCK)
+        self.assertEqual(len(ids), 5)
+        self.assertEqual(ids, sorted(n["id"] for n in L.NOTIF.visible(L.CTX.xuid))[-5:])         # the newest, in id order
+        self.assertEqual(list(res["activeNotificationIds"]), ids)
+
+    def test_the_message_center_reply_keeps_to_the_bytes_the_client_asked_for(self):
+        whole, ids = self.retrieve(rows=6, maxResults=L.NOTIF_MAX_RESULTS, cbParameterBlockSize=L.NOTIF_MAX_BLOCK)
+        self.assertEqual(len(ids), 6)
+        each = len(whole["parameterBlock"]) // 6
+        res, kept = self.retrieve(rows=0, maxResults=L.NOTIF_MAX_RESULTS, cbParameterBlockSize=each * 2 + each // 2)
+        self.assertEqual(kept, ids[-2:])
+        self.assertLessEqual(len(res["parameterBlock"]), each * 2 + each // 2)
+        self.assertEqual(list(res["activeNotificationIds"]), kept)
+        fields = L.notif_fields(0x200)
+        first, _ = xls.decode(L.SC, fields, bytes(res["parameterBlock"]))        # blocks stay in the order of their results
+        self.assertEqual(first["Message"], "news 4")
+
+    def test_best_score_on_a_class_board_is_the_best_in_that_class(self):
+        x = L.CTX.xuid
+
+        def run(cls, seconds):
+            return L.SB.submit(x, "Tester", 1, {"scoreboardType": 1, "gameScoreboardId": -1, "trackId": 300, "carId": 283, "carClassId": cls,
+                                                "carPerformanceIndex": 0.5, "score": L.scoreboard.dbl_to_u64(seconds), "isClean": True,
+                                                "usedSTM": False, "usedTCS": False, "usedABS": False})
+        self.assertIsNotNone(run(4, 60.0))
+        self.assertIsNotNone(run(1, 90.0))
+
+        def best(cls):
+            return L.sb_best({"scoreboardType": 1, "scoreType": 1, "gameScoreboardId": -1, "trackId": 300, "carId": 283, "carClassId": cls})
+        self.assertEqual(L.scoreboard.u64_to_dbl(best(4)["bestScore"]["score"]), 60.0)
+        self.assertEqual(L.scoreboard.u64_to_dbl(best(1)["bestScore"]["score"]), 90.0)
+        self.assertFalse(best(2)["scoreFound"])                                  # S2 best no longer stops a first D-class run
 
     def test_handlers_accept_default_parameters_except_rival_notifications(self):
         failures = []

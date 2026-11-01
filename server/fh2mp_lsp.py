@@ -249,10 +249,17 @@ def _visible():
     return NOTIF.visible(getattr(CTX, "xuid", 0))
 
 
+NOTIF_MAX_RESULTS, NOTIF_MAX_BLOCK = 0x200, 0xc800     # what the client asks for (0xf0c3f0)
+
+
 def notif_retrieve(req):
-    results, block = [], bytearray()
-    vis = _visible()
-    for n in vis:
+    """Newest first up to the client's limits, in id order: broadcasts never expire and club notices are never cleared."""
+    results, blocks, room = [], [], (req or {}).get("cbParameterBlockSize") or NOTIF_MAX_BLOCK
+    limit = (req or {}).get("maxResults") or NOTIF_MAX_RESULTS
+    vis = []
+    for n in reversed(_visible()):
+        if len(vis) >= limit:
+            break
         fields = notif_fields(n["type"])
         val = xls.default_struct(SC, fields)
         if "Message" in val:
@@ -263,12 +270,18 @@ def notif_retrieve(req):
             val["OfferId"] = n["sra"]
         val.update(n.get("params", {}))
         pb = xls.encode(SC, fields, val)
+        if len(pb) > room:
+            break
+        room -= len(pb)
+        vis.append(n)
+        blocks.append(pb)
         results.append({"id": n["id"], "xuidRecipient": n.get("xuid", 0), "notificationType": n["type"],
                         "hasThumbnail": False, "isRead": n["read"], "deleteAction": 0,
                         "expirationDate": filetime(time.time() + 86400 * 365), "sentDate": n["sent"],
                         "cbParameters": len(pb)})
-        block += pb
-    return {"results": results, "parameterBlock": bytes(block), "nextRetrieveSeconds": POLL_SECONDS,
+    vis.reverse()
+    results.reverse()
+    return {"results": results, "parameterBlock": b"".join(reversed(blocks)), "nextRetrieveSeconds": POLL_SECONDS,
             "reconcileActiveNotifications": True, "activeNotificationIds": [n["id"] for n in vis]}
 
 
@@ -311,6 +324,32 @@ def notif_clear(req):
 
 
 # ---------------------------------------------------------------- drivatars
+
+class AuthShare:
+    """Requests with and without a session token, one log line an hour: the number that decides FH2MP_AUTH=required."""
+
+    def __init__(self, period=3600, clock=time.monotonic, sink=None):
+        self.period, self.clock, self.sink = period, clock, sink
+        self.lock = threading.Lock()
+        self.start = clock()
+        self.counts, self.players = [0, 0], [set(), set()]
+
+    def note(self, xuid, authed):
+        line = None
+        with self.lock:
+            now = self.clock()
+            if now - self.start >= self.period:
+                line = (f"auth share: last hour {self.counts[1]} requests with a token from {len(self.players[1])} players, "
+                        f"{self.counts[0]} without from {len(self.players[0])}")
+                self.start, self.counts, self.players = now, [0, 0], [set(), set()]
+            self.counts[bool(authed)] += 1
+            self.players[bool(authed)].add(xuid)
+        if line:
+            (self.sink or log)(line)
+
+
+AUTH_SHARE = AuthShare()
+
 
 def _me():
     xuid = getattr(CTX, "xuid", 0)
@@ -526,7 +565,9 @@ def sb_submit_xp(req):
 
 def sb_best(req):
     xuid, _ = _me()
-    b = SB.best_of(xuid, req["scoreboardType"], req["scoreType"], req["trackId"], req["gameScoreboardId"])
+    # gameScoreboardId is -1 on the class boards: the best across all classes would hide every slower run in another class (0xa3e880)
+    pivot = req["carClassId"] if req["scoreboardType"] in scoreboard.CLASS_PIVOT_BOARDS else req["gameScoreboardId"]
+    b = SB.best_of(xuid, req["scoreboardType"], req["scoreType"], req["trackId"], pivot)
     log(f"  GetBestScore board=({req['scoreboardType']},{req['scoreType']}) gsid={req['gameScoreboardId']} "
         f"track={req['trackId']} car={req['carId']}: "
         f"{'%.3f' % b['score'] if b else 'none'}")
@@ -2107,14 +2148,14 @@ def handle_xls(cls, method, body):
         return frame(result=2, error=0x0001, text=b"fh2mp: not implemented")
     pname, pfields = find_struct(cls, method, "_Parameters")
     req = None
-    if pfields is not None and body:
+    if pfields is not None and body and key in HANDLERS:
         try:
             req, rem = xls.decode(SC, pfields, body)
             if rem:
                 log(f"  warning: {rem} unread request bytes")
         except Exception as e:  # noqa: BLE001
             log(f"  request decode failed: {e}")
-    elif pfields is not None:
+    elif pfields is not None and not body:
         log(f"  request schema {pname} (empty body)")
     rname, rfields = find_struct(cls, method, "_Results")
     if rfields is None and key not in HANDLERS:
@@ -2453,6 +2494,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._reply_json(e.status, {"error": e.code, "message": e.message})
                     return False
                 CTX.xuid, CTX.tag, CTX.authed = acct.xuid, acct.gamertag, True
+                AUTH_SHARE.note(acct.xuid, True)
                 if os.environ.get("FH2MP_RESTRICTED_TOOLS") == "quarantine" and not Handler._restricted_tools_ok(self, acct):
                     return False
                 if not self._gamedb_ok(acct):
@@ -2467,6 +2509,7 @@ class Handler(BaseHTTPRequestHandler):
             CTX.xuid = int(self.headers.get("X-UserId", "0"), 0)
         except ValueError:
             CTX.xuid = 0
+        AUTH_SHARE.note(CTX.xuid, False)
         return True
 
     def _handle(self):

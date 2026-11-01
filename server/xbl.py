@@ -330,6 +330,7 @@ _TICKETS = {}   # ticket id -> record
 _LOBBIES = {}   # lobby_key -> [session name, ...]: every lobby of that hopper / location, oldest first
 _RESERVED = {}  # session name -> {xuid: time}: players matched into a lobby that the game server has not seen connect yet
 _LOBBY_LOCK = threading.Lock()
+_GUID = re.compile(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 LOBBY_CAPACITY = 12
 RESERVE_SECONDS = 30.0     # a matched player that has not connected after this long no longer holds a seat (the game connects within ~10 s)
 _POP_DOWN_UNTIL = 0.0      # the game server did not answer: do not ask again before this
@@ -552,9 +553,9 @@ def _lobby_for(scid, hopper, attrs, ref, xuid=None):
     that players arriving one after another fill lobbies up (12, 12, 1) instead of leaving every lobby partly empty (8, 10, 6, 1).
     Players leave lobbies that were filled earlier, so the newest lobby is not the only one with seats."""
     key = lobby_key(scid, hopper, attrs)
+    pops = hub_populations()        # up to 0.3 s when the game server is busy: tickets must not queue behind it
     with _LOBBY_LOCK:
         names = _LOBBIES.setdefault(key, [])
-        pops = hub_populations()
         import launcher_lobbies
         preferred = launcher_lobbies.pick(xuid, key, attrs, ref, pops) if xuid else None
         best, best_n = preferred, LOBBY_CAPACITY if preferred else -1
@@ -587,23 +588,37 @@ def _lobby_for(scid, hopper, attrs, ref, xuid=None):
     return name
 
 
+def _lobby_custom(ticket, attrs):
+    """constants.custom of a new lobby. Only what the game reads, each checked: one player's ticket session seeds the document every later
+    joiner parses, and that parser throws on a bad key (0x183bb50). The lobby size is the server's."""
+    def guid(v, default):
+        return v if isinstance(v, str) and _GUID.fullmatch(v) else default
+    ticket = ticket if isinstance(ticket, dict) else {}
+    gsp = ticket.get("gameServerPlatform")
+    gsp = gsp if isinstance(gsp, dict) else {}
+    out = {"gameVariantId": guid(gsp.get("gameVariantId"), "00000000-0000-0000-0000-000000000001"),
+           "gsiSetId": guid(gsp.get("gsiSetId"), guid(attrs.get("gsiSetId"), "00000000-0000-0000-0000-000000000102")),
+           "maxAllowedPlayers": LOBBY_CAPACITY}
+    location = gsp.get("location")
+    if isinstance(location, str) and len(location) <= 64 or type(location) is int:
+        out["location"] = location
+    custom = {"gameServerPlatform": out}
+    hopper = ticket.get("hopperId")
+    custom["hopperId"] = hopper if type(hopper) is int else attrs.get("hopperId", 0)
+    if type(ticket.get("EnableFullArbitration")) is bool:
+        custom["EnableFullArbitration"] = ticket["EnableFullArbitration"]
+    return custom
+
+
 def _new_lobby(scid, attrs, ref, name=None):
     name = name or str(uuid.uuid4())
     # The game reads constants.custom.gameServerPlatform.{gameVariantId,gsiSetId[,location]} from the target session
     # (FUN_14183bb50) and throws on a missing key, so take them from the ticket session it wrote itself.
-    custom = {}
+    src = None
     if ref:
         src = _SESSIONS.get((str(ref.get("scid", "")).lower(), str(ref.get("templateName", "")).lower(),
                              str(ref.get("name", "")).lower()))
-        if src:
-            custom = copy.deepcopy(src["constants"].get("custom", {}))
-    gsp = custom.setdefault("gameServerPlatform", {})
-    gsp.setdefault("gameVariantId", "00000000-0000-0000-0000-000000000001")
-    gsp.setdefault("gsiSetId", attrs.get("gsiSetId", "00000000-0000-0000-0000-000000000102"))
-    if not isinstance(gsp, dict):
-        gsp = custom["gameServerPlatform"] = {}
-    gsp["maxAllowedPlayers"] = LOBBY_CAPACITY      # server-owned: the ticket session the client wrote does not set the lobby size
-    custom.setdefault("hopperId", attrs.get("hopperId", 0))
+    custom = _lobby_custom(src["constants"].get("custom") if src else None, attrs)
     body = {"constants": {"system": {"version": 1, "visibility": "open"}, "custom": custom},
             "properties": {"system": {"joinRestriction": "none", "readRestriction": "none"}, "custom": {}}}
     put_session("/serviceconfigs/%s/sessionTemplates/%s/sessions/%s" % (scid, TARGET_TEMPLATE, name),
