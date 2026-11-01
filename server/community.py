@@ -31,9 +31,9 @@ class Community:
         except ValueError:
             xuid = None
         if xuid is not None and 0 < xuid < 2**63:
-            row = self.db.one("SELECT xuid FROM accounts WHERE xuid=? AND banned_at IS NULL", (xuid,))
+            row = self.db.one("SELECT xuid FROM accounts WHERE xuid=? AND (banned_at IS NULL OR ban_until <= ?)", (xuid, time.time()))
         else:
-            row = self.db.one("SELECT xuid FROM accounts WHERE gamertag_key=? AND banned_at IS NULL", (auth.fold_tag(value),))
+            row = self.db.one("SELECT xuid FROM accounts WHERE gamertag_key=? AND (banned_at IS NULL OR ban_until <= ?)", (auth.fold_tag(value), time.time()))
         if not row:
             raise auth.AuthError(404, "player_not_found", "No player has that gamertag or ID.")
         return row[0]

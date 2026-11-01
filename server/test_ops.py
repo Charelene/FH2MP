@@ -22,7 +22,7 @@ SCHEMA = """
 CREATE TABLE players (xuid INTEGER PRIMARY KEY, gamertag TEXT NOT NULL DEFAULT '', career_level INTEGER NOT NULL DEFAULT 0,
                       first_seen REAL NOT NULL, last_seen REAL NOT NULL);
 CREATE TABLE accounts (xuid INTEGER PRIMARY KEY, gamertag TEXT NOT NULL, created REAL NOT NULL, last_login REAL NOT NULL DEFAULT 0,
-                       banned_at REAL, ban_reason TEXT NOT NULL DEFAULT '');
+                       banned_at REAL, ban_until REAL, ban_reason TEXT NOT NULL DEFAULT '');
 CREATE TABLE score_submissions (id INTEGER PRIMARY KEY AUTOINCREMENT, xuid INTEGER, sb INTEGER, st INTEGER, gsid INTEGER, track INTEGER,
     car INTEGER, cls INTEGER, cpi REAL, score REAL, clean INTEGER, stm INTEGER, tcs INTEGER, abs INTEGER,
     autobrake INTEGER NOT NULL DEFAULT 0, autoshift INTEGER NOT NULL DEFAULT 0, clutch INTEGER NOT NULL DEFAULT 0, submitted REAL, score_id BLOB);
@@ -84,8 +84,8 @@ class FakeAuth:
     def stats(self):
         return {"accounts": 3, "sessions": 2, "registered_24h": 1}
 
-    def set_banned(self, xuid, reason=None):
-        self.calls.append(("ban" if reason else "unban", xuid, reason))
+    def set_banned(self, xuid, reason=None, until=None):
+        self.calls.append(("ban" if reason else "unban", xuid, reason) + ((until,) if until else ()))
 
     def revoke(self, xuid):
         self.calls.append(("kick", xuid))
@@ -328,7 +328,7 @@ class ActionTests(unittest.TestCase):
         self.lsp.DB.execute("INSERT INTO accounts (xuid, gamertag, created) VALUES (1, 'Alice', 0)")
 
     def test_ban_unban_kick(self):
-        self.assertEqual(call(self.lsp, "POST", "/ops/v1/players/1/ban", {"reason": "cheating"})[1], {"banned": True})
+        self.assertEqual(call(self.lsp, "POST", "/ops/v1/players/1/ban", {"reason": "cheating"})[1], {"banned": True, "until": None})
         self.assertEqual(call(self.lsp, "POST", "/ops/v1/players/1/ban", {})[0], 200)
         call(self.lsp, "POST", "/ops/v1/players/0x1/unban", {})
         self.assertEqual(call(self.lsp, "POST", "/ops/v1/players/1/kick", {})[1], {"sessionsDropped": 2})
@@ -336,6 +336,26 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(call(self.lsp, "POST", "/ops/v1/players/99/ban", {})[0], 404)
         self.assertEqual(call(self.lsp, "POST", "/ops/v1/players/zz/ban", {})[0], 400)
         self.assertEqual(call(self.lsp, "POST", "/ops/v1/players/1/explode", {})[0], 404)
+
+    def test_temporary_ban(self):
+        r = call(self.lsp, "POST", "/ops/v1/players/1/ban", {"reason": "cheating", "days": 7})
+        self.assertEqual(r[0], 200)
+        self.assertAlmostEqual(r[1]["until"], time.time() + 7 * 86400, delta=5)
+        self.assertAlmostEqual(self.lsp.AUTH.calls[-1][3], r[1]["until"], delta=1)
+        for bad in ("x", 0, -1, 99999):
+            self.assertEqual(call(self.lsp, "POST", "/ops/v1/players/1/ban", {"days": bad})[0], 400)
+        self.assertIsNone(call(self.lsp, "POST", "/ops/v1/players/1/ban", {})[1]["until"])
+
+    def test_players_list_shows_only_active_bans(self):
+        db_ = self.lsp.DB
+        db_.execute("UPDATE accounts SET banned_at=1, ban_until=? WHERE xuid=1", (time.time() + 3600,))
+        p = call(self.lsp, "GET", "/ops/v1/players", None)[1]["players"][0]
+        self.assertTrue(p["banned"]); self.assertGreater(p["banUntil"], time.time())
+        db_.execute("UPDATE accounts SET ban_until=? WHERE xuid=1", (time.time() - 1,))
+        self.assertFalse(call(self.lsp, "GET", "/ops/v1/players", None)[1]["players"][0]["banned"])
+        db_.execute("UPDATE accounts SET ban_until=NULL WHERE xuid=1")
+        p = call(self.lsp, "GET", "/ops/v1/players", None)[1]["players"][0]
+        self.assertTrue(p["banned"]); self.assertIsNone(p["banUntil"])
 
     def test_notifications_pass_through(self):
         self.assertEqual(call(self.lsp, "POST", "/ops/v1/notifications", {"kind": "announcement", "text": "hi"})[1], {"echo": ["POST", "/api/notifications"]})
