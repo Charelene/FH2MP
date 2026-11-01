@@ -260,6 +260,30 @@ class SocialTests(unittest.TestCase):
         self.assertEqual(self.route('POST', '/friends', {'player': '2'})[0], 429)
 
 
+class SnapshotCost(SocialTests):
+    def test_a_larger_friends_list_asks_no_more_queries(self):
+        def queries(n):
+            with self.db.tx() as c:
+                for i in range(10, 10 + n):
+                    c.execute('INSERT INTO accounts(xuid,pubkey,gamertag,gamertag_key,created) VALUES (?,?,?,?,0) ON CONFLICT DO NOTHING',
+                              (i, bytes([i]) * 32, 'P%d' % i, 'p%d' % i))
+                    c.execute('INSERT INTO friendships(a,b,created) VALUES (1,?,0) ON CONFLICT DO NOTHING', (i,))
+            count = []
+            real_query, real_one = self.db.query, self.db.one
+            with patch.object(self.db, 'query', lambda *a: count.append(a) or real_query(*a)), patch.object(self.db, 'one', lambda *a: count.append(a) or real_one(*a)):
+                self.s.channels(1)
+                self.s.profiles(self.social.friends(1))
+            return len(count)
+        few = queries(2)
+        self.assertLessEqual(queries(30), few + 2 * 30)         # channel() still checks each friendship; the rest does not grow
+
+    def test_the_hub_is_asked_once_for_a_moment(self):
+        with patch.object(community.time, 'monotonic', lambda: 100.0):
+            self.s.hub_lobbies()
+            self.s.hub_lobbies()
+        self.assertEqual(xbl.hub_lobbies.call_count, 1)
+
+
 class ReservationTests(unittest.TestCase):
     def setUp(self):
         xbl._SESSIONS.clear(); xbl._LOBBIES.clear(); xbl._RESERVED.clear(); leases.HOLDS.clear()

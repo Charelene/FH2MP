@@ -1879,7 +1879,7 @@ class Server:
                 self.hub.revoke(q.xuid)         # ends every connection of the account and keeps it refused until its next sign-in
             else:
                 try:
-                    self.send(q, [close_connection(0)], fast=True)
+                    self.send(q, [self.goodbye(q)], fast=True)
                 except OSError:
                     pass
                 self.drop_peer(q, f"car policy: {reason}")
@@ -3109,6 +3109,10 @@ class Server:
         """Traffic stays on its side of an event boundary, like the cars themselves (same_event)."""
         return 1 if self.event and peer in self.event["people"] else 0
 
+    def goodbye(self, peer: Peer):
+        """CloseConnection with this connection's ids: the client checks both, and wrong ones (0x1764b10) make its handler fail."""
+        return close_connection(0, peer.client_counter, self.server_counter)
+
     def noise(self, msg: str) -> None:
         """Log about datagrams from strangers at most once a second, so a flood of junk cannot fill the disk."""
         now = time.monotonic()
@@ -3276,7 +3280,7 @@ class Server:
                     if owner is None:
                         # the hub routes around worlds without a free id (Hub.owner_room); this only catches a race or a standalone server
                         self.log(f"{addr[1]} refused: no relay owner id free in this world (1..{RELAY_OWNER_LAST})")
-                        self.send(peer, [close_connection(0)], fast=True)
+                        self.send(peer, [self.goodbye(peer)], fast=True)
                         self.drop_peer(peer, "no relay owner id free")
                         continue
                     peer.connected = True
@@ -4406,7 +4410,7 @@ class Hub:
             peer = w.peers.get(addr) if w is not None else None
             if peer is not None:
                 try:
-                    w.send(peer, [close_connection(0)], fast=True)
+                    w.send(peer, [w.goodbye(peer)], fast=True)
                 except OSError:
                     pass
                 w.drop_peer(peer, "signed out")
@@ -4462,7 +4466,7 @@ class Hub:
         for w in list(self.worlds.values()):
             for peer in [q for q in w.peers.values() if q.xuid == xuid]:
                 try:
-                    w.send(peer, [close_connection(0)], fast=True)
+                    w.send(peer, [w.goodbye(peer)], fast=True)
                 except OSError:
                     pass
                 w.drop_peer(peer, "revoked by the account service")
@@ -4623,7 +4627,7 @@ class Hub:
             if a == addr or peer is None or peer.xuid != xuid:
                 continue
             try:
-                w.send(peer, [close_connection(0)], fast=True)
+                w.send(peer, [w.goodbye(peer)], fast=True)
             except OSError:
                 pass
             w.drop_peer(peer, "replaced by a newer connection of the same player")
@@ -4677,9 +4681,11 @@ class Hub:
         for addr in list(self.ticket_epochs):
             if addr not in self.bound:
                 del self.ticket_epochs[addr]
-        if len(self.nonces) > 1000:
-            for k in [k for k, until in self.nonces.items() if until < now]:
-                del self.nonces[k]
+        while self.nonces:           # every nonce lives equally long, so the dict is in expiry order
+            k = next(iter(self.nonces))
+            if self.nonces[k] >= now:
+                break
+            del self.nonces[k]
         for xuid, until in list(self.revoked.items()):
             if until < now:
                 del self.revoked[xuid]

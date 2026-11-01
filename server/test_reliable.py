@@ -158,6 +158,15 @@ class Server(unittest.TestCase):
         w.drop_peer(b, "test")
         self.assertFalse([m for _, ms in c.window.pending.values() for m in ms if R.relay_owner(m, S.ROUTER_BITS) == b.owner_id and m[0] & 0x7F == S.MSG_OBJECT_UPDATE])
 
+    def test_a_kick_carries_this_connections_ids(self):
+        w, (a, b, c) = world()
+        b.client_counter, w.server_counter = 77, 88
+        w.send(b, [w.goodbye(b)])
+        w.flush(float("inf"))
+        r = S.BitReader(w.sock.sent[-1][0])
+        S.parse_header(r)
+        self.assertEqual((r.bits(7), r.bits(3), r.bits(32), r.bits(32)), (S.MSG_CLOSE_CONNECTION, 0, 77, 88))     # 0x1764b10
+
     def test_client_resends_are_counted_and_still_relayed(self):
         w, (a, b, c) = world()
         msg = S.object_message(S.MSG_OBJECT_UPDATE, 1, 5, None, 3, 7, 0, lambda v: v.bits(1, 8))

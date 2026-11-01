@@ -5,6 +5,7 @@ records name the relay owner/car id already observed in native predictions.
 """
 import hashlib
 import hmac
+import itertools
 import struct
 import time
 
@@ -36,7 +37,13 @@ def handle(hub, data, addr):
     # The auxiliary socket has its own NAT mapping. Authenticate against the key
     # and epoch of the player's existing native connection, not its claimed IP.
     found = None
-    for main_addr, world in hub.route.items():
+    # Normally the address that matched last time; one lobby of 12 at 10 Hz was a walk of every connection, 120 times a second.
+    routes = getattr(hub, 'lighting_routes', None)
+    if routes is None:
+        routes = hub.lighting_routes = {}
+    last = routes.get(xuid)
+    candidates = ((last, hub.route[last]),) if last in hub.route else ()
+    for main_addr, world in itertools.chain(candidates, hub.route.items()):
         binding = hub.bound.get(main_addr)
         peer = world.peers.get(main_addr)
         if (not binding or binding[0] != xuid or not peer or not peer.connected or not peer.entered
@@ -48,8 +55,10 @@ def handle(hub, data, addr):
                 or not hmac.compare_digest(hmac.new(key, data[:-MAC_SIZE], hashlib.sha256).digest(), data[-MAC_SIZE:])):
             continue
         found = world, peer, key
+        routes[xuid] = main_addr
         break
     if found is None:
+        routes.pop(xuid, None)
         return
     world, peer, key = found
     old = getattr(peer, 'lighting', None)

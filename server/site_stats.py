@@ -32,6 +32,7 @@ TIME_KINDS = ("route", "event")           # boards where the lower score (second
 RUN_FILTER = "sb IN (1, 3, 9)"            # the runs a car is raced in: Festival Routes, Monthly Rivals, speed traps and zones
 ALL_CLASSES = rivals.CLASS_LETTERS + ("X", "R")
 HISTORY_RECHECK = 15         # seconds between "has a run been stored?" checks of the cached record history
+HISTORY_RESCAN = 60          # and at most one full rescan in this long: at a busy hour a run arrives every few seconds
 GARAGE_KINDS = ("livery", "tune", "photo")
 GARAGE_SORTS = {"likes": "f.likes DESC, f.downloads DESC", "downloads": "f.downloads DESC, f.likes DESC", "new": "f.created DESC"}
 RANGES = {"24h": (86400, 600), "7d": (7 * 86400, 3600), "30d": (30 * 86400, 4 * 3600)}     # span, bucket (seconds)
@@ -162,8 +163,8 @@ def record_history(lsp):
         if cache and now - cache["checked"] < HISTORY_RECHECK:
             return cache["data"]
         stamp = tuple(lsp.DB.one("SELECT COUNT(*), MAX(id), (SELECT COUNT(*) FROM hidden_scores) FROM score_submissions"))
-        if not cache or cache["stamp"] != stamp:
-            cache = {"stamp": stamp, "data": _scan(lsp)}
+        if not cache or (cache["stamp"] != stamp and now - cache["scanned"] >= HISTORY_RESCAN):
+            cache = {"stamp": stamp, "data": _scan(lsp), "scanned": now}
         cache["checked"] = now
         lsp._site_history = cache
         return cache["data"]
