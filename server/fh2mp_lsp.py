@@ -2348,6 +2348,17 @@ class Handler(BaseHTTPRequestHandler):
             CTX.xuid = int(self.headers.get("X-UserId", "0"), 0)
         except ValueError:
             CTX.xuid = 0
+        banned = None
+        if AUTH is not None:                          # both ways a tokenless request names its sender (X-UserId, the XSAPI token)
+            for who in (CTX.xuid, int(xbl_xuid(self.headers) or 0)):
+                banned = banned or (AUTH.ban_text(who) if who else None)
+        if banned:                                    # no token needed to be refused: nothing a banned player sends is accepted
+            if SC is not None and self.headers.get("X-ClassName", "").startswith("Xls.WebServices.Notifications") \
+                    and self.headers.get("X-Method", "") == "RetrieveForUser":
+                self._reply_json(200, ban_notice(banned), "bin/xtsw")
+            else:
+                self._reply_json(403, {"error": "banned", "message": banned})
+            return False
         AUTH_SHARE.note(CTX.xuid, False)
         return True
 
