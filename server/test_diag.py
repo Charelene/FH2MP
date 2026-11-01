@@ -70,6 +70,22 @@ class Levels(unittest.TestCase):
         self.assertEqual(got, ["x", "WARN y", "  indented"])
 
 
+class ModuleLoggers(unittest.TestCase):
+    def test_a_module_logger_writes_through_the_process_sink(self):
+        got = []
+        old = diag._sink
+        diag.set_sink(lambda level, sub, msg: got.append((level, sub, msg)))
+        self.addCleanup(lambda: diag.set_sink(old))
+        log = diag.get("parts")
+        log.warn("owner=3 slot 8 unknown tyre id")
+        try:
+            raise KeyError("x")
+        except KeyError as e:
+            log.exc("repairing parts", e, level="WARN")
+        self.assertEqual(got[0], ("WARN", "parts", "parts: owner=3 slot 8 unknown tyre id"))
+        self.assertTrue(got[1][2].startswith("parts: repairing parts: KeyError: 'x' at test_diag.py:"))
+
+
 class Helpers(unittest.TestCase):
     def test_kv_quotes_only_what_needs_it(self):
         self.assertEqual(diag.kv(owner=3, why="no packets", gone=None, empty=""), "owner=3 why='no packets' empty=''")

@@ -98,6 +98,9 @@ def warn(msg, sub=None):
     log(msg, "WARN", sub)
 
 
+diag.set_sink(lambda level, sub, msg: log(msg, level, sub))          # modules with a diag.get() logger write to this log
+
+
 def log_exc(msg, exc, level="ERROR"):
     """A caught exception: what was being done, then type, message and innermost frame; the stack follows at ERROR."""
     log(f"{msg}: {diag.where(exc)}", level)
