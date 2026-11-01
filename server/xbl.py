@@ -722,12 +722,21 @@ def create_game_session(mode, xuids=()):
 
 def hub_lobbies():
     """Live public summaries from the UDP hub, or None when it cannot be reached."""
+    return _hub_query(b"lobbies")
+
+
+def hub_positions():
+    """hub_lobbies plus where each car is in those lobbies, or None when the hub cannot be reached."""
+    return _hub_query(b"positions")
+
+
+def _hub_query(command):
     import socket
     target = os.environ.get("FH2MP_SERVER_CONTROL", "127.0.0.1:5090").rsplit(":", 1)
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as so:
             so.settimeout(0.3)
-            so.sendto(b"lobbies", (target[0], int(target[1])))
+            so.sendto(command, (target[0], int(target[1])))
             data, _ = so.recvfrom(65535)
         result = json.loads(data)
         return result if isinstance(result, dict) and isinstance(result.get("lobbies"), list) else None

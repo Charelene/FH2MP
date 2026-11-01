@@ -9,6 +9,7 @@ address in FH2MP_OPS_ALLOW (comma separated CIDRs, default loopback only; the we
 not carry proxy headers, so nothing reachable through the public reverse proxy can ever get in. Wrong tokens are rate limited per IP.
 
     GET    /ops/v1/lobbies                     occupied Free Roam / Road Trip worlds and their current stages
+    GET    /ops/v1/positions                   the same worlds with each car's name and x/z in metres, for the website's live map
     GET    /ops/v1/reports[?limit=&offset=]    reports queue and permanently hidden submissions
     POST   /ops/v1/reports/<id>               {"browser": "<hash>", "ip": "<hash>}, duplicate protected
     POST   /ops/v1/reports/<id>/hide          permanently suppress a run; preserve its data and ghost
@@ -155,6 +156,15 @@ def _int(q, key, default, lo, hi):
         raise OpsError(400, "bad_request", f"{key} must be a number")
 
 
+def _nickname(lsp, hex_xuid):
+    xuid = int(hex_xuid, 16)
+    name = lsp.TAGS.get(xuid)
+    if not name:
+        row = lsp.DB.one("SELECT gamertag FROM players WHERE xuid = ?", (xuid,))
+        name = row['gamertag'] if row else ''
+    return name or 'Connecting player'
+
+
 def _route(lsp, method, path, body):
     u = urlparse(path)
     q = parse_qs(u.query)
@@ -184,15 +194,17 @@ def _route(lsp, method, path, body):
             raise OpsError(503, "unavailable", "the game server did not answer")
         # Resolve private protocol IDs to nicknames here; public summaries contain no player IDs.
         for lobby in result['lobbies']:
-            members = []
-            for value in lobby.pop('memberXuids', []):
-                xuid = int(value, 16)
-                name = lsp.TAGS.get(xuid)
-                if not name:
-                    row = lsp.DB.one("SELECT gamertag FROM players WHERE xuid = ?", (xuid,))
-                    name = row['gamertag'] if row else ''
-                members.append(name or 'Connecting player')
-            lobby['members'] = sorted(members, key=str.casefold)
+            lobby['members'] = sorted((_nickname(lsp, value) for value in lobby.pop('memberXuids', [])), key=str.casefold)
+        return 200, result
+    if what == "positions" and not rest and method == "GET":
+        result = lsp.xbl.hub_positions()
+        if result is None:
+            raise OpsError(503, "unavailable", "the game server did not answer")
+        cars = lsp.RIV.names()["car"]
+        for lobby in result['lobbies']:
+            lobby.pop('memberXuids', None)
+            lobby['cars'] = [{"id": c["id"], "name": _nickname(lsp, c["xuid"]), "x": c["x"], "z": c["z"], "car": cars.get(c["car"], "")}
+                             for c in lobby.get('cars', [])]
         return 200, result
     if what == "overview" and method == "GET":
         return 200, overview(lsp)

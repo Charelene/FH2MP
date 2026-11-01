@@ -4184,7 +4184,7 @@ class Hub:
 
     def ctl_text(self, text: str, reply_to=None) -> None:
         """One control message: "assign <xuid hex> <lobby name>", "auth <xuid hex> <ip> [ticket key hex]", "logout <xuid hex> <key hex>",
-        "revoke" / "allow" / "unflag <xuid hex>", "pop", "lobbies"."""
+        "revoke" / "allow" / "unflag <xuid hex>", "pop", "lobbies", "positions"."""
         parts = text.split()
         if len(parts) == 1 and parts[0] == "pop":
             try:
@@ -4194,6 +4194,11 @@ class Hub:
         elif parts == ["lobbies"]:
             try:
                 self.ctl.sendto(json.dumps(self.lobby_status()).encode(), reply_to)
+            except OSError:
+                pass
+        elif parts == ["positions"]:
+            try:
+                self.ctl.sendto(json.dumps(self.map_status()).encode(), reply_to)
             except OSError:
                 pass
         elif len(parts) == 3 and parts[0] == "tools":
@@ -4278,6 +4283,17 @@ class Hub:
                 row["status"] = "Free roaming"
             out.append(row)
         return {"lobbies": sorted(out, key=lambda r: (r["kind"], -r["players"], r["id"]))}
+
+    def map_status(self) -> dict:
+        """lobby_status plus where each car is, for the website's live map: world x and z in metres (y is height)."""
+        status = self.lobby_status()
+        rows = {(r["kind"], r["id"]): r for r in status["lobbies"]}
+        for (kind, name), world in self.worlds.items():
+            row = rows.get(("roadtrip" if kind == LOBBY_TYPE_ROAD_TRIP else "freeroam", name or "default"))
+            if row is not None:
+                row["cars"] = [{"id": p.owner_id, "xuid": f"{p.xuid:x}", "x": round(p.pos[0]), "z": round(p.pos[2]), "car": p.model_id}
+                               for p in world.peers.values() if p.connected and p.xuid and p.pos is not None]
+        return status
 
     def populations(self) -> dict:
         """Lobby name -> hex xuids of the players in it right now (connected or still connecting; 0 when the id is not known yet). The
