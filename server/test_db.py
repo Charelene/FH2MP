@@ -307,6 +307,24 @@ class ScoreTests(Base):
         rows = self.db.query("SELECT verdict, COUNT(*) AS n FROM xp_awards WHERE xuid=7 GROUP BY verdict ORDER BY verdict")
         self.assertEqual([(r["verdict"], r["n"]) for r in rows], [("ok", 2), ("rejected", 4)])
 
+    def test_club_ladder_counts_this_weeks_accepted_awards_since_joining(self):
+        import clubs
+        store = clubs.ClubStore(self.db)
+        now = 1_793_664_005.0                                   # Monday 2026-11-02 00:00:05 UTC
+        week = store.week_start(now)
+        self.assertEqual(week, 1_793_664_000.0)
+        cid = store.create(1, "WEEK", "Weekly", "", 1, 0, 0, 0)
+        with self.db.tx() as c:
+            c.execute("INSERT INTO club_members (xuid, club_id, role, joined, status_changed, xp_base) VALUES (2, ?, 1, ?, 0, 0)", (cid, week + 1))
+            c.execute("UPDATE club_members SET joined=? WHERE xuid=1", (week - 86400,))
+            for xuid, xp, at, verdict in ((1, 300., week - 5, "ok"), (1, 700., week + 2, "ok"), (1, 9e6, week + 3, "rejected"),
+                                          (2, 50., week, "ok"), (2, 900., week + 4, "ok")):
+                c.execute("INSERT INTO xp_awards (xuid, xp, at, verdict) VALUES (?,?,?,?)", (xuid, xp, at, verdict))
+        # last week's award and the rejected one do not count; member 2's 50 XP came before they joined
+        self.assertEqual(store.member_ladder(cid, now), [(2, 900.0), (1, 700.0)])
+        self.assertEqual(store.member_ladder(cid, now + 7 * 86400), [(1, 0.0), (2, 0.0)])         # the next week starts empty
+        self.assertEqual([t for t, _ in store.TIERS], sorted((t for t, _ in store.TIERS), reverse=True))     # Tier 1 = highest
+
     def test_backfill_takes_logged_cheats_off_the_total_and_the_club_base(self):
         import xp_audit
         with self.db.tx() as c:          # the state the old code left: every award counted
@@ -434,6 +452,77 @@ class DrivatarTests(Base):
         self.assertGreaterEqual(len({v for k, v in first.items() if k <= 40}), 10)
         self.assertEqual(first[7], low)
         self.assertEqual({r["Xuid"]: r["wristbandLevel"] for r in self.d.pool(40)}[3], first[3])
+
+    def many_templates(self):
+        self.d.templates = [dict(template(s, 100 * w, "T%d_%d" % (s, w)), Xuid=1000 + s * 100 + w) for s in range(5) for w in range(25)]
+
+    def test_cache_never_exceeds_what_the_client_holds(self):
+        self.many_templates()
+        for x in range(1, 300):
+            self.d.add_player(x, "P%d" % x, skill=x % 5)
+        out = self.d.for_cache(120)
+        self.assertEqual(len(out), 120)
+        self.assertEqual(len(self.d.for_cache(400)), 120)
+        self.assertEqual(len({r["Xuid"] for r in out}), 120)
+
+    def test_cache_keeps_a_floor_of_shipped_records_for_every_skill(self):
+        self.many_templates()
+        for x in range(1, 300):
+            self.d.add_player(x, "P%d" % x, skill=3)
+        bots = {t["Xuid"] for t in self.d.templates}
+        out = self.d.for_cache(120)
+        for skill in range(5):
+            self.assertGreaterEqual(sum(1 for r in out if r["Xuid"] in bots and r["UserSkillLevel"] == skill), drivatar.CACHE_SHIPPED_PER_SKILL)
+
+    def test_cache_with_no_players_is_full_of_shipped_records(self):
+        self.many_templates()
+        out = self.d.for_cache(120)
+        self.assertEqual(len(out), 120)
+        self.assertTrue(all(r["GamerTag"] for r in out))
+
+    def test_cache_carries_real_players_and_not_the_requester(self):
+        self.many_templates()
+        for x in range(1, 6):
+            self.d.add_player(x, "P%d" % x)
+        got = {r["Xuid"] for r in self.d.for_cache(120, exclude_xuid=1)}
+        self.assertEqual(got & {1, 2, 3, 4, 5}, {2, 3, 4, 5})
+
+    def test_a_non_finite_upload_is_refused(self):
+        self.d.for_player(77, "Alice")
+        self.assertFalse(self.d.save_upload(77, "Alice", {"base": {"x": float("nan")}, "sideswipeMean": 0.9}, [], []))
+        self.assertFalse(self.d.save_upload(77, "Alice", {"base": {}, "sideswipeMean": 1e30}, [], []))
+        self.assertEqual(self.d.for_player(77, "Alice")["UserInfo"]["sideswipeMean"], 0.5)
+        self.assertTrue(self.d.save_upload(77, "Alice", {"base": {}, "sideswipeMean": 0.9}, [], []))
+
+    def test_a_stored_bad_record_is_not_served(self):
+        self.many_templates()
+        self.d.add_player(9, "Bad")
+        self.d.edit(9, {"sideswipeMean": "inf"})
+        self.assertNotIn(9, {r["Xuid"] for r in self.d.for_cache(120)})
+        self.assertNotIn(9, {r["Xuid"] for r in self.d.pool(200)})
+
+    def test_players_get_their_own_car_tune_and_livery(self):
+        self.many_templates()
+        self.d.add_player(9, "Own")
+        bot = self.d.templates[0]
+        with mock.patch.object(drivatar, "CARS", True), mock.patch.object(drivatar, "KNOWN_CARS", frozenset({283})):
+            answers = iter(([{"xuid": 9, "car": 283}],
+                            [{"creator": 9, "car_id": 283, "kind": "livery", "id": 41}, {"creator": 9, "car_id": 283, "kind": "tune", "id": 42}]))
+            with mock.patch.object(self.db, "query", lambda *a: next(answers)):
+                mine, shipped = self.d.with_cars([dict(self.d.for_player(9, "Own")), dict(bot)])
+        self.assertEqual((mine["CarId"], mine["TuneId"], mine["LiveryId"]), (283, 42, 41))
+        self.assertEqual(shipped, bot)
+
+    def test_a_car_the_server_does_not_know_is_left_out(self):
+        self.d.add_player(9, "Own")
+        before = self.d.for_player(9, "Own")
+        with mock.patch.object(drivatar, "CARS", True), mock.patch.object(drivatar, "KNOWN_CARS", frozenset()):
+            answers = iter(([{"xuid": 9, "car": 283}], []))
+            with mock.patch.object(self.db, "query", lambda *a: next(answers)):
+                self.assertEqual(self.d.with_cars([before])[0]["CarId"], before["CarId"])
+
+    def test_cars_stay_off_by_default(self):
+        self.assertFalse(drivatar.CARS)
 
 
 if __name__ == "__main__":

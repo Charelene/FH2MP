@@ -362,7 +362,9 @@ def _me():
 
 def drv_save(req):
     xuid, tag = _me()
-    DRV.save_upload(xuid, tag, req["info"], req["curveTypes"], req["segmentInformation"])
+    if DRV.save_upload(xuid, tag, req["info"], req["curveTypes"], req["segmentInformation"]) is False:
+        log(f"  refused a Drivatar upload from {xuid:#x}: a value is not finite or out of range")
+        return None
     log(f"  stored Drivatar upload from {xuid:#x} ({len(req['segmentInformation'])} segments, "
         f"{len(req['curveTypes'])} curves)")
     return None
@@ -372,11 +374,8 @@ def drv_for_cache(req):
     xuid, tag = _me()
     DRV.for_player(xuid, tag)          # makes sure the requesting player has one (profile-based if needed)
     n = req["numberOfDrivatars"]
-    # The client replaces its built-in set with whatever we return here, so send the whole shipped
-    # set plus the players' own Drivatars, never a short or empty list.
-    nplayers = DRV.count()
-    recs = DRV.pool(max(n, len(DRV.templates) + nplayers))
-    log(f"  ForCache numberOfDrivatars={n}: serving {len(recs)} ({nplayers} player + shipped)")
+    recs = DRV.for_cache(n, exclude_xuid=xuid)
+    log(f"  ForCache numberOfDrivatars={n}: serving {len(recs)}")
     return {"drivatarInfos": recs}
 
 
@@ -1790,19 +1789,20 @@ def club_accept_invites_pref(req):
 
 
 def club_ladder(req):
-    """Scoreboard.GetLadderRows (Club Overview > View Club Ladder): the club's MEMBERS ranked by the XP they earned in it, the caller's
-    own row and the reward tiers. (The club-vs-club board is GetRows with isClubBoard.)"""
+    """Scoreboard.GetLadderRows (Club Overview > View Club Ladder): the club's MEMBERS ranked by the XP they earned this week, the caller's
+    own row and the reward tiers (Tier 1 = the highest threshold: the client fills the tier tabs by walking the list in order). (The club-vs-club board is GetRows with isClubBoard.)"""
     res = xls.default_struct(SC, SC.call_struct("ForzaWebServicesScoreboardGetLadderRows_Results"))
     row_t = _elem_template("ForzaWebServicesScoreboardGetLadderRows_Results", "rows")
     tier_t = _elem_template("ForzaWebServicesScoreboardGetLadderRows_Results", "ladderTiers")
     xuid, _ = _me()
     ladder = CLUBS.member_ladder(req["clubId"])
-    club_xp = sum(xp for _, xp in ladder)
+    top = clubs.ClubStore.TIERS[0][0]
+    top_count = sum(1 for _, xp in ladder if xp >= top)           # the "Tier 1" count the client shows: members in the top tier
 
     def row(rank, member, xp):
         r = _clone(row_t)
         r.update({"rank": rank, "user": _owner(row_t["user"], member), "score": scoreboard.dbl_to_u64(xp),
-                  "topTierCount": sum(1 for th, _ in clubs.ClubStore.TIERS if club_xp >= th)})
+                  "topTierCount": top_count})
         return r
     start = max(1, req["startAt"])
     res["rows"] = [row(i + 1, m, xp) for i, (m, xp) in enumerate(ladder)][start - 1:start - 1 + max(1, req["maxResults"])]
@@ -1813,7 +1813,7 @@ def club_ladder(req):
         res["userRow"] = row(*mine)
     res["available"] = len(ladder)
     log(f"  GetLadderRows club={req['clubId']} start={req['startAt']} max={req['maxResults']}: {len(res['rows'])} of {len(ladder)} members, "
-        f"club XP {club_xp:.0f}, you={'#%d' % mine[0] if mine else '-'}")
+        f"{top_count} in Tier 1, you={'#%d' % mine[0] if mine else '-'}")
     return res
 
 
