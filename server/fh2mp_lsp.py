@@ -154,6 +154,8 @@ def logon(req):
 # ---------------------------------------------------------------- notifications (Message Center)
 
 POLL_SECONDS = 5
+POLL_IDLE_SECONDS = 20       # 72 players at 5 s were 14 queries a second for a list that rarely changes
+POLL_BUSY_WINDOW = 60        # back to POLL_SECONDS for this long after any notification changes
 # The hosts through which a client finds or joins other people (matchmaking, session documents, the game servers it is sent to).
 MULTIPLAYER_HOSTS = ("momatch.xboxlive.com", "sessiondirectory.xboxlive.com", "gameserverds.xboxlive.com", "gameserverms.xboxlive.com")
 MSG_TYPE = 0x200    # notificationType carrying MessageNotificationParameters (to be confirmed in game)
@@ -257,10 +259,32 @@ def _visible():
 NOTIF_MAX_RESULTS, NOTIF_MAX_BLOCK = 0x200, 0xc800     # what the client asks for (0xf0c3f0)
 
 
+_NOTIF_REPLIES = {}          # (xuid, limit, room) -> (NOTIF.generation, reply): rebuilt only after something changed
+_NOTIF_CHANGE = [None, 0.0]  # the generation last seen, and when it changed
+NOTIF_REPLIES_MAX = 4096
+
+
 def notif_retrieve(req):
-    """Newest first up to the client's limits, in id order: broadcasts never expire and club notices are never cleared."""
-    results, blocks, room = [], [], (req or {}).get("cbParameterBlockSize") or NOTIF_MAX_BLOCK
     limit = (req or {}).get("maxResults") or NOTIF_MAX_RESULTS
+    room = (req or {}).get("cbParameterBlockSize") or NOTIF_MAX_BLOCK
+    key, generation = (getattr(CTX, "xuid", 0), limit, room), (NOTIF, NOTIF.generation)
+    now = time.monotonic()
+    if generation != _NOTIF_CHANGE[0]:
+        _NOTIF_CHANGE[:] = generation, now
+    poll = POLL_SECONDS if now - _NOTIF_CHANGE[1] < POLL_BUSY_WINDOW else POLL_IDLE_SECONDS
+    cached = _NOTIF_REPLIES.get(key)
+    if cached is not None and cached[0] == generation:
+        return dict(cached[1], nextRetrieveSeconds=poll)
+    reply = _notif_reply(limit, room)
+    if len(_NOTIF_REPLIES) >= NOTIF_REPLIES_MAX:
+        _NOTIF_REPLIES.clear()
+    _NOTIF_REPLIES[key] = generation, reply
+    return dict(reply, nextRetrieveSeconds=poll)
+
+
+def _notif_reply(limit, room):
+    """Newest first up to the client's limits, in id order: broadcasts never expire and club notices are never cleared."""
+    results, blocks = [], []
     vis = []
     for n in reversed(_visible()):
         if len(vis) >= limit:
@@ -286,8 +310,8 @@ def notif_retrieve(req):
                         "cbParameters": len(pb)})
     vis.reverse()
     results.reverse()
-    return {"results": results, "parameterBlock": b"".join(reversed(blocks)), "nextRetrieveSeconds": POLL_SECONDS,
-            "reconcileActiveNotifications": True, "activeNotificationIds": [n["id"] for n in vis]}
+    return {"results": results, "parameterBlock": b"".join(reversed(blocks)), "reconcileActiveNotifications": True,
+            "activeNotificationIds": [n["id"] for n in vis]}
 
 
 OUTDATED_NOTICE_ID = 0x7FFFFF00      # never stored: only out-of-date clients see it

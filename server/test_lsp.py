@@ -481,6 +481,26 @@ class LspTests(unittest.TestCase):
         first, _ = xls.decode(L.SC, fields, bytes(res["parameterBlock"]))        # blocks stay in the order of their results
         self.assertEqual(first["Message"], "news 4")
 
+    def test_a_notification_reply_is_reused_until_something_changes(self):
+        L.NOTIF.add("first", "", 0x200)
+        built = []
+        real = L._notif_reply
+        with mock.patch.object(L, "_notif_reply", lambda *a: built.append(a) or real(*a)):
+            first = L.notif_retrieve({"maxResults": 512, "cbParameterBlockSize": 51200})
+            self.assertEqual(L.notif_retrieve({"maxResults": 512, "cbParameterBlockSize": 51200})["activeNotificationIds"], first["activeNotificationIds"])
+            self.assertEqual(len(built), 1)
+            L.NOTIF.add("second", "", 0x200)
+            after = L.notif_retrieve({"maxResults": 512, "cbParameterBlockSize": 51200})
+        self.assertEqual(len(built), 2)
+        self.assertEqual(len(after["activeNotificationIds"]), len(first["activeNotificationIds"]) + 1)
+        self.assertEqual(after["nextRetrieveSeconds"], L.POLL_SECONDS)
+
+    def test_the_poll_slows_once_nothing_has_changed_for_a_while(self):
+        L.NOTIF.add("first", "", 0x200)
+        L.notif_retrieve({})
+        L._NOTIF_CHANGE[1] -= L.POLL_BUSY_WINDOW + 1
+        self.assertEqual(L.notif_retrieve({})["nextRetrieveSeconds"], L.POLL_IDLE_SECONDS)
+
     def test_best_score_on_a_class_board_is_the_best_in_that_class(self):
         x = L.CTX.xuid
 

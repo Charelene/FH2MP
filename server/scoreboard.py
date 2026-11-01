@@ -168,12 +168,12 @@ class ScoreStore:
         stands: the same bytes again are a harmless retry, anything else is refused. Returns (submission id, run is newly public), or
         (None, False) if it is refused."""
         data = bytes(data)
-        r = self.db.one("SELECT s.*, g.data AS stored, '' AS tag FROM score_submissions s LEFT JOIN score_ghosts g ON g.submission_id = s.id WHERE s.score_id=?",
+        r = self.db.one("SELECT s.*, g.submission_id AS stored, '' AS tag FROM score_submissions s LEFT JOIN score_ghosts g ON g.submission_id = s.id WHERE s.score_id=?",
                         (bytes(score_id),))
         if r is None or r["xuid"] != xuid or len(data) > ghost.MAX_BLOB:
             return None, False
         if r["stored"] is not None:
-            return (r["id"], False) if bytes(r["stored"]) == data else (None, False)
+            return (r["id"], False) if self.ghost(r["id"]) == data else (None, False)
         try:
             ghost.parse(data)        # every one of 17,011 real ghosts parses; what does not is never stored or served
         except ghost.GhostError:
@@ -243,7 +243,7 @@ class ScoreStore:
     def better(self, st, a, b):
         return a < b if st in ASCENDING else a > b
 
-    def _best_per_player(self, sb, st, track, xuid=None, pivot=-1, viewer=None):
+    def _best_per_player(self, sb, st, track, xuid=None, pivot=-1, viewer=None, counts=True):
         """Each player's best submission on a board (any track when `track` is -1/65535), as row dicts keyed by
         xuid. Progress counters use the latest valid snapshot of the active save. `viewer` also sees their own run awaiting its ghost."""
         asc = st in ASCENDING
@@ -275,7 +275,8 @@ class ScoreStore:
             args.append(pivot)
         # Record ties retain their first submission; save snapshots follow submission order.
         order = 's.id DESC' if limit is not None else f"s.score {'ASC' if asc else 'DESC'}, s.id"
-        sql = (f"SELECT * FROM (SELECT s.*, {score_reports.COUNTS} AS report_count, COALESCE(p.gamertag, '') AS tag, "
+        reports = score_reports.COUNTS if counts else "0"        # the game never shows them; only the website does
+        sql = (f"SELECT * FROM (SELECT s.*, {reports} AS report_count, COALESCE(p.gamertag, '') AS tag, "
                f"CASE WHEN g.submission_id IS NULL OR length(g.data) > {ghost.MAX_SERVED} THEN 0 ELSE s.id END AS ghost, ROW_NUMBER() OVER "
                f"(PARTITION BY s.xuid ORDER BY {order}) AS rn "
                "FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid "
@@ -284,7 +285,7 @@ class ScoreStore:
         return best
 
     def best_of(self, xuid, sb, st, track, pivot=-1):
-        return self._best_per_player(sb, st, track, xuid, pivot, viewer=xuid).get(xuid)
+        return self._best_per_player(sb, st, track, xuid, pivot, viewer=xuid, counts=False).get(xuid)
 
     def top(self, sb, st, track=-1, pivot=-1, limit=25):
         """Real players only (no synthesized rivals), best first, each row with its `position`. For the website's public boards."""
@@ -378,7 +379,7 @@ class ScoreStore:
 
     def rows(self, xuid, sb, st, track, start_at, max_results, pivot=-1):
         """Sorted best-per-player rows (real + fake) and the requesting player's row."""
-        best = self._best_per_player(sb, st, track, pivot=pivot, viewer=xuid)
+        best = self._best_per_player(sb, st, track, pivot=pivot, viewer=xuid, counts=False)
         me = best.get(xuid)
         real = list(best.values())
         fake = [] if (sb, st) in PROGRESS_LIMITS else self._fake(sb, st, track, me["score"] if me else None, max(0, FAKE_ROWS - len(real)), pivot)

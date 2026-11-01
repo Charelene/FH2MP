@@ -55,6 +55,7 @@ def conditions(tod, weather_adj):
     return f"{'an' if weather_adj[0] in 'aeiou' else 'a'} {weather_adj} {word}"
 ID_BASE = 1000
 EPOCH = (2026, 1)
+SERIAL_CACHE_SECONDS = 30   # GetTimeTrials and every board page ask; another process may re-roll, which then shows within this time
 
 
 # CarRestrictions attribute -> (v_cars column, SQL operator). Names follow the exe's option table [inferred].
@@ -183,11 +184,17 @@ class RivalCatalog:
         """(month index since 2026-01, re-roll counter of that month)."""
         d = now or datetime.date.today()
         month = (d.year - EPOCH[0]) * 12 + d.month - EPOCH[1]
+        cached = self.__dict__.get("_serial")
+        clock = time.monotonic()
+        if now is None and cached and cached[0] == month and clock - cached[2] < SERIAL_CACHE_SECONDS:
+            return month, cached[1]
         stored = self.database.one("SELECT value FROM meta WHERE key='rival_reroll'") if self.database else None
         n = 0
         if stored:
             m, _, c = stored["value"].partition(":")
             n = int(c) if int(m) == month else 0
+        if now is None:
+            self._serial = (month, min(n, 9), clock)
         return month, min(n, 9)
 
     def rotate(self):
@@ -197,7 +204,7 @@ class RivalCatalog:
             with self.database.tx() as c:
                 c.execute("INSERT INTO meta (key, value) VALUES ('rival_reroll', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                           (f"{month}:{min(n + 1, 9)}",))
-        self._cache = None
+        self._cache = self._serial = None
         return self.events()
 
     def _row(self, r):

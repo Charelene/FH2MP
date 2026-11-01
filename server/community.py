@@ -11,6 +11,7 @@ import xbl
 
 LAUNCHER_SEEN = {}                  # independent of the game's presence poll
 MESSAGE_KEEP = 7 * 86400            # chat messages older than a week are deleted
+HUB_CACHE_SECONDS = 2.5
 _PRUNE = {"at": 0.0}
 INVITE_ERRORS = {                   # ClubStore rule violations, in the launcher's words
     "not_in_club": "You are not in a club.", "no_privilege": "Only the club leader and co-leaders can invite players.",
@@ -38,33 +39,55 @@ class Community:
         return row[0]
 
     def profile(self, xuid, lobbies=()):
-        row = self.db.one("SELECT a.xuid, a.gamertag, p.career_level, COALESCE(g.gamerpic_at,0) AS gamerpic_version "
-                          "FROM accounts a LEFT JOIN players p ON p.xuid=a.xuid LEFT JOIN player_profiles g ON g.xuid=a.xuid "
-                          "WHERE a.xuid=?", (xuid,))
+        return self.profiles([xuid], lobbies)[xuid]
+
+    def profiles(self, xuids, lobbies=()):
+        """The cards of many players in three queries; the friends list asked nine per friend, every 5 s per open launcher."""
+        xuids = list(dict.fromkeys(xuids))
+        if not xuids:
+            return {}
+        marks = ",".join("?" * len(xuids))
+        rows = {r[0]: r for r in self.db.query("SELECT a.xuid, a.gamertag, p.career_level, COALESCE(g.gamerpic_at,0) AS gamerpic_version "
+                                               "FROM accounts a LEFT JOIN players p ON p.xuid=a.xuid LEFT JOIN player_profiles g ON g.xuid=a.xuid "
+                                               f"WHERE a.xuid IN ({marks})", xuids)}
+        clubs = {r["xuid"]: r for r in self.db.query("SELECT m.xuid, c.id, c.tag, c.name, m.role, (SELECT COUNT(*) FROM club_members n WHERE n.club_id=c.id) AS members "
+                                                     f"FROM club_members m JOIN clubs c ON c.id=m.club_id WHERE m.xuid IN ({marks})", xuids)}
+        return {x: self._card(x, rows.get(x), clubs.get(x), lobbies) for x in xuids}
+
+    def _card(self, xuid, row, club, lobbies):
         if not row:
             # Dev/optional-auth worlds may contain a legitimate game player
             # without a launcher account. They are visible but cannot be added
             # until they register (resolve() still requires an account).
             row = {"gamertag": self.social.profile(xuid)["Gamertag"], "career_level": 0, "gamerpic_version":0}
-        club = self.db.one("SELECT c.id, c.tag, c.name, m.role, (SELECT COUNT(*) FROM club_members n WHERE n.club_id=c.id) AS members "
-                           "FROM club_members m JOIN clubs c ON c.id=m.club_id WHERE m.xuid=?", (xuid,))
         lobby = next((l for l in lobbies if f"{xuid:x}" in l.get("memberXuids", [])), None)
         playing = lobby is not None or social.online(xuid)
         return {"xuid": xuid, "gamertag": row["gamertag"], "level": db.display_level(row["career_level"] or 0),
                 "gamerpicVersion": row['gamerpic_version'],
                 "state": "playing" if playing else "online" if time.time() - LAUNCHER_SEEN.get(xuid, 0) < 40 else "offline",
-                "club": dict(club) if club else None,
+                "club": {k: club[k] for k in ("id", "tag", "name", "role", "members")} if club else None,
                 "lobby": {k: v for k, v in lobby.items() if k != "memberXuids"} if lobby else None}
 
     def snapshot(self, me):
-        result = xbl.hub_lobbies()
+        result = self.hub_lobbies()
         lobbies = (result or {}).get("lobbies", [])
-        friends = [self.profile(f, lobbies) for f in self.social.friends(me)]
+        people = self.social.friends(me)
         requests = self.db.query("SELECT sender, recipient FROM friend_requests WHERE sender=? OR recipient=? ORDER BY created", (me, me))
-        return {"friends": friends, "incoming": [self.profile(r[0], lobbies) for r in requests if r[1] == me],
-                "outgoing": [self.profile(r[1], lobbies) for r in requests if r[0] == me], "me": self.profile(me, lobbies),
+        cards = self.profiles([me, *people, *(r[0] for r in requests), *(r[1] for r in requests)], lobbies)
+        return {"friends": [cards[f] for f in people], "incoming": [cards[r[0]] for r in requests if r[1] == me],
+                "outgoing": [cards[r[1]] for r in requests if r[0] == me], "me": cards[me],
                 "reservation": public_hold(launcher_lobbies.current(me)), "chats": self.channels(me),
                 "lobbyCounts": {kind: sum(l['kind'] == kind for l in lobbies) for kind in ('freeroam', 'roadtrip')} if result is not None else None}
+
+    def hub_lobbies(self):
+        """The hub's answer, shared for a moment: a launcher open means one UDP query every 5 s, up to 0.3 s each."""
+        now = time.monotonic()
+        cached = self.__dict__.get("_hub")
+        if cached and now - cached[0] < HUB_CACHE_SECONDS:
+            return cached[1]
+        result = xbl.hub_lobbies()
+        self._hub = (now, result)
+        return result
 
     def request(self, me, value):
         target = self.resolve(value)
@@ -106,21 +129,31 @@ class Community:
         raise auth.AuthError(403, "chat_unavailable", "Direct messages require friendship; club chat requires current membership.")
 
     def channels(self, me):
-        refs = [(str(f), self.profile(f)["gamertag"]) for f in self.social.friends(me)]
+        friends = self.social.friends(me)
+        cards = self.profiles(friends)
+        refs = [(str(f), cards[f]["gamertag"]) for f in friends]
         club = self.db.one("SELECT c.tag, c.name FROM clubs c JOIN club_members m ON m.club_id=c.id WHERE m.xuid=?", (me,))
         if club:
             refs.insert(0, ("club", f"[{club['tag']}] {club['name']}"))
-        out = []
-        for ref, title in refs:
-            channel = self.channel(me, ref)
-            last = self.db.one("SELECT id, body FROM launcher_messages WHERE channel=? AND created>? ORDER BY id DESC LIMIT 1",
-                               (channel, time.time() - MESSAGE_KEEP))
-            read = self.db.one("SELECT last_id FROM launcher_chat_reads WHERE xuid=? AND channel=?", (me, channel))
-            unread = self.db.one("SELECT COUNT(*) FROM launcher_messages WHERE channel=? AND sender<>? AND id>?", (channel, me, read[0] if read else 0))[0]
-            incoming = self.db.one("SELECT id FROM launcher_messages WHERE channel=? AND sender<>? ORDER BY id DESC LIMIT 1", (channel, me))
-            out.append({"id": ref, "title": title, "last": last["body"] if last else "", "unread": unread,
-                        "lastIncomingId": incoming[0] if incoming else 0})
-        return out
+        if not refs:
+            return []
+        named = {ref: self.channel(me, ref) for ref, _ in refs}
+        channels = list(named.values())
+        marks = ",".join("?" * len(channels))
+        last_ids = dict(tuple(r) for r in self.db.query(f"SELECT channel, MAX(id) FROM launcher_messages WHERE channel IN ({marks}) AND created>? GROUP BY channel",
+                                                        (*channels, time.time() - MESSAGE_KEEP)))
+        bodies = {}
+        if last_ids:
+            ids = list(last_ids.values())
+            bodies = dict(tuple(r) for r in self.db.query(f"SELECT id, body FROM launcher_messages WHERE id IN ({','.join('?' * len(ids))})", ids))
+        read = dict(tuple(r) for r in self.db.query(f"SELECT channel, last_id FROM launcher_chat_reads WHERE xuid=? AND channel IN ({marks})", (me, *channels)))
+        incoming, unread = {}, {}
+        for channel, message in self.db.query(f"SELECT channel, id FROM launcher_messages WHERE channel IN ({marks}) AND sender<>?", (*channels, me)):
+            incoming[channel] = max(incoming.get(channel, 0), message)
+            if message > read.get(channel, 0):
+                unread[channel] = unread.get(channel, 0) + 1
+        return [{"id": ref, "title": title, "last": bodies.get(last_ids.get(named[ref]), ""), "unread": unread.get(named[ref], 0),
+                 "lastIncomingId": incoming.get(named[ref], 0)} for ref, title in refs]
 
     def messages(self, me, ref, after=0):
         channel = self.channel(me, ref)

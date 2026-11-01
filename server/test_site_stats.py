@@ -115,6 +115,7 @@ class RecordTests(Base):
         self.assertIs(site_stats.record_history(self.lsp), first)
         festival(self.lsp.SB, 3, "Cara", 60.0, 856)
         self.lsp._site_history["checked"] -= site_stats.HISTORY_RECHECK + 1
+        self.lsp._site_history["scanned"] -= site_stats.HISTORY_RESCAN + 1
         self.assertIsNot(site_stats.record_history(self.lsp), first)
         self.assertEqual(self.get("/ops/v1/records?limit=1")["feed"][0]["gamertag"], "Cara")
 
