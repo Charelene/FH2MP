@@ -6,6 +6,11 @@ only as an opt-in checkbox nobody found. The reply is exactly as long as the req
 per minute. Format: the game's 11-byte datagram header (ignored, any bytes) + MAGIC + 8 bytes the client chose."""
 import time
 
+import diag
+
+LOG = diag.get("probe")
+_RATE = diag.RateLimit()
+
 MAGIC = b"FH2MPPN1"
 LENGTH = 11 + len(MAGIC) + 8
 PER_WINDOW = 6            # answers per address per WINDOW seconds
@@ -26,12 +31,18 @@ def handle(hub, data, addr, now=None):
     if now - start >= WINDOW:
         start, count = now, 0
     if count >= PER_WINDOW:
+        ok, skipped = _RATE.allow("limit", WINDOW)
+        if ok:
+            LOG.warn(f"probe over the limit of {PER_WINDOW} answers per address per {WINDOW:g} s, the excess gets no answer (a launcher then thinks UDP is blocked)"
+                     + (f"; {skipped} more since the last line" if skipped else ""))
         return True
     if len(_seen) >= MAX_ADDRESSES:
         _seen.clear()
     _seen[addr] = (start, count + 1)
     try:
         hub.sock.sendto(data, addr)
-    except OSError:
-        pass
+    except OSError as e:
+        ok, skipped = _RATE.allow("send", WINDOW)
+        if ok:
+            LOG.warn(f"probe answer not sent: {e}" + (f" ({skipped} more since the last line)" if skipped else ""))
     return True

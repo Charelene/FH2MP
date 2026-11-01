@@ -62,7 +62,7 @@ def suspects(awards, rare_users=RARE_USERS, repeats=REPEATS):
 # ---- the existing log (lsp.log): `#N POST ... SubmitXpScore body=4 user=0x..` then `HH:MM:SS   SubmitXpScore +X -> total T` (since
 # 2026-10-22 the award line ends with ` user=0x..` itself)
 _POST = re.compile(r"SubmitXpScore body=\d+ user=(0x[0-9a-f]+)")
-_AWARD = re.compile(r"^(\d\d):(\d\d):(\d\d)   SubmitXpScore \+(\S+) -> total (\S+)(?: user=(0x[0-9a-f]+))?")
+_AWARD = re.compile(r"^(\d\d):(\d\d):(\d\d)   (?:#\d+ )?SubmitXpScore \+(\S+) -> total (\S+)(?: user=(0x[0-9a-f]+))?")
 
 
 def _close(a, b):

@@ -51,6 +51,7 @@ import time
 from urllib.parse import parse_qs, urlparse
 
 import auth
+import diag
 import rivals
 import scoreboard
 import score_reports
@@ -59,6 +60,9 @@ import social
 import db
 
 STARTED = time.time()
+LOG = diag.get("ops")
+_RATE = diag.RateLimit()
+REFUSAL_LOG_SECONDS = 120.0       # one line per code, route and reason: the website retries a refused call every few seconds
 BLOCKLIST_MAX = 500
 MONTHLY_BOARD = (3, 1)                  # (scoreboardType, scoreType) of a Monthly Rivals event; the pivot is the event id
 FESTIVAL_BOARD = (1, 1)                 # (scoreboardType, scoreType) of a Festival Route; the track id is the route, the pivot the car class
@@ -72,9 +76,9 @@ NEWS_FIELDS = {"tag": 24, "title": 80, "text": 200, "url": 300, "image": 300}   
 
 
 class OpsError(Exception):
-    def __init__(self, status, code, message=""):
+    def __init__(self, status, code, message="", detail=""):
         super().__init__(message or code)
-        self.status, self.code, self.message = status, code, message or code
+        self.status, self.code, self.message, self.detail = status, code, message or code, detail
 
 
 @dataclass
@@ -115,28 +119,47 @@ def handle(cfg, lsp, method, path, headers, body, peer, proxied):
         _authorize(cfg, lsp, headers, peer, proxied)
         return _route(lsp, method, path, body)
     except OpsError as e:
+        _refused(method, path, e.status, e.code, e.message, getattr(e, "detail", ""))
         return e.status, {"error": e.code, "message": e.message}
     except auth.AuthError as e:
+        _refused(method, path, e.status, e.code, e.message, e.detail)
         return e.status, {"error": e.code, "message": e.message}
     except lsp.ApiError as e:                                  # the notification API's own errors
+        _refused(method, path, e.status, "bad_request", e.msg, "")
         return e.status, {"error": "bad_request", "message": e.msg}
     except Exception as e:  # noqa: BLE001 - a bug here must not kill the LSP's handler thread silently
-        import traceback
-        traceback.print_exc()
+        LOG.exc(f"unhandled error in {method} {_route_name(path)}, answered 500", e)
         return 500, {"error": "internal", "message": type(e).__name__}
+
+
+def _route_name(path):
+    """The route without query and ids (the query of a player search is somebody's name)."""
+    return re.sub(r"/\d+", "/N", path.split("?")[0].rstrip("/"))[:80]
+
+
+def _refused(method, path, status, code, message, detail):
+    """Why the operator API said no, once per code and route every 120 s. Never the token; no address (the allow list is the cause for 403)."""
+    route = _route_name(path)
+    ok, skipped = _RATE.allow(("refused", status, code, route), REFUSAL_LOG_SECONDS)
+    if not ok:
+        return
+    line = (f"refused {status} {code}: {method} {route} " + diag.kv(message=message if message != code else None, detail=detail or None)
+            + (f" (and {skipped} more in the last {REFUSAL_LOG_SECONDS:.0f} s)" if skipped else ""))
+    (LOG.warn if status in (401, 403, 429) or status >= 500 else LOG.info)(line)
 
 
 def _authorize(cfg, lsp, headers, peer, proxied):
     if not cfg.token:
-        raise OpsError(404, "disabled", "the operator API is not enabled on this server")
+        raise OpsError(404, "disabled", "the operator API is not enabled on this server", detail="FH2MP_OPS_TOKEN is not set")
     if proxied or not cfg.permits(peer):
-        raise OpsError(403, "forbidden")
+        raise OpsError(403, "forbidden", detail="the request carries proxy headers (X-Real-IP / X-Forwarded-For): it came through the public proxy" if proxied
+                       else f"the sender is not in FH2MP_OPS_ALLOW ({len(cfg.allow)} network(s) allowed)")
     h = headers.get("Authorization", "")
     given = h[7:].strip() if h[:7].lower() == "bearer " else ""
     if not hmac.compare_digest(given.encode(), cfg.token.encode()):
         if lsp.AUTH is not None and not lsp.AUTH.hit(("ops-fail", peer), 10, 60):
-            raise OpsError(429, "rate_limited", "too many wrong tokens")
-        raise OpsError(401, "unauthorized")
+            raise OpsError(429, "rate_limited", "too many wrong tokens", detail="over 10 wrong tokens per minute from this sender")
+        raise OpsError(401, "unauthorized", detail="no bearer token sent" if not given else f"the bearer token does not match ({len(given)} characters sent)")
 
 
 def _json(body):
@@ -191,7 +214,7 @@ def _route(lsp, method, path, body):
     if what == "lobbies" and not rest and method == "GET":
         result = lsp.xbl.hub_lobbies()
         if result is None:
-            raise OpsError(503, "unavailable", "the game server did not answer")
+            raise OpsError(503, "unavailable", "the game server did not answer", detail="lobby list query got no answer")
         # Resolve private protocol IDs to nicknames here; public summaries contain no player IDs.
         for lobby in result['lobbies']:
             lobby['members'] = sorted((_nickname(lsp, value) for value in lobby.pop('memberXuids', [])), key=str.casefold)
@@ -199,7 +222,7 @@ def _route(lsp, method, path, body):
     if what == "positions" and not rest and method == "GET":
         result = lsp.xbl.hub_positions()
         if result is None:
-            raise OpsError(503, "unavailable", "the game server did not answer")
+            raise OpsError(503, "unavailable", "the game server did not answer", detail="positions query got no answer")
         cars = lsp.RIV.names()["car"]
         for lobby in result['lobbies']:
             lobby.pop('memberXuids', None)
@@ -473,8 +496,10 @@ def _xuid(text):
 
 def player_action(lsp, xuid_text, action, d):
     xuid = _xuid(xuid_text)
-    if not lsp.DB.one("SELECT 1 FROM accounts WHERE xuid=?", (xuid,)):
-        raise OpsError(404, "no_such_player", "no account with that xuid")
+    row = lsp.DB.one("SELECT banned_at, ban_until FROM accounts WHERE xuid=?", (xuid,))
+    if not row:
+        raise OpsError(404, "no_such_player", "no account with that xuid", detail=f"{xuid:#x}, action {action!r}")
+    was_banned = auth.ban_active(row["banned_at"], row["ban_until"], time.time())
     if action == "ban":
         reason = str(d.get("reason", "")).strip()[:200] or "banned by an operator"
         until = None
@@ -487,11 +512,11 @@ def player_action(lsp, xuid_text, action, d):
                 raise OpsError(400, "bad_request", "days must be between 0 and 3650")
             until = time.time() + days * 86400
         lsp.AUTH.set_banned(xuid, reason, until)
-        lsp.log(f"  ops: banned {xuid:#x}{f' until {int(until)}' if until else ''}: {reason}")
+        lsp.log(f"  ops: banned {xuid:#x}{f' until {int(until)}' if until else ''}: {reason}" + (" (was banned already, replaced)" if was_banned else ""))
         return {"banned": True, "until": int(until) if until else None}
     if action == "unban":
         lsp.AUTH.set_banned(xuid, None)
-        lsp.log(f"  ops: unbanned {xuid:#x}")
+        lsp.log(f"  ops: unbanned {xuid:#x}" + ("" if was_banned else " (was not banned)"))
         return {"banned": False}
     if action == "kick":
         n = lsp.AUTH.revoke(xuid)
@@ -605,6 +630,7 @@ def set_config(lsp, d):
     new = validate_config(d)
     row = lsp.DB.one("SELECT value FROM meta WHERE key='ops_config'")
     saved = json.loads(row["value"]) if row else {}
+    before = get_config(lsp)
     if "links" in new:
         new["links"] = {**saved.get("links", {}), **new["links"]}
     saved.update(new)
@@ -612,7 +638,9 @@ def set_config(lsp, d):
         c.execute("INSERT INTO meta (key, value) VALUES ('ops_config', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                   (json.dumps(saved),))
     apply_config(lsp, saved)
-    lsp.log(f"  ops: settings changed: {', '.join(sorted(new))}")
+    short = ("minLauncher", "minShim", "maintenance", "registration")        # short settings are written out; texts, links and lists are only named
+    moved = [f"{k} {before.get(k)!r} -> {new[k]!r}" for k in short if k in new and before.get(k) != new[k]]
+    lsp.log(f"  ops: settings changed: {', '.join(sorted(new))}" + (f" ({'; '.join(moved)})" if moved else ""))
     return get_config(lsp)
 
 

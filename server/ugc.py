@@ -20,6 +20,12 @@ import subprocess
 import time
 import zlib
 
+import diag
+
+LOG = diag.get("ugc")
+_RATE = diag.RateLimit()
+DAMAGED_LOG_SECONDS = 600.0
+
 
 MAX_REQUEST_BODY = 16 << 20       # largest HTTP body the LSP reads from a game client
 MAX_BLOB_SIZE = 8 << 20           # one uploaded blob (a livery container, a tune, a vinyl group), declared total size
@@ -83,6 +89,10 @@ def photo_1080p(data):
         return data
     tool = shutil.which("magick") or shutil.which("convert")
     if tool is None:
+        ok, skipped = _RATE.allow("photo-no-tool", DAMAGED_LOG_SECONDS)
+        if ok:
+            LOG.warn(f"photo stays {size[0]}x{size[1]} instead of {PHOTO_SIZE[0]}x{PHOTO_SIZE[1]}: ImageMagick (magick / convert) is not installed, so the game shows it cropped"
+                     + (f" ({skipped} photos since the last line)" if skipped else ""))
         return data
     w, h = PHOTO_SIZE
     # `jpeg:` pins the decoder to JPEG, whatever the bytes claim to be
@@ -90,9 +100,14 @@ def photo_1080p(data):
            "-resize", f"{w}x{h}^", "-gravity", "center", "-extent", f"{w}x{h}", "-quality", str(PHOTO_QUALITY), "jpeg:-"]
     try:
         out = subprocess.run(cmd, input=bytes(data), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=PHOTO_TIMEOUT, check=True).stdout
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as e:
+        LOG.warn(f"photo {size[0]}x{size[1]} ({len(data)} bytes) not converted to {PHOTO_SIZE[0]}x{PHOTO_SIZE[1]}, stored as uploaded: {type(e).__name__}: {e}")
         return data
-    return out if jpeg_size(out) == PHOTO_SIZE and len(out) <= MAX_BLOB_SIZE else data
+    if jpeg_size(out) == PHOTO_SIZE and len(out) <= MAX_BLOB_SIZE:
+        return out
+    LOG.warn(f"photo {size[0]}x{size[1]} ({len(data)} bytes) not converted: the converter produced {jpeg_size(out)} in {len(out)} bytes "
+             f"(wanted {PHOTO_SIZE} within {MAX_BLOB_SIZE} bytes), stored as uploaded")
+    return data
 
 
 def pack(b):
@@ -131,19 +146,28 @@ def unpack(b):
     return out
 
 
+def _livery_chunk(blob):
+    """(inflated container, None) or (None, why it is not one)."""
+    try:
+        comp, raw = struct.unpack("<II", blob[:8])
+        if len(blob) != 8 + comp or raw > MAX_LIVERY_RAW:
+            return None, (f"header says {comp} compressed bytes (blob has {len(blob) - 8}) and {raw} raw bytes (limit {MAX_LIVERY_RAW})")
+        d = zlib.decompressobj()
+        out = d.decompress(blob[8:], raw + 1)
+        if len(out) == raw and not d.unconsumed_tail and d.eof:
+            return out, None
+        return None, f"inflates to {len(out)} bytes, the header says {raw}" + ("" if d.eof else " and the zlib stream does not end")
+    except struct.error:
+        return None, f"blob is {len(blob)} bytes, shorter than the 8 byte chunk header"
+    except zlib.error as e:
+        return None, f"zlib: {e}"
+
+
 def livery_chunk(blob):
     """Checks a livery blob in the game's compression-stream form (IOSys::CCompressionStream, zlib mode, recovered from the exe):
     one chunk = u32 LE compressed size + u32 LE raw size + that many zlib bytes. Returns the inflated 'vlrc' container or None.
     The inflate never produces more than the declared raw size (itself capped), so a small upload cannot expand into gigabytes."""
-    try:
-        comp, raw = struct.unpack("<II", blob[:8])
-        if len(blob) != 8 + comp or raw > MAX_LIVERY_RAW:
-            return None
-        d = zlib.decompressobj()
-        out = d.decompress(blob[8:], raw + 1)
-        return out if len(out) == raw and not d.unconsumed_tail and d.eof else None
-    except (struct.error, zlib.error):
-        return None
+    return _livery_chunk(blob)[0]
 
 
 def strip_livery_prefix(data):
@@ -161,15 +185,18 @@ def parse_layergroup_upload(body):
         n = struct.unpack(">I", body[:4])[0]
         name = body[4:4 + n].decode("utf-8", "replace")
         if len(name.encode()) > 4096:
+            LOG.warn(f"UpdateLiveryGroup body ({len(body)} bytes) refused: name of {len(name.encode())} bytes (limit 4096)")
             return None
         (layers,) = struct.unpack(">H", body[4 + n:6 + n])
         p = 6 + n + 1 + 8
         ln = struct.unpack(">I", body[p:p + 4])[0]
         blob = body[p + 4:p + 4 + ln]
         if len(blob) != ln or ln == 0:
+            LOG.warn(f"UpdateLiveryGroup body ({len(body)} bytes, name {name[:30]!r}) is not a vinyl group: {ln} bytes declared, {len(blob)} present")
             return None
         return {"name": name, "layers": layers, "payload": blob}
-    except (struct.error, ValueError):
+    except (struct.error, ValueError) as e:
+        LOG.warn(f"UpdateLiveryGroup body ({len(body)} bytes) does not follow the recovered layout: {type(e).__name__}: {e}")
         return None
 
 
@@ -186,11 +213,13 @@ def parse_livery_upload(body):
         p = 4 + n + 6 + 1 + 8
         ln = struct.unpack(">I", body[p:p + 4])[0]
         blob = body[p + 4:p + 4 + ln]
-        container = livery_chunk(blob)
+        container, why = _livery_chunk(blob)
         if container is None:
+            LOG.warn(f"UpdateLivery body ({len(body)} bytes, name {name[:30]!r}, car {car_id}) is not a livery: the blob of {ln} declared bytes ({len(blob)} present) {why}")
             return None
         return {"name": name, "car_id": car_id, "layers": layers, "container": container, "payload": blob}
-    except (struct.error, ValueError):
+    except (struct.error, ValueError) as e:
+        LOG.warn(f"UpdateLivery body ({len(body)} bytes) does not follow the recovered layout: {type(e).__name__}: {e}")
         return None
 
 
@@ -223,11 +252,11 @@ class UgcStore:
     def blob_create(self, owner, name, total):
         total = int(total)
         if not 0 <= total <= MAX_BLOB_SIZE:
-            raise LimitError(f"a blob may be at most {MAX_BLOB_SIZE} bytes")
+            raise LimitError(f"a blob may be at most {MAX_BLOB_SIZE} bytes (declared {total})")
         with self.db.tx() as c:
             q = c.execute("SELECT COUNT(*) AS n, COALESCE(SUM(total_size), 0) AS b FROM ugc_blobs WHERE owner=?", (owner,)).fetchone()
             if q["n"] >= MAX_BLOBS_PER_OWNER or q["b"] + total > MAX_BYTES_PER_OWNER:
-                raise LimitError("upload quota of this account reached")
+                raise LimitError(f"upload quota of this account reached ({q['n']} of {MAX_BLOBS_PER_OWNER} blobs, {q['b']} + {total} of {MAX_BYTES_PER_OWNER} bytes)")
             return c.execute("INSERT INTO ugc_blobs (owner, user_file_name, total_size, received, data, created) VALUES (?,?,?,0,?,?)",
                              (owner, name or "", total, b"", time.time())).lastrowid
 
@@ -238,7 +267,7 @@ class UgcStore:
         the original); a blob and its listing then carry the converted size, the return value still counts the uploaded bytes."""
         offset = int(offset)
         if offset < 0 or len(data) > MAX_CHUNK:
-            raise LimitError("bad upload chunk")
+            raise LimitError(f"bad upload chunk (offset {offset}, {len(data)} bytes, limit {MAX_CHUNK} per chunk) for blob {blob_id}")
         with self.db.tx() as c:
             r = c.execute("SELECT data, total_size, received FROM ugc_blobs WHERE id=? AND owner=?", (blob_id, owner)).fetchone()
             if r is None:
@@ -246,7 +275,7 @@ class UgcStore:
             if finish is not None and int(r["received"]) >= int(r["total_size"]):
                 return int(r["received"])             # a repeated last chunk: the stored blob is already converted
             if offset + len(data) > min(int(r["total_size"]), MAX_BLOB_SIZE):
-                raise LimitError("upload chunk beyond the declared size")
+                raise LimitError(f"upload chunk beyond the declared size (blob {blob_id}: offset {offset} + {len(data)} bytes, declared {r['total_size']})")
             buf = bytearray(unpack(r["data"]))
             if offset > len(buf):
                 buf.extend(b"\0" * (offset - len(buf)))
@@ -303,8 +332,11 @@ class UgcStore:
         for k in ("data", "thumb", "thumb_small"):
             try:
                 d[k] = unpack(d[k])
-            except LimitError:
+            except LimitError as e:
                 d[k] = b""              # a damaged row reads as empty instead of failing every listing that contains it
+                ok, skipped = _RATE.allow(("damaged", vid, k), DAMAGED_LOG_SECONDS)
+                if ok:
+                    LOG.error(f"versioned item {vid} ({d.get('kind')}, creator {d.get('creator')}) has a damaged {k}, served empty: {e}")
         return d
 
     def versioned_set_data(self, vid, data, creator=None):

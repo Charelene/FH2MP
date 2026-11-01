@@ -96,6 +96,15 @@ class Log(unittest.TestCase):
         self.assertEqual((a["counted"], a["rejected"], a["rejected_n"]), (7550.0, 12_500_000.0, 1))
         self.assertIn("legit total 7550", X.report(X.audit(aw)))
 
+class AwardLineParsing(unittest.TestCase):
+    def test_award_lines_parse_with_and_without_the_request_number(self):
+        # the LSP numbers the lines under a request ("#N") since 2026-10-29; the pattern must accept both shapes
+        for line in ("12:00:01   SubmitXpScore +1500 -> total 99000 user=0x9000000000001",
+                     "12:00:01   #4821 SubmitXpScore +1500 -> total 99000 user=0x9000000000001"):
+            m = X._AWARD.match(line)
+            self.assertIsNotNone(m, line)
+            self.assertEqual((m.group(4), m.group(5), m.group(6)), ("1500", "99000", "0x9000000000001"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,10 +5,13 @@ from urllib.parse import parse_qs
 import auth
 import clubs
 import db
+import diag
 import launcher_lobbies
 import social
 import xbl
 
+LOG = diag.get("community")
+_RATE = diag.RateLimit()
 LAUNCHER_SEEN = {}                  # independent of the game's presence poll
 MESSAGE_KEEP = 7 * 86400            # chat messages older than a week are deleted
 HUB_CACHE_SECONDS = 2.5
@@ -35,7 +38,8 @@ class Community:
         else:
             row = self.db.one("SELECT xuid FROM accounts WHERE gamertag_key=? AND (banned_at IS NULL OR ban_until <= ?)", (auth.fold_tag(value), time.time()))
         if not row:
-            raise auth.AuthError(404, "player_not_found", "No player has that gamertag or ID.")
+            raise auth.AuthError(404, "player_not_found", "No player has that gamertag or ID.",
+                                 detail=f"no unbanned account matches {value[:40]!r} " + ("as an id" if xuid is not None and 0 < xuid < 2**63 else "as a gamertag"))
         return row[0]
 
     def profile(self, xuid, lobbies=()):
@@ -95,9 +99,9 @@ class Community:
             raise auth.AuthError(400, "self_request", "That is your own account.")
         with self.db.tx() as c:
             if c.execute("SELECT 1 FROM friendships WHERE a=? AND b=?", (min(me, target), max(me, target))).fetchone():
-                raise auth.AuthError(409, "already_friends", "You are already friends.")
+                raise auth.AuthError(409, "already_friends", "You are already friends.", xuid=me, detail=f"with {target:#x}")
             if c.execute("SELECT COUNT(*) FROM friend_requests WHERE sender=?", (me,)).fetchone()[0] >= 100:
-                raise auth.AuthError(409, "request_limit", "Cancel an outgoing request before sending another.")
+                raise auth.AuthError(409, "request_limit", "Cancel an outgoing request before sending another.", xuid=me, detail="100 outgoing friend requests are pending")
             c.execute("INSERT INTO friend_requests(sender,recipient,created) VALUES (?,?,?) ON CONFLICT DO NOTHING", (me, target, time.time()))
         return {"ok": True}
 
@@ -105,7 +109,7 @@ class Community:
         with self.db.tx() as c:
             if accept:
                 if not c.execute("SELECT 1 FROM friend_requests WHERE sender=? AND recipient=?", (target, me)).fetchone():
-                    raise auth.AuthError(404, "request_gone", "This friend request is no longer available.")
+                    raise auth.AuthError(404, "request_gone", "This friend request is no longer available.", xuid=me, detail=f"no request from {target:#x}")
                 c.execute("INSERT INTO friendships(a,b,created) VALUES (?,?,?) ON CONFLICT DO NOTHING", (min(me, target), max(me, target), time.time()))
             c.execute("DELETE FROM friend_requests WHERE (sender=? AND recipient=?) OR (sender=? AND recipient=?)", (target, me, me, target))
         return {"ok": True}
@@ -126,7 +130,8 @@ class Community:
             other = int(value)
             if query("SELECT 1 FROM friendships WHERE a=? AND b=?", (min(me, other), max(me, other))):
                 return f"dm:{min(me, other)}:{max(me, other)}"
-        raise auth.AuthError(403, "chat_unavailable", "Direct messages require friendship; club chat requires current membership.")
+        raise auth.AuthError(403, "chat_unavailable", "Direct messages require friendship; club chat requires current membership.", xuid=me,
+                             detail=f"channel {str(value)[:20]!r}: " + ("not in a club" if value == "club" else "not friends" if str(value).isdigit() else "unknown channel"))
 
     def channels(self, me):
         friends = self.social.friends(me)
@@ -165,7 +170,8 @@ class Community:
 
     def send(self, me, ref, body):
         if not isinstance(body, str) or not body.strip() or len(body.strip()) > 2000 or any(ord(ch) < 32 and ch not in '\n\t' for ch in body):
-            raise auth.AuthError(400, "bad_message", "Messages must contain 1–2000 characters.")
+            raise auth.AuthError(400, "bad_message", "Messages must contain 1–2000 characters.", xuid=me,
+                                 detail=f"{type(body).__name__}" + (f" of {len(body.strip())} characters" if isinstance(body, str) else ""))
         with self.db.tx() as c:
             channel = self.channel(me, ref, c)
             c.execute("INSERT INTO launcher_messages(sender,channel,body,created) VALUES (?,?,?,?)", (me, channel, body.strip(), time.time()))
@@ -207,21 +213,21 @@ class Community:
             raise auth.AuthError(400, "self_invite", "That is your own account.")
         invite = getattr(self.ctx, "club_invite", None)
         if invite is None:
-            raise auth.AuthError(503, "unavailable", "Club invites are not available on this server.")
+            raise auth.AuthError(503, "unavailable", "Club invites are not available on this server.", xuid=me, detail="Ctx.club_invite is not set")
         try:
             invite(me, target)
         except clubs.ClubError as e:
             code = next((k for k, v in clubs.CODES.items() if v == e.code), "unknown")
-            raise auth.AuthError(409, code, INVITE_ERRORS.get(code, e.text)) from None
+            raise auth.AuthError(409, code, INVITE_ERRORS.get(code, e.text), xuid=me, detail=f"club rule: {e.text} (target {target:#x})") from None
         return {"ok": True, "gamertag": self.profile(target)["gamertag"]}
 
     def lobbies(self, me):
         result = xbl.hub_lobbies()
         if result is None:
-            raise auth.AuthError(503, "unavailable", "The game server did not answer. Try again shortly.")
+            raise auth.AuthError(503, "unavailable", "The game server did not answer. Try again shortly.", xuid=me, detail="lobby list query got no answer")
         pops = xbl.hub_populations()
         if pops is None:
-            raise auth.AuthError(503, "unavailable")
+            raise auth.AuthError(503, "unavailable", xuid=me, detail="population query got no answer")
         flags = xbl.flagged_set(pops)
         out = []
         with xbl._LOBBY_LOCK:
@@ -259,8 +265,10 @@ def handle(ctx, method, p, u, body, acct):
     LAUNCHER_SEEN[me] = time.time()
     try:
         store.prune_messages()
-    except Exception:  # noqa: BLE001 - housekeeping must never fail a request
-        pass
+    except Exception as e:  # noqa: BLE001 - housekeeping must never fail a request
+        ok, skipped = _RATE.allow("prune-messages", 3600)
+        if ok:
+            LOG.exc("old chat messages not deleted, the request carries on" + (f" ({skipped} more failed since)" if skipped else ""), e, level="WARN")
     # Expired presence entries carry no durable meaning.
     for x, seen in list(LAUNCHER_SEEN.items()):
         if time.time() - seen > 120:

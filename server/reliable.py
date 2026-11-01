@@ -9,6 +9,12 @@ create or update that is lost stops that object on that client for the rest of t
 A resent update the client already has is dropped as old by its sequence check. A resent create with no newer update recreates the object (0x17ab160),
 which is why nothing is resent to a client that has gone quiet: it may be loading and still hold the original."""
 
+import diag
+
+LOG = diag.get("reliable")
+_RATE = diag.RateLimit()
+GIVE_UP_LOG_SECONDS = 10.0
+
 ID_WRAP = 0xFFFF
 UNRELIABLE_ID = 0xFFFF
 RESEND_SECONDS = 2.2         # the client's rtt + 2000 ms; there is no RTT here yet
@@ -34,9 +40,10 @@ def relay_owner(baked, router_bits):
 
 class Window:
     """Reliable packets sent to one client and not acked yet. `pending` is in send order: id -> (time sent, baked messages)."""
-    __slots__ = ("last_id", "pending", "sent", "resent", "resent_creates", "peak", "lost")
+    __slots__ = ("last_id", "pending", "sent", "resent", "resent_creates", "peak", "lost", "label")
 
-    def __init__(self):
+    def __init__(self, label=""):
+        self.label = label          # who this window is for, shown in its log lines (optional: the caller sets it, e.g. "owner 7")
         self.last_id = 0
         self.pending = {}
         self.sent = self.resent = self.resent_creates = self.peak = self.lost = 0
@@ -52,8 +59,13 @@ class Window:
         if len(self.pending) > self.peak:
             self.peak = len(self.pending)
         while len(self.pending) > MAX_PENDING:
-            del self.pending[next(iter(self.pending))]
+            oldest = next(iter(self.pending))
+            at, dropped = self.pending.pop(oldest)
             self.lost += 1
+            ok, skipped = _RATE.allow(("overflow", self.label), GIVE_UP_LOG_SECONDS)
+            if ok:
+                LOG.warn(f"{self.label + ': ' if self.label else ''}{MAX_PENDING} reliable packets are waiting for an ack; giving up packet id {oldest} "
+                         f"({len(dropped)} message(s), sent {now - at:.1f} s ago), {self.lost} given up so far" + (f" (+{skipped} more since the last line)" if skipped else ""))
         return self.last_id
 
     def ack(self, remote_ack, ack_bits):
@@ -75,7 +87,10 @@ class Window:
             del self.pending[pid]
             out.extend(messages)
         self.resent += len(out)
-        self.resent_creates += sum(1 for m in out if m[0] & 0x7F == CREATE)
+        creates = sum(1 for m in out if m[0] & 0x7F == CREATE)
+        self.resent_creates += creates
+        if out:
+            LOG.debug(f"{self.label + ': ' if self.label else ''}{len(out)} message(s) ({creates} creates) resent, no ack after {RESEND_SECONDS:g} s; {len(self.pending)} packet(s) still waiting")
         return out
 
     def forget_owner(self, owner, router_bits):

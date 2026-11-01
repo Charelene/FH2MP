@@ -22,7 +22,10 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 
+import diag
 import ops_api
+
+LOG = diag.get("home")
 
 GITHUB_REPO = os.environ.get("FH2MP_GITHUB_REPO", "Charelene/FH2MP")
 ITCH_FEED = "https://almost-there-games.itch.io/azimuth/devlog.rss"
@@ -98,8 +101,11 @@ class Feeds:
             try:
                 self.data[key] = self._load(key)
                 self.due[key] = self.clock() + FEED_TTL
-            except Exception:  # noqa: BLE001 - an outside site being down must never break /v1/home
-                self.due[key] = self.clock() + (FEED_RETRY if self.data[key] is not None else FIRST_RETRY)
+            except Exception as e:  # noqa: BLE001 - an outside site being down must never break /v1/home
+                retry = FEED_RETRY if self.data[key] is not None else FIRST_RETRY
+                self.due[key] = self.clock() + retry
+                LOG.warn(f"{key} feed fetch failed, " + ("serving the copy from the last good fetch" if self.data[key] is not None else "nothing to serve yet")
+                         + f", retry in {retry:g} s: {diag.where(e)}")
             return self.data[key]
         finally:
             lock.release()

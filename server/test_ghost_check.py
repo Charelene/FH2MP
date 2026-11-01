@@ -277,7 +277,7 @@ class Handlers(unittest.TestCase):
         self.sent = []
         ctx = threading.local()
         ctx.xuid, ctx.own_cars = 1, False
-        for name, value in (("SB", self.sc), ("CTX", ctx), ("AUTH", None), ("TAGS", {1: "A", 2: "B"}), ("log", lambda m: None),
+        for name, value in (("SB", self.sc), ("CTX", ctx), ("AUTH", None), ("TAGS", {1: "A", 2: "B"}), ("log", lambda m, *a: None),
                             ("event_info", lambda e: {"id": e} if e in (7, 8) else None), ("send_beaten", lambda *a: self.sent.append(a))):
             p = mock.patch.object(L, name, value)
             p.start()

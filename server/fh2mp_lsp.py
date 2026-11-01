@@ -17,6 +17,7 @@ Usage: python3 -I server/fh2mp_lsp.py [port]
        the server itself never reads game files. Also: FH2MP_LSP_BIND (listen address, default 127.0.0.1), FH2MP_PUBLIC_HOST /
        FH2MP_GAME_PORT (the game server address handed to clients).
 """
+import itertools
 import json
 import math
 import os
@@ -54,7 +55,7 @@ try:
 except ImportError:
     parts_check = None
 
-SEQ = 0
+_SEQ = itertools.count(1)   # request numbers: next() is atomic, a plain `SEQ += 1` handed two threads the same number
 SC = None
 STATE = {}
 CTX = threading.local()   # per-request: xuid (from the session token; X-UserId only for legacy clients), authed, tag
@@ -98,7 +99,14 @@ def warn(msg, sub=None):
     log(msg, "WARN", sub)
 
 
-diag.set_sink(lambda level, sub, msg: log(msg, level, sub))          # modules with a diag.get() logger write to this log
+def _module_sink(level, sub, msg):
+    """Lines of modules with a diag.get() logger. Written while a request is being served they get its number, like the LSP's own indented lines."""
+    if getattr(CTX, "seq", None) and not msg.startswith("  "):
+        msg = "  " + msg
+    log(msg, level, sub)
+
+
+diag.set_sink(_module_sink)          # modules with a diag.get() logger write to this log
 
 
 def log_exc(msg, exc, level="ERROR"):
@@ -114,6 +122,26 @@ def log_every(key, interval, msg, level="WARN", sub=None):
     ok, skipped = RATE.allow(key, interval)
     if ok:
         log(msg + (f" (and {skipped} more in the last {interval:.0f} s)" if skipped else ""), level, sub)
+
+
+def call_name(headers):
+    """`Notifications.RetrieveForUser`, or the host for an Xbox Live call: what a request is for, from its headers."""
+    cls = (headers.get("X-ClassName", "") or "").split(",")[0].strip().rsplit(".", 1)[-1]
+    method = headers.get("X-Method", "") or ""
+    return f"{cls}.{method}" if cls and method else (method or headers.get("X-FH2MP-Host", "") or "?")
+
+
+def _shim():
+    """The shim version of the request being served, for log lines."""
+    return getattr(CTX, "shim", "") or "(none)"
+
+
+def claimed_xuid(headers):
+    """The X-UserId a request claims (not verified: the number of a tokenless request), 0 when absent or unreadable."""
+    try:
+        return int(headers.get("X-UserId", "0"), 0)
+    except ValueError:
+        return 0
 
 
 def candidates(cls, method, suffix):
@@ -153,7 +181,9 @@ def logon(req):
     LEVELS[lg["xuid"]] = lg["currentCareerLevel"]
     with DB.tx() as c:
         db.touch_player(c, lg["xuid"], lg["gamerTag"], level=lg["currentCareerLevel"])
-    log(f"  Logon xuid={lg['xuid']:#x} tag={lg['gamerTag']!r} lcid={lg['LCID']}")
+    log(f"  Logon xuid={lg['xuid']:#x} tag={lg['gamerTag']!r} lcid={lg['LCID']} " + diag.kv(
+        shim=getattr(CTX, "shim", "") or "(none)", signed_in=bool(getattr(CTX, "authed", False)), own_cars=bool(getattr(CTX, "own_cars", False)) or None,
+        career_xp=lg["currentCareerLevel"]))
     r = xls.default_struct(SC, SC.sub(SC.call_struct("ForzaUserLogon_Results")[0]))
     r.update({
         "isProfileValid": True,
@@ -328,6 +358,8 @@ def _notif_reply(limit, room):
         val.update(n.get("params", {}))
         pb = xls.encode(SC, fields, val)
         if len(pb) > room:
+            log_every(("notif-room", getattr(CTX, "xuid", 0)), 600, f"  notifications cut: {len(vis)} delivered (newest first), the next one (type {n['type']:#x}, {len(pb)} bytes) does not fit "
+                      f"the {room} bytes left in the client's parameter block; it and the older ones are not delivered", "WARN")
             break
         room -= len(pb)
         vis.append(n)
@@ -421,6 +453,35 @@ class AuthShare:
 
 
 AUTH_SHARE = AuthShare()
+SOCIAL_HOSTS = ("profile.xboxlive.com", "social.xboxlive.com", "peoplehub.xboxlive.com", "userpresence.xboxlive.com")
+
+
+class PollShare:
+    """The Message Center and friends polls (a request every 5-60 s from every player) are counted, not listed: one line per period with how many
+    requests came from how many players. Their request lines are DEBUG (FH2MP_LOG_SUB=poll=DEBUG lists them)."""
+
+    def __init__(self, period=600, clock=time.monotonic, sink=None):
+        self.period, self.clock, self.sink = period, clock, sink
+        self.lock = threading.Lock()
+        self.start = clock()
+        self.counts, self.players = {}, {}
+
+    def note(self, call, xuid):
+        line = None
+        with self.lock:
+            now = self.clock()
+            if now - self.start >= self.period:
+                if self.counts:
+                    line = (f"polls: last {now - self.start:.0f} s: "
+                            + ", ".join(f"{c} {n} requests from {len(self.players[c])} players" for c, n in sorted(self.counts.items())))
+                self.start, self.counts, self.players = now, {}, {}
+            self.counts[call] = self.counts.get(call, 0) + 1
+            self.players.setdefault(call, set()).add(xuid)
+        if line:
+            (self.sink or log)(line)
+
+
+POLLS = PollShare()
 
 
 def _me():
@@ -487,6 +548,7 @@ def _own_cars():
     return getattr(CTX, "own_cars", False)
 
 
+SLOW_REQUEST_S = float(os.environ.get("FH2MP_LSP_SLOW_S", "2"))     # a request that runs this long is reported
 SCORE_LIMIT = (120, 60)           # SubmitScore per account per second window: the busiest player sends a few a minute, counters included
 GHOST_LIMITS = ((10, 60), (300, 86400))   # UploadFile: the busiest day of 17,330 runs was 64
 GHOST_UPLOAD = ("Forza.WebServices.Scoreboard", "UploadFile")
@@ -500,7 +562,8 @@ def _within(name, limits):
 def sb_submit_score(req):
     xuid, tag = _me()
     if not _within("score", (SCORE_LIMIT,)):
-        log(f"  SubmitScore user={xuid:#x}: over the rate limit, ignored")
+        log_every(("score-limit", xuid), 60, f"  SubmitScore user={xuid:#x}: over the rate limit, ignored "
+                  f"(more than {SCORE_LIMIT[0]} per {SCORE_LIMIT[1]} s for this account)", "WARN")
         return None
     if _own_cars():
         log(f"  SubmitScore board=({req['data']['scoreboardType']},{req['type']}): not stored, the player runs its own car database")
@@ -523,7 +586,8 @@ def sb_submit_score(req):
         try:
             notify_beaten(xuid, tag, req["type"], d, s)
         except Exception as ex:          # a notification problem must never fail the score submission
-            log(f"  notify_beaten failed: {ex!r}")
+            log_exc(f"  notify_beaten failed after the score was stored (board {d['scoreboardType']}, event {d['gameScoreboardId']}); "
+                    f"the submission stands, the rivals were not told", ex, "WARN")
     return {"scoreId": s["score_id"], "uploadFiles": True}
 
 
@@ -601,19 +665,21 @@ def announce_rotation():
 def sb_upload_file(req):
     xuid, tag = _me()
     sid, public = SB.attach_ghost(req["scoreId"], req["data"], xuid)
-    log(f"  UploadFile scoreId={bytes(req['scoreId']).hex()[:8]} {len(req['data'])} bytes -> ghost #{sid}")
+    log(f"  UploadFile scoreId={bytes(req['scoreId']).hex()[:8]} {len(req['data'])} bytes -> " + (f"ghost #{sid}" if sid is not None else "refused (the scores: line above says why), nothing stored")
+        + f" user={xuid:#x}")
     if public and SB.ghost_policy == "enforce":
         sub = SB.by_score_id(req["scoreId"])
         try:
             notify_beaten(xuid, tag, sub["st"], {"scoreboardType": sub["sb"], "gameScoreboardId": sub["gsid"], "carId": sub["car"], "carClassId": sub["cls"]}, sub)
         except Exception as ex:          # a notification problem must never fail the upload
-            log(f"  notify_beaten failed: {ex!r}")
+            log_exc(f"  notify_beaten failed after the ghost was stored (score #{sub['id'] if sub else '?'}); the upload stands, the rivals were not told", ex, "WARN")
     return None
 
 
 def sb_download_file(req):
     data = SB.public_ghost(req["id"]) if req["id"] > 0 else None
-    log(f"  DownloadFile id={req['id']} maxSize={req['maxSize']}: {len(data) if data else 'no ghost'}")
+    log(f"  DownloadFile id={req['id']} maxSize={req['maxSize']}: {len(data) if data else 'no ghost'}"
+        + (" (over maxSize, an empty file is sent)" if data and len(data) > req["maxSize"] else ""))
     if data is None or len(data) > req["maxSize"]:
         return {"data": b""}
     return {"data": data}
@@ -1010,13 +1076,13 @@ def profile_update_livery(body):
     xuid, _ = _me()
     up = ugc.parse_livery_upload(body)
     if up is None:
-        log(f"  UpdateLivery: unparsable body ({len(body)}B)")
+        log(f"  UpdateLivery: unparsable body ({len(body)}B), user={xuid:#x}; nothing kept, the share that follows will find no upload", "WARN")
         return b""
     try:
         bid = UGC.blob_create(xuid, up["name"], len(body))
         UGC.blob_write(bid, 0, body, owner=xuid)
     except ugc.LimitError as e:
-        log(f"  UpdateLivery refused: {e}")
+        log(f"  UpdateLivery refused: {e} (user={xuid:#x}, {len(body)}B)", "WARN")
         return b""
     log(f"  UpdateLivery {up['name']!r} car={up['car_id']} layers={up['layers']} container={len(up['container'])}B "
         f"({len(body)}B on the wire) -> kept as blob #{bid}")
@@ -1051,7 +1117,7 @@ def livery_thumbs(preview):
             big = pngtool.downscale(preview, *BIG_THUMB)
         return big, pngtool.downscale(preview, *SMALL_THUMB)
     except (ValueError, struct.error, Exception) as e:      # noqa: BLE001 - never fail a share over a thumbnail
-        log(f"  thumbnail generation failed: {e!r}")
+        log(f"  thumbnail generation failed, no thumbnail stored: {diag.where(e)}", "WARN")
         return b"", b""
 
 
@@ -1079,13 +1145,13 @@ def profile_update_layergroup(body):
     xuid, _ = _me()
     up = ugc.parse_layergroup_upload(body)
     if up is None:
-        log(f"  UpdateLiveryGroup: unparsable body ({len(body)}B)")
+        log(f"  UpdateLiveryGroup: unparsable body ({len(body)}B), user={xuid:#x}; nothing kept, the share that follows will find no upload", "WARN")
         return b""
     try:
         bid = UGC.blob_create(xuid, up["name"], len(body))
         UGC.blob_write(bid, 0, body, owner=xuid)
     except ugc.LimitError as e:
-        log(f"  UpdateLiveryGroup refused: {e}")
+        log(f"  UpdateLiveryGroup refused: {e} (user={xuid:#x}, {len(body)}B)", "WARN")
         return b""
     log(f"  UpdateLiveryGroup {up['name']!r} layers={up['layers']} payload={len(up['payload'])}B -> kept as blob #{bid}")
     return b""
@@ -1120,7 +1186,7 @@ def cv_create_tune_structs(req):
     xuid, _ = _me()
     bad = _unbuildable_tune_parts(req["carId"], req["installedParts"])
     if bad:
-        log(f"  CreateVersionedTuneFromStructs car={req['carId']} refused: {bad[:4]}")
+        log(f"  CreateVersionedTuneFromStructs car={req['carId']} refused: {len(bad)} part(s) the game cannot build, first {bad[:4]} (slot, id, why)", "WARN")
         raise XlsError("this tune has parts the game cannot build")
     vid = UGC.versioned_create("tune", xuid, "", req["carId"], parts=req["installedParts"], tuning=req["tuning"])
     log(f"  CreateVersionedTuneFromStructs car={req['carId']} -> versioned {vid}")
@@ -1171,7 +1237,8 @@ def design_has_layers(stored_layers, data):
         return False
     try:
         container = ugc.livery_chunk(ugc.strip_livery_prefix(bytes(data)))
-    except Exception:           # noqa: BLE001 - anything unreadable counts as "has layers": hiding it is the safe side
+    except Exception as e:      # noqa: BLE001 - anything unreadable counts as "has layers": hiding it is the safe side
+        log(f"  livery container unreadable, treated as layered: {diag.where(e)} ({len(data)} bytes)", "DEBUG", "ugc")
         return True
     return container is None or len(container) > LIVERY_GATE_BYTES
 
@@ -1193,7 +1260,8 @@ def cv_get_livery(req):
         # A car wearing a layered design makes the game build a 1024x1024 11-mip texture that Azimuth cannot place; clients without the shim
         # fallback stop (prod 2026-10-20: every wipe lines up with all the other clients fetching a layered design, e.g. 581 with 26 layers).
         # They get the answer designs with layers=-1 always got (an error): the car shows without the design, nothing crashes.
-        log(f"  RetrieveVersionedLivery {v['id']}: withheld from a client without the texture fix (shim {getattr(CTX, 'shim', '') or 'unknown'})")
+        log(f"  RetrieveVersionedLivery {v['id']}: withheld from a client without the texture fix (shim {getattr(CTX, 'shim', '') or 'unknown'}, "
+            f"stored layers {v['layers']}, creator {v['creator']:#x}, user {xuid:#x})")
         raise XlsError(f"livery {v['id']} is not available to this client")
     res = xls.default_struct(SC, SC.call_struct("ForzaContentVersioningRetrieveVersionedLiveryById_Results"))
     d = res["versionedLiveryData"]
@@ -1241,7 +1309,8 @@ def _unbuildable_tune_parts(car_id, installed):
         if parts_check.stock_list(car_id) is None:
             return []
         return parts_check.integrity_errors([int(w) & 0xFFFFFFFF for w in words])
-    except (TypeError, ValueError, KeyError):
+    except (TypeError, ValueError, KeyError) as e:
+        log_every(("tune-check", car_id), 600, f"  tune part check could not run for car {car_id}, the tune is accepted unchecked: {diag.where(e)}", "WARN")
         return []
 
 
@@ -1259,7 +1328,8 @@ def _buildable_tune_parts(car_id, installed, tune_id):
         fixed, _, left = parts_check.neutralize(raw)
         if left or parts_check.integrity_errors(fixed):
             fixed = stock
-    except (TypeError, ValueError, KeyError):
+    except (TypeError, ValueError, KeyError) as e:
+        log(f"  tune {tune_id} of car {car_id} has parts the game cannot build and the repair failed ({diag.where(e)}): served as stored", "WARN")
         return installed
     log(f"  tune {tune_id} of car {car_id} has parts the game cannot build; served repaired")
     return dict(installed, m_CarParts=[w - (1 << 32) if w >= 1 << 31 else w for w in fixed])
@@ -1292,7 +1362,7 @@ def _create_file(kind, header, versioned_id, car_id, file_name, preview, meta=No
     blob = UGC.blob_by_name(xuid, file_name) if file_name else None
     v = UGC.versioned_get(versioned_id) if versioned_id else None
     if v is not None and v["creator"] != xuid:
-        log(f"  {kind} share refused: versioned item {versioned_id} belongs to {v['creator']}, not to {xuid}")
+        log(f"  {kind} share refused: versioned item {versioned_id} belongs to {v['creator']:#x}, not to {xuid:#x}", "WARN")
         raise XlsError(f"versioned item {versioned_id} is not yours")
     car_id = car_id or (v["car_id"] if v else None)         # a tune's listing carries make/model/class only; its car is on the versioned item
     if kind == "livery" and v is not None:
@@ -1514,7 +1584,7 @@ def _club_errors(fn):
         try:
             return fn(req)
         except clubs.ClubError as e:
-            log(f"  club: {e.text} (error code {e.code:#x})")
+            log(f"  club: {e.text} (error code {e.code:#x}) call={fn.__name__} user={getattr(CTX, 'xuid', 0):#x}")
             raise XlsError(e.text, e.code)
     wrapped.__name__ = fn.__name__
     return wrapped
@@ -1887,18 +1957,18 @@ def xbl_social(host, command, path, body, headers):
         if command == "POST" and segs == ["users", "batch", "profile", "settings"]:
             j = json.loads(body or b"{}")
             ids = [int(x) for x in j.get("userIds", [])]
-            log(f"  profile settings for {len(ids)} user(s): {','.join(str(i)[-5:] for i in ids)}")
+            log(f"  profile settings for {len(ids)} user(s): {','.join(str(i)[-5:] for i in ids)}", "DEBUG", "social")
             return 200, {"profileUsers": users(ids, j.get("settings", []))}
         if command == "GET" and len(segs) == 4 and segs[0] == "users" and segs[2:] == ["profile", "settings"]:
             return 200, {"profileUsers": users([_xuid_of(segs[1], headers)], settings)}
         if command == "GET" and len(segs) == 6 and segs[0] == "users" and segs[2:4] == ["profile", "settings"] and segs[4] == "people":
             me = _xuid_of(segs[1], headers)
-            log(f"  profile settings of the social group {segs[5]!r} of {me:#x}: {len(SOCIAL.friends(me))} friends")
+            log(f"  profile settings of the social group {segs[5]!r} of {me:#x}: {len(SOCIAL.friends(me))} friends", "DEBUG", "social")
             return 200, {"profileUsers": users(SOCIAL.friends(me), settings)}
     elif host == "social.xboxlive.com" and command == "GET" and len(segs) == 3 and segs[0] == "users":
         me = _xuid_of(segs[1], headers)
         if segs[2] == "people":
-            log(f"  social people of {me:#x}: {len(SOCIAL.friends(me))}")
+            log(f"  social people of {me:#x}: {len(SOCIAL.friends(me))}", "DEBUG", "social")
             return 200, social.people(SOCIAL, me)
         if segs[2] == "summary":
             return 200, social.summary(SOCIAL, me)
@@ -1910,12 +1980,12 @@ def xbl_social(host, command, path, body, headers):
             out.append({"xuid": str(f), "isFavorite": False, "isFollowingCaller": True, "isFollowedByCaller": True, "displayName": prof["GameDisplayName"],
                         "realName": "", "displayPicRaw": _pic_url(f, prof["_pic_version"]), "gamertag": prof["Gamertag"],
                         "gamerScore": prof["Gamerscore"], "presenceState": "Online" if social.online(f) else "Offline"})
-        log(f"  peoplehub people of {me:#x}: {len(out)}")
+        log(f"  peoplehub people of {me:#x}: {len(out)}", "DEBUG", "social")
         return 200, {"people": out}
     elif host == "userpresence.xboxlive.com":
         if command == "POST" and segs == ["users", "batch"]:
             ids = [int(x) for x in json.loads(body or b"{}").get("users", [])]
-            log(f"  presence of {len(ids)} user(s)")
+            log(f"  presence of {len(ids)} user(s)", "DEBUG", "social")
             return 200, [social.presence(x) for x in ids]
         if command == "GET" and len(segs) == 3 and segs[0] == "users" and segs[2] == "presence":
             return 200, social.presence(_xuid_of(segs[1], headers))
@@ -1968,6 +2038,7 @@ def social_api(method, path, body):
                 SOCIAL.set_profile(xuid, d.get("displayName"), d.get("gamerscore"), d.get("tier"))
                 return 200, {"updated": xuid}, None
     except (ValueError, KeyError, TypeError) as e:
+        log(f"  admin api refused 400: {method} {'/'.join(parts[:2])}/... : {diag.where(e)}", "WARN")
         return 400, {"error": str(e)}, None
     return None
 
@@ -2079,40 +2150,42 @@ _also_xls_club()
 
 def handle_xls(cls, method, body):
     key = (cls.split(",")[0].strip(), method)
+    call = f"{key[0].rsplit('.', 1)[-1]}.{method}"
     if key in RAW_HANDLERS:
         return frame(RAW_HANDLERS[key](body) or b"")
     if key in FAIL_UNTIL_IMPLEMENTED and key not in HANDLERS:
-        log("  not implemented -> error result (client keeps its local data)")
+        log(f"  not implemented -> error result (client keeps its local data) call={call}")
         return frame(result=2, error=0x0001, text=b"fh2mp: not implemented")
     pname, pfields = find_struct(cls, method, "_Parameters")
     req = None
     limited = key == GHOST_UPLOAD and not _within("ghost", GHOST_LIMITS)       # before the decode: the body is what is expensive
     if limited:
-        log("  UploadFile over the rate limit, ignored")
+        log(f"  UploadFile over the rate limit, ignored (user={getattr(CTX, 'xuid', 0):#x}, {len(body)} bytes; limits "
+            f"{' and '.join(f'{n} per {w} s' for n, w in GHOST_LIMITS)})", "WARN")
     elif pfields is not None and body and key in HANDLERS:
         try:
             req, rem = xls.decode(SC, pfields, body)
             if rem:
-                log(f"  warning: {rem} unread request bytes")
+                log(f"  warning: {rem} unread request bytes (call={call}, body {len(body)} bytes, schema {pname})", "WARN")
         except Exception as e:  # noqa: BLE001
-            log(f"  request decode failed: {e}")
+            log(f"  request decode failed: {diag.where(e)} (call={call}, body {len(body)} bytes, schema {pname}); the handler gets no request", "WARN")
     elif pfields is not None and not body:
-        log(f"  request schema {pname} (empty body)")
+        log(f"  request schema {pname} (empty body)", "DEBUG", "xls")
     rname, rfields = find_struct(cls, method, "_Results")
     if rfields is None and key not in HANDLERS:
-        log(f"  no schema for {cls} {method}; answering OK with empty body")
+        log_every(("no-schema", key), 600, f"  no schema for {cls} {method}; answering OK with empty body (a call this server does not know)", "WARN")
         return frame()
     try:
         result = HANDLERS[key][1](req) if key in HANDLERS and not limited else None
     except XlsError as e:
-        log(f"  -> error result: {e.text}")
+        log(f"  -> error result: {e.text} (error {e.code:#x}, call={call})")
         return frame(result=2, error=e.code, text=e.text.encode())
     if result is None:
         if rfields is None:
             return frame()
         result = xls.default_struct(SC, rfields)
         if key not in HANDLERS:
-            log(f"  default {rname}")
+            log_every(("default-result", key), 600, f"  default {rname} (no handler for {call}: answered with an all-default result)")
     return frame(xls.encode(SC, rfields, result))
 
 
@@ -2291,6 +2364,16 @@ def verify_strings(body):
     return {"verifyStringResult": [{"resultCode": 0, "offendingString": ""} for _ in strings]}
 
 
+def _log_auth_refusal(headers, e, sent):
+    """A session token that does not check out: who (when the token's account is known), which call, why, with the compared values. One line per
+    code and player every 5 minutes: a client with a dead token repeats its polls every few seconds. The token itself is never written."""
+    shim = getattr(CTX, "shim", "") or "(none)"
+    who = f"{e.xuid:#x}" if e.xuid else None
+    log_every(("auth-refused", e.code, e.xuid or shim), 300,
+              f"  refused: {e.status} {e.code} on {call_name(headers)} ({sent}) " + diag.kv(xuid=who, shim=shim, detail=e.detail or None)
+              + (f" {e.message}" if e.code == "banned" else ""), "WARN")
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = float(os.environ.get("FH2MP_LSP_READ_TIMEOUT", "30"))   # a client that sends nothing for this long (slow body, idle
@@ -2348,7 +2431,8 @@ class Handler(BaseHTTPRequestHandler):
         _OLD_REMOVED[acct.xuid] = now
         if len(_OLD_REMOVED) > 20000:
             _OLD_REMOVED.clear()
-        log(f"  old shim {CTX.shim or '(none)'!r}: removing {acct.gamertag!r} {acct.xuid:#x} from the game")
+        log(f"  old shim {_shim()!r}: removing {acct.gamertag!r} {acct.xuid:#x} from the game (minShim {LAUNCHER.config.get()['minShim']}, "
+            f"call={call_name(self.headers)})")
         on_revoke(acct.xuid)
 
     def _gamedb_ok(self, acct):
@@ -2364,6 +2448,8 @@ class Handler(BaseHTTPRequestHandler):
         m = LAUNCHER.gamedb.manifest()
         if m is None:
             if LAUNCHER.gamedb.path:
+                log_every("gamedb-unavailable", 60, f"  refused: 503 gamedb_unavailable: the server's car database {LAUNCHER.gamedb.path!r} cannot be read, so every "
+                          f"signed-in request is refused until it can (xuid {acct.xuid:#x}, call={call_name(self.headers)})", "ERROR")
                 self._reply_json(503, {"error": "gamedb_unavailable", "message": "The server's car database is unavailable. Please try again later."})
                 return False
             return True
@@ -2371,12 +2457,13 @@ class Handler(BaseHTTPRequestHandler):
             _OWN_CARS.pop(acct.xuid, None)
             return True
         CTX.own_cars = True
+        CTX.gamedb = (have.strip().lower()[:16], m["sha256"][:16])          # for the lines that refuse this request later
         if acct.xuid not in _OWN_CARS:
             if len(_OWN_CARS) > 20000:
                 _OWN_CARS.clear()
             _OWN_CARS[acct.xuid] = time.monotonic()
             log(f"  car database {have.strip()[:16]!r} is not the server's {m['sha256'][:16]}: {acct.gamertag!r} {acct.xuid:#x} keeps the "
-                f"services but is out of play with other people")
+                f"services but is out of play with other people (shim {_shim()}" + ("; the client sent no hash" if not have.strip() else "") + ")")
             on_revoke(acct.xuid)            # a game in progress had the server's database: it must not carry on with another one
         return True
 
@@ -2384,10 +2471,14 @@ class Handler(BaseHTTPRequestHandler):
         value = self.headers.get("X-FH2MP-Tools", "")
         tokens = value.split(",") if len(value) <= 80 else []
         if not tokens or tokens[0] != "v1":
+            log_every(("tools-426", acct.xuid), 300, f"  refused: 426 tool_check_required: xuid={acct.xuid:#x} sent X-FH2MP-Tools "
+                      + (f"{len(value)} characters (limit 80)" if len(value) > 80 else f"{value!r}" if value else "nothing") + f", expected 'v1,...' (shim {_shim()})", "WARN")
             self._reply_json(426, {"error": "tool_check_required", "message": "Update FH2MP and restart the game from the launcher."})
             return False
         tools = tuple(sorted(set(tokens[1:])))
         if not set(tools) <= {"redline", "nitrosystem"}:
+            log_every(("tools-400", acct.xuid), 300, f"  refused: 400 bad_tool_report: xuid={acct.xuid:#x} reported unknown tool(s) "
+                      f"{sorted(set(tools) - {'redline', 'nitrosystem'})}, known are redline and nitrosystem (shim {_shim()})", "WARN")
             self._reply_json(400, {"error": "bad_tool_report"})
             return False
         if not tools:
@@ -2398,12 +2489,15 @@ class Handler(BaseHTTPRequestHandler):
             return True
         result = xbl.quarantine_tools(acct.xuid, tools)
         if result is None:
+            log_every(("tools-503", acct.xuid), 60, f"  refused: 503 pool_unavailable: xuid={acct.xuid:#x} reports {','.join(tools)} but the game server did not "
+                      f"answer the quarantine query, so the player cannot be placed in a pool", "ERROR")
             self._reply_json(503, {"error": "pool_unavailable", "message": "Matchmaking is unavailable. Please try again later."})
             return False
         if len(_TOOLS_ANNOUNCED) >= 10000:
             _TOOLS_ANNOUNCED.clear()
         _TOOLS_ANNOUNCED[acct.xuid] = (tools, now)
         if result == "rejoin":
+            log(f"  tools: xuid={acct.xuid:#x} reports {','.join(tools)}: moved to the restricted pool, dropped from matchmaking until the game restarts")
             xbl.drop_player(acct.xuid)
             self._reply_json(409, {"error": "pool_changed", "message": "Restart the game from the launcher to join the restricted matchmaking pool."})
             return False
@@ -2415,7 +2509,7 @@ class Handler(BaseHTTPRequestHandler):
         CTX.shim = self.headers.get("X-FH2MP-Shim", "")          # the client's shim version ("1.0.0-rc2"); empty for clients that do not send it
         need = LAUNCHER.config.get()["minShim"] if LAUNCHER is not None else "0.0.0"
         if not launcher_api.version_at_least(CTX.shim, need):
-            log(f"  refused: shim {CTX.shim or '(none)'!r} is older than {need}")
+            log_every(("old-shim", CTX.shim), 60, f"  refused: shim {CTX.shim or '(none)'!r} is older than {need} (426, call={call_name(self.headers)})", "INFO")
             self._remove_old_client()
             cls, method = self.headers.get("X-ClassName", ""), self.headers.get("X-Method", "")
             if SC is not None and cls.startswith("Xls.WebServices.Notifications") and method == "RetrieveForUser":
@@ -2434,8 +2528,10 @@ class Handler(BaseHTTPRequestHandler):
                 except auth.AuthError as e:
                     if e.code == "banned" and SC is not None and self.headers.get("X-ClassName", "").startswith("Xls.WebServices.Notifications") \
                             and self.headers.get("X-Method", "") == "RetrieveForUser":
+                        _log_auth_refusal(self.headers, e, "answered 200 with the ban notice")
                         self._reply_json(200, ban_notice(e.message), "bin/xtsw")      # the game shows this, unlike the 403 below
                         return False
+                    _log_auth_refusal(self.headers, e, f"answered {e.status}")
                     self._reply_json(e.status, {"error": e.code, "message": e.message})
                     return False
                 CTX.xuid, CTX.tag, CTX.authed = acct.xuid, acct.gamertag, True
@@ -2448,6 +2544,8 @@ class Handler(BaseHTTPRequestHandler):
                     announce_auth(acct.xuid, self.client_ip(), token)      # the game server only admits the server's car database
                 return True
             if AUTH.mode == "required":
+                log_every(("no-token", claimed_xuid(self.headers), CTX.shim), 300, f"  refused: 401 login_required: no X-FH2MP-Token on {call_name(self.headers)} "
+                          f"(FH2MP_AUTH=required; shim {CTX.shim or '(none)'}, claims user {claimed_xuid(self.headers):#x}, unverified): the game was not started from the launcher", "WARN")
                 self._reply_json(401, {"error": "login_required", "message": "start the game from the FH2MP launcher"})
                 return False
         try:
@@ -2455,10 +2553,14 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             CTX.xuid = 0
         banned = None
+        via = ""
         if AUTH is not None:                          # both ways a tokenless request names its sender (X-UserId, the XSAPI token)
-            for who in (CTX.xuid, int(xbl_xuid(self.headers) or 0)):
-                banned = banned or (AUTH.ban_text(who) if who else None)
+            for how, who in (("X-UserId", CTX.xuid), ("XSAPI token", int(xbl_xuid(self.headers) or 0))):
+                if not banned and who:
+                    banned = AUTH.ban_text(who)
+                    via = f"{how} {who:#x}" if banned else via
         if banned:                                    # no token needed to be refused: nothing a banned player sends is accepted
+            log_every(("banned-tokenless", via), 300, f"  refused: 403 banned (no token, named by {via}) on {call_name(self.headers)}: {banned}", "WARN")
             if SC is not None and self.headers.get("X-ClassName", "").startswith("Xls.WebServices.Notifications") \
                     and self.headers.get("X-Method", "") == "RetrieveForUser":
                 self._reply_json(200, ban_notice(banned), "bin/xtsw")
@@ -2468,24 +2570,49 @@ class Handler(BaseHTTPRequestHandler):
         AUTH_SHARE.note(CTX.xuid, False)
         return True
 
+    def _entry(self):
+        """Runs _handle. Anything that escapes is logged here, with the request's number and how long it ran, and re-raised so the
+        connection ends as before; a request that takes 2 s or more is reported (the LSP normally answers in milliseconds)."""
+        started = time.monotonic()
+        try:
+            return self._handle()
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError) as e:
+            log_every(("client-gone", type(e).__name__), 300, f"  client went away or stalled before the exchange finished ({type(e).__name__}) after "
+                      f"{time.monotonic() - started:.1f} s: {self.command} {self.path.split('?')[0][:80]} {call_name(self.headers)}", "INFO")
+            e._fh2mp_logged = True
+            raise
+        except Exception as e:  # noqa: BLE001
+            log_exc(f"  unhandled error in {self.command} {self.path.split('?')[0][:80]} {call_name(self.headers)} after {time.monotonic() - started:.1f} s; "
+                    f"the connection is closed without a reply", e)
+            e._fh2mp_logged = True
+            raise
+        finally:
+            took = time.monotonic() - started
+            if took >= SLOW_REQUEST_S:
+                log_every(("slow", call_name(self.headers)), 60, f"  slow request: {self.command} {self.path.split('?')[0][:80]} {call_name(self.headers)} took {took:.1f} s", "WARN")
+
     def _handle(self):
-        global SEQ
-        SEQ += 1
-        CTX.seq = SEQ                  # log() numbers the indented lines of this request with it
+        seq = CTX.seq = next(_SEQ)     # log() numbers the indented lines of this request with it
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             self.close_connection = True
+            log_every("bad-length", 300, f"  refused: 400 bad_length: Content-Length {self.headers.get('Content-Length', '')[:20]!r} is not a number "
+                      f"({getattr(self, 'command', '?')} {self.path.split('?')[0][:80]})", "WARN")
             return self._reply_json(400, {"error": "bad_length"})
         limit = launcher_api.body_limit(self.path) if self.path.startswith("/v1/") else ugc.MAX_REQUEST_BODY
         if n > limit or (self.path.startswith("/ops/") and n > 65536) or n < 0:
             self.close_connection = True
+            log_every(("too-large", self.path.split("?")[0][:40]), 300, f"  refused: 413 too_large: {getattr(self, 'command', '?')} {self.path.split('?')[0][:80]} announces {n} bytes, "
+                      f"limit {min(limit, 65536) if self.path.startswith('/ops/') else limit}", "WARN")
             return self._reply_json(413, {"error": "too_large"})
         body = self.rfile.read(n) if n else b""
         proxied = "X-Real-IP" in self.headers or "X-Forwarded-For" in self.headers
         if self.path.startswith("/ops/"):
             return self._ops(body, proxied)
         if self.path.startswith(("/admin/", "/api/")) and (self.client_address[0] not in ("127.0.0.1", "::1") or proxied):
+            log_every(("local-only", self.path.split("?")[0][:20]), 300, f"  refused: 403 on {self.path.split('?')[0][:80]}: operator and game-server endpoints answer "
+                      f"loopback only, never through the proxy (came through the proxy: {proxied})", "WARN")
             self.send_response(403)                       # operator and game-server endpoints are loopback only (and never through the proxy)
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -2504,9 +2631,15 @@ class Handler(BaseHTTPRequestHandler):
         if not self._identify():
             return
         social.touch(CTX.xuid or int(xbl_xuid(self.headers) or 0))
-        log(f"#{SEQ} {self.command} {host}{self.path} {cls} {method} body={len(body)} user={CTX.xuid:#x}")
+        if (method == "RetrieveForUser" and cls.startswith("Xls.WebServices.Notifications")) or host in SOCIAL_HOSTS:
+            POLLS.note(call_name(self.headers) if method else host, CTX.xuid)       # polls are counted, not listed (see PollShare)
+            log(f"#{seq} {self.command} {host}{self.path} {cls} {method} body={len(body)} user={CTX.xuid:#x}", "DEBUG", "poll")
+        else:
+            log(f"#{seq} {self.command} {host}{self.path} {cls} {method} body={len(body)} user={CTX.xuid:#x}")
         if CTX.own_cars and host in MULTIPLAYER_HOSTS:
-            log("  multiplayer refused: this player's car database is not the server's")
+            mine, theirs = getattr(CTX, "gamedb", ("?", "?"))
+            log_every(("mp-refused", CTX.xuid), 120, "  multiplayer refused: this player's car database is not the server's " + diag.kv(
+                xuid=f"{CTX.xuid:#x}", host=host, client_db=mine or "(none sent)", server_db=theirs, shim=getattr(CTX, "shim", "") or "(none)"), "INFO")
             return self._reply_json(409, {"error": "gamedb_mismatch", "message": "Playing with other people needs the server's car database. "
                                           "Press Play in the FH2MP launcher without keeping your own car packs."})
         out = b""
@@ -2514,8 +2647,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 out = handle_xls(cls, method, body)
             except Exception as e:  # noqa: BLE001
-                import traceback
-                traceback.print_exc()
+                log_exc(f"  {call_name(self.headers)} failed in its handler (user={CTX.xuid:#x}, body {len(body)} bytes), answered with an error result", e)
                 msg = f"fh2mp: {e}".encode()
                 out = frame(result=2, error=0x1, text=msg)
         ctype = "bin/xtsw"
@@ -2523,17 +2655,20 @@ class Handler(BaseHTTPRequestHandler):
         extra = []
         if host == "gameserverds.xboxlive.com" and self.path.endswith("/variants"):
             out, ctype = gsds_variants(), "application/json"
-            log(f"  GSDS variants -> {out.decode()}")
+            log(f"  GSDS variants -> {len(json.loads(out)['gsiSets'])} sets Release_{GSI_VERSION}.*, max {MAX_LOBBY_PLAYERS} players")
+            log(f"  GSDS variants body: {out.decode()}", "DEBUG", "gsds")
         elif host == "gameserverds.xboxlive.com" and "qosservers" in self.path:
             out, ctype = gsds_qos_servers(), "application/json"
-            log(f"  GSDS qos -> {out.decode()}")
+            log(f"  GSDS qos -> {len(json.loads(out)['qosServers'])} server(s)")
+            log(f"  GSDS qos body: {out.decode()}", "DEBUG", "gsds")
         elif host == "gameserverms.xboxlive.com" and self.path.rstrip("/").endswith("/clusters"):
             out, ctype = gsms_cluster(), "application/json"
             log(f"  GSMS cluster -> {out.decode()}")
         elif host == "client-strings.xboxlive.com" and self.path.rstrip("/").endswith("/system/strings/validate"):
             try:
                 verified = verify_strings(body)
-            except ValueError:
+            except ValueError as e:
+                log(f"  refused: 400 invalid_strings on strings/validate: {e} (body {len(body)} bytes, user={CTX.xuid:#x})", "WARN")
                 return self._reply_json(400, {"error": "invalid_strings"})
             out = json.dumps(verified).encode()
             ctype = "application/json"
@@ -2546,13 +2681,14 @@ class Handler(BaseHTTPRequestHandler):
             # The game polls GetAchievementsForTitleIdAsync every frame it is set; a 200 with no usable list makes the
             # embedded XSAPI complete with a NULL result and the game dereferences it (docs/matchmaking.md). Fail it.
             out, ctype, status = b'{"code":0,"description":"achievements unavailable"}', "application/json", 404
-            log("  achievements -> 404")
+            log_every(("achievements", CTX.xuid), 300, "  achievements -> 404 (on purpose: any 200 makes the game dereference a null result)", "INFO")
         elif host == "sessiondirectory.xboxlive.com" and xbl.parse_path(self.path) is not None:
             # MPSD session document (PUT create/update, GET read, DELETE); see server/xbl.py
             caller = xbl_xuid(self.headers)
             if caller is None and AUTH is not None and AUTH.mode == "required" and self.command != "GET":
                 st, doc = 401, None                     # session writes need a signed-in caller
                 out, status = b"{}", 401
+                log_every(("mpsd-401", CTX.xuid), 300, f"  MPSD {self.command} refused 401: no signed-in caller (FH2MP_AUTH=required, user {CTX.xuid:#x})", "WARN")
             elif self.command == "DELETE":
                 st, doc = xbl.delete_session(self.path, caller), None
                 out, status = b"", st
@@ -2571,11 +2707,16 @@ class Handler(BaseHTTPRequestHandler):
                 who = " members=" + ",".join(
                     f"{m['constants']['system']['xuid'][-5:]}{'+' if m['properties']['system'].get('active') else '-'}"
                     for m in doc.get("members", {}).values())
-            log(f"  MPSD {self.command} session -> {status} ({len(out)} bytes, {xbl.count()} session(s)){who}")
+            line = f"  MPSD {self.command} session -> {status} ({len(out)} bytes, {xbl.count()} session(s)){who}"
+            if self.command == "GET" and _unchanged(("mpsd", caller, self.path.split("?")[0]), (status, hash(out))):
+                log(line, "DEBUG", "poll")              # the same answer as this player's last poll of this session
+            else:
+                log(line)
         elif host == "momatch.xboxlive.com" and xbl.parse_momatch(self.path) is not None:
             caller = xbl_xuid(self.headers)
             if caller is None and AUTH is not None and AUTH.mode == "required":
                 status, doc = 401, None                 # matchmaking needs a signed-in caller
+                log_every(("momatch-401", CTX.xuid), 300, f"  MOMATCH {self.command} refused 401: no signed-in caller (FH2MP_AUTH=required, user {CTX.xuid:#x})", "WARN")
             elif self.command == "DELETE":
                 status, doc = xbl.delete_ticket(self.path, caller), None
             elif self.command == "POST":
@@ -2584,14 +2725,23 @@ class Handler(BaseHTTPRequestHandler):
                 status, doc = xbl.get_ticket(self.path, caller)
             out = json.dumps(doc).encode() if doc is not None else b""
             ctype = "application/json"
-            log(f"  MOMATCH {self.command} -> {status} {out.decode()[:300]}")
+            line = f"  MOMATCH {self.command} -> {status} {out.decode()[:300]}"
+            if self.command == "GET" and status < 400 and _unchanged(("momatch", caller, self.path.split("?")[0]), (status, hash(out))):
+                log(line, "DEBUG", "poll")              # the ticket is polled every 5 s: only a changed answer is news
+            elif self.command == "GET" and status == 404:
+                log(line + " (no such ticket: expired, swept, or never made)", "WARN")
+            else:
+                log(line)
         elif host == "sessiondirectory.xboxlive.com" and self.command == "GET" and "/sessions" in self.path:
             # MPSD session query (MultiplayerService.GetSessionsAsync). Any 200 answer (empty body or {"results":[]}) makes
             # the embedded XSAPI complete the async with a NULL result and the game dereferences it (crash at
             # game+0x41fd28, docs/matchmaking.md). An HTTP error leaves the async in the Error state, which the game's
             # poll loop (FUN_140415030) skips, as when Azimuth's offline stub failed the request.
             out, ctype, status = b'{"code":0,"description":"no sessions"}', "application/json", 404
-            log("  MPSD sessions -> 404")
+            log_every(("mpsd-sessions", CTX.xuid), 300, "  MPSD sessions -> 404 (on purpose: any 200 makes the game dereference a null result)", "INFO")
+        elif not (host.endswith("forzamotorsport.net") and cls):
+            log_every(("unhandled-host", host, self.command), 3600, f"  unhandled request {self.command} {host}{self.path.split('?')[0][:60]}: answered 200 with an empty body "
+                      f"(user {CTX.xuid:#x}, body {len(body)} bytes)", "INFO")
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         for k, v in extra:
@@ -2610,7 +2760,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(png or b"")
         if png:
-            log(f"  gamerpic {m.group(1)[-5:]} served ({len(png)}B)")
+            log(f"  gamerpic {m.group(1)[-5:]} served ({len(png)}B)", "DEBUG", "social")
 
     def _api(self, body):
         r = social_api(self.command, self.path, body)
@@ -2626,6 +2776,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             status, obj = api(self.command, self.path, body)
         except ApiError as e:
+            log(f"  admin api refused {e.status}: {self.command} {self.path.split('?')[0][:60]}: {e.msg}", "WARN")
             status, obj = e.status, {"error": e.msg}
         b = json.dumps(obj, indent=1).encode()
         self.send_response(status)
@@ -2646,6 +2797,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 rid = site_stats.add_result(sys.modules[__name__], body)
             except ValueError as e:
+                log(f"  refused: 400 bad_request on /admin/result: {e} (body {len(body)} bytes); the game server's event result is not stored", "WARN")
                 return self._reply_json(400, {"error": "bad_request", "message": str(e)})
             return self._reply_json(201, {"id": rid})
         if u.path == "/admin/gamemode":
@@ -2680,6 +2832,7 @@ class Handler(BaseHTTPRequestHandler):
             announce_rotation()
             out = "".join(f"#{e['id']} track {e['track']} {e['kind']} {e['attrs']} :: {e['name']}\n" for e in evs)
         else:
+            log(f"  refused: 404 on {self.command} {u.path[:60]}: not an admin endpoint", "WARN")
             self.send_error(404)
             return
         b = out.encode()
@@ -2689,7 +2842,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
-    do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = _handle
+    do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = _entry
 
 
 def setup(dsn=None):
@@ -2761,6 +2914,18 @@ def announce_auth(xuid, ip, token=""):
     if len(_AUTH_ANNOUNCED) > 20000:
         _AUTH_ANNOUNCED.clear()
     xbl.announce_auth(xuid, ip, tkey)
+
+
+_LAST_POLL = {}
+
+
+def _unchanged(key, sig):
+    """True when a poll got the same answer as the same player's last poll of the same resource: a repeat is not news."""
+    old = _LAST_POLL.get(key)
+    if len(_LAST_POLL) > 5000:
+        _LAST_POLL.clear()
+    _LAST_POLL[key] = sig
+    return old == sig
 
 
 _OLD_REMOVED = {}
@@ -2858,6 +3023,17 @@ class BoundedHTTPServer(ThreadingHTTPServer):
             super().process_request_thread(request, client_address)
         finally:
             self.slots.release()
+
+    def handle_error(self, request, client_address):
+        """An exception that left a handler. Those from _handle are logged there (with the request's number); the default would print them
+        again to stderr. What is left is a failure outside a request: a malformed request line, a connection that broke while reading it."""
+        exc = sys.exc_info()[1]
+        if exc is None or getattr(exc, "_fh2mp_logged", False):
+            return
+        if isinstance(exc, (ConnectionError, TimeoutError)):
+            log_every(("conn-error", type(exc).__name__), 300, f"connection ended outside a request: {type(exc).__name__}: {exc}", "INFO")
+            return
+        log_exc("unhandled error before a request was read", exc)
 
 
 def main():

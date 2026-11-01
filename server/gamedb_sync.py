@@ -12,6 +12,10 @@ import lzma
 import os
 import threading
 
+import diag
+
+LOG = diag.get("gamedb")
+
 FILE_NAME = "gamedbRC.slt"
 DOWNLOAD_PATH = f"/v1/gamedb/{FILE_NAME}.xz"
 MAX_SIZE = 64 * 1024 * 1024          # the stock file is about 6 MB
@@ -22,7 +26,14 @@ class GameDb:
         self.path = path if path is not None else os.environ.get("FH2MP_SYNC_GAMEDB", "")
         self._lock = threading.Lock()
         self._key = None
+        self._problem = None             # the failure last logged for the current file state, so a file that stays broken is reported once
         self.sha256, self.size, self.blob = "", 0, b""
+
+    def _report(self, key, msg):
+        """A file problem is logged when it first appears (or the file changes), not on every launcher request."""
+        if self._problem != key:
+            self._problem = key
+            LOG.warn(msg + ("; the last good copy " + self.sha256[:12] + " keeps being served" if self.blob else "; there is no copy to serve, launchers get 404"))
 
     def _load(self):
         """Brings sha256/size/blob up to date with the file. -> True when there is something to serve (the last good copy is kept when
@@ -32,15 +43,23 @@ class GameDb:
         try:
             st = os.stat(self.path)
             key = (st.st_mtime_ns, st.st_size)
+            if key != self._key and st.st_size > MAX_SIZE:
+                self._report(("big", key), f"car database {self.path} is {st.st_size} bytes, above the {MAX_SIZE} byte limit")
             if key != self._key and st.st_size <= MAX_SIZE:
                 with open(self.path, "rb") as f:
                     data = f.read(MAX_SIZE + 1)
                 if data[:16] == b"SQLite format 3\x00" and len(data) <= MAX_SIZE:
+                    old = self.sha256
                     self.sha256, self.size = hashlib.sha256(data).hexdigest(), len(data)
                     self.blob = lzma.compress(data, preset=9)        # once per change; a client decompresses it in well under a second
                     self._key = key
-        except OSError:
-            pass
+                    self._problem = None
+                    LOG.info(f"car database now served: sha256 {self.sha256[:12]} {self.size} bytes ({len(self.blob)} compressed)"
+                             + (f", replaces {old[:12]}" if old and old != self.sha256 else ""))
+                else:
+                    self._report(("format", key), f"car database {self.path} ({len(data)} bytes) does not start with the SQLite header, it starts with {data[:16]!r}")
+        except OSError as e:
+            self._report(("os", type(e).__name__, getattr(e, "errno", None)), f"car database {self.path} cannot be read: {e}")
         return bool(self.blob)
 
     def manifest(self):

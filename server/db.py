@@ -23,6 +23,21 @@ from contextlib import contextmanager
 
 import psycopg
 
+import diag
+
+LOG = diag.get("db")
+_RATE = diag.RateLimit()
+SLOW_QUERY_SECONDS = float(os.environ.get("FH2MP_DB_SLOW_S", "1.0"))    # a read or write that takes longer is reported
+SLOW_LOCK_SECONDS = 1.0           # waiting longer than this for the write lock names a long writer ahead
+SLOW_TX_SECONDS = 2.0             # a write transaction holds the lock for its whole body
+DB_LOG_SECONDS = 60.0
+
+
+def _sql_head(sql, n=110):
+    """The statement without its parameters, on one line: what a slow-query line names (arguments can hold personal data)."""
+    return re.sub(r"\s+", " ", sql).strip()[:n]
+
+
 MIGRATIONS = [
     # 1: the schema as of 2026-10-18 (scores + ghosts, XP, Drivatars, notifications, Rivals events, user content)
     """
@@ -655,17 +670,26 @@ class Database:
             if room:
                 try:
                     c = self._connect()
-                except BaseException:
+                except BaseException as e:
                     with self._made_lock:
                         self._made -= 1
+                    ok, skipped = _RATE.allow("connect", DB_LOG_SECONDS)
+                    if ok and isinstance(e, Exception):
+                        LOG.error(f"could not open a connection to {self.path} ({self._made} open): {diag.where(e)}" + (f" (+{skipped} more since the last line)" if skipped else ""))
                     raise
                 with self._made_lock:
                     self._all = [x for x in self._all if not x.closed] + [c]
             else:
+                waited = time.monotonic()
                 try:
                     c = self._idle.get(timeout=30)
                 except queue.Empty:
+                    LOG.error(f"no database connection became free within 30 s: all {self.pool_size} pooled connections are in use (FH2MP_PG_POOL), {self.path}")
                     raise RuntimeError("no database connection became free within 30 s") from None
+                waited = time.monotonic() - waited
+                ok, skipped = _RATE.allow("pool-wait", DB_LOG_SECONDS)
+                if ok and waited > SLOW_LOCK_SECONDS:
+                    LOG.warn(f"waited {waited:.1f} s for a free connection, all {self.pool_size} are in use (FH2MP_PG_POOL)" + (f" (+{skipped} more since the last line)" if skipped else ""))
         try:
             yield c
         finally:
@@ -694,14 +718,23 @@ class Database:
 
     def _run(self, sql, args, fetch):
         for attempt in (0, 1):
+            started = time.monotonic()
             try:
                 with self._use() as conn:
                     cur = self._exec(conn, sql, args)
-                    return cur.fetchall() if fetch == "all" else cur.fetchone()
-            except psycopg.OperationalError:
+                    result = cur.fetchall() if fetch == "all" else cur.fetchone()
+                took = time.monotonic() - started
+                if took > SLOW_QUERY_SECONDS:
+                    ok, skipped = _RATE.allow(("slow", _sql_head(sql, 60)), DB_LOG_SECONDS)
+                    if ok:
+                        LOG.warn(f"slow query {took:.1f} s (limit {SLOW_QUERY_SECONDS:g}): {_sql_head(sql)}" + (f" (+{skipped} like it since the last line)" if skipped else ""))
+                return result
+            except psycopg.OperationalError as e:
                 if attempt or getattr(self._local, "tx_conn", None) is not None:
+                    LOG.error(f"query failed, {'inside a transaction, cannot retry' if not attempt else 'second attempt'}: {diag.where(e)}; {_sql_head(sql)}")
                     raise                          # (inside a transaction a lost connection cannot be retried)
                 # the connection went away between requests (it is dropped by _use): try once with another one
+                LOG.warn(f"connection lost after {time.monotonic() - started:.1f} s, retrying once on another: {diag.where(e)}; {_sql_head(sql, 60)}")
 
     @contextmanager
     def tx(self):
@@ -710,12 +743,24 @@ class Database:
         with self._use() as conn:
             outer = getattr(self._local, "tx_conn", None)
             self._local.tx_conn = conn
+            asked = time.monotonic()
+            got = None
             try:
                 with conn.transaction():
                     conn.execute("SELECT pg_advisory_xact_lock(%s)", (ADVISORY_LOCK,))
+                    got = time.monotonic()
+                    if got - asked > SLOW_LOCK_SECONDS:
+                        ok, skipped = _RATE.allow("lock-wait", DB_LOG_SECONDS)
+                        if ok:
+                            LOG.warn(f"waited {got - asked:.1f} s for the write lock, another write transaction held it" + (f" (+{skipped} more since the last line)" if skipped else ""))
                     yield _Tx(self, conn)
             finally:
                 self._local.tx_conn = outer
+                if got is not None and time.monotonic() - got > SLOW_TX_SECONDS:
+                    ok, skipped = _RATE.allow("tx-long", DB_LOG_SECONDS)
+                    if ok:
+                        LOG.warn(f"a write transaction held the write lock for {time.monotonic() - got:.1f} s (limit {SLOW_TX_SECONDS:g}); every other writer waited"
+                                 + (f" (+{skipped} like it since the last line)" if skipped else ""))
 
     def query(self, sql, args=()):
         return self._run(sql, args, "all")
@@ -738,6 +783,8 @@ class Database:
 
     # ---- schema
     def _migrate(self):
+        started = time.monotonic()
+        applied = None
         with self._use() as conn, conn.transaction():
             conn.execute("SELECT pg_advisory_xact_lock(%s)", (ADVISORY_LOCK + 1,))
             conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version BIGINT NOT NULL)")
@@ -753,6 +800,10 @@ class Database:
                 conn.execute("INSERT INTO schema_version (version) VALUES (%s)", (len(MIGRATIONS),))
             elif version < len(MIGRATIONS):
                 conn.execute("UPDATE schema_version SET version=%s", (len(MIGRATIONS),))
+            if version < len(MIGRATIONS):
+                applied = version
+        if applied is not None:
+            LOG.info(f"schema migrated from v{applied} to v{len(MIGRATIONS)} ({len(MIGRATIONS) - applied} step(s), {time.monotonic() - started:.1f} s) on {self.path}")
 
     # ---- meta
     def meta_get(self, key, default=None):
