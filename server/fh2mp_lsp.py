@@ -70,9 +70,10 @@ SOCIAL = None             # social.SocialStore
 AUTH = None               # auth.AuthService (accountless identity, server/auth.py)
 LAUNCHER = None           # launcher_api.Ctx
 OPS = ops_api.OpsConfig() # operator API access (token + allowed addresses), see ops_api.py; replaced from the environment in setup_auth
-# The client shows a club's level as clubXP / 100 + 1 (578 for 57713 XP, seen in game), and the club XP is what its members earned since they
-# joined: a one-member club of a level-41 player reads 480. FH2MP_CLUB_XP_DIVISOR scales the XP sent (12 puts a solo club near its member's level).
-CLUB_XP_DIVISOR = max(1, int(os.environ.get("FH2MP_CLUB_XP_DIVISOR", "1")))
+# The pause menu reads the club XP as clubXP * 10000 (c18640) and shows level = min(9999, XP / 1,000,000 + 1) (c16a70, the club
+# leaderboards use the same function on the score), so clubXP is the XP in units of 10000: 45,558,854 XP is clubXP 4555, level 46, as on the board.
+# Sent raw, any large club reads 9999. FH2MP_CLUB_XP_DIVISOR overrides the unit.
+CLUB_XP_DIVISOR = max(1, int(os.environ.get("FH2MP_CLUB_XP_DIVISOR", "10000")))
 LEVELS = {}               # xuid -> currentCareerLevel as sent at Logon (career XP, NOT display level)
 TAGS = {}                 # xuid -> gamertag, learned at Logon
 
