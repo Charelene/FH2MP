@@ -5,6 +5,8 @@
  */
 typedef void (*torque_scale_fn)(float *, void **, void **, void **);
 static torque_scale_fn g_torque_scale_orig;
+/* Upgrade rowsets that were missing and got an empty one, and calls that had one or more missing (the monitor thread reports the change). */
+static volatile unsigned g_torque_scale_missing, g_torque_scale_calls;
 
 static int torque_empty_count(void *self)
 {
@@ -29,6 +31,10 @@ static void torque_scale_guard(float *out, void **a, void **b, void **c)
     void *empty = (void *)&g_torque_empty;
     if (!out || !g_torque_scale_orig) {
         return;
+    }
+    if (!a || !*a || !b || !*b || !c || !*c) {
+        __atomic_add_fetch(&g_torque_scale_calls, 1, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_torque_scale_missing, (a && *a ? 0u : 1u) + (b && *b ? 0u : 1u) + (c && *c ? 0u : 1u), __ATOMIC_RELAXED);
     }
     g_torque_scale_orig(out, a && *a ? a : &empty, b && *b ? b : &empty, c && *c ? c : &empty);
 }

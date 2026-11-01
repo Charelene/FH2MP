@@ -142,7 +142,25 @@ static int xhr_wh_init(void)
                      : -1;
     if (g_wh.ready < 0) {
         log_begin();
-        log_raw("xhr: WinHTTP/ole32 entry points missing, requests will fail\n");
+        log_raw("xhr: requests will fail, ");
+        log_raw(!g_wh.mod ? "winhttp.dll could not be loaded" : "winhttp.dll lacks an entry point (or ole32.dll lacks CoTaskMemAlloc)");
+        log_raw(" (WinHttpOpen=");
+        log_raw(g_wh.open ? "ok" : "missing");
+        log_raw(" Connect=");
+        log_raw(g_wh.connect ? "ok" : "missing");
+        log_raw(" OpenRequest=");
+        log_raw(g_wh.openreq ? "ok" : "missing");
+        log_raw(" Send=");
+        log_raw(g_wh.send ? "ok" : "missing");
+        log_raw(" Receive=");
+        log_raw(g_wh.recv ? "ok" : "missing");
+        log_raw(" Query=");
+        log_raw(g_wh.query ? "ok" : "missing");
+        log_raw(" Read=");
+        log_raw(g_wh.read ? "ok" : "missing");
+        log_raw(" CoTaskMemAlloc=");
+        log_raw(g_wh.cotaskalloc ? "ok" : "missing");
+        log_raw(")\n");
     }
     return g_wh.ready > 0;
 }
@@ -193,6 +211,25 @@ static void cap_forget(xhr_stream *s)
     }
 }
 
+/* A COM object of ours was asked for an interface it does not have: the first few are named (the caller then did without it or failed). */
+static void xhr_qi_refused(const char *who, const GUID *iid)
+{
+    static volatile LONG n;
+
+    if (InterlockedIncrement(&n) <= 5) {
+        log_begin();
+        log_raw("xhr: ");
+        log_raw(who);
+        log_raw(" QueryInterface refused for {");
+        log_hex(iid->Data1, 8);
+        log_raw("-");
+        log_hex(iid->Data2, 4);
+        log_raw("-");
+        log_hex(iid->Data3, 4);
+        log_raw("}\n");
+    }
+}
+
 static HRESULT STDMETHODCALLTYPE st_qi(void *self, const GUID *iid, void **out)
 {
     if (xhr_guid_eq(iid, &XHR_IID_IUNKNOWN) || xhr_guid_eq(iid, &XHR_IID_SEQSTREAM)) {
@@ -200,8 +237,7 @@ static HRESULT STDMETHODCALLTYPE st_qi(void *self, const GUID *iid, void **out)
         *out = self;
         return S_OK;
     }
-    log_begin();
-    log_raw("xhr: stream QueryInterface refused\n");
+    xhr_qi_refused("response stream", iid);
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -324,6 +360,7 @@ static HRESULT STDMETHODCALLTYPE xhr_qi(void *self, const GUID *iid, void **out)
         *out = self;
         return S_OK;
     }
+    xhr_qi_refused("request object", iid);
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -441,6 +478,13 @@ static HRESULT STDMETHODCALLTYPE xhr_set_header(void *self, const wchar_t *name,
     xhr_obj *x = (xhr_obj *)self;
 
     if (!name || x->nhdr >= XHR_MAX_HDR) {
+        static volatile LONG n;
+        if (InterlockedIncrement(&n) <= 3) {
+            log_begin();
+            log_raw("xhr#");
+            log_dec(x->seq);
+            log_raw(name ? " SetRequestHeader refused, the request already has the maximum of 32 headers\n" : " SetRequestHeader refused, no header name\n");
+        }
         return E_INVALIDARG;
     }
     x->hname[x->nhdr] = xhr_wdup(name);
@@ -543,6 +587,56 @@ static void xhr_dump_request(xhr_obj *x, const wchar_t *path)
     CloseHandle(f);
 }
 
+/* Consecutive requests that never got an HTTP answer (reset by any answer), and when the first of them started: the server being down shows as
+ * one line when it comes back, not as 20 lines and then silence. */
+static volatile LONG g_xhr_fail_run;
+static volatile DWORD g_xhr_fail_since;
+
+/* up to `max` characters of a wide string, stopping at '?' (no query strings in the log) */
+static void xhr_log_wide_n(const wchar_t *w, int max)
+{
+    char buf[130];
+    int n = 0;
+
+    while (w && w[n] && w[n] != L'?' && n < max && n < (int)sizeof buf - 1) {
+        buf[n] = w[n] >= 32 && w[n] < 127 ? (char)w[n] : '?';
+        n++;
+    }
+    buf[n] = 0;
+    log_raw(buf);
+    if (w && w[n] && w[n] != L'?') {
+        log_raw("...");
+    }
+}
+
+/* One request header onto the WinHTTP request; a refusal is named (never the value: it can be the session token). */
+static void xhr_add_header(HINTERNET req, const wchar_t *line, DWORD seq)
+{
+    if (!g_wh.addhdr(req, line, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE)) {
+        static volatile LONG n;
+        DWORD err = GetLastError();
+
+        if (InterlockedIncrement(&n) <= 5) {
+            wchar_t name[40];
+            int k = 0;
+
+            while (line[k] && line[k] != L':' && k < 39) {
+                name[k] = line[k];
+                k++;
+            }
+            name[k] = 0;
+            log_begin();
+            log_raw("xhr#");
+            log_dec(seq);
+            log_raw(" header ");
+            log_wide(name);
+            log_raw(" could not be added to the request, error ");
+            log_dec(err);
+            log_raw("\n");
+        }
+    }
+}
+
 static DWORD WINAPI xhr_thread(LPVOID param)
 {
     xhr_obj *x = (xhr_obj *)param;
@@ -558,6 +652,7 @@ static DWORD WINAPI xhr_thread(LPVOID param)
     int i, k;
     HRESULT hr = S_OK;
     const char *stage = "winhttp load";
+    DWORD t0 = GetTickCount();
 
     /* split "scheme://host[:port]/path" */
     orig_host[0] = 0;
@@ -578,6 +673,24 @@ static DWORD WINAPI xhr_thread(LPVOID param)
         goto fail;
     }
     xhr_load_cfg();
+    if (g_lsp_cfg_why) {
+        static volatile LONG told;
+        if (!InterlockedExchange(&told, 1)) {
+            log_begin();
+            log_raw("xhr: fh2mp-lsp.txt ");
+            log_raw(g_lsp_cfg_why);
+            if (g_lsp_cfg_err) {
+                log_raw(" (error ");
+                log_dec(g_lsp_cfg_err);
+                log_raw(")");
+            }
+            log_raw(", requests go to ");
+            log_wide(g_lsp_host);
+            log_raw(":");
+            log_dec(g_lsp_port);
+            log_raw("\n");
+        }
+    }
     log_begin();
     log_raw("xhr#");
     log_dec(x->seq);
@@ -617,6 +730,17 @@ static DWORD WINAPI xhr_thread(LPVOID param)
     }
     for (i = 0; i < x->nhdr; i++) {
         if (lstrlenW(x->hname[i]) > 100 || lstrlenW(x->hval[i]) > 480) {
+            static volatile LONG skipped;
+            if (InterlockedIncrement(&skipped) <= 3) {
+                log_begin();
+                log_raw("xhr#");
+                log_dec(x->seq);
+                log_raw(" request header dropped, too long (name ");
+                log_dec((unsigned long)lstrlenW(x->hname[i]));
+                log_raw(" chars, value ");
+                log_dec((unsigned long)lstrlenW(x->hval[i]));
+                log_raw("; limits 100 and 480)\n");
+            }
             continue;
         }
         if (lstrcmpiW(x->hname[i], L"Host") == 0) {
@@ -627,11 +751,11 @@ static DWORD WINAPI xhr_thread(LPVOID param)
         lstrcpyW(hdrline, x->hname[i]);
         lstrcatW(hdrline, L": ");
         lstrcatW(hdrline, x->hval[i]);
-        g_wh.addhdr(req, hdrline, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+        xhr_add_header(req, hdrline, x->seq);
     }
     lstrcpyW(hdrline, L"X-FH2MP-Host: ");
     lstrcatW(hdrline, orig_host);
-    g_wh.addhdr(req, hdrline, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+    xhr_add_header(req, hdrline, x->seq);
     if (g_token[0]) { /* the session the launcher signed in; the server takes the player's identity from it, not from a header the game wrote */
         int k;
         lstrcpyW(hdrline, L"X-FH2MP-Token: ");
@@ -640,11 +764,11 @@ static DWORD WINAPI xhr_thread(LPVOID param)
             hdrline[k + i] = (WCHAR)(unsigned char)g_token[i];
         }
         hdrline[k + i] = 0;
-        g_wh.addhdr(req, hdrline, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+        xhr_add_header(req, hdrline, x->seq);
     }
-    g_wh.addhdr(req, L"X-FH2MP-Shim: " FH2MP_WSTR(FH2MP_SHIM_VERSION), (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+    xhr_add_header(req, L"X-FH2MP-Shim: " FH2MP_WSTR(FH2MP_SHIM_VERSION), x->seq);
     restricted_tools_header(hdrline);
-    g_wh.addhdr(req, hdrline, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+    xhr_add_header(req, hdrline, x->seq);
     if (g_gamedb_path[0]) { /* the car database the game runs with (gamedb_hash); the server refuses a different one */
         char hex[65];
         int k;
@@ -655,13 +779,13 @@ static DWORD WINAPI xhr_thread(LPVOID param)
             hdrline[k + i] = (WCHAR)hex[i];
         }
         hdrline[k + i] = 0;
-        g_wh.addhdr(req, hdrline, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+        xhr_add_header(req, hdrline, x->seq);
     }
 
     {   /* the launcher runs a local UDP-over-TCP proxy for this game (experimental TCP fallback): the server then names 127.0.0.1 as the game server */
         WCHAR tun[4];
         if (GetEnvironmentVariableW(L"FH2MP_TUNNEL", tun, 4) > 0) {
-            g_wh.addhdr(req, L"X-FH2MP-Tunnel: 1", (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+            xhr_add_header(req, L"X-FH2MP-Tunnel: 1", x->seq);
         }
     }
 
@@ -720,6 +844,43 @@ static DWORD WINAPI xhr_thread(LPVOID param)
             goto fail;
         }
     }
+    {
+        /* the server answered: the run of requests without any answer is over (said once it was 3 or more) */
+        LONG run = InterlockedExchange(&g_xhr_fail_run, 0);
+        if (run >= 3) {
+            log_begin();
+            log_raw("xhr: the server answers again (status ");
+            log_dec(status);
+            log_raw(") after ");
+            log_dec((unsigned long)run);
+            log_raw(" requests without an answer over ");
+            log_dec((GetTickCount() - g_xhr_fail_since) / 1000);
+            log_raw(" s\n");
+        }
+    }
+    if (status < 200 || status > 299) {
+        /* a refusal from the server (401 token not accepted, 403, 5xx ...) is a failed request too: the game just sees an error body */
+        static volatile LONG bad;
+        LONG nbad = InterlockedIncrement(&bad);
+        if (nbad <= 20 || nbad % 25 == 0) {
+            log_begin();
+            log_raw("xhr#");
+            log_dec(x->seq);
+            log_raw(" HTTP error status=");
+            log_dec(status);
+            log_raw(" ");
+            log_wide(x->method);
+            log_raw(" ");
+            xhr_log_wide_n(path, 80);
+            log_raw(" after ");
+            log_dec(GetTickCount() - t0);
+            log_raw(" ms, response bytes=");
+            log_dec(ndata);
+            log_raw(" (#");
+            log_dec((unsigned long)nbad);
+            log_raw(")\n");
+        }
+    }
     log_begin();
     log_raw("xhr#");
     log_dec(x->seq);
@@ -749,7 +910,11 @@ fail:
     {
         /* release builds keep this line ("fail"): without it a player whose game never reaches the server has nothing to send us */
         static volatile LONG logged;
-        if (InterlockedIncrement(&logged) <= 20) {
+        LONG nlogged = InterlockedIncrement(&logged), run = InterlockedIncrement(&g_xhr_fail_run);
+        if (run == 1) {
+            g_xhr_fail_since = t0;
+        }
+        if (nlogged <= 20 || nlogged % 25 == 0) {
             log_begin();
             log_raw("xhr#");
             log_dec(x->seq);
@@ -757,13 +922,27 @@ fail:
             log_raw(stage);
             log_raw(": hr=0x");
             log_hex((unsigned long)hr, 8);
-            log_raw(" server ");
+            if (HRESULT_FACILITY(hr) == FACILITY_WIN32) {
+                log_raw(" (Win32/WinHTTP error ");
+                log_dec((unsigned long)HRESULT_CODE(hr));
+                log_raw(")");
+            }
+            log_raw(" ");
+            log_wide(x->method);
+            log_raw(" ");
+            xhr_log_wide_n(path, 80);
+            log_raw(" after ");
+            log_dec(GetTickCount() - t0);
+            log_raw(" ms, server ");
             log_wide(g_lsp_host);
             log_raw(":");
             log_dec(g_lsp_port);
+            log_raw(g_lsp_secure ? " tls" : " plain");
             log_raw(" (orig host ");
             log_wide(orig_host);
-            log_raw(")\n");
+            log_raw("), ");
+            log_dec((unsigned long)run);
+            log_raw(run == 1 ? " request without an answer\n" : " requests in a row without an answer\n");
         }
     }
     if (!InterlockedCompareExchange(&x->aborted, 0, 0)) {
@@ -793,6 +972,12 @@ static HRESULT STDMETHODCALLTYPE xhr_send(void *self, void *body, unsigned long 
         DWORD total = 0;
         x->body = (unsigned char *)xhr_alloc((SIZE_T)cb);
         if (!x->body) {
+            log_begin();
+            log_raw("xhr#");
+            log_dec(x->seq);
+            log_raw(" Send failed: no memory for the ");
+            log_dec((unsigned long)cb);
+            log_raw("-byte request body\n");
             return E_OUTOFMEMORY;
         }
         while (total < cb) {
@@ -808,8 +993,15 @@ static HRESULT STDMETHODCALLTYPE xhr_send(void *self, void *body, unsigned long 
     InterlockedIncrement(&x->ref); /* the worker owns a reference */
     t = CreateThread(NULL, 0, xhr_thread, x, 0, NULL);
     if (!t) {
+        DWORD err = GetLastError();
         InterlockedDecrement(&x->ref);
-        return HRESULT_FROM_WIN32(GetLastError());
+        log_begin();
+        log_raw("xhr#");
+        log_dec(x->seq);
+        log_raw(" Send failed: the request thread could not be created, error ");
+        log_dec(err);
+        log_raw("\n");
+        return HRESULT_FROM_WIN32(err);
     }
     CloseHandle(t);
     return S_OK;
@@ -833,8 +1025,13 @@ static HRESULT STDMETHODCALLTYPE xhr_set_cookie(void *self, const void *cookie, 
 static HRESULT STDMETHODCALLTYPE xhr_set_custom_stream(void *self, void *stream)
 {
     (void)self; (void)stream;
-    log_begin();
-    log_raw("xhr: SetCustomResponseStream (ignored)\n");
+    {
+        static volatile LONG n;
+        if (InterlockedIncrement(&n) <= 3) {
+            log_begin();
+            log_raw("xhr: SetCustomResponseStream is ignored, the caller gets the normal response stream\n");
+        }
+    }
     return S_OK;
 }
 
@@ -932,6 +1129,7 @@ static const void *const g_xhr_vtbl[] = {
 
 #define FH2_COCREATE_IAT_RVA 0x1dd0ea0u
 static unsigned char *g_cocreate_img;
+static DWORD g_cocreate_hooked_tick;
 
 static HRESULT WINAPI hooked_cocreate(const GUID *clsid, void *outer, DWORD ctx, const GUID *iid, void **out)
 {
@@ -941,10 +1139,12 @@ static HRESULT WINAPI hooked_cocreate(const GUID *clsid, void *outer, DWORD ctx,
         static volatile LONG first;
 
         if (InterlockedExchange(&first, 1) == 0) {
-            /* compared with the "import hooked" line: a game that asked before the hook got Azimuth's offline stub instead */
+            /* a game that asked before the import was hooked got Azimuth's offline stub instead */
             unsigned char *ra = (unsigned char *)__builtin_return_address(0);
             log_begin();
-            log_raw("xhr: first request object through the hook, caller ");
+            log_raw("xhr: first request object ");
+            log_dec(GetTickCount() - g_cocreate_hooked_tick);
+            log_raw(" ms after the CoCreateInstance import was hooked, caller ");
             if (g_cocreate_img && ra >= g_cocreate_img && ra < g_cocreate_img + 0x4000000u) {
                 log_raw("game+0x");
                 log_hex((unsigned long long)(ra - g_cocreate_img), 8);
@@ -956,6 +1156,8 @@ static HRESULT WINAPI hooked_cocreate(const GUID *clsid, void *outer, DWORD ctx,
             log_raw("\n");
         }
         if (!x) {
+            log_begin();
+            log_raw("xhr: no memory for a request object, the game gets E_OUTOFMEMORY\n");
             return E_OUTOFMEMORY;
         }
         x->vtbl = g_xhr_vtbl;
@@ -964,7 +1166,15 @@ static HRESULT WINAPI hooked_cocreate(const GUID *clsid, void *outer, DWORD ctx,
         xhr_release(x);
         return hr;
     }
-    return g_real_cocreate ? g_real_cocreate(clsid, outer, ctx, iid, out) : E_FAIL;
+    if (!g_real_cocreate) {
+        static volatile LONG n;
+        if (InterlockedIncrement(&n) <= 3) {
+            log_begin();
+            log_raw("xhr: CoCreateInstance for another class was called before the real function was known, it fails with E_FAIL\n");
+        }
+        return E_FAIL;
+    }
+    return g_real_cocreate(clsid, outer, ctx, iid, out);
 }
 
 /* (Re)points the game's CoCreateInstance import at hooked_cocreate. Called from the monitor loop
@@ -984,6 +1194,15 @@ static void patch_game_cocreate(unsigned char *img)
         return;
     }
     if (!VirtualProtect(slot, 8, PAGE_READWRITE, &old)) {
+        static volatile LONG refused;
+        if (InterlockedIncrement(&refused) <= 3) {
+            log_begin();
+            log_raw("xhr: the game's CoCreateInstance import (game+0x");
+            log_hex(FH2_COCREATE_IAT_RVA, 8);
+            log_raw(") could not be made writable, error ");
+            log_dec(GetLastError());
+            log_raw(": requests keep going to Azimuth's offline stub\n");
+        }
         return;
     }
     g_real_cocreate = (co_create_fn)*slot;
@@ -992,10 +1211,7 @@ static void patch_game_cocreate(unsigned char *img)
     VirtualProtect(slot, 8, old, &old);
     if (!announced) {
         announced = 1;
-        log_begin();
-        log_raw("xhr: game CoCreateInstance import hooked (was 0x");
-        log_hex((unsigned long long)g_real_cocreate, 16);
-        log_raw("); XMLHTTP60 requests go to the local LSP server\n");
+        g_cocreate_hooked_tick = GetTickCount();
     } else {
         /* Azimuth rebound the slot after we hooked it: anything the game created in between went to its offline stub */
         log_begin();
@@ -1028,6 +1244,13 @@ static void patch_xsapi_cocreate(void)
         return;
     }
     if (!VirtualProtect(slot, 8, PAGE_READWRITE, &old)) {
+        if (!announced) {
+            announced = 1;
+            log_begin();
+            log_raw("xhr: XSAPI's CoCreateInstance import could not be made writable, error ");
+            log_dec(GetLastError());
+            log_raw(": its requests keep going to Azimuth's offline stub\n");
+        }
         return;
     }
     if (!g_real_cocreate) {
@@ -1035,11 +1258,7 @@ static void patch_xsapi_cocreate(void)
     }
     *slot = (void *)hooked_cocreate;
     VirtualProtect(slot, 8, old, &old);
-    if (!announced) {
-        announced = 1;
-        log_begin();
-        log_raw("xhr: XSAPI CoCreateInstance import hooked; its HTTP requests go to the local LSP server\n");
-    }
+    announced = 1;
 }
 
 /*
@@ -1063,7 +1282,7 @@ static LONG (*g_xs_mkstr)(const WCHAR *, unsigned, void **);
 static void xs_response_store_stub(void *slot, void *resp)
 {
     DWORD tid = GetCurrentThreadId();
-    int i;
+    int i, found = 0;
 
     if (resp && g_xs_mkstr && *(void **)((unsigned char *)resp + 0x30) == NULL) {
         for (i = 0; i < XHR_CAP_MAX; i++) {
@@ -1071,6 +1290,7 @@ static void xs_response_store_stub(void *slot, void *resp)
             if ((DWORD)g_cap[i].tid == tid && st) {
                 unsigned char *p = st->data;
                 DWORD n = st->len;
+                found = 1;
                 if (n >= 3 && p[0] == 0xEF && p[1] == 0xBB && p[2] == 0xBF) {
                     p += 3;
                     n -= 3;
@@ -1090,6 +1310,19 @@ static void xs_response_store_stub(void *slot, void *resp)
                     }
                 }
                 break;
+            }
+        }
+        if (!found) {
+            /* the body stays empty and the session is read as null: the matchmaker then waits for ever */
+            static volatile LONG missed;
+            LONG n = InterlockedIncrement(&missed);
+            if (n <= 5 || n % 100 == 0) {
+                log_begin();
+                log_raw("xsbody: no response stream was read on thread ");
+                log_dec(tid);
+                log_raw(" before this XSAPI response was stored, its body stays empty (#");
+                log_dec((unsigned long)n);
+                log_raw(")\n");
             }
         }
     }
@@ -1122,21 +1355,25 @@ static int patch_xsapi_body(void)
     g_xs_mkstr = (LONG(*)(const WCHAR *, unsigned, void **))xs_find_import(img, "WindowsCreateString");
     if (!site || !g_xs_mkstr || site - ctor_site > 0x100) {
         log_begin();
-        log_raw("xsbody: call sites or WindowsCreateString not found, not patched\n");
+        log_raw("xsbody: not patched, in Microsoft.Xbox.Services.dll +0x378b0..+0x37d50 the RestCallResponse constructor call (to +0x35d70) is ");
+        log_raw(ctor_site ? "found" : "missing");
+        log_raw(", the response store call (to +0x14d0) is ");
+        log_raw(site ? (site - ctor_site > 0x100 ? "too far from it" : "found") : "missing");
+        log_raw(", WindowsCreateString is ");
+        log_raw(g_xs_mkstr ? "imported" : "not imported");
+        log_raw("\n");
         return 2;
     }
     /* the platform puts the stub within rel32 reach of the call itself (it used to need a code cave near the module) */
     {
         FH2Hook *h = g_api->hook_call(g_mod, "xsbody: XSAPI RestCall response store", site, (void *)xs_response_store_stub, &original);
         if (!h) {
-            log_begin();
-            log_raw("xsbody: the response store call was not patched\n");
+            plat_failed("xsbody: XSAPI RestCall response store", site, "refused (not a call rel32, or overlaps another hook)");
             return 2;
         }
         g_xs_store_orig = (void (*)(void *, void *))original;
         if (!g_api->enable_hooks(g_mod, h)) {
-            log_begin();
-            log_raw("xsbody: the response store call was not patched\n");
+            plat_failed("xsbody: XSAPI RestCall response store", site, "created but could not be switched on");
             return 2;
         }
     }

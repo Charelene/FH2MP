@@ -88,14 +88,21 @@ static void grid_set_ready(void *console, unsigned value)
 static unsigned grid_msg_start(void *a, void *b, void *c)
 {
     if (g_grid_epoch) {
-        char line[160];
+        char line[300];
         DWORD now = GetTickCount();
+        int i, missing = 0;
         if (g_grid_ready_tick)
             wsprintfA(line, "grid: race start message +%lu ms, RenderReady had been set %lu ms ago", (unsigned long)(now - g_grid_tick0),
                       (unsigned long)(now - g_grid_ready_tick));
         else
             wsprintfA(line, "grid: race start message +%lu ms, RenderReady NOT set yet: this client is still preparing the grid",
                       (unsigned long)(now - g_grid_tick0));
+        for (i = 0; i < GRID_STAGE_COUNT; ++i) {
+            if (!g_grid_stage_seen[i]) {
+                lstrcatA(line, missing++ ? ", " : "; stages not seen before the start message: ");
+                lstrcatA(line, g_grid_stage_name[i]);
+            }
+        }
         grid_line(line);
         InterlockedExchange(&g_grid_epoch, 0);
     }
@@ -133,11 +140,7 @@ static int patch_grid_trace(void)
     int ok = 1;
     if (!img) return 0;
     for (i = 0; i < sizeof hooks / sizeof hooks[0]; ++i) {
-        if (memcmp(img + hooks[i].rva, hooks[i].bytes, sizeof hooks[i].bytes)) {
-            log_begin();
-            log_raw("grid: unexpected game code at ");
-            log_raw(hooks[i].name);
-            log_raw(", the starting grid is not traced\n");
+        if (!code_is("grid", hooks[i].name + 6, img, hooks[i].rva, hooks[i].bytes, sizeof hooks[i].bytes)) {
             return 0;
         }
     }
@@ -145,7 +148,7 @@ static int patch_grid_trace(void)
         if (!plat_hook(hooks[i].name, img + hooks[i].rva, hooks[i].detour, hooks[i].original)) ok = 0;
     if (!ok) {
         log_begin();
-        log_raw("grid: some hooks could not be installed, the starting grid trace is incomplete (fh2-mods\\platform.log)\n");
+        log_raw("grid: the starting grid trace is incomplete, the hooks named above failed\n");
     }
     return ok;
 }
