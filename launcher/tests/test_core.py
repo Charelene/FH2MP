@@ -1403,6 +1403,10 @@ class DevModeTests(unittest.TestCase):
             self.assertTrue(lc.shim_outdated())
             lc.shim_state = lambda: ("ours", version.__version__)
             self.assertFalse(lc.shim_outdated())
+            lc.shim_state = lambda: ("ours", version.__version__ + "-debug")
+            self.assertTrue(lc.shim_outdated())                     # a released launcher does not pin it
+            with mock.patch.object(core.paths, "is_dev", return_value=True):
+                self.assertFalse(lc.shim_outdated())                # the dev launcher leaves a debug build alone
 
     def test_an_older_shim_of_ours_is_updated_without_play(self):
         from fh2mp_launcher import core, version

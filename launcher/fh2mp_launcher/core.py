@@ -405,6 +405,8 @@ class Launcher:
     def shim_outdated(self):
         """The shim must match this release and meet the server's minimum."""
         kind, ver = self.shim_state()
+        if self.shim_pinned(kind, ver):
+            return False
         return kind == "ours" and (ver != __version__ or not updater.at_least(ver, (self.server or {}).get("minShim", "0.0.0")))
 
     def auto_update_shim(self):
