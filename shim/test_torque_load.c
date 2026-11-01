@@ -128,6 +128,7 @@ static void reset(void)
 static void check(int fallback, int cancel)
 {
     unsigned char before[sizeof vehicle];
+    LONG rejects = g_torque_rejects;
     memcpy(before, vehicle, sizeof before);
     torque_preload_guard((void *)42, &job_ptr);
     assert(calls == (unsigned)!cancel);
@@ -137,7 +138,7 @@ static void check(int fallback, int cancel)
      * original physics restoration ONLY for invalid data. */
     before[0x3fd] = (unsigned char)fallback;
     if (calls && fallback) memcpy(before + 0x400, before + 0x118, 4);
-    if (calls && logs) { unsigned none = 0xffffffffu; memcpy(before + 0x400, &none, 4); }
+    if (calls && g_torque_rejects != rejects) { unsigned none = 0xffffffffu; memcpy(before + 0x400, &none, 4); }
     assert(!memcmp(before, vehicle, sizeof before));
     assert(db.refs == 1 && !engine.refs && !camshaft.refs && !curve.refs && !motor.refs &&
            !fallback_engine.refs && !fallback_camshaft.refs && !fallback_curve.refs);

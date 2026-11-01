@@ -79,6 +79,7 @@ static void arm_trace_file(void);
 #endif
 
 static wchar_t g_dir[MAX_PATH];
+static DWORD g_init_tick;     /* GetTickCount() when fh2mod_init started */
 
 #ifndef FH2MP_SHIM_VERSION
 #define FH2MP_SHIM_VERSION "0.0.0-dev"
@@ -101,10 +102,21 @@ const char fh2mp_shim_marker[] __attribute__((used)) = "FH2MP-SHIM-VERSION:" FH2
 static const FH2ModApi *g_api;
 static FH2Mod *g_mod;
 
+/* One line per change the platform did not make: which change, where, and at which step (the platform's own reason is in fh2-mods\platform.log). */
+static void plat_failed(const char *name, const void *at, const char *step);
+
 static int plat_patch(const char *name, void *at, const void *expect, const void *bytes, unsigned n)
 {
     FH2Hook *h = g_api->patch_bytes(g_mod, name, at, expect, bytes, n);
-    return h && g_api->enable_hooks(g_mod, h);
+    if (!h) {
+        plat_failed(name, at, "refused (overlaps another mod's change, or the bytes differ from the exe on disk)");
+        return 0;
+    }
+    if (!g_api->enable_hooks(g_mod, h)) {
+        plat_failed(name, at, "created but could not be switched on");
+        return 0;
+    }
+    return 1;
 }
 
 /* Replaces the function at `target` with `detour`; `original` (may be NULL) gets what to call for the game's own code. */
@@ -112,14 +124,30 @@ static int plat_hook(const char *name, void *target, void *detour, void **origin
 {
     void *unused;
     FH2Hook *h = g_api->hook_function(g_mod, name, target, detour, original ? original : &unused);
-    return h && g_api->enable_hooks(g_mod, h);
+    if (!h) {
+        plat_failed(name, target, "refused (overlaps another hook, or the code is not hookable)");
+        return 0;
+    }
+    if (!g_api->enable_hooks(g_mod, h)) {
+        plat_failed(name, target, "created but could not be switched on");
+        return 0;
+    }
+    return 1;
 }
 
 /* Points one `call rel32` at `detour`; `original` gets the function it called. */
 static int plat_hook_call(const char *name, void *site, void *detour, void **original)
 {
     FH2Hook *h = g_api->hook_call(g_mod, name, site, detour, original);
-    return h && g_api->enable_hooks(g_mod, h);
+    if (!h) {
+        plat_failed(name, site, "refused (not a call rel32, or overlaps another hook)");
+        return 0;
+    }
+    if (!g_api->enable_hooks(g_mod, h)) {
+        plat_failed(name, site, "created but could not be switched on");
+        return 0;
+    }
+    return 1;
 }
 
 /* Commits one page of executable memory within +-2 GB of `anchor` (so a rip-relative operand reaches it), nearest free region first,
@@ -227,7 +255,7 @@ static void log_unlock(void)
 
 /* log_begin() takes the lock; a string ending in '\n' releases it, so each line is atomic */
 #ifndef FH2MP_DEBUG_BUILD
-static char g_line[600];
+static char g_line[1024];
 static int g_ll;
 
 static int line_has(const char *l, int n, const char *pat)
@@ -246,7 +274,9 @@ static int line_has(const char *l, int n, const char *pat)
 static int line_wanted(const char *l, int n)
 {
     static const char *const keep[] = {"attached", "session:", "identity:", "late:", "not patched", "NOT ", "unexpected", "fail", "error", "could not",
-                                       "refus", "crash", "xsbody", "xstoken", "mmtimeout", "mmtoast", "online-setup", "bindfix", "gamedb:", "timelock:", "rivalsleave", "bucketcars", "matchpoll", "sample", "carprobe", "probe:", "lighting:", "grid:", 0};
+                                       "refus", "crash", "xsbody", "xstoken", "mmtimeout", "mmtoast", "online-setup", "bindfix", "gamedb:", "timelock:", "rivalsleave", "bucketcars", "matchpoll", "sample", "carprobe", "probe:", "lighting:", "grid:",
+                                       "xhr:", "winsock:", "placement:", "netstrings:", "torqueload:", "nulltorque", "speedpb:", "cinematics:",
+                                       "festivalgrid:", "invitetype:", "ticket:", "tools:", "offline:", "rebound", "redirect:", "serverport:", "secureip:", "hook:", 0};
     int i;
     for (i = 0; keep[i]; i++) {
         if (line_has(l, n, keep[i])) {
@@ -335,6 +365,95 @@ static void log_begin(void)
     log_raw("[");
     log_dec(GetTickCount());
     log_raw("] ");
+}
+
+/* "48 8b 5c" for n bytes; a game update shows up as a different run of these in a "not patched" line */
+static void log_hexbytes(const unsigned char *p, unsigned n)
+{
+    unsigned i;
+
+    for (i = 0; i < n; i++) {
+        if (i) {
+            log_raw(" ");
+        }
+        log_hex(p[i], 2);
+    }
+}
+
+/* Index of the first byte that differs, or -1 when the n bytes are equal. */
+static int bytes_first_diff(const void *a, const void *b, unsigned n)
+{
+    const unsigned char *x = a, *y = b;
+    unsigned i;
+
+    for (i = 0; i < n; i++) {
+        if (x[i] != y[i]) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+/* Game code that is not what a patch was written for (a game update, or another mod's change): which patch, where (RVA in the exe, build
+ * 1.0.0.64) and how the bytes differ. `at` is where the n compared bytes start, `rva` that place's RVA. Always returns 0. */
+static int log_code_mismatch(const char *tag, const char *what, unsigned rva, const void *actual, const void *expect, unsigned n)
+{
+    int d = bytes_first_diff(actual, expect, n);
+    unsigned from = d < 0 ? 0 : (unsigned)d, show = n - from < 8 ? n - from : 8;
+
+    log_begin();
+    log_raw(tag);
+    log_raw(": unexpected bytes in ");
+    log_raw(what);
+    log_raw(" at game+0x");
+    log_hex(rva + from, 8);
+    log_raw(" (first difference at +");
+    log_dec(from);
+    log_raw(" of ");
+    log_dec(n);
+    log_raw("): expected ");
+    log_hexbytes((const unsigned char *)expect + from, show);
+    log_raw(", found ");
+    log_hexbytes((const unsigned char *)actual + from, show);
+    log_raw("; not patched\n");
+    return 0;
+}
+
+/* Compares n bytes of game code (at img+rva) with what the patch expects; 1 when equal, else the mismatch is logged and it is 0. */
+static int code_is(const char *tag, const char *what, const unsigned char *img, unsigned rva, const void *expect, unsigned n)
+{
+    return bytes_first_diff(img + rva, expect, n) < 0 || log_code_mismatch(tag, what, rva, img + rva, expect, n);
+}
+
+static void plat_failed(const char *name, const void *at, const char *step)
+{
+    HMODULE m = NULL;
+    unsigned char *game = g_api ? (unsigned char *)g_api->game_base() : NULL;
+
+    log_begin();
+    log_raw(name ? name : "?");
+    log_raw(": not patched, the platform ");
+    log_raw(step);
+    log_raw(", at ");
+    if (game && (const unsigned char *)at >= game && (const unsigned char *)at < game + FH2_SIZE_OF_IMAGE) {
+        log_raw("game+0x");
+        log_hex((unsigned long long)((const unsigned char *)at - game), 8);
+    } else if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)at, &m) && m) {
+        char file[MAX_PATH];
+        DWORD n = GetModuleFileNameA(m, file, sizeof file), k = n;
+
+        while (k > 0 && file[k - 1] != '\\' && file[k - 1] != '/') {
+            k--;
+        }
+        file[n < sizeof file ? n : sizeof file - 1] = 0;
+        log_raw(file + k);
+        log_raw("+0x");
+        log_hex((unsigned long long)((const unsigned char *)at - (const unsigned char *)m), 8);
+    } else {
+        log_raw("0x");
+        log_hex((unsigned long long)(ULONG_PTR)at, 16);
+    }
+    log_raw(" (reason: fh2-mods\\platform.log)\n");
 }
 
 static void add_arg(const wchar_t *s, int len)
@@ -481,6 +600,7 @@ static void fh_ensure_bound(fh_sock s)
         return;
     }
     if (!g_r_bind || !g_r_getsockname) {
+        static volatile LONG told;
         HMODULE ws2 = GetModuleHandleW(L"ws2_32.dll");
 
         if (!ws2) {
@@ -489,6 +609,10 @@ static void fh_ensure_bound(fh_sock s)
         g_r_getsockname = (fh_f_getsockname)(void *)GetProcAddress(ws2, (LPCSTR)(ULONG_PTR)6);
         g_r_bind = (fh_f_bind)(void *)GetProcAddress(ws2, (LPCSTR)(ULONG_PTR)2);
         if (!g_r_bind || !g_r_getsockname) {
+            if (!InterlockedExchange(&told, 1)) {
+                log_begin();
+                log_raw("bindfix: ws2_32 has no bind/getsockname (ordinals 2/6), so a receive on an unbound socket is passed on unchanged and may fail with 10022\n");
+            }
             return;
         }
     }
@@ -974,6 +1098,21 @@ static void patch_game_winsock(unsigned char *img)
         void *want = (void *)real;
 
         if (!real) {
+            static volatile LONG missing;
+            if (InterlockedIncrement(&missing) <= 3) {
+                log_begin();
+                log_raw("winsock: slot ");
+                log_dec(i);
+                log_raw(g_ws2_slots[i].name ? " " : " ordinal ");
+                if (g_ws2_slots[i].name) {
+                    log_raw(g_ws2_slots[i].name);
+                } else {
+                    log_dec(g_ws2_slots[i].ordinal);
+                }
+                log_raw(": ws2_32 does not export it (error ");
+                log_dec(GetLastError());
+                log_raw("), the game keeps Azimuth's offline function in this slot\n");
+            }
             continue;
         }
 #ifdef FH2MP_DEBUG_BUILD
@@ -984,6 +1123,19 @@ static void patch_game_winsock(unsigned char *img)
             continue; /* already the real function (or its tracer) */
         }
         if (!VirtualProtect(slot, 8, PAGE_READWRITE, &oldprot)) {
+            static volatile LONG refused;
+            if (InterlockedIncrement(&refused) <= 3) {
+                log_begin();
+                log_raw("winsock: slot ");
+                log_dec(i);
+                log_raw(" (game+0x");
+                log_hex(FH2_WS2_IAT_RVA + i * 8u, 8);
+                log_raw(") could not be made writable, error ");
+                log_dec(GetLastError());
+                log_raw(": it keeps ");
+                log_raw(oldmod);
+                log_raw("\n");
+            }
             continue;
         }
         log_begin();
@@ -1027,16 +1179,12 @@ static int patch_traffic_local_mode(void)
     if (!img) {
         return 0;
     }
+    static const unsigned char want[5] = {0xC6, 0x41, 0x20, 0x00, 0xC3};
     fn = img + FH2_TRAFFIC_NETMODE_RVA;
-    if (fn[0] != 0xC6 || fn[1] != 0x41 || fn[2] != 0x20 || fn[3] != 0x00 || fn[4] != 0xC3 ||
-        !plat_patch("traffic: networked mode stays local", fn + 3, &zero, &one, 1)) {
-        log_begin();
-        log_raw("traffic: unexpected bytes at set-networked function, not patched\n");
+    if (!code_is("traffic", "the set-networked function", img, FH2_TRAFFIC_NETMODE_RVA, want, sizeof want)) {
         return 0;
     }
-    log_begin();
-    log_raw("traffic: networked-mode switch patched; traffic stays local\n");
-    return 1;
+    return plat_patch("traffic: networked mode stays local", fn + 3, &zero, &one, 1);
 }
 
 /*
@@ -1062,24 +1210,15 @@ static int patch_traffic_module_offline(void)
     }
     fn = img + FH2_TRAFFIC_ONLINE_RVA;
     tgt = img + FH2_TRAFFIC_OFFLINE_RVA;
-    for (i = 0; i < (int)sizeof on_sig; i++) {
-        if (fn[i] != on_sig[i] || tgt[i] != off_sig[i]) {
-            log_begin();
-            log_raw("traffic: unexpected bytes at module online/offline switch, not patched\n");
-            return 0;
-        }
+    (void)i;
+    if (!code_is("traffic", "SyncTrafficModule go-online", img, FH2_TRAFFIC_ONLINE_RVA, on_sig, sizeof on_sig) ||
+        !code_is("traffic", "SyncTrafficModule go-offline", img, FH2_TRAFFIC_OFFLINE_RVA, off_sig, sizeof off_sig)) {
+        return 0;
     }
     rel32 = (int)(tgt - (fn + 5));
     jmp[0] = 0xE9;
     mem_copy(jmp + 1, &rel32, 4);
-    if (!plat_patch("traffic: SyncTrafficModule go-online -> go-offline", fn, on_sig, jmp, 5)) {
-        log_begin();
-        log_raw("traffic: module online/offline switch not patched\n");
-        return 0;
-    }
-    log_begin();
-    log_raw("traffic: module go-online redirected to go-offline; single-player traffic stays active\n");
-    return 1;
+    return plat_patch("traffic: SyncTrafficModule go-online -> go-offline", fn, on_sig, jmp, 5);
 }
 
 /*
@@ -1105,21 +1244,11 @@ static int patch_matchmaking_allowed(void)
         return 0;
     }
     at = img + FH2_MM_ALLOWED_JE_RVA - 6;
-    for (i = 0; i < (int)sizeof want; i++) {
-        if (at[i] != want[i]) {
-            log_begin();
-            log_raw("mmallow: unexpected bytes in IsMatchMakingAllowed, not patched\n");
-            return 0;
-        }
-    }
-    if (!plat_patch("mmallow: IsMatchMakingAllowed without the CLobby flag", at + 6, want + 6, nop6, 6)) {
-        log_begin();
-        log_raw("mmallow: IsMatchMakingAllowed not patched\n");
+    (void)i;
+    if (!code_is("mmallow", "IsMatchMakingAllowed", img, FH2_MM_ALLOWED_JE_RVA - 6, want, sizeof want)) {
         return 0;
     }
-    log_begin();
-    log_raw("mmallow: IsMatchMakingAllowed no longer requires the CLobby flag at +0xf0\n");
-    return 1;
+    return plat_patch("mmallow: IsMatchMakingAllowed without the CLobby flag", at + 6, want + 6, nop6, 6);
 }
 
 /*
@@ -1149,19 +1278,10 @@ static int patch_qos_assume_success(void)
     }
     a = img + FH2_QOS_JNE_RVA - 3;
     b = img + FH2_QOS_FLAG_RVA - 6;
-    for (i = 0; i < (int)sizeof want_jne; i++) {
-        if (a[i] != want_jne[i]) {
-            log_begin();
-            log_raw("qosok: unexpected bytes in the match-request QoS lambda, not patched\n");
-            return 0;
-        }
-    }
-    for (i = 0; i < (int)sizeof want_flag; i++) {
-        if (b[i] != want_flag[i]) {
-            log_begin();
-            log_raw("qosok: unexpected flag store in the match-request QoS lambda, not patched\n");
-            return 0;
-        }
+    (void)i;
+    if (!code_is("qosok", "the match-request QoS lambda (test rdi / jne)", img, FH2_QOS_JNE_RVA - 3, want_jne, sizeof want_jne) ||
+        !code_is("qosok", "the match-request QoS lambda (flag store)", img, FH2_QOS_FLAG_RVA - 6, want_flag, sizeof want_flag)) {
+        return 0;
     }
     {
         /* both or neither: half of it would skip the association and still report failure */
@@ -1171,13 +1291,12 @@ static int patch_qos_assume_success(void)
             if (ha) {
                 g_api->disable_hooks(g_mod, ha);
             }
-            log_begin();
-            log_raw("qosok: match-request QoS lambda not patched\n");
+            plat_failed("qosok: match-request QoS lambda", ha ? b + 6 : a + 3,
+                        !ha ? "refused the skip of the secure association" : !hb ? "refused the success flag (the skip is undone)"
+                                                                               : "could not switch both changes on (the skip is undone)");
             return 0;
         }
     }
-    log_begin();
-    log_raw("qosok: match-request QoS step reports success without creating a secure association\n");
     return 1;
 }
 
@@ -1202,11 +1321,14 @@ static void secure_resolve_stub(void *resolver)
     void *mr = *(void **)(g_secure_img + FH2_MATCHREQUESTER_RVA);
     unsigned char *args;
     (void)resolver;
-    if (!mr) {
-        return;
-    }
-    args = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x100); /* hr = 0, endpoints = NULL */
-    if (!args) {
+    if (!mr || !(args = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x100))) { /* hr = 0, endpoints = NULL */
+        /* the resolved-address handler is never called, so this search stays on "Finding session" until the game gives up */
+        static volatile LONG told;
+        if (InterlockedIncrement(&told) <= 5) {
+            log_begin();
+            log_raw(mr ? "secureip: could not allocate the resolver result, the match request gets no server address\n"
+                       : "secureip: the match requester does not exist yet (game+0x36e2960 is null), the match request gets no server address\n");
+        }
         return;
     }
     ((void (*)(void *, void *))(g_secure_img + FH2_RESOLVED_HANDLER_RVA))(mr, args);
@@ -1222,29 +1344,13 @@ static int patch_secure_association(void)
     if (!img) {
         return 0;
     }
-    for (i = 0; i < (int)sizeof want_fn; i++) {
-        if (img[FH2_SECURE_RESOLVE_RVA + i] != want_fn[i]) {
-            log_begin();
-            log_raw("secureip: unexpected bytes in SecureIPResolver, not patched\n");
-            return 0;
-        }
-    }
-    for (i = 0; i < (int)sizeof want_handler; i++) {
-        if (img[FH2_RESOLVED_HANDLER_RVA + i] != want_handler[i]) {
-            log_begin();
-            log_raw("secureip: unexpected bytes in the resolved handler, not patched\n");
-            return 0;
-        }
-    }
-    g_secure_img = img;
-    if (!plat_hook("secureip: SecureIPResolver", img + FH2_SECURE_RESOLVE_RVA, (void *)secure_resolve_stub, NULL)) {
-        log_begin();
-        log_raw("secureip: SecureIPResolver not patched\n");
+    (void)i;
+    if (!code_is("secureip", "SecureIPResolver", img, FH2_SECURE_RESOLVE_RVA, want_fn, sizeof want_fn) ||
+        !code_is("secureip", "the resolved-address handler", img, FH2_RESOLVED_HANDLER_RVA, want_handler, sizeof want_handler)) {
         return 0;
     }
-    log_begin();
-    log_raw("secureip: SecureIPResolver reports success without a secure association (host from the session)\n");
-    return 1;
+    g_secure_img = img;
+    return plat_hook("secureip: SecureIPResolver", img + FH2_SECURE_RESOLVE_RVA, (void *)secure_resolve_stub, NULL);
 }
 
 /*
@@ -1301,22 +1407,12 @@ static int patch_invite_type(void)
     if (!img) {
         return 0;
     }
-    for (i = 0; i < (int)sizeof want; i++) {
-        if (img[FH2_SETSESSION_RVA + i] != want[i]) {
-            log_begin();
-            log_raw("invitetype: unexpected bytes in MatchRequester::SetSession, not patched\n");
-            return 0;
-        }
-    }
-    g_invite_img = img;
-    if (!plat_hook("invitetype: MatchRequester::SetSession", img + FH2_SETSESSION_RVA, (void *)set_session_stub, NULL)) {
-        log_begin();
-        log_raw("invitetype: MatchRequester::SetSession not patched\n");
+    (void)i;
+    if (!code_is("invitetype", "MatchRequester::SetSession", img, FH2_SETSESSION_RVA, want, sizeof want)) {
         return 0;
     }
-    log_begin();
-    log_raw("invitetype: joining an invite session sets the lobby type from the invite\n");
-    return 1;
+    g_invite_img = img;
+    return plat_hook("invitetype: MatchRequester::SetSession", img + FH2_SETSESSION_RVA, (void *)set_session_stub, NULL);
 }
 
 /*
@@ -1334,27 +1430,29 @@ static int patch_server_port(void)
     unsigned char port[4];
     int i;
 
-    if (n != 4 || !img) {
+    if (n == 0 || !img) {
+        return 0;
+    }
+    if (n != 4) {
+        log_begin();
+        log_raw("serverport: FH2MP_SERVER_PORT must be 4 digits, it has ");
+        log_dec(n);
+        log_raw(" characters; the game keeps port 5000\n");
         return 0;
     }
     at = img + FH2_PORT_LITERAL_RVA;
-    if (at[0] != '5' || at[1] != '0' || at[2] != '0' || at[3] != '0' || at[4] != 0) {
+    if (!code_is("serverport", "the \"5000\" service literal", img, FH2_PORT_LITERAL_RVA, "5000", 5)) {
         return 0;
     }
     for (i = 0; i < 4; i++) {
         if (env[i] < L'0' || env[i] > L'9') {
+            log_begin();
+            log_raw("serverport: FH2MP_SERVER_PORT is not 4 digits; the game keeps port 5000\n");
             return 0;
         }
         port[i] = (unsigned char)env[i];
     }
-    if (!plat_patch("serverport: game server port", at, "5000", port, 4)) {
-        log_begin();
-        log_raw("serverport: port literal not patched\n");
-        return 0;
-    }
-    log_begin();
-    log_raw("serverport: the game connects to the port from FH2MP_SERVER_PORT\n");
-    return 1;
+    return plat_patch("serverport: game server port", at, "5000", port, 4);
 }
 
 /*
@@ -1381,14 +1479,8 @@ static int patch_mp_difficulty(void)
     if (memcmp(at, now, sizeof now) == 0) {
         return 1;
     }
-    if (memcmp(at, want, sizeof want) != 0 || !plat_patch("mpdiff: online AI difficulty bonus", at, want, now, sizeof now)) {
-        log_begin();
-        log_raw("mpdiff: unexpected bytes in the assists bonus code, not patched\n");
-        return 0;
-    }
-    log_begin();
-    log_raw("mpdiff: online races use the maximum (Insane, +40%) AI difficulty bonus\n");
-    return 1;
+    return code_is("mpdiff", "the assists bonus code", img, FH2_MPDIFF_INSN_RVA, want, sizeof want) &&
+           plat_patch("mpdiff: online AI difficulty bonus", at, want, now, sizeof now);
 }
 
 /*
@@ -1587,15 +1679,12 @@ static int patch_match_poll(void)
 
         if (memcmp(at, now, sizeof now) == 0) {
             done++;
-        } else if (memcmp(at, want, sizeof want) == 0 &&
+        } else if (code_is("matchpoll", i == 1 ? "the ticket poll timer" : i ? "the ticket retry interval" : "the ticket status handler", img, rvas[i], want,
+                           sizeof want) &&
                    plat_patch(i == 1 ? "matchpoll: ticket poll interval (poll timer)" : i ? "matchpoll: ticket retry interval" : "matchpoll: ticket poll interval (status handler)",
                               at + 1, want + 1, now + 1, 4)) {
             done++;
         }
-    }
-    if (done != 3) {
-        log_begin();
-        log_raw("matchpoll: unexpected bytes at the ticket poll timers, not patched\n");
     }
     return done == 3;
 }
@@ -1623,18 +1712,14 @@ static int patch_mm_timeouts(void)
         return 0;
     }
     if (memcmp(img + FH2_MMTIMEOUT_A_RVA, a_new, sizeof a_new) == 0 ||
-        (memcmp(img + FH2_MMTIMEOUT_A_RVA, a_old, sizeof a_old) == 0 &&
+        (code_is("mmtimeout", "the match request tick (first-state limit)", img, FH2_MMTIMEOUT_A_RVA, a_old, sizeof a_old) &&
          plat_patch("mmtimeout: first-state limit of the match request 10 s -> 3 s", img + FH2_MMTIMEOUT_A_RVA + 1, a_old + 1, a_new + 1, 4))) {
         done++;
     }
     if (memcmp(img + FH2_MMTIMEOUT_B_RVA, b_new, sizeof b_new) == 0 ||
-        (memcmp(img + FH2_MMTIMEOUT_B_RVA, b_old, sizeof b_old) == 0 &&
+        (code_is("mmtimeout", "the match request tick (second-state limit)", img, FH2_MMTIMEOUT_B_RVA, b_old, sizeof b_old) &&
          plat_patch("mmtimeout: second-state limit of the match request 30 s -> 3 s", img + FH2_MMTIMEOUT_B_RVA + 1, b_old + 1, b_new + 1, 4))) {
         done++;
-    }
-    if (done != 2) {
-        log_begin();
-        log_raw("mmtimeout: unexpected bytes in the match request tick, not patched\n");
     }
     return done == 2;
 }
@@ -1661,17 +1746,14 @@ static int patch_mm_failed_toast(void)
         unsigned char *at = img + rvas[i];
         const unsigned char *want = i ? jne_b : jne_a, *now = i ? jmp_b : jmp_a;
 
-        if (memcmp(at, cmp12e, sizeof cmp12e) != 0) {
+        if (!code_is("mmtoast", "the matchmaking failure handler (cmp byte [rax+0x12e],0)", img, rvas[i], cmp12e, sizeof cmp12e)) {
             continue;
         }
         if (memcmp(at + 7, now, 2) == 0 ||
-            (memcmp(at + 7, want, 2) == 0 && plat_patch("mmtoast: no \"lost Xbox Live\" toast on a failed matchmaking", at + 7, want, now, 2))) {
+            (code_is("mmtoast", "the matchmaking failure handler (jne)", img, rvas[i] + 7, want, 2) &&
+             plat_patch("mmtoast: no \"lost Xbox Live\" toast on a failed matchmaking", at + 7, want, now, 2))) {
             done++;
         }
-    }
-    if (done != 2) {
-        log_begin();
-        log_raw("mmtoast: unexpected bytes at the failure handler, not patched\n");
     }
     return done == 2;
 }
@@ -1699,15 +1781,12 @@ static int patch_traffic_request_ownership(void)
     if (at[0] == 0x90 && at[1] == 0x90) {
         return 1;
     }
-    if (memcmp(at - sizeof cmp_ctx, cmp_ctx, sizeof cmp_ctx) != 0 ||
-        !plat_patch("trafficown: RequestOwnership on every collision", at, je, nop2, 2)) {
-        log_begin();
-        log_raw("trafficown: unexpected bytes in the RequestOwnership trigger, not patched\n");
+    if (!code_is("trafficown", "the RequestOwnership trigger (cmp byte [rcx+0xaa],0)", img, FH2_TRAFFIC_REQOWN_RVA - (unsigned)sizeof cmp_ctx, cmp_ctx,
+                 sizeof cmp_ctx) ||
+        !code_is("trafficown", "the RequestOwnership trigger (je)", img, FH2_TRAFFIC_REQOWN_RVA, je, sizeof je)) {
         return 0;
     }
-    log_begin();
-    log_raw("trafficown: a collision with a traffic car always requests its ownership\n");
-    return 1;
+    return plat_patch("trafficown: RequestOwnership on every collision", at, je, nop2, 2);
 }
 
 /*
@@ -1740,12 +1819,12 @@ static int patch_live_gates(void)
             }
         }
         if (j != 7 || jne[0] != 0x0F || jne[1] != 0x85) {
+            static const unsigned char want_gate[9] = {0x80, 0xB8, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x85};
             if (jne[0] == 0xE9) {
                 done++;           /* already patched */
                 continue;
             }
-            log_begin();
-            log_raw("livegate: unexpected bytes at a Live gate, skipped\n");
+            log_code_mismatch("livegate", "a Live-only menu gate (cmp byte [rax+0xf0],0 / jne)", cmp_rva[i], c, want_gate, sizeof want_gate);
             continue;
         }
         mem_copy(&rel, jne + 2, 4);
@@ -1754,15 +1833,9 @@ static int patch_live_gates(void)
         mem_copy(jmp + 1, &rel, 4);
         jmp[5] = 0x90;
         if (!plat_patch("livegate: Live-only menu entry", jne, jne, jmp, 6)) {
-            log_begin();
-            log_raw("livegate: a Live gate was not patched\n");
             continue;
         }
         done++;
-    }
-    if (done) {
-        log_begin();
-        log_raw("livegate: Live-only menu entries no longer check the connected-to-Live byte\n");
     }
     return done;
 }
@@ -1791,21 +1864,11 @@ static int patch_home_tile(void)
     if (p[7] == 0xEB && p[8] == 0x2C) {
         return 1;                 /* already patched */
     }
-    for (i = 0; i < 9; i++) {
-        if (p[i] != want[i]) {
-            log_begin();
-            log_raw("hometile: unexpected bytes at the Home tile test, not patched\n");
-            return 0;
-        }
-    }
-    if (!plat_patch("hometile: Online Road Trip tile", p + 7, want + 7, &jmp, 1)) {
-        log_begin();
-        log_raw("hometile: the Home tile test was not patched\n");
+    (void)i;
+    if (!code_is("hometile", "the Home tile test (cmp [rbx+0x537],r13b / jnz)", img, 0xddb494u, want, sizeof want)) {
         return 0;
     }
-    log_begin();
-    log_raw("hometile: the Home page Online Road Trip tile is no longer forced off without the connected-to-Live byte\n");
-    return 1;
+    return plat_patch("hometile: Online Road Trip tile", p + 7, want + 7, &jmp, 1);
 }
 
 /*
@@ -1836,19 +1899,11 @@ static int patch_same_session(void)
     if (p[2] == 0xEB && p[3] == 0x04) {
         return 1;                 /* already patched */
     }
-    for (i = 0; i < 10; i++) {
-        if (p[i] != want[i]) {
-            log_begin();
-            log_raw("samesession: unexpected bytes in the session validation handler, not patched\n");
-            return 0;
-        }
-    }
-    if (!plat_patch("samesession: join a found session with the remembered name", p + 2, want + 2, &jmp, 1)) {
-        log_begin();
-        log_raw("samesession: the session validation handler was not patched\n");
+    (void)i;
+    if (!code_is("samesession", "the session validation handler", img, 0x17b07beu, want, sizeof want)) {
         return 0;
     }
-    return 1;
+    return plat_patch("samesession: join a found session with the remembered name", p + 2, want + 2, &jmp, 1);
 }
 
 /*
@@ -1883,14 +1938,18 @@ static int patch_speed_pb(void)
     unsigned i;
     if (!img) return 0;
     for (i = 0; i < sizeof signatures / sizeof signatures[0]; ++i) {
-        if (memcmp(img + signatures[i].rva, signatures[i].bytes, 16)) {
-            log_begin();
-            log_raw("speedpb: unexpected completion/comparison code, not patched\n");
+        if (!code_is("speedpb", "the speed trap/zone completion or HUD comparison code", img, signatures[i].rva, signatures[i].bytes, 16)) {
             return 0;
         }
     }
     g_speed_pb_tls = TlsAlloc();
-    if (g_speed_pb_tls == TLS_OUT_OF_INDEXES) return 0;
+    if (g_speed_pb_tls == TLS_OUT_OF_INDEXES) {
+        log_begin();
+        log_raw("speedpb: not patched, no thread-local slot left (TlsAlloc failed, error ");
+        log_dec(GetLastError());
+        log_raw(")\n");
+        return 0;
+    }
     g_speed_pb_resolve = (speed_pb_resolve_fn)(img + 0x3eb620);
     g_speed_pb_property = (speed_pb_property_fn)(img + 0x3d2d70);
     /* Partial installation stays inert until every hook is available. */
@@ -1903,8 +1962,6 @@ static int patch_speed_pb(void)
         !plat_hook("speedpb: saved zone PB before completion", img + 0x6b76b0,
                    (void *)speed_pb_zone, (void **)&g_speed_pb_zone)) return 0;
     InterlockedExchange(&g_speed_pb_active, 1);
-    log_begin();
-    log_raw("speedpb: speed notifications retain the saved PB when the online result is missing or lower\n");
     return 1;
 }
 
@@ -1918,12 +1975,9 @@ static int patch_null_torque_scale(void)
     if (!img) {
         return 0;
     }
-    for (i = 0; i < sizeof want; i++) {
-        if (img[0x105e530u + i] != want[i]) {
-            log_begin();
-            log_raw("nulltorquescale: unexpected code at the upgrade torque reader, not patched\n");
-            return 0;
-        }
+    (void)i;
+    if (!code_is("nulltorquescale", "the upgrade torque reader", img, 0x105e530u, want, sizeof want)) {
+        return 0;
     }
     return plat_hook("nulltorquescale: missing upgrade torque rows", img + 0x105e530u,
                      (void *)torque_scale_guard, (void **)&g_torque_scale_orig);
@@ -1934,8 +1988,11 @@ static int patch_null_torque_scale(void)
 static unsigned char cinematics_exists(void *directory)
 {
     if (!directory) {
-        log_begin();
-        log_raw("cinematics: game media/Cinematics is unavailable; skipping its optional directory registration\n");
+        static volatile LONG told;
+        if (InterlockedIncrement(&told) <= 3) {
+            log_begin();
+            log_raw("cinematics: the game's media/Cinematics directory query returned null (game+0x21f44d); its optional registration is skipped\n");
+        }
         return 0;
     }
     return ((unsigned char (*)(void *))(*(void ***)directory)[0xb0 / 8])(directory);
@@ -1952,12 +2009,21 @@ static int patch_missing_cinematics(void)
         return 0;
     }
     site = img + 0x21f44du;
-    if (memcmp(site, want, sizeof want) != 0 || !(slot = alloc_near(site))) {
+    if (!code_is("cinematics", "the Cinematics directory check", img, 0x21f44du, want, sizeof want)) {
+        return 0;
+    }
+    if (!(slot = alloc_near(site))) {
+        log_begin();
+        log_raw("cinematics: not patched, no free page within 2 GB of game+0x21f44d (VirtualAlloc error ");
+        log_dec(GetLastError());
+        log_raw(")\n");
         return 0;
     }
     delta = (long long)(slot - (site + 6));
     if (delta < -0x80000000ll || delta > 0x7fffffffll) {
         VirtualFree(slot, 0, MEM_RELEASE);
+        log_begin();
+        log_raw("cinematics: not patched, the page found is out of rel32 reach of game+0x21f44d\n");
         return 0;
     }
     *(void **)slot = (void *)cinematics_exists;
@@ -1990,24 +2056,22 @@ static int patch_null_torque_curve(void)
         return 0;
     }
     site = img + 0x10643b0u;
-    for (i = 0; i < 10; i++) {
-        if (site[i] != want[i]) {
-            log_begin();
-            log_raw("nulltorque: unexpected bytes at the torque curve reader, not patched\n");
-            return 0;
-        }
+    (void)i;
+    if (!code_is("nulltorque", "the torque curve reader", img, 0x10643b0u, want, sizeof want)) {
+        return 0;
     }
     stub = VirtualAlloc(NULL, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
     if (!stub) {
         log_begin();
-        log_raw("nulltorque: could not allocate the stub, not patched\n");
+        log_raw("nulltorque: could not allocate the stub, not patched (VirtualAlloc error ");
+        log_dec(GetLastError());
+        log_raw(")\n");
         return 0;
     }
     mem_copy(stub, code, sizeof code);
     h = g_api->hook_function(g_mod, "nulltorque: torque curve reader", site, stub, &original);
     if (!h) {
-        log_begin();
-        log_raw("nulltorque: the torque curve reader was not patched\n");
+        plat_failed("nulltorque: torque curve reader", site, "refused (overlaps another hook, or the code is not hookable)");
         return 0;
     }
     *(void **)(stub + 56) = original;
@@ -2015,12 +2079,9 @@ static int patch_null_torque_curve(void)
     FlushInstructionCache(GetCurrentProcess(), stub, 68);
     g_nulltorque_hits = (volatile unsigned *)(stub + 64);
     if (!g_api->enable_hooks(g_mod, h)) {
-        log_begin();
-        log_raw("nulltorque: the torque curve reader was not patched\n");
+        plat_failed("nulltorque: torque curve reader", site, "created but could not be switched on");
         return 0;
     }
-    log_begin();
-    log_raw("nulltorque: missing-row reads guarded; torqueload separately rejects invalid car physics\n");
     return 1;
 }
 
@@ -2097,43 +2158,34 @@ static int patch_placement_fallback(void)
         return 0;
     }
     site = img + 0x10c8971u;              /* mov rdx,r14 ; call [r10+0x200] ; nop */
-    for (i = 0; i < 11; i++) {
-        if (site[i] != want[i]) {
-            if (site[3] == 0xff && site[4] == 0x15) {
-                return 1;                 /* already patched */
-            }
-            log_begin();
-            log_raw("placement: unexpected bytes at the CreatePlacementTexture2D call, not patched\n");
-            return 0;
+    if (bytes_first_diff(site, want, sizeof want) >= 0) {
+        if (site[3] == 0xff && site[4] == 0x15) {
+            return 1;                 /* already patched */
         }
+        return code_is("placement", "the CreatePlacementTexture2D call", img, 0x10c8971u, want, sizeof want);
     }
+    (void)i;
     g_place_force = GetEnvironmentVariableW(L"FH2MP_PLACEMENT_FORCE", env, 8) != 0;
     slot = alloc_near(site);
     if (!slot) {
         log_begin();
-        log_raw("placement: could not allocate a page near the game image, not patched\n");
+        log_raw("placement: could not allocate a page near the game image, not patched (VirtualAlloc error ");
+        log_dec(GetLastError());
+        log_raw(")\n");
         return 0;
     }
     *(void **)slot = (void *)placement_hook;
     disp = (long long)(slot - (site + 3 + 6));
     if (disp > 0x7fffffffll || disp < -0x80000000ll) {
         log_begin();
-        log_raw("placement: slot out of rel32 range, not patched\n");
+        log_raw("placement: not patched, the call slot is out of rel32 reach of game+0x10c8974\n");
         return 0;
     }
     {
         int d32 = (int)disp;
         mem_copy(call + 2, &d32, 4);
     }
-    if (!plat_patch("placement: CreatePlacementTexture2D fallback", site + 3, want + 3, call, sizeof call)) {
-        log_begin();
-        log_raw("placement: the CreatePlacementTexture2D call was not patched\n");
-        return 0;
-    }
-    log_begin();
-    log_raw(g_place_force ? "placement: textures Azimuth cannot place are created as ordinary textures (FORCED for depth-stencil, test mode)\n"
-                          : "placement: textures Azimuth cannot place are created as ordinary textures instead of ending the game\n");
-    return 1;
+    return plat_patch("placement: CreatePlacementTexture2D fallback", site + 3, want + 3, call, sizeof call);
 }
 
 /*
@@ -2222,18 +2274,18 @@ static int patch_festival_grid(void)
     mem_copy(&d32, site + 1, 4);
     if (site[0] != 0xe8 || site + 5 + d32 != img + 0x627c20u) {
         log_begin();
-        log_raw("festivalgrid: unexpected bytes at the end-event-grid call, not patched\n");
+        log_raw("festivalgrid: unexpected bytes in the end-event-grid call at game+0x8131a0: found ");
+        log_hexbytes(site, 5);
+        log_raw(site[0] == 0xe8 ? " (a call to game+0x" : " (not a call rel32; expected e8 and a target of game+0x627c20)");
+        if (site[0] == 0xe8) {
+            log_hex((unsigned long long)(site + 5 + d32 - img), 8);
+            log_raw(", expected game+0x627c20)");
+        }
+        log_raw("; not patched\n");
         return 0;
     }
     g_fg_img = img;
-    if (!plat_hook_call("festivalgrid: end-event grid placement", site, (void *)festival_grid_hook, (void **)&g_fg_place)) {
-        log_begin();
-        log_raw("festivalgrid: the end-event-grid call was not patched\n");
-        return 0;
-    }
-    log_begin();
-    log_raw("festivalgrid: a fresh Road Trip lobby's first drive starts at the festival\n");
-    return 1;
+    return plat_hook_call("festivalgrid: end-event grid placement", site, (void *)festival_grid_hook, (void **)&g_fg_place);
 }
 
 /*
@@ -2260,21 +2312,11 @@ static int patch_rival_gate(void)
     if (at[7] == 0xEB) {
         return 1;                 /* already patched */
     }
-    for (i = 0; i < 9; i++) {
-        if (at[i] != want[i]) {
-            log_begin();
-            log_raw("rivalgate: unexpected bytes in the Rivals race gate, not patched\n");
-            return 0;
-        }
-    }
-    if (!plat_patch("rivalgate: Rivals race gate", at + 7, want + 7, &jmp, 1)) {
-        log_begin();
-        log_raw("rivalgate: the Rivals race gate was not patched\n");
+    (void)i;
+    if (!code_is("rivalgate", "the Rivals race gate (cmp byte [rax+0xf0],0 / jne)", img, 0x666f4bu, want, sizeof want)) {
         return 0;
     }
-    log_begin();
-    log_raw("rivalgate: Rivals events no longer require the connected-to-Live byte\n");
-    return 1;
+    return plat_patch("rivalgate: Rivals race gate", at + 7, want + 7, &jmp, 1);
 }
 
 /*
@@ -2299,24 +2341,14 @@ static int patch_online_meet(void)
         return 0;
     }
     at = img + FH2_ONLINEMEET_TEST_RVA;
-    for (i = 0; i < (int)sizeof want; i++) {
-        if (at[i] != want[i]) {
-            if (at[2] == 0x90 && at[3] == 0x90) {
-                return 1;       /* already patched */
-            }
-            log_begin();
-            log_raw("onlinemeet: unexpected bytes in the Car Meet view model, not patched\n");
-            return 0;
+    (void)i;
+    if (bytes_first_diff(at, want, sizeof want) >= 0) {
+        if (at[2] == 0x90 && at[3] == 0x90) {
+            return 1;       /* already patched */
         }
+        return code_is("onlinemeet", "the Car Meet view model tick", img, FH2_ONLINEMEET_TEST_RVA, want, sizeof want);
     }
-    if (!plat_patch("onlinemeet: Car Meet counts as online", at + 2, want + 2, nop2, 2)) {
-        log_begin();
-        log_raw("onlinemeet: the Car Meet view model was not patched\n");
-        return 0;
-    }
-    log_begin();
-    log_raw("onlinemeet: the Car Meet counts as online once connected (online entries available)\n");
-    return 1;
+    return plat_patch("onlinemeet: Car Meet counts as online", at + 2, want + 2, nop2, 2);
 }
 
 /*
@@ -2358,9 +2390,7 @@ static int patch_torque_load(void)
     unsigned i;
     if (!img) return 0;
     for (i = 0; i < sizeof signatures / sizeof signatures[0]; ++i) {
-        if (memcmp(img + signatures[i].rva, signatures[i].bytes, 16)) {
-            log_begin();
-            log_raw("torqueload: unexpected native preloader/resolver code, not patched\n");
+        if (!code_is("torqueload", "the native car preloader/part resolver", img, signatures[i].rva, signatures[i].bytes, 16)) {
             return 0;
         }
     }
@@ -2394,20 +2424,14 @@ static int patch_net_string_receivers(void)
     int ok = 1;
     if (!img) return 0;
     for (i = 0; i < sizeof hooks / sizeof hooks[0]; ++i) {
-        if (memcmp(img + hooks[i].rva, hooks[i].bytes, sizeof hooks[i].bytes)) {
-            log_begin();
-            log_raw("netstrings: unexpected receive-handler code, not patched\n");
+        if (!code_is("netstrings", hooks[i].name + 12, img, hooks[i].rva, hooks[i].bytes, sizeof hooks[i].bytes)) {
             return 0;
         }
     }
-    /* Each independent handler is safe as soon as its own hook is enabled. */
+    /* Each independent handler is safe as soon as its own hook is enabled; plat_hook names the ones it could not hook. */
     for (i = 0; i < sizeof hooks / sizeof hooks[0]; ++i)
         if (!plat_hook(hooks[i].name, img + hooks[i].rva, hooks[i].detour,
                        (void **)hooks[i].original)) ok = 0;
-    if (!ok) {
-        log_begin();
-        log_raw("netstrings: some receive handlers could not be guarded; check platform.log\n");
-    }
     return ok;
 }
 
@@ -2503,6 +2527,8 @@ static void *xs_token_stub(void *a, void *b, void *c, void *d)
  * log (override with env FH2MP_XUID=<hex>), patches the immediate, and carries the id in the XSAPI token ("XBL3.0
  * x=fh2mp;<decimal xuid>") so the stand-in services can tell the callers apart. Disable with env FH2MP_NO_IDENTITY. */
 static unsigned long long g_xuid = 0x0009000000000000ULL;
+/* where the xuid in use came from (for the "identity:" line) */
+static const char *g_xuid_source = "Azimuth's fixed id (no identity was loaded)";
 
 static void xuid_decimal(WCHAR *out)
 {
@@ -2542,20 +2568,19 @@ static int patch_xsapi_token(void)
     }
     f1 = img + XS_GETTOKEN_RVA;
     f2 = img + XS_GETTOKEN_ALL_RVA;
-    for (i = 0; i < 12; i++) {
-        if (f1[i] != sig_get[i] || f2[i] != sig_all[i]) {
-            log_begin();
-            log_raw("xstoken: unexpected bytes in the XSAPI token functions, not patched\n");
-            return 2;
-        }
+    (void)i;
+    if (bytes_first_diff(f1, sig_get, sizeof sig_get) >= 0) {
+        log_code_mismatch("xstoken", "Microsoft.Xbox.Services.dll GetTokenAndSignature", XS_GETTOKEN_RVA, f1, sig_get, sizeof sig_get);
+        return 2;
+    }
+    if (bytes_first_diff(f2, sig_all, sizeof sig_all) >= 0) {
+        log_code_mismatch("xstoken", "Microsoft.Xbox.Services.dll GetTokenAndSignatureForAllUsers", XS_GETTOKEN_ALL_RVA, f2, sig_all, sizeof sig_all);
+        return 2;
     }
     call = f1 + XS_ALLOC_CALL_OFF;
-    for (i = 0; i < 7; i++) {
-        if (call[i] != alloc_sig[i]) {
-            log_begin();
-            log_raw("xstoken: allocator call not where expected, not patched\n");
-            return 2;
-        }
+    if (bytes_first_diff(call, alloc_sig, sizeof alloc_sig) >= 0) {
+        log_code_mismatch("xstoken", "the allocator call in GetTokenAndSignature", XS_GETTOKEN_RVA + XS_ALLOC_CALL_OFF, call, alloc_sig, sizeof alloc_sig);
+        return 2;
     }
     mem_copy(&rel, call + 7, 4);
     alloc = *(void *(**)(ULONGLONG))(call + 11 + rel);
@@ -2563,11 +2588,17 @@ static int patch_xsapi_token(void)
     ctor = (void *(*)(void *))(img + XS_AUTH_CTOR_RVA);
     if (!alloc || !mkstr) {
         log_begin();
-        log_raw("xstoken: could not resolve the allocator or WindowsCreateString, not patched\n");
+        log_raw("xstoken: could not resolve the allocator (");
+        log_raw(alloc ? "found" : "null");
+        log_raw(") or WindowsCreateString in the XSAPI import table (");
+        log_raw(mkstr ? "found" : "missing");
+        log_raw("); not patched\n");
         return 2;
     }
     mem = alloc(0x48);
     if (!mem) {
+        log_begin();
+        log_raw("xstoken: not patched, the XSAPI allocator returned null for the 0x48-byte Authentication object\n");
         return 2;
     }
     obj = ctor(mem);
@@ -2577,7 +2608,8 @@ static int patch_xsapi_token(void)
     if (!obj || mkstr(tok, tok_len, &h_tok) < 0 ||
         mkstr(sgn, (unsigned)(sizeof sgn / sizeof sgn[0] - 1), &h_sig) < 0) {
         log_begin();
-        log_raw("xstoken: could not build the Authentication object, not patched\n");
+        log_raw(obj ? "xstoken: not patched, WindowsCreateString failed for the token or signature\n"
+                    : "xstoken: not patched, the Authentication constructor returned null\n");
         return 2;
     }
     *(void **)((unsigned char *)obj + 0x20) = h_tok;
@@ -2591,8 +2623,6 @@ static int patch_xsapi_token(void)
     g_xs_auth = obj;
     if (!plat_hook("xstoken: XSAPI GetTokenAndSignature", f1, (void *)xs_token_stub, NULL) ||
         !plat_hook("xstoken: XSAPI GetTokenAndSignatureForAllUsers", f2, (void *)xs_token_stub, NULL)) {
-        log_begin();
-        log_raw("xstoken: the XSAPI token functions were not patched\n");
         return 2;
     }
     g_xs_hooked_at = GetTickCount();
@@ -2616,8 +2646,19 @@ static void *sda_string_stub(void *self)
     static const WCHAR s[] = L"RkgyTVAtU0RBLTAwMDAwMDA=";
     void *h = NULL;
     (void)self;
-    if (g_sda_mkstr && g_sda_mkstr(s, (unsigned)(sizeof s / sizeof s[0] - 1), &h) >= 0) {
+    LONG hr = g_sda_mkstr ? g_sda_mkstr(s, (unsigned)(sizeof s / sizeof s[0] - 1), &h) : (LONG)0x80004005;
+    if (hr >= 0) {
         return h; /* the caller owns it and releases it with WindowsDeleteString */
+    }
+    {
+        /* the session member then has an empty secureDeviceAddress and XSAPI refuses to serialize it ("Unable to join session") */
+        static volatile LONG told;
+        if (InterlockedIncrement(&told) <= 3) {
+            log_begin();
+            log_raw("sdastr: WindowsCreateString failed, hr=0x");
+            log_hex((unsigned long long)(unsigned)hr, 8);
+            log_raw("; the game gets a null secure device address string\n");
+        }
     }
     return NULL;
 }
@@ -2636,12 +2677,10 @@ static int patch_sda_string(void)
         return 0; /* both must be mapped (XSAPI supplies WindowsCreateString) */
     }
     fn = img + FH2_SDA_STR_RVA;
-    for (i = 0; i < sizeof sig; i++) {
-        if (fn[i] != sig[i]) {
-            log_begin();
-            log_raw("sdastr: unexpected bytes at the secure device address string getter, not patched\n");
-            return 2;
-        }
+    (void)i;
+    if (bytes_first_diff(fn, sig, sizeof sig) >= 0) {
+        log_code_mismatch("sdastr", "the secure device address string getter", FH2_SDA_STR_RVA, fn, sig, sizeof sig);
+        return 2;
     }
     mk = xs_find_import(img, "WindowsCreateString");
     if (!mk) {
@@ -2649,18 +2688,11 @@ static int patch_sda_string(void)
     }
     if (!mk) {
         log_begin();
-        log_raw("sdastr: WindowsCreateString not found, not patched\n");
+        log_raw("sdastr: WindowsCreateString is in neither the game's nor XSAPI's import table; not patched\n");
         return 2;
     }
     g_sda_mkstr = (LONG(*)(const WCHAR *, unsigned, void **))mk;
-    if (!plat_hook("sdastr: SecureDeviceAddress string", fn, (void *)sda_string_stub, NULL)) {
-        log_begin();
-        log_raw("sdastr: the secure device address string getter was not patched\n");
-        return 2;
-    }
-    log_begin();
-    log_raw("sdastr: local secure device address string now returns a placeholder\n");
-    return 1;
+    return plat_hook("sdastr: SecureDeviceAddress string", fn, (void *)sda_string_stub, NULL) ? 1 : 2;
 }
 
 /*
@@ -2691,8 +2723,6 @@ static void msvc_wstr_set(msvc_wstr *w, const wchar_t *src)
     w->cap = 7;
 }
 
-static int g_sts_stub_calls;
-
 static void sts_auth_stub(void *a, void *b, void *c, void *d, void **ref)
 {
     void **cb = (void **)ref[1];
@@ -2702,10 +2732,6 @@ static void sts_auth_stub(void *a, void *b, void *c, void *d, void **ref)
     (void)a; (void)b; (void)c; (void)d;
     msvc_wstr_set(&tok, L"fh2mp");
     msvc_wstr_set(&sig, L"fh2mp");
-    if (g_sts_stub_calls++ < 8) {
-        log_begin();
-        log_raw("sts: GetAuthToken completed in-process\n");
-    }
     ((void (*)(void *, long, msvc_wstr *, msvc_wstr *))(((void **)*cb)[2]))(cb, 0, &tok, &sig);
 }
 
@@ -2721,35 +2747,25 @@ static int patch_sts_auth(void)
         return 0;
     }
     fn = img + FH2_STS_GETAUTH_RVA;
-    for (i = 0; i < (int)sizeof sig; i++) {
-        if (fn[i] != sig[i]) {
-            log_begin();
-            log_raw("sts: unexpected bytes at GetAuthToken, not patched\n");
-            return 0;
-        }
-    }
-    if (!plat_hook("sts: StsAuthTokenManager::GetAuthToken", fn, (void *)sts_auth_stub, NULL)) {
-        log_begin();
-        log_raw("sts: GetAuthToken was not patched\n");
+    (void)i;
+    if (!code_is("sts", "StsAuthTokenManager::GetAuthToken", img, FH2_STS_GETAUTH_RVA, sig, sizeof sig)) {
         return 0;
     }
-    log_begin();
-    log_raw("sts: GetAuthToken replaced; LSP requests no longer wait for an Xbox token\n");
-    return 1;
+    return plat_hook("sts: StsAuthTokenManager::GetAuthToken", fn, (void *)sts_auth_stub, NULL);
 }
 
 static int install_cmdline_hook(void)
 {
     unsigned char *exe = (unsigned char *)GetModuleHandleW(NULL);
     unsigned char *target = NULL;
-    unsigned long long h = 0;
+    unsigned long long h[sizeof g_hook_builds / sizeof g_hook_builds[0]] = {0};
     size_t i;
 
     for (i = 0; i < sizeof g_hook_builds / sizeof g_hook_builds[0]; i++) {
         unsigned char *cand = exe + g_hook_builds[i].rva;
         if (!IsBadReadPtr(cand, g_hook_builds[i].size)) {
-            h = fnv1a64(cand, g_hook_builds[i].size);
-            if (h == g_hook_builds[i].fnv1a64) {
+            h[i] = fnv1a64(cand, g_hook_builds[i].size);
+            if (h[i] == g_hook_builds[i].fnv1a64) {
                 target = cand;
                 break;
             }
@@ -2757,21 +2773,24 @@ static int install_cmdline_hook(void)
     }
     if (!target) {
         log_begin();
-        log_raw("hook: GetCmdArguments not found in this azimuth.exe (last fnv1a64=");
-        log_hex(h, 16);
-        log_raw("), skipping; launch arguments will not be injected\n");
+        log_raw("hook: GetCmdArguments not found in this azimuth.exe, not patched (an Azimuth version this shim does not know); fnv1a64 of the");
+        for (i = 0; i < sizeof g_hook_builds / sizeof g_hook_builds[0]; i++) {
+            log_raw(i ? ", " : " ");
+            log_dec(g_hook_builds[i].size);
+            log_raw(" bytes at azimuth.exe+0x");
+            log_hex(g_hook_builds[i].rva, 6);
+            log_raw(h[i] ? " is " : " (unreadable) ");
+            if (h[i]) {
+                log_hex(h[i], 16);
+            }
+            log_raw(" (expected ");
+            log_hex(g_hook_builds[i].fnv1a64, 16);
+            log_raw(")");
+        }
+        log_raw("; launch arguments will not be injected\n");
         return 0;
     }
-    if (!plat_hook("hook: Azimuth Platform::Details::GetCmdArguments", target, (void *)hooked_get_cmd_arguments, NULL)) {
-        log_begin();
-        log_raw("hook: GetCmdArguments was not patched; launch arguments will not be injected\n");
-        return 0;
-    }
-    log_begin();
-    log_raw("hook: GetCmdArguments patched, argc=");
-    log_dec((unsigned long)g_argc);
-    log_raw("\n");
-    return 1;
+    return plat_hook("hook: Azimuth Platform::Details::GetCmdArguments", target, (void *)hooked_get_cmd_arguments, NULL);
 }
 
 static int has_arg_prefix(const wchar_t *prefix)
@@ -2797,7 +2816,31 @@ static unsigned char *find_fh2_image(void)
 {
     unsigned char *img = g_api ? (unsigned char *)g_api->game_base() : NULL;
     IMAGE_NT_HEADERS64 nt;
-    return read_game_headers(img, &nt, NULL) ? img : NULL;
+    if (read_game_headers(img, &nt, NULL)) {
+        return img;
+    }
+    if (img) {
+        /* a readable image that is not FH2 1.0.0.64 (another build, or another title): every game patch is then skipped; said once per image */
+        static void *volatile told;
+        IMAGE_DOS_HEADER dos;
+        if (told != img && read_game_memory(img, &dos, sizeof dos) && dos.e_magic == IMAGE_DOS_SIGNATURE && dos.e_lfanew > 0 &&
+            dos.e_lfanew < 0x100000 && read_game_memory(img + dos.e_lfanew, &nt, sizeof nt) && nt.Signature == IMAGE_NT_SIGNATURE) {
+            told = img;
+            log_begin();
+            log_raw("late: the game image at 0x");
+            log_hex((unsigned long long)(ULONG_PTR)img, 12);
+            log_raw(" is not FH2 1.0.0.64, unexpected TimeDateStamp 0x");
+            log_hex(nt.FileHeader.TimeDateStamp, 8);
+            log_raw(" (expected 0x");
+            log_hex(FH2_TIMESTAMP, 8);
+            log_raw(") SizeOfImage 0x");
+            log_hex(nt.OptionalHeader.SizeOfImage, 8);
+            log_raw(" (expected 0x");
+            log_hex(FH2_SIZE_OF_IMAGE, 8);
+            log_raw("); no game patch is applied\n");
+        }
+    }
+    return NULL;
 }
 
 static int str_equal(const char *a, const char *b)
@@ -2827,30 +2870,42 @@ static int redirect_group(const char *name, unsigned lea_rva, unsigned str_rva, 
 
     if (!img) {
         log_begin();
-        log_raw("redirect: FH2 1.0.0.64 image not found in this process\n");
+        log_raw("redirect: ");
+        log_raw(name);
+        log_raw(" group not redirected, FH2 1.0.0.64 image not found in this process\n");
         return 0;
     }
     lea = img + lea_rva;
-    log_begin();
-    log_raw("redirect: FH2 image found, patching the ");
-    log_raw(name);
-    log_raw(" entry\n");
     if (lea[0] != 0x4c || lea[1] != 0x8d || lea[2] != 0x05) {
-        log_begin();
-        log_raw("redirect: unexpected instruction bytes, skipping\n");
+        static const unsigned char want_lea[3] = {0x4c, 0x8d, 0x05};
+        log_code_mismatch("redirect", name, lea_rva, lea, want_lea, sizeof want_lea);
         return 0;
     }
     mem_copy(&oldDisp, lea + 3, 4);
     if ((lea + 7 + oldDisp) != (img + str_rva) || !str_equal((const char *)(img + str_rva), oldstr)) {
         log_begin();
-        log_raw("redirect: call site does not reference the expected path string, skipping\n");
+        log_raw("redirect: unexpected target, ");
+        log_raw(name);
+        log_raw(" group not redirected: the lea at game+0x");
+        log_hex(lea_rva, 8);
+        log_raw(" points to game+0x");
+        log_hex((unsigned long long)(lea + 7 + oldDisp - img), 8);
+        log_raw(", expected game+0x");
+        log_hex(str_rva, 8);
+        log_raw(" holding \"");
+        log_raw(oldstr);
+        log_raw("\"\n");
         return 0;
     }
 
     newstr = alloc_near(lea);
     if (!newstr) {
         log_begin();
-        log_raw("redirect: could not allocate a page near the game image\n");
+        log_raw("redirect: could not allocate a page near the game image, ");
+        log_raw(name);
+        log_raw(" group not redirected (VirtualAlloc error ");
+        log_dec(GetLastError());
+        log_raw(")\n");
         return 0;
     }
     for (i = 0; i < newstr_len; i++) {
@@ -2859,24 +2914,17 @@ static int redirect_group(const char *name, unsigned lea_rva, unsigned str_rva, 
     newDisp = (long long)(newstr - (lea + 7));
     if (newDisp > 0x7fffffffll || newDisp < -0x80000000ll) {
         log_begin();
-        log_raw("redirect: allocated page out of rel32 range\n");
+        log_raw("redirect: ");
+        log_raw(name);
+        log_raw(" group not redirected, the allocated page is out of rel32 reach of game+0x");
+        log_hex(lea_rva, 8);
+        log_raw("\n");
         return 0;
     }
     {
         int d32 = (int)newDisp;
-        if (!plat_patch("redirect: matchmaking group path", lea + 3, &oldDisp, &d32, 4)) {
-            log_begin();
-            log_raw("redirect: the matchmaking group entry was not patched\n");
-            return 0;
-        }
+        return plat_patch("redirect: matchmaking group path", lea + 3, &oldDisp, &d32, 4);
     }
-    log_begin();
-    log_raw("redirect: ");
-    log_raw(name);
-    log_raw(" matchmaking group -> ");
-    log_raw(newstr_src);
-    log_raw("\n");
-    return 1;
 }
 
 static int redirect_freeroam_group(void)
@@ -3147,12 +3195,25 @@ static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *
     hmac_sha256(g_ticket_key, 32, t, 52, t + 52);
     wb.len = sizeof t;
     wb.buf = t;
-    g_r_wsasendto(s, &wb, 1, &sent, 0, to, tolen, NULL, NULL);
-    lighting_note_ticket(to, tolen, t + 36);
-    if (n <= 3) {
+    if (g_r_wsasendto(s, &wb, 1, &sent, 0, to, tolen, NULL, NULL) != 0) {
+        /* without the ticket the server cannot bind this address to the account and refuses the OpenConnection that follows */
+        DWORD err = GetLastError();
+        if (n <= 10 || n % 50 == 0) {
+            log_begin();
+            log_raw("ticket: could not send the connection ticket (#");
+            log_dec((unsigned long)n);
+            log_raw("), WSA error ");
+            log_dec(err);
+            log_raw("; the server will probably refuse the OpenConnection\n");
+        }
+        SetLastError(err);
+    } else if (n <= 3) {
         log_begin();
-        log_raw("ticket: sent before OpenConnection\n");
+        log_raw("ticket: sent before OpenConnection #");
+        log_dec((unsigned long)n);
+        log_raw("\n");
     }
+    lighting_note_ticket(to, tolen, t + 36);
 }
 
 #include "lighting_sync.inc"
@@ -3196,6 +3257,11 @@ static int stateflow_replace(const WCHAR *zip_name, const char *file, const char
     int ok;
 
     if (!g_api->game_dir[0] || lstrlenW(g_api->game_dir) + lstrlenW(zip_name) + 8 >= MAX_PATH) {
+        log_begin();
+        log_raw(tag);
+        log_raw(g_api->game_dir[0] ? ": the game folder path is too long to open the zip, " : ": the platform found no game folder (Azimuth's game folder setting), ");
+        log_raw(file);
+        log_raw(" not changed\n");
         return 0;
     }
     lstrcpyW(zip, g_api->game_dir);
@@ -3206,7 +3272,9 @@ static int stateflow_replace(const WCHAR *zip_name, const char *file, const char
         log_raw(tag);
         log_raw(": could not read ");
         log_raw(file);
-        log_raw(" from the game's stateflow.zip, not changed\n");
+        log_raw(" from ");
+        log_wide(zip_name + 1);
+        log_raw(" (missing, unreadable or not a zip the reader handles), not changed\n");
         return 0;
     }
     for (i = 0; i + olen <= size; i++) {
@@ -3221,7 +3289,15 @@ static int stateflow_replace(const WCHAR *zip_name, const char *file, const char
         log_raw(tag);
         log_raw(": the state in ");
         log_raw(file);
-        log_raw(" is not as expected, not changed\n");
+        if (hits != 1) {
+            log_raw(" is not as expected (the text to replace occurs ");
+            log_dec((unsigned long)hits);
+            log_raw(" times in ");
+            log_dec((unsigned long)size);
+            log_raw(" bytes, it must occur once: another mod or a game update changed it), not changed\n");
+        } else {
+            log_raw(" could not be rewritten (out of memory), not changed\n");
+        }
         return 0;
     }
     mem_copy(out, orig, at);
@@ -3294,8 +3370,18 @@ static void gamedb_hash(char out[65])
 
     AcquireSRWLockExclusive(&g_gamedb_lock);
     if (!GetFileAttributesExW(g_gamedb_path, GetFileExInfoStandard, &fa)) {
+        static DWORD told_err;
+        DWORD err = GetLastError();
+
         lstrcpyA(g_gamedb_hex, "missing");
         g_gamedb_size = g_gamedb_time = 0;
+        if (err != told_err) {
+            told_err = err;
+            log_begin();
+            log_raw("gamedb: the game's car database (mediaoverride\\Stripped\\gamedbRC.slt) cannot be found, error ");
+            log_dec(err);
+            log_raw(": requests say \"missing\" and the server refuses online play\n");
+        }
     } else {
         size = (ULONGLONG)fa.nFileSizeHigh << 32 | fa.nFileSizeLow;
         wtime = (ULONGLONG)fa.ftLastWriteTime.dwHighDateTime << 32 | fa.ftLastWriteTime.dwLowDateTime;
@@ -3304,16 +3390,18 @@ static void gamedb_hash(char out[65])
                                    FILE_FLAG_SEQUENTIAL_SCAN, NULL);
             static unsigned char buf[1 << 16];
             sha256_ctx c;
-            DWORD got;
+            DWORD got, err;
             int ok = f != INVALID_HANDLE_VALUE;
 
             sha256_init(&c);
             while (ok && (ok = ReadFile(f, buf, sizeof buf, &got, NULL)) && got) {
                 sha256_update(&c, buf, got);
             }
+            err = ok ? 0 : GetLastError();
             if (f != INVALID_HANDLE_VALUE) {
                 CloseHandle(f);
             }
+
             if (ok) {
                 sha256_final_hex(&c, g_gamedb_hex);
                 g_gamedb_size = size, g_gamedb_time = wtime;
@@ -3323,6 +3411,11 @@ static void gamedb_hash(char out[65])
             log_begin();
             log_raw("gamedb: ");
             log_raw(g_gamedb_hex);
+            if (!ok) {
+                log_raw(" (the file exists but could not be read, error ");
+                log_dec(err);
+                log_raw(")");
+            }
             log_raw("\n");
         }
     }
@@ -3443,10 +3536,21 @@ static unsigned char *eo_timelock_plugin(void)
         return NULL;
     }
     for (i = 0; i < sizeof known / sizeof known[0]; i++) {
-        if (!read_game_memory(wc + known[i].rva, code, known[i].n) || memcmp(code, known[i].code, known[i].n)) {
+        int readable = read_game_memory(wc + known[i].rva, code, known[i].n);
+        if (!readable || memcmp(code, known[i].code, known[i].n)) {
             refused = 1;
             log_begin();
-            log_raw("timelock: unknown EO_WeatherControl.dll, its time lock is not parked online\n");
+            log_raw("timelock: unexpected EO_WeatherControl.dll (only the one in Extra Options 0.4.4 is known), its time lock is not parked online: at plugin+0x");
+            log_hex(known[i].rva, 4);
+            if (readable) {
+                log_raw(" expected ");
+                log_hexbytes(known[i].code, known[i].n);
+                log_raw(", found ");
+                log_hexbytes(code, known[i].n);
+            } else {
+                log_raw(" the code cannot be read");
+            }
+            log_raw("\n");
             return NULL;
         }
     }
@@ -3456,6 +3560,7 @@ static unsigned char *eo_timelock_plugin(void)
 static void eo_timelock_tick(unsigned char *img)
 {
     static struct eo_lock state;
+    struct eo_lock before;
     unsigned char *wc = eo_timelock_plugin();
     unsigned char *manager = NULL, *session = NULL, *root = NULL, *players = NULL, *world = NULL, *clock = NULL;
     int did;
@@ -3470,18 +3575,29 @@ static void eo_timelock_tick(unsigned char *img)
         read_game_memory(players + 0x98, &world, 8) && world) {
         read_game_memory(world + 0x480, &clock, 8);
     }
+    before = state;
     did = eo_lock_step(&state, wc, session != NULL, clock);
     if (did & EO_LOCK_RESTORED) {
         log_begin();
-        log_raw("timelock: session over, EO's time and weather settings are back\n");
+        log_raw("timelock: session over, EO's settings are back (time lock ");
+        log_raw(before.enabled ? "on" : "off");
+        log_raw(", weather ");
+        log_dec((unsigned long)before.weather);
+        log_raw(")\n");
     }
     if (did & EO_LOCK_PARKED) {
         log_begin();
-        log_raw("timelock: EO's time and weather settings are parked for this session\n");
+        log_raw("timelock: a session exists, EO's time lock (");
+        log_raw(state.enabled ? "on" : "off");
+        log_raw(") and weather (");
+        log_dec((unsigned long)state.weather);
+        log_raw(") are parked in the plugin until it ends\n");
     }
     if (did & EO_LOCK_CLOCK_RELEASED) {
         log_begin();
-        log_raw("timelock: the clock EO held follows the network clock again\n");
+        log_raw("timelock: the clock EO held at 0x");
+        log_hex((unsigned long long)(ULONG_PTR)clock, 12);
+        log_raw(" is released, it follows the network clock again\n");
     }
 }
 
@@ -3501,6 +3617,8 @@ static DWORD WINAPI option_monitor(LPVOID unused)
     int first = 1;
     int weather_dump;
     WCHAR wd_env[4];
+    DWORD monitor_start = 0;
+    int waited_told = 0;
 
     (void)unused;
 #ifdef FH2MP_DEBUG_BUILD
@@ -3527,10 +3645,13 @@ static DWORD WINAPI option_monitor(LPVOID unused)
     }
     if (!img) {
         log_begin();
-        log_raw("monitor: FH2 image not found\n");
+        log_raw("monitor: FH2 image not found after 30 s (the platform reports the game at 0x");
+        log_hex((unsigned long long)(ULONG_PTR)(g_api ? g_api->game_base() : NULL), 12);
+        log_raw("); the Winsock and request hooks are not kept in place\n");
         return 0;
     }
     opts = img + FH2_OPTIONS_RVA;
+    monitor_start = GetTickCount();
     for (tick = 0; tick < 24000; tick++) { /* ~3.3 h of 0.5 s ticks */
         /* Azimuth binds the game's imports after the helper loads; keep our pointers on top */
         patch_game_winsock(img);
@@ -3565,19 +3686,34 @@ static DWORD WINAPI option_monitor(LPVOID unused)
             if (!restart_written && first && !g_gsds_seen && GetTickCount() - first > 20000 && !GetEnvironmentVariableW(L"FH2MP_OFFLINE", NULL, 0)) {
                 wchar_t rp[MAX_PATH];
                 HANDLE rf;
-                DWORD got;
+                DWORD got, werr;
                 static const char why[] = "online setup skipped: no game-server directory request 20 s after the first server request\r\n";
 
                 restart_written = 1;
                 lstrcpyW(rp, g_dir);
                 lstrcatW(rp, L"\\fh2mp-restart.txt");
                 rf = CreateFileW(rp, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                werr = rf == INVALID_HANDLE_VALUE ? GetLastError() : 0;
                 if (rf != INVALID_HANDLE_VALUE) {
                     WriteFile(rf, why, (DWORD)sizeof why - 1, &got, NULL);
                     CloseHandle(rf);
                 }
                 log_begin();
-                log_raw("online-setup: the game never started its online setup (the cloud configuration failed before any request); restart requested\n");
+                log_raw("online-setup: the game never started its online setup (the cloud configuration failed before any request): the first request to the server was ");
+                log_dec(GetTickCount() - first);
+                log_raw(" ms ago (at tick ");
+                log_dec(first);
+                log_raw(") and no game-server directory request (gameserverds.xboxlive.com) has been made since; XSAPI token requests ");
+                log_dec((unsigned long)g_xs_calls);
+                log_raw(", LSP requests ");
+                log_dec((unsigned long)g_xhr_seq);
+                log_raw("; the launcher is asked to restart the game");
+                if (werr) {
+                    log_raw(", but fh2mp-restart.txt could not be written (error ");
+                    log_dec(werr);
+                    log_raw("), so it will not");
+                }
+                log_raw("\n");
             }
         }
         {
@@ -3585,6 +3721,14 @@ static DWORD WINAPI option_monitor(LPVOID unused)
             wchar_t sda_env[8];
             if (sda_state == 0 && GetEnvironmentVariableW(L"FH2MP_NO_SDASTR", sda_env, 8) == 0) {
                 sda_state = patch_sda_string();
+            }
+            if (!waited_told && GetTickCount() - monitor_start > 90000) {
+                /* the token, body and secure-address patches all wait for Microsoft.Xbox.Services.dll; none of them says so by itself */
+                waited_told = 1;
+                if (!find_xsapi_image()) {
+                    log_begin();
+                    log_raw("xstoken: Microsoft.Xbox.Services.dll is still not in the process 90 s after the monitor started, so the XSAPI token, response body and secure-address patches are not made\n");
+                }
             }
         }
         unsigned char cur[FH2_OPT_IP_SLOT_SIZE + 4];
@@ -3700,8 +3844,54 @@ static DWORD WINAPI option_monitor(LPVOID unused)
                 nt_seen = nt_now;
             }
         }
+        {
+            static unsigned ts_seen_calls, ts_seen_rows;
+            unsigned calls = g_torque_scale_calls, rows = g_torque_scale_missing;
+            if (calls != ts_seen_calls) {
+                log_begin();
+                log_raw("nulltorquescale: ");
+                log_dec(calls - ts_seen_calls);
+                log_raw(" upgrade torque read(s) lacked a rowset, an empty one stood in for ");
+                log_dec(rows - ts_seen_rows);
+                log_raw(" (");
+                log_dec(calls);
+                log_raw(" reads in all)\n");
+                ts_seen_calls = calls;
+                ts_seen_rows = rows;
+            }
+        }
+        {
+            static LONG pb_seen;
+            LONG pb = g_speed_pb_fault;
+            if (pb && pb != pb_seen) {
+                pb_seen = pb;
+                log_begin();
+                log_raw("speedpb: switched itself off, the thread-local slot could not be written (error ");
+                log_dec((unsigned long)(pb - 1));
+                log_raw("); speed notifications use the online result only\n");
+            }
+        }
+        {
+            static LONG tools_seen;
+            LONG fault = g_tools_scan_fault;
+            if (fault != tools_seen) {
+                tools_seen = fault;
+                log_begin();
+                if (fault) {
+                    log_raw("tools: the process scan failed (");
+                    log_raw(fault == 1 ? "ProcessIdToSessionId" : "CreateToolhelp32Snapshot");
+                    log_raw(" error ");
+                    log_dec((unsigned long)g_tools_scan_error);
+                    log_raw("), requests report no restricted tools until it works again\n");
+                } else {
+                    log_raw("tools: the process scan works again\n");
+                }
+            }
+        }
         Sleep(1000);
     }
+    log_begin();
+    log_raw("monitor: stopped after 24000 ticks (about 3 h); the Winsock and request hooks are not re-applied from here on\n");
     return 0;
 }
 
@@ -5050,18 +5240,34 @@ static int install_create_probe(void)
     MoveFileExW(path, prev, MOVEFILE_REPLACE_EXISTING);        /* the last session's ring, for a crash report */
     f = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (f == INVALID_HANDLE_VALUE) {
+        log_begin();
+        log_raw("probe: could not create fh2mp-creates.ring (error ");
+        log_dec(GetLastError());
+        log_raw("), so a crash report will not show the last ObjectCreate messages\n");
         return 0;
     }
     m = CreateFileMappingW(f, NULL, PAGE_READWRITE, 0, sizeof(probe_ring), NULL);
-    CloseHandle(f);
     if (!m) {
+        DWORD err = GetLastError();
+        CloseHandle(f);
+        log_begin();
+        log_raw("probe: could not map fh2mp-creates.ring (error ");
+        log_dec(err);
+        log_raw(")\n");
         return 0;
     }
+    CloseHandle(f);
     g_probe = (probe_ring *)MapViewOfFile(m, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(probe_ring));
-    CloseHandle(m);
     if (!g_probe) {
+        DWORD err = GetLastError();
+        CloseHandle(m);
+        log_begin();
+        log_raw("probe: could not map a view of fh2mp-creates.ring (error ");
+        log_dec(err);
+        log_raw(")\n");
         return 0;
     }
+    CloseHandle(m);
     GetSystemTimeAsFileTime(&ft);
     g_probe->magic = PROBE_MAGIC;
     g_probe->version = 1;
@@ -5071,13 +5277,9 @@ static int install_create_probe(void)
     g_probe->ft_low = ft.dwLowDateTime;
     g_probe->ft_high = ft.dwHighDateTime;
     if (!plat_hook("probe: ObjectCreate receive", img + FH2_RVA_OBJECT_CREATE_RECV, (void *)probe_object_create, (void **)&g_create_orig)) {
-        log_begin();
-        log_raw("probe: the ObjectCreate receive handler was not hooked\n");
         g_probe = NULL;
         return 0;
     }
-    log_begin();
-    log_raw("probe: the last 64 ObjectCreate messages this client receives are kept in fh2mp-creates.ring\n");
     return 1;
 }
 
@@ -5134,7 +5336,10 @@ static DWORD WINAPI late_init(LPVOID unused)
     /* Azimuth shows its launcher first: the game is mapped only after Play is clicked, which can take arbitrarily long, so wait for it
      * without a limit. wait_for_code also waits for FH2 Extra Options to finish: it checks every place it patches before it changes any,
      * so a change of ours made first would switch all of it off. */
-    g_api->wait_for_code(0xFFFFFFFFu);
+    if (!g_api->wait_for_code(0xFFFFFFFFu)) {
+        log_begin();
+        log_raw("late: the platform returned no game base from wait_for_code; patches are tried anyway\n");
+    }
     wait_for_executable_game();
     {
         wchar_t pr_env[8];
@@ -5143,8 +5348,9 @@ static DWORD WINAPI late_init(LPVOID unused)
         }
     }
     log_begin();
-    log_raw(find_fh2_image() ? "late: game image mapped, applying patches\n"
-                             : "late: game image not found, applying what is possible\n");
+    log_raw(find_fh2_image() ? "late: game image mapped and executable " : "late: game image not found or not FH2 1.0.0.64 (patches that need it are skipped), ");
+    log_dec(GetTickCount() - g_init_tick);
+    log_raw(" ms after the shim loaded\n");
     if (has_arg_prefix(L"NetSessionDirectIpRoadTrip=")) {
         redirect_roadtrip_group();
     }
@@ -5334,9 +5540,12 @@ static int session_load(void)
     char buf[1536];
     DWORD got = 0, i, n;
     HANDLE f;
-    int have_xuid = 0;
+    int have_xuid = 0, token_env = 0;
+    const char *file_state = "absent";
+    DWORD file_age_s = 0, open_err = 0;
 
     if (GetEnvironmentVariableW(L"FH2MP_TOKEN", env, 100) && env[0]) {
+        token_env = 1;
         for (n = 0; env[n] && n < sizeof g_token - 1; n++) {
             g_token[n] = (char)env[n];
         }
@@ -5345,6 +5554,12 @@ static int session_load(void)
     lstrcpyW(path, g_dir);
     lstrcatW(path, L"\\fh2mp-session.txt");
     f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) {
+        open_err = GetLastError();
+        if (open_err != ERROR_FILE_NOT_FOUND && open_err != ERROR_PATH_NOT_FOUND) {
+            file_state = "could not be opened";
+        }
+    }
     if (f != INVALID_HANDLE_VALUE) {
         FILETIME written, now_ft;
         ULARGE_INTEGER w, n;
@@ -5365,21 +5580,31 @@ static int session_load(void)
         if (GetFileTime(f, NULL, NULL, &written)) {
             w.LowPart = written.dwLowDateTime, w.HighPart = written.dwHighDateTime;
         }
+        file_state = "used";
+        file_age_s = w.QuadPart && n.QuadPart >= w.QuadPart ? (DWORD)((n.QuadPart - w.QuadPart) / 10000000ULL) : 0;
         if (session_is_stale(w.QuadPart, n.QuadPart, max_age)) {
+            int removed;
             CloseHandle(f);
             f = INVALID_HANDLE_VALUE;
-            DeleteFileW(path);       /* best effort: the launcher also removes leftovers when it starts and quits */
+            removed = DeleteFileW(path);       /* best effort: the launcher also removes leftovers when it starts and quits */
+            file_state = "stale";
             log_begin();
             log_raw("session: the launcher's session file is ");
             log_dec((unsigned long)((n.QuadPart - w.QuadPart) / 600000000ULL));
-            log_raw(" minutes old, a leftover of an earlier Play: ignored, so this game is offline\n");
+            log_raw(" minutes old (limit ");
+            log_dec((unsigned long)(max_age / 600000000ULL));
+            log_raw(" minutes), a leftover of an earlier Play: ignored, so this game is offline");
+            log_raw(removed ? ", file removed\n" : ", file could not be removed\n");
             if (g_api && g_api->set_notice) {
                 g_api->set_notice(g_mod, "FH2MP: not signed in\nPress Play in the FH2MP launcher to play online");
             }
         }
     }
     if (f != INVALID_HANDLE_VALUE) {
-        if (ReadFile(f, buf, sizeof buf - 1, &got, NULL)) {
+        if (!ReadFile(f, buf, sizeof buf - 1, &got, NULL)) {
+            file_state = "could not be read";
+            open_err = GetLastError();
+        } else {
             buf[got] = 0;
             for (i = 0; i < got;) {
                 char *line = buf + i;
@@ -5415,6 +5640,7 @@ static int session_load(void)
                     }
                     if (v) {
                         g_xuid = v;
+                        g_xuid_source = "the launcher's session";
                         have_xuid = 1;
                     }
                 } else if (line[0] == 't' && line[1] == 'o' && line[2] == 'k' && line[3] == 'e' && line[4] == 'n' && line[5] == 0 &&
@@ -5433,6 +5659,9 @@ static int session_load(void)
                         g_api->log(g_mod, "the game folder was not found (Azimuth's game folder setting), so the server's car database "
                                           "cannot be put in place: online play will be refused");
                         g_api->set_notice(g_mod, "FH2MP: game files not found\nSet the game folder in Azimuth");
+                        log_begin();
+                        log_raw(g_api->game_dir[0] ? "session: the game folder path is too long for the car database path; online play will be refused\n"
+                                                   : "session: the platform found no game folder (Azimuth's game folder setting); the server's car database cannot be put in place and online play will be refused\n");
                     } else if (MultiByteToWideChar(CP_UTF8, 0, eq, -1, rel, MAX_PATH) &&
                                lstrlenW(g_exe_dir) + lstrlenW(rel) + 2 < MAX_PATH) {
                         lstrcpyW(g_gamedb_src, absolute ? L"" : g_exe_dir);
@@ -5440,6 +5669,9 @@ static int session_load(void)
                         lstrcatW(g_gamedb_src, rel);
                         lstrcpyW(g_gamedb_path, g_api->game_dir);
                         lstrcatW(g_gamedb_path, L"\\mediaoverride\\Stripped\\gamedbRC.slt");
+                    } else {
+                        log_begin();
+                        log_raw("session: the session names a car database path that cannot be used (gamedb= is not valid UTF-8 or is too long); the game runs without the server's database and online play may be refused\n");
                     }
                 }
             }
@@ -5451,7 +5683,20 @@ static int session_load(void)
     log_raw("session: ");
     log_raw(g_token[0] ? "token present" : "no token");
     log_raw(g_gamedb_path[0] ? ", car database set" : "");
-    log_raw(have_xuid ? ", xuid from the launcher\n" : "\n");
+    log_raw(have_xuid ? ", xuid from the launcher" : "");
+    log_raw(token_env ? ", token from FH2MP_TOKEN" : "");
+    log_raw("; fh2mp-session.txt ");
+    log_raw(file_state);
+    if (file_state[0] == 'u') {
+        log_raw(", written ");
+        log_dec(file_age_s);
+        log_raw(" s ago");
+    } else if (open_err && file_state[0] == 'c') {
+        log_raw(" (error ");
+        log_dec(open_err);
+        log_raw(")");
+    }
+    log_raw(g_token[0] ? "\n" : ", so this game is offline\n");
     return have_xuid;
 }
 
@@ -5470,6 +5715,7 @@ static int identity_load(void)
         }
         if (v) {
             g_xuid = v;
+            g_xuid_source = "the FH2MP_XUID environment variable";
             return 1;
         }
     }
@@ -5511,7 +5757,17 @@ static int identity_load(void)
             buf[8] = '\n';
             WriteFile(f, buf, 9, &got, NULL);
             CloseHandle(f);
+            g_xuid_source = "a new random id, saved in fh2mp-identity.txt (no earlier file: a new player profile)";
+        } else {
+            DWORD err = GetLastError();
+            g_xuid_source = "a new random id that could NOT be saved (fh2mp-identity.txt cannot be written), so the next start gets another id";
+            log_begin();
+            log_raw("identity: could not write fh2mp-identity.txt, error ");
+            log_dec(err);
+            log_raw("; the id is not kept and the next start is a different player\n");
         }
+    } else {
+        g_xuid_source = "fh2mp-identity.txt";
     }
     g_xuid = 0x0009000000000000ULL | (v & 0xFFFFFFFFULL);
     return 1;
@@ -5547,7 +5803,9 @@ static int patch_identity(void)
     log_begin();
     log_raw("identity: xuid 0x");
     log_hex(g_xuid, 16);
-    log_raw(hits ? " (Azimuth's XboxUserId patched)\n" : " (Azimuth's XboxUserId constant NOT found)\n");
+    log_raw(" from ");
+    log_raw(g_xuid_source);
+    log_raw(hits ? " (Azimuth's XboxUserId patched)\n" : " (Azimuth's XboxUserId constant NOT found: the game keeps Azimuth's fixed id)\n");
     return (int)hits;
 }
 
@@ -5557,6 +5815,30 @@ static int patch_identity(void)
 
 /* Called by the FH2 Mod Platform on its own thread (outside the loader lock) right after it loads this DLL from fh2-mods. */
 #include "title_scope.inc"
+
+/* FH2 was selected but its executable is not the supported build: FH2MP then stays out of the launch (no registration, no files of its own), and this
+ * one line is the only trace of why. It goes straight to data\bin\fh2mp.log, which is not open yet. */
+static void early_refusal_note(const wchar_t *azimuth_dir, const char *why)
+{
+    wchar_t path[MAX_PATH];
+    char line[400];
+    HANDLE f;
+    DWORD put;
+    int n;
+
+    if (!azimuth_dir || lstrlenW(azimuth_dir) >= MAX_PATH - 40) {
+        return;
+    }
+    lstrcpyW(path, azimuth_dir);
+    lstrcatW(path, L"\\data\\bin\\fh2mp.log");
+    f = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) {
+        return;       /* no log of an FH2MP run here: do not create folders or files in a launch that is not ours */
+    }
+    n = wsprintfA(line, "[%lu] late: FH2 was selected but FH2MP stays out of this launch (unexpected game executable): %s\r\n", (unsigned long)GetTickCount(), why);
+    WriteFile(f, line, (DWORD)n, &put, NULL);
+    CloseHandle(f);
+}
 
 FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
 {
@@ -5569,7 +5851,11 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
     }
     /* This must precede registration, session/identity I/O, host hooks and
      * mediaoverride changes, including the offline-account-save branch. */
-    if (!fh2_launch_selected(api->azimuth_dir, GetCommandLineW()) || !fh2_launch_executable(api->game_dir)) {
+    if (!fh2_launch_selected(api->azimuth_dir, GetCommandLineW())) {
+        return 0;
+    }
+    if (!fh2_launch_executable(api->game_dir)) {
+        early_refusal_note(api->azimuth_dir, g_fh2_exe_why);
         return 0;
     }
     memset(&info, 0, sizeof info);
@@ -5584,6 +5870,7 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
     info.check_updates = 1;
     info.description = "Forza Horizon 2 online on the FH2MP servers: Free Roam, Road Trip, Rivals, Car Clubs and more. "
                        "Start the game from the FH2MP launcher to play online.";
+    g_init_tick = GetTickCount();
     g_mod = api->register_mod(&info);
     if (!g_mod) {
         return 1;
@@ -5594,6 +5881,7 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
     }
     g_api = api;
     if (lstrlenW(api->azimuth_dir) >= MAX_PATH - 32) {
+        api->log(g_mod, "the Azimuth folder path is too long for FH2MP's files; FH2MP does nothing");
         return 1;
     }
     lstrcpyW(g_exe_dir, api->azimuth_dir);
@@ -5630,7 +5918,8 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
             identity_load();
             patch_identity();
             gamedb_put_back();    /* restore the player's database before the platform builds its offline overrides */
-            log_raw("offline: account save profile active; online hooks skipped\n");
+            log_begin();
+            log_raw("offline: FH2MP_OFFLINE is set, account save profile active; online hooks, session and network patches skipped\n");
             return 0;
         }
     }
