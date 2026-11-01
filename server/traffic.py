@@ -9,14 +9,14 @@ How it works in the retail game (recovered from the client binary, build 1.0.0.6
     the client applies strictly in order (FUN_1403b8b60), plus ClientTraffic FullSync 18, RouteProgressUpdate 19, FullRoute 75,
     Stationary 76.
 
-Confidence: message ids, field layouts, the enum orders and the client's reaction to each server message are [C] (decompiled);
-the server-side rules (limits, ownership policy, when to grant) are [guess] and are logged heavily so they can be tuned from
-real sessions.
+Message ids, field layouts, the enum orders and the client's reaction to each server message are [C] (decompiled). Who holds and owns what is
+traffic_manager.py, a port of the game's own manager; this file is the wire and the join sequence.
 """
 import os
-import random
 import struct
 import time
+
+import traffic_manager
 
 # message ids
 MSG_SERVER_FULL_SYNC = 16
@@ -66,12 +66,11 @@ RELAY_ID = {MSG_SERVER_FULL_SYNC: MSG_CLIENT_FULL_SYNC, MSG_SERVER_ROUTE_PROGRES
 UPDATE_NAMES = {MSG_SERVER_FULL_SYNC: "FullSync", MSG_SERVER_ROUTE_PROGRESS: "RouteProgress", MSG_SERVER_FULL_ROUTE: "FullRoute",
                 MSG_SERVER_STATIONARY: "Stationary"}
 
-MAX_CARS = 250            # car ids are 8 bit; 0xff is "none"
-PER_PLAYER_MAX = 18       # the game's offline limit (FUN_140728a30 sets 0x12)
-PER_PLAYER_MIN = 6
-WORLD_BUDGET = 36         # total civilian cars the world aims for; each player's limit is WORLD_BUDGET / players
-OWNERSHIP_COOLDOWN_S = 2.0  # a car changes hands only if more than 2000 ms passed since its last change (FUN_141955d40) [C]
+TRAFFIC_LIMIT = traffic_manager.HARD_CAP
 GRANT_TIMEOUT_S = 15.0    # a granted id that is never spawned is taken back
+TICK_S = 0.2              # holders and ownership change with distance, at driving speed; retail did this every frame
+MAX_MESSAGES_PER_S = 400  # per client, requests and updates together; far above what a client sends
+RADIUS_KINDS = frozenset((0, 1, 2, 4, 5, 6))   # these carry the client's radius (callers of SetPlayerTrafficBudget); in 3, 7 and 8 the field is the car model
 
 
 def load_models(path=None):
@@ -121,17 +120,6 @@ def update_message(mtype, fields):
     return write
 
 
-class Vehicle:
-    __slots__ = ("vid", "owner", "struct", "full_sync", "full_route", "stationary", "route_progress", "born", "model", "moved")
-
-    def __init__(self, vid, owner, struct_):
-        self.vid, self.owner, self.struct = vid, owner, struct_     # struct = (a, s14, u5, b, flag) as the owner sent it
-        self.full_sync = self.full_route = self.stationary = self.route_progress = None
-        self.born = time.monotonic()
-        self.moved = self.born       # time of the last ownership change (a new car counts as just changed: FUN_141957ba0)
-        self.model = struct_[1] if struct_ else None
-
-
 class PeerState:
     def __init__(self):
         self.seq = 0                 # next ClientTrafficMessage sequence number for this client
@@ -140,27 +128,47 @@ class PeerState:
         self.burst_n = 0             # CarModelLoaded messages in the current burst
         self.burst_at = None         # time of the last CarModelLoaded (the client announces its loaded models whenever it
                                      # switches (back) to online traffic, e.g. after a fast travel)
-        self.owned = set()           # car ids this client simulates
-        self.pending = {}            # granted car id -> time granted (not yet spawned)
-        self.wanted = 0              # outstanding RequestTraffic count we could not grant yet
-        self.can_take = set()        # car ids this client announced it could take over (CanTakeOwnership)
-        self.models = set()          # model ids the client reported loaded
-        self.limit = PER_PLAYER_MAX
+        self.granted_at = {}         # car id -> time granted
         self.rx = 0                  # server-bound messages seen
-        self.last_rx_seq = None
+        self.window_at = 0.0         # start of the current rate window
+        self.window_n = 0
+        self.flooded = False
+
+
+class CarData:
+    """What traffic_manager calls a car's info: its AddTraffic struct and the last state of each kind, for whoever gets it next."""
+    __slots__ = ("struct", "full_sync", "full_route", "stationary")
+
+    def __init__(self, struct_):
+        self.struct = struct_        # (a, s14, u5, b, flag) as the owner sent it
+        self.full_sync = self.full_route = self.stationary = None
+
+
+def update_position(mtype, fields):
+    """The car's position in an update from its owner: FullSync and Stationary carry it first, RouteProgress and FullRoute as the block only the server reads."""
+    if mtype == MSG_SERVER_FULL_SYNC:
+        words = fields[2:5]
+    elif mtype == MSG_SERVER_STATIONARY:
+        words = fields[1:4]
+    else:
+        words = fields[-3:]
+    return tuple(f32(w) for w in words)
 
 
 class TrafficWorld:
-    """Traffic bookkeeping for one world (lobby). `send(peer, [writer, ...])` delivers messages; `peers()` lists the connected,
-    entered clients; `log(text)` logs."""
+    """Traffic for one world (lobby). `send(peer, [writer, ...], fast=)` delivers messages; `peers()` lists the connected, entered clients; `log(text)` logs;
+    `universe(peer)` says which side of an event boundary a client is on; `bake` freezes a writer so one update reaches many clients cheaply."""
 
-    def __init__(self, send, peers, log, models=None):
+    def __init__(self, send, peers, log, models=None, universe=None, bake=None):
         self.send, self.peers, self.log = send, peers, log
+        self.universe = universe or (lambda peer: 0)
+        self.bake = bake or (lambda m: m)
         self.models = models if models is not None else load_models()
-        self.vehicles = {}
         self.state = {}
         self.enabled = bool(self.models) and os.environ.get("FH2MP_TRAFFIC", "1") != "0"
         self.counters = {}
+        self.manager = traffic_manager.TrafficManager(self)
+        self.next_tick = 0.0
         self._batch = None
         if not self.enabled:
             self.log("traffic: disabled (no model list or FH2MP_TRAFFIC=0)")
@@ -189,206 +197,154 @@ class TrafficWorld:
         if self._batch is not None:
             self._batch.append(msg)
         else:
-            self.send(peer, [msg])
+            self.send(peer, [msg], fast=True)
 
-    def per_player_limit(self):
-        n = max(1, len(self.active()))
-        return max(PER_PLAYER_MIN, min(PER_PLAYER_MAX, WORLD_BUDGET // n))
+    # ------------------------------------------------------------ traffic_manager.Out
+    def add(self, peer, car):
+        d = car.info
+        a, s14, u5, b, flag = d.struct
+        self.push(peer, C_ADD_TRAFFIC, a=a, s14=s14, u5=u5, b=b, flag=flag)
+        for mtype, fields in ((MSG_SERVER_FULL_SYNC, d.full_sync), (MSG_SERVER_FULL_ROUTE, d.full_route), (MSG_SERVER_STATIONARY, d.stationary)):
+            if fields:
+                self.emit(peer, update_message(mtype, fields))
 
-    def free_id(self):
-        used = set(self.vehicles) | {i for s in self.state.values() for i in s.pending}
-        for _ in range(MAX_CARS):
-            vid = random.randrange(MAX_CARS)
-            if vid not in used:
-                return vid
-        return None
+    def remove(self, peer, vid):
+        if peer in self.state:
+            self.push(peer, C_REMOVE_TRAFFIC, a=vid)
+
+    def granted(self, peer, vid):
+        self.st(peer).granted_at[vid] = time.monotonic()
+        self.push(peer, C_SPAWN_GRANTED, a=vid)
+
+    def canceled(self, peer, vid):
+        self.st(peer).granted_at.pop(vid, None)
+        self.push(peer, C_SPAWN_CANCELED, a=vid)
+
+    def withdrawn(self, peer):
+        self.push(peer, C_WITHDRAW_ACCEPTED)
+
+    def take(self, peer, vid):
+        self.push(peer, C_TAKE_OWNERSHIP, a=vid)
+
+    def drop(self, peer, vid):
+        if peer in self.state:
+            self.push(peer, C_DROP_OWNERSHIP, a=vid)
+
+    def denied(self, peer, vid):
+        self.push(peer, C_OWNERSHIP_DENIED, a=vid)
 
     # ------------------------------------------------------------ lifecycle
     def join(self, peer, force=False):
         """The server's initial sequence for a client that entered the session (the client waits for InitialJoinComplete:
-        module flags +0xac/+0xad, FUN_140716800 / FUN_140720950)."""
+        module flags +0xac/+0xad, FUN_140716800 / FUN_140720950). Cars follow from the tick, once its position and loaded models are known."""
         if not self.enabled:
             return
         s = self.st(peer)
         if s.joined and not force:
             return
+        if s.joined:
+            self.manager.reset(peer)
         s.joined = True
         s.joined_at = time.monotonic()
-        s.limit = self.per_player_limit()
+        self.manager.join(peer)
         self._batch = []
         for model in self.models:
             self.push(peer, C_LOAD_CAR_MODEL, s14=model)
         self.push(peer, C_ALL_MODELS_SENT)
-        self.push(peer, C_TRAFFIC_LIMIT, a=s.limit)
-        n = 0
-        for v in sorted(self.vehicles.values(), key=lambda v: v.vid):
-            if v.owner is peer:
-                continue
-            a, s14, u5, b, flag = v.struct
-            self.push(peer, C_ADD_TRAFFIC, a=a, s14=s14, u5=u5, b=b, flag=flag)
-            for mtype, fields in (("full_sync", v.full_sync), ("full_route", v.full_route), ("stationary", v.stationary)):
-                if fields:
-                    self.emit(peer, update_message({"full_sync": MSG_SERVER_FULL_SYNC, "full_route": MSG_SERVER_FULL_ROUTE,
-                                                    "stationary": MSG_SERVER_STATIONARY}[mtype], fields))
-            n += 1
+        self.push(peer, C_TRAFFIC_LIMIT, a=TRAFFIC_LIMIT)
         self.push(peer, C_INITIAL_JOIN_COMPLETE)
         batch, self._batch = self._batch, None
         self.send(peer, batch)
-        self.log(f"traffic: join {peer.addr[1]}: {len(self.models)} models, limit {s.limit}, {n} existing cars")
-        self.rebalance_limits(exclude=peer)
-
-    def rebalance_limits(self, exclude=None):
-        limit = self.per_player_limit()
-        for p in self.active():
-            s = self.st(p)
-            if p is not exclude and s.limit != limit:
-                s.limit = limit
-                self.push(p, C_TRAFFIC_LIMIT, a=limit)
+        self.log(f"traffic: join {peer.addr[1]}: {len(self.models)} models, limit {TRAFFIC_LIMIT}")
 
     def leave(self, peer):
-        s = self.state.pop(peer, None)
-        if not s:
-            return
-        gone = sorted(s.owned)
-        for vid in gone:
-            self.remove_vehicle(vid, notify_owner=False)
-        self.log(f"traffic: {peer.addr[1]} left; removed its {len(gone)} cars; {len(self.vehicles)} left")
-        self.rebalance_limits()
-
-    def remove_vehicle(self, vid, notify_owner=True):
-        v = self.vehicles.pop(vid, None)
-        if not v:
-            return
-        if v.owner in self.state:
-            self.state[v.owner].owned.discard(vid)
-        for p in self.active():
-            if p is v.owner and not notify_owner:
-                continue
-            self.push(p, C_REMOVE_TRAFFIC, a=vid)
+        if self.state.pop(peer, None) is not None:
+            self.manager.leave(peer)
+            self.log(f"traffic: {peer.addr[1]} left; {len(self.manager.cars)} cars remain")
 
     # ------------------------------------------------------------ client -> server
+    def flooding(self, peer, s):
+        now = time.monotonic()
+        if now - s.window_at >= 1.0:
+            s.window_at, s.window_n = now, 0
+        s.window_n += 1
+        if s.window_n <= MAX_MESSAGES_PER_S:
+            return False
+        if not s.flooded:
+            s.flooded = True
+            self.log(f"traffic: {peer.addr[1]} over {MAX_MESSAGES_PER_S} messages/s; the excess is ignored")
+        return True
+
     def on_message(self, peer, kind, a, s14, u5, b, flag, seq):
         s = self.st(peer)
         s.rx += 1
         name = S_NAMES[kind] if kind < len(S_NAMES) else f"?{kind}"
         if s.rx <= 60 or s.rx % 100 == 0:
             self.log(f"traffic: {peer.addr[1]} -> {name} a={a} s14={signed14(s14)} u5={u5} b={b} flag={flag} seq={seq} "
-                     f"(owned {len(s.owned)}, pending {len(s.pending)})")
-        if not self.enabled:
+                     f"(held {len(self.manager.players[peer].held) if peer in self.manager.players else 0})")
+        if not self.enabled or not s.joined or self.flooding(peer, s):
             return
+        m, now = self.manager, time.monotonic() * 1000.0
+        if kind in RADIUS_KINDS:
+            m.set_radius(peer, signed14(s14))
         if kind == S_REQUEST_TRAFFIC:
-            s.wanted = max(1, a if a != 0xFF else 1)
-            self.grant(peer)
+            m.set_universe(peer, self.universe(peer))
+            m.request(peer, max(1, a if a != 0xFF else 1))
         elif kind == S_WITHDRAW_REQUEST:
-            s.wanted = 0
-            for vid in list(s.pending):
-                s.pending.pop(vid)
-                self.push(peer, C_SPAWN_CANCELED, a=vid)
-            self.push(peer, C_WITHDRAW_ACCEPTED)
+            m.withdraw(peer)
         elif kind == S_TRAFFIC_SPAWNED:
-            vid = a
-            if vid in s.pending:
-                s.pending.pop(vid)
-            if vid in self.vehicles and self.vehicles[vid].owner is not peer:
-                self.log(f"traffic: {peer.addr[1]} spawned id {vid} that belongs to someone else; ignored")
-                return
-            v = self.vehicles.get(vid) or Vehicle(vid, peer, (a, s14, u5, b, flag))
-            v.owner, v.struct = peer, (a, s14, u5, b, flag)
-            self.vehicles[vid] = v
-            s.owned.add(vid)
-            s.can_take.add(vid)      # a spawn marks its owner as able to take the car (back) later: FUN_141957ba0 sets the flag
-            for q in self.active():
-                if q is not peer:
-                    self.push(q, C_ADD_TRAFFIC, a=a, s14=s14, u5=u5, b=b, flag=flag)
-            self.push(peer, C_TAKE_OWNERSHIP, a=vid)       # the spawner drives the car; it starts sending updates
-            if s.wanted:
-                self.grant(peer)
+            s.granted_at.pop(a, None)
+            if m.spawned(peer, a, signed14(s14), CarData((a, s14, u5, b, flag)), now):
+                self.push(peer, C_TAKE_OWNERSHIP, a=a)       # the spawner drives the car; without this it despawns it after ~7 s
+            else:
+                self.log(f"traffic: {peer.addr[1]} spawned car {a} it was not granted; ignored")
         elif kind == S_TRAFFIC_REMOVED:
-            v = self.vehicles.get(a)
-            if v and v.owner is peer:
-                self.remove_vehicle(a, notify_owner=False)
-            elif v and v.owner is None:
-                self.vehicles.pop(a, None)
+            m.removed(peer, a)
         elif kind == S_REQUEST_DESPAWN:
-            v = self.vehicles.get(a)
-            if v:
-                self.remove_vehicle(a, notify_owner=True)     # the owner removes it and answers TrafficRemoved
-        elif kind in (S_CAN_TAKE_OWNERSHIP, S_REQUEST_OWNERSHIP):
-            self.ownership(peer, kind, a)
+            m.despawn(peer, a, now)
+        elif kind == S_CAN_TAKE_OWNERSHIP:
+            m.can_take(peer, a)
+        elif kind == S_REQUEST_OWNERSHIP:
+            if m.request_ownership(peer, a, now):
+                self.log(f"traffic: car {a} handed to {peer.addr[1]} (RequestOwnership)")
         elif kind == S_CAR_MODEL_LOADED:
-            s.models.add(signed14(s14))
+            m.model_loaded(peer, signed14(s14))
             s.burst_at = time.monotonic()
             s.burst_n += 1
         elif kind == S_CAR_MODEL_UNLOADED:
-            s.models.discard(signed14(s14))
-
-    def grant(self, peer):
-        s = self.st(peer)
-        while s.wanted > 0 and len(s.owned) + len(s.pending) < s.limit:
-            vid = self.free_id()
-            if vid is None:
-                break
-            s.pending[vid] = time.monotonic()
-            s.wanted -= 1
-            self.push(peer, C_SPAWN_GRANTED, a=vid)
-
-    def ownership(self, peer, kind, vid):
-        """CanTakeOwnership: the client says it could drive car `vid`; the original server only remembers that (FUN_141955d80)
-        and answers nothing. RequestOwnership (sent when the client collides with the car): the original checks that flag, tells
-        the old owner to drop the car and moves the owner (FUN_141956a20); the new owner is told to take it."""
-        v = self.vehicles.get(vid)
-        s = self.st(peer)
-        if kind == S_CAN_TAKE_OWNERSHIP:
-            if v is not None and v.owner is not peer:
-                s.can_take.add(vid)
-            return
-        now = time.monotonic()
-        if v is None or v.owner is peer:
-            self.push(peer, C_OWNERSHIP_DENIED, a=vid)
-            return
-        owner_gone = v.owner is None or v.owner not in self.state
-        # The original server ignores a request from a client that did not announce CanTakeOwnership first (FUN_141956a20). The shim
-        # makes every collision request the car (patch_traffic_request_ownership), so the flag is no longer required here.
-        if not owner_gone and now - v.moved < OWNERSHIP_COOLDOWN_S:
-            self.push(peer, C_OWNERSHIP_DENIED, a=vid)
-            return
-        old = v.owner
-        if not owner_gone:
-            self.state[old].owned.discard(vid)
-            self.push(old, C_DROP_OWNERSHIP, a=vid)
-        v.owner, v.moved = peer, now
-        s.owned.add(vid)
-        self.push(peer, C_TAKE_OWNERSHIP, a=vid)
-        self.log(f"traffic: car {vid} handed from {old.addr[1] if old is not None else '-'} to {peer.addr[1]} (RequestOwnership)")
-
-    def closer(self, peer, v):
-        """True when the requester is clearly nearer to the car than its owner is (positions come from the cars' own updates)."""
-        return False        # [guess] ownership stays with the spawner until it leaves; refine from observed sessions
+            m.model_unloaded(peer, signed14(s14))
 
     def on_update(self, peer, mtype, reader):
-        """FullSync / RouteProgress / FullRoute / Stationary from the car's owner: copy to everyone else."""
-        layout = UPDATE_LAYOUT[mtype]
-        fields = [reader.bits(w) for w in layout]
+        """FullSync / RouteProgress / FullRoute / Stationary from the car's owner: copy to the others who hold it."""
+        fields = [reader.bits(w) for w in UPDATE_LAYOUT[mtype]]        # read first: the rest of the datagram follows it
         vid = fields[0]
         n = self.counters.get("rx_" + UPDATE_NAMES[mtype], 0) + 1
         self.counters["rx_" + UPDATE_NAMES[mtype]] = n
         if n <= 6 or n % 500 == 0:
             self.log(f"traffic: {peer.addr[1]} -> {UPDATE_NAMES[mtype]} car {vid} (#{n})")
-        v = self.vehicles.get(vid)
-        if not self.enabled or v is None or v.owner is not peer:
+        m = self.manager
+        car = m.cars.get(vid)
+        if not self.enabled or car is None or car.owner is not peer or self.flooding(peer, self.st(peer)):
             return
         if mtype == MSG_SERVER_FULL_SYNC:
-            v.full_sync = fields
+            car.info.full_sync = fields
         elif mtype == MSG_SERVER_FULL_ROUTE:
-            v.full_route = fields
+            car.info.full_route = fields
         elif mtype == MSG_SERVER_STATIONARY:
-            v.stationary = fields
-        for q in self.active():
+            car.info.stationary = fields
+        m.car_position(peer, vid, update_position(mtype, fields))
+        msg = None
+        for q in car.holders:
             if q is not peer:
-                self.emit(q, update_message(mtype, fields))
+                msg = msg or self.bake(update_message(mtype, fields))
+                self.emit(q, msg)
 
     # ------------------------------------------------------------ timers
     def tick(self, now):
+        if not self.enabled or not self.state or now < self.next_tick:
+            return
+        self.next_tick = now + TICK_S
+        m = self.manager
         for peer, s in list(self.state.items()):
             # A big burst of CarModelLoaded long after the join means the client just went (back) online, e.g. after a fast
             # travel (FUN_140726230 reports every loaded model at once). While a session starts the models trickle in one or
@@ -398,10 +354,15 @@ class TrafficWorld:
                 if n >= 4 and now - s.joined_at > 25.0:
                     self.log(f"traffic: {peer.addr[1]} reported {n} loaded models at once; repeating the join sequence")
                     self.join(peer, force=True)
-            for vid, t in list(s.pending.items()):
+            if peer in m.players:
+                pos = getattr(peer, "pos", None)
+                if pos is not None:
+                    m.set_position(peer, pos)
+                m.set_universe(peer, self.universe(peer))
+            for vid, t in list(s.granted_at.items()):
                 if now - t > GRANT_TIMEOUT_S:
-                    s.pending.pop(vid)
+                    s.granted_at.pop(vid)
                     self.log(f"traffic: grant of car {vid} to {peer.addr[1]} timed out")
+                    m.withdraw_one(peer, vid)
                     self.push(peer, C_SPAWN_CANCELED, a=vid)
-            if s.wanted and len(s.owned) + len(s.pending) < s.limit:
-                self.grant(peer)
+        m.tick(now * 1000.0)

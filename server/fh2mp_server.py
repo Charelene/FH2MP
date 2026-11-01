@@ -1415,7 +1415,7 @@ class Server:
         # A random start under 24 h gives each world its own time of day; it stays small so the plain comparisons on now_ms() hold.
         self.clock_offset_ms = int(os.environ.get("FH2MP_CLOCK_OFFSET_MS", random.randrange(CLOCK_OFFSET_MAX_MS)))
         self.traffic = traffic_mod.TrafficWorld(self.send, lambda: [p for p in self.peers.values() if p.connected and p.entered],
-                                                self.log)
+                                                self.log, universe=self.traffic_universe, bake=bake)
         self.coop = bucketlist.Coop(self.bl_key, self.now_ms, time.monotonic)
         self.leftover_logged = 0
         self.big_logged = 0
@@ -3096,6 +3096,10 @@ class Server:
             for q in self.peers.values():
                 for key in [k for k in q.seq_shift if k[0] == peer.owner_id]:
                     del q.seq_shift[key]
+
+    def traffic_universe(self, peer: Peer) -> int:
+        """Traffic stays on its side of an event boundary, like the cars themselves (same_event)."""
+        return 1 if self.event and peer in self.event["people"] else 0
 
     def noise(self, msg: str) -> None:
         """Log about datagrams from strangers at most once a second, so a flood of junk cannot fill the disk."""
