@@ -23,7 +23,7 @@ not carry proxy headers, so nothing reachable through the public reverse proxy c
     GET    /ops/v1/routes/<id>[?limit=50]      one route: a board per car class (D .. S2), real players only
     GET    /ops/v1/recent[?limit=20]           the newest Rivals runs (Festival Routes and Monthly events)
     GET    /ops/v1/players[?q=&limit=&offset=] accounts (gamertag / xuid search), with online and ban state
-    POST   /ops/v1/players/<xuid>/ban          {"reason": "..."}   |  /unban  |  /kick (drops the player's sessions)
+    POST   /ops/v1/players/<xuid>/ban          {"reason": "...", "days": 7 (optional; omitted = permanent)}   |  /unban  |  /kick (drops the player's sessions)
     GET    /ops/v1/notification-types          \
     GET    /ops/v1/notifications                > the Message Center queue, same JSON as the loopback /api/notifications
     POST   /ops/v1/notifications               >   ({"kind"|"type", "text", "sra", "xuid", "fields": {...}})
@@ -444,15 +444,17 @@ def players(lsp, text, limit, offset):
             where += " OR a.xuid = ?"
             args.append(xuid)
     total = lsp.DB.one(f"SELECT COUNT(*) FROM accounts a {where}", args)[0]
+    now = time.time()
     rows = lsp.DB.query(
-        "SELECT a.xuid, a.gamertag, a.created, a.last_login, a.banned_at, a.ban_reason, COALESCE(p.career_level, 0) AS level, "
+        "SELECT a.xuid, a.gamertag, a.created, a.last_login, a.banned_at, a.ban_until, a.ban_reason, COALESCE(p.career_level, 0) AS level, "
         "COALESCE(p.last_seen, 0) AS last_seen, COALESCE(x.xp, 0) AS xp FROM accounts a LEFT JOIN players p ON p.xuid = a.xuid "
         f"LEFT JOIN player_xp x ON x.xuid = a.xuid {where} ORDER BY GREATEST(a.last_login, COALESCE(p.last_seen, 0)) DESC, a.xuid "
         "LIMIT ? OFFSET ?", args + [limit, offset])
     return {"total": total, "players": [
         {"xuid": r["xuid"], "gamertag": r["gamertag"], "created": int(r["created"]), "lastLogin": int(r["last_login"]),
          "lastSeen": int(r["last_seen"]), "level": db.display_level(r["level"]), "xp": int(r["xp"]), "online": social.online(r["xuid"]),
-         "banned": r["banned_at"] is not None, "banReason": r["ban_reason"]} for r in rows]}
+         "banned": auth.ban_active(r["banned_at"], r["ban_until"], now), "banUntil": int(r["ban_until"]) if r["ban_until"] else None,
+         "banReason": r["ban_reason"]} for r in rows]}
 
 
 def auth_events(lsp, limit):
@@ -475,9 +477,18 @@ def player_action(lsp, xuid_text, action, d):
         raise OpsError(404, "no_such_player", "no account with that xuid")
     if action == "ban":
         reason = str(d.get("reason", "")).strip()[:200] or "banned by an operator"
-        lsp.AUTH.set_banned(xuid, reason)
-        lsp.log(f"  ops: banned {xuid:#x}: {reason}")
-        return {"banned": True}
+        until = None
+        if d.get("days") not in (None, ""):
+            try:
+                days = float(d["days"])
+            except (TypeError, ValueError):
+                raise OpsError(400, "bad_request", "days must be a number")
+            if not 0 < days <= 3650:
+                raise OpsError(400, "bad_request", "days must be between 0 and 3650")
+            until = time.time() + days * 86400
+        lsp.AUTH.set_banned(xuid, reason, until)
+        lsp.log(f"  ops: banned {xuid:#x}{f' until {int(until)}' if until else ''}: {reason}")
+        return {"banned": True, "until": int(until) if until else None}
     if action == "unban":
         lsp.AUTH.set_banned(xuid, None)
         lsp.log(f"  ops: unbanned {xuid:#x}")

@@ -484,6 +484,10 @@ CREATE TABLE invites (
         at DOUBLE PRECISION NOT NULL
     );
     """,
+    # temporary bans. NULL with banned_at set = permanent; a ban whose ban_until has passed no longer applies
+    """
+    ALTER TABLE accounts ADD COLUMN ban_until DOUBLE PRECISION;
+    """,
 ]
 
 ADVISORY_LOCK = 7240001          # serialises write transactions (see tx)

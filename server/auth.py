@@ -58,6 +58,11 @@ def udp_ticket_key(token):
     return hmac.new(token.encode(), b"fh2mp udp ticket v1", hashlib.sha256).hexdigest() if token else ""
 
 
+def ban_active(banned_at, until, now):
+    """A ban applies while banned_at is set and, for a temporary one, until `until`; nothing needs to clear it afterwards."""
+    return bool(banned_at) and (until is None or now < until)
+
+
 class AuthError(Exception):
     def __init__(self, status, code, message=""):
         super().__init__(message or code)
@@ -335,10 +340,10 @@ class AuthService:
         if not self._verify(pubkey, sig, sign_message(self.env, "login", raw, pubkey)):
             self._event("login_badsig", ip)
             raise AuthError(401, "bad_signature")
-        row = self.db.one("SELECT xuid, gamertag, banned_at, ban_reason FROM accounts WHERE pubkey=?", (pubkey,))
+        row = self.db.one("SELECT xuid, gamertag, banned_at, ban_until, ban_reason FROM accounts WHERE pubkey=?", (pubkey,))
         if row is None:
             raise AuthError(404, "unknown_account", "no account for this key: sign up first")
-        if row["banned_at"]:
+        if ban_active(row["banned_at"], row["ban_until"], self.clock()):
             self._event("login_banned", ip, row["xuid"])
             raise AuthError(403, "banned", row["ban_reason"] or "this account is banned")
         token = "fh2." + b64u(secrets.token_bytes(32))
@@ -370,17 +375,17 @@ class AuthService:
         with self._cache_lock:
             ent = self._cache.get(h)
         if ent is None or now - ent["checked"] > CACHE_SECONDS:
-            r = self.db.one("SELECT s.xuid, s.ip, s.expires, s.hard_expires, s.last_used, a.gamertag, a.banned_at, a.ban_reason "
+            r = self.db.one("SELECT s.xuid, s.ip, s.expires, s.hard_expires, s.last_used, a.gamertag, a.banned_at, a.ban_until, a.ban_reason "
                             "FROM auth_sessions s JOIN accounts a ON a.xuid = s.xuid WHERE s.token_hash=? AND s.revoked=0", (h,))
             if r is None:
                 with self._cache_lock:
                     self._cache.pop(h, None)
                 raise AuthError(401, "invalid_token")
             ent = {"xuid": r["xuid"], "ip": r["ip"], "expires": r["expires"], "hard": r["hard_expires"], "tag": r["gamertag"],
-                   "banned": r["banned_at"], "reason": r["ban_reason"], "written": r["last_used"], "checked": now}
+                   "banned": r["banned_at"], "until": r["ban_until"], "reason": r["ban_reason"], "written": r["last_used"], "checked": now}
             with self._cache_lock:
                 self._cache[h] = ent
-        if ent["banned"]:
+        if ban_active(ent["banned"], ent["until"], now):
             raise AuthError(403, "banned", ent["reason"] or "this account is banned")
         if now > ent["expires"] or now > ent["hard"]:
             raise AuthError(401, "token_expired", "the session expired: sign in again from the launcher")
@@ -400,7 +405,7 @@ class AuthService:
 
     # ---- account management
     def account(self, xuid):
-        r = self.db.one("SELECT xuid, pubkey, gamertag, created, last_login, tag_changed, banned_at, ban_reason FROM accounts WHERE xuid=?", (xuid,))
+        r = self.db.one("SELECT xuid, pubkey, gamertag, created, last_login, tag_changed, banned_at, ban_until, ban_reason FROM accounts WHERE xuid=?", (xuid,))
         return r
 
     def rename(self, xuid, new_tag, force=False):
@@ -433,11 +438,13 @@ class AuthService:
         tag = validate_gamertag(tag, self.blocked, self.blocked_words)
         return not self.db.one("SELECT 1 FROM accounts WHERE gamertag_key=?", (fold_tag(tag),))
 
-    def set_banned(self, xuid, reason=None):
-        """reason None = unban."""
+    def set_banned(self, xuid, reason=None, until=None):
+        """reason None = unban. `until` (epoch seconds) makes the ban temporary; without it the ban is permanent."""
+        if until is not None and until <= self.clock():
+            raise AuthError(400, "bad_request", "a ban must end in the future")
         with self.db.tx() as c:
-            n = c.execute("UPDATE accounts SET banned_at=?, ban_reason=? WHERE xuid=?",
-                          (None if reason is None else self.clock(), reason or "", xuid)).rowcount
+            n = c.execute("UPDATE accounts SET banned_at=?, ban_until=?, ban_reason=? WHERE xuid=?",
+                          (None if reason is None else self.clock(), None if reason is None else until, reason or "", xuid)).rowcount
             if reason is not None:
                 c.execute("DELETE FROM auth_sessions WHERE xuid=?", (xuid,))
         with self._cache_lock:

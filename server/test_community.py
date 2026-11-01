@@ -40,6 +40,8 @@ class MemoryDb:
                     sql = statement
                     sql = re.sub(r'BIGINT GENERATED (?:BY DEFAULT|ALWAYS) AS IDENTITY PRIMARY KEY', 'INTEGER PRIMARY KEY AUTOINCREMENT', sql)
                     self.conn.execute(sql)
+                elif re.match(r'ALTER TABLE accounts ADD COLUMN', statement, re.I):
+                    self.conn.execute(statement)
 
     def query(self, sql, args=()):
         return self.conn.execute(sql, args).fetchall()

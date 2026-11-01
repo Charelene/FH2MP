@@ -263,6 +263,20 @@ class SessionTests(AuthCase):
         self.svc.set_banned(self.acct.xuid, None)
         self.login()
 
+    def test_temporary_ban_lapses_by_itself(self):
+        t = self.login()
+        self.svc.authenticate(t, "203.0.113.5")
+        self.svc.set_banned(self.acct.xuid, "cheating", until=self.clock.t + 7 * 86400)
+        self.assertEqual(self.code(self.svc.login, **self.d.login_args(self.svc)), "banned")
+        self.clock.t += 7 * 86400 - 1
+        self.assertEqual(self.code(self.svc.login, **self.d.login_args(self.svc)), "banned")
+        self.clock.t += 2
+        t = self.login()                                                        # no unban call needed
+        self.assertEqual(self.svc.authenticate(t, "203.0.113.5").xuid, self.acct.xuid)
+
+    def test_ban_must_end_in_the_future(self):
+        self.assertEqual(self.code(self.svc.set_banned, self.acct.xuid, "x", self.clock.t - 1), "bad_request")
+
     def test_logout(self):
         t = self.login()
         self.svc.logout(t)
