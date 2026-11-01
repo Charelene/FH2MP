@@ -320,17 +320,32 @@ def outdated_notice(need):
     """The Message Center reply for a client below minShim, in place of the HTTP 426 its game cannot show: prod 2026-10-28, ~33k refused
     requests a day from shims 1.0.0-rc4 to 1.1.1, and those players saw only "network error". Shown on the Community News page
     (type 0x200, confirmed visible 2026-10-16); whether the game also raises a pop-up for it is unverified."""
-    ntype = 0x200
+    return single_notice(OUTDATED_NOTICE_ID, 0x200,
+                         f"FH2MP is out of date, so online play is off. Close the game, open the FH2MP launcher and press Play: "
+                         f"it updates FH2MP to {need}. Starting azimuth.exe directly skips the update.")
+
+
+BAN_NOTICE_ID = 0x7FFFFF01
+_BAN_NOTICE_SENT = filetime()
+
+
+def ban_notice(message):
+    """The Message Center reply for a banned player's poll: the one message in the Messages tab (type 0x602) with the end date and
+    reason. The session survives a ban for exactly this: every other call is refused with 403 "banned". Not seen in game yet."""
+    return single_notice(BAN_NOTICE_ID, 0x602, message, _BAN_NOTICE_SENT)
+
+
+def single_notice(nid, ntype, text, sent=None):
+    """A Notifications.RetrieveForUser reply holding one notice that is never stored, framed for the wire."""
     fields = notif_fields(ntype)
     val = xls.default_struct(SC, fields)
-    val["Message"] = (f"FH2MP is out of date, so online play is off. Close the game, open the FH2MP launcher and press Play: "
-                      f"it updates FH2MP to {need}. Starting azimuth.exe directly skips the update.")
+    val["Message"] = text
     pb = xls.encode(SC, fields, val)
-    result = {"results": [{"id": OUTDATED_NOTICE_ID, "xuidRecipient": 0, "notificationType": ntype, "hasThumbnail": False,
+    result = {"results": [{"id": nid, "xuidRecipient": 0, "notificationType": ntype, "hasThumbnail": False,
                            "isRead": False, "deleteAction": 0, "expirationDate": filetime(time.time() + 86400),
-                           "sentDate": _OUTDATED_SENT, "cbParameters": len(pb)}],
+                           "sentDate": _OUTDATED_SENT if sent is None else sent, "cbParameters": len(pb)}],
               "parameterBlock": pb, "nextRetrieveSeconds": 60, "reconcileActiveNotifications": True,
-              "activeNotificationIds": [OUTDATED_NOTICE_ID]}
+              "activeNotificationIds": [nid]}
     _name, rfields = find_struct("Xls.WebServices.Notifications, Xls.WebServices", "RetrieveForUser", "_Results")
     return frame(xls.encode(SC, rfields, result))
 
@@ -2311,6 +2326,10 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     acct = AUTH.authenticate(token, self.client_ip())
                 except auth.AuthError as e:
+                    if e.code == "banned" and SC is not None and self.headers.get("X-ClassName", "").startswith("Xls.WebServices.Notifications") \
+                            and self.headers.get("X-Method", "") == "RetrieveForUser":
+                        self._reply_json(200, ban_notice(e.message), "bin/xtsw")      # the game shows this, unlike the 403 below
+                        return False
                     self._reply_json(e.status, {"error": e.code, "message": e.message})
                     return False
                 CTX.xuid, CTX.tag, CTX.authed = acct.xuid, acct.gamertag, True

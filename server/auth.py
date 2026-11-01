@@ -58,6 +58,12 @@ def udp_ticket_key(token):
     return hmac.new(token.encode(), b"fh2mp udp ticket v1", hashlib.sha256).hexdigest() if token else ""
 
 
+def ban_message(reason, until):
+    """What a banned player is told (launcher sign-in error, game Message Center): the end date for a temporary ban, then the reason."""
+    when = f"until {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(until))}" if until else "permanently"
+    return f"This account is banned {when}." + (f" Reason: {reason}" if reason else "")
+
+
 def ban_active(banned_at, until, now):
     """A ban applies while banned_at is set and, for a temporary one, until `until`; nothing needs to clear it afterwards."""
     return bool(banned_at) and (until is None or now < until)
@@ -345,7 +351,7 @@ class AuthService:
             raise AuthError(404, "unknown_account", "no account for this key: sign up first")
         if ban_active(row["banned_at"], row["ban_until"], self.clock()):
             self._event("login_banned", ip, row["xuid"])
-            raise AuthError(403, "banned", row["ban_reason"] or "this account is banned")
+            raise AuthError(403, "banned", ban_message(row["ban_reason"], row["ban_until"]))
         token = "fh2." + b64u(secrets.token_bytes(32))
         now = self.clock()
         with self.db.tx() as c:
@@ -386,7 +392,7 @@ class AuthService:
             with self._cache_lock:
                 self._cache[h] = ent
         if ban_active(ent["banned"], ent["until"], now):
-            raise AuthError(403, "banned", ent["reason"] or "this account is banned")
+            raise AuthError(403, "banned", ban_message(ent["reason"], ent["until"]))
         if now > ent["expires"] or now > ent["hard"]:
             raise AuthError(401, "token_expired", "the session expired: sign in again from the launcher")
         if self.token_ip == "exact" and ip and ent["ip"] != ip:
@@ -445,8 +451,6 @@ class AuthService:
         with self.db.tx() as c:
             n = c.execute("UPDATE accounts SET banned_at=?, ban_until=?, ban_reason=? WHERE xuid=?",
                           (None if reason is None else self.clock(), None if reason is None else until, reason or "", xuid)).rowcount
-            if reason is not None:
-                c.execute("DELETE FROM auth_sessions WHERE xuid=?", (xuid,))
         with self._cache_lock:
             for h, ent in list(self._cache.items()):
                 if ent["xuid"] == xuid:
