@@ -32,22 +32,64 @@ class SpeedCheck(unittest.TestCase):
             self.pos[1] += dy_kmh / 3.6 * step
             self.w.track_speed(self.a, tuple(self.pos))
 
-    def test_the_timestamp_rate_is_logged_from_one_second_windows(self):
-        logs, a = [], self.a
-        self.w.log = logs.append
-        S.STAMP_RATE_SAMPLES, was = 5, S.STAMP_RATE_SAMPLES
-        self.addCleanup(setattr, S, "STAMP_RATE_SAMPLES", was)
-        stamp = 1000
-        for _ in range(8):
+    def stamped(self, seconds, kmh, stamp, scene=(0, 0)):
+        for _ in range(seconds):
             self.clock.t += 1.0
-            self.pos[0] += 10.0
-            stamp += 1000                                  # a clock in milliseconds: 1000 ticks per second
-            self.w.track_speed(a, tuple(self.pos), stamp)
-        rates = [m for m in logs if m.startswith("STAMP RATE")]
-        self.assertEqual(len(rates), 1)
-        self.assertIn("1000.0 ticks per second", rates[0])
-        self.w.track_speed(a, tuple(self.pos), None)       # a packet without a stamp neither breaks nor counts
-        self.assertEqual(len([m for m in logs if m.startswith("STAMP RATE")]), 1)
+            self.pos[0] += kmh / 3.6
+            stamp += 1000
+            self.w.track_speed(self.a, tuple(self.pos), stamp, scene)
+        return stamp
+
+    def test_the_cars_clock_measures_speed_not_arrival_time(self):
+        """Bunched arrivals: the packets land 1.2 s apart in wall time but the car's clock says 1.8 s; at 400 km/h arrival time would read 600."""
+        stamp = 1000
+        self.w.track_speed(self.a, tuple(self.pos), stamp, (0, 0))
+        for _ in range(8):
+            self.clock.t += 1.2
+            self.pos[0] += 400 / 3.6 * 1.8
+            stamp += 1800
+            self.w.track_speed(self.a, tuple(self.pos), stamp, (0, 0))
+        self.assertIsNone(self.a.kick_reason)
+        self.assertAlmostEqual(self.a.top_kmh, 400, delta=1)
+
+    def test_a_teleport_or_universe_change_restarts_the_measure(self):
+        stamp = self.stamped(2, 100, 1000)
+        self.pos[0] += 9000.0
+        self.clock.t += 1.0
+        self.w.track_speed(self.a, tuple(self.pos), stamp + 1000, (1, 0))
+        self.clock.t += 1.0
+        self.pos[0] += 9000.0
+        self.w.track_speed(self.a, tuple(self.pos), stamp + 2000, (1, 3))
+        self.assertLess(self.a.top_kmh, 150)
+
+    def test_a_clock_step_is_not_a_speed(self):
+        stamp = self.stamped(2, 100, 1000)
+        self.stamped(1, 100, stamp + 60000)
+        self.stamped(3, 100, stamp + 61000)
+        self.assertLess(self.a.top_kmh, 110)
+
+    def test_a_clock_wrap_is_handled(self):
+        self.stamped(4, 100, 0xFFFFF000)
+        self.assertAlmostEqual(self.a.top_kmh, 100, delta=1)
+
+    def test_a_car_above_the_cap_on_its_own_clock_is_still_caught(self):
+        self.stamped(6, 500, 1000)
+        self.assertIn("speed", self.a.kick_reason)
+
+    def test_spin_is_logged_once_and_changes_nothing(self):
+        logs = []
+        self.w.log = logs.append
+        word = int(9.0 / 10.0 * 0x7FFF)
+        for _ in range(3):
+            self.w.track_spin(self.a, word << S.CAR_SPIN_OFFSET)
+        self.assertEqual(len([m for m in logs if m.startswith("SPIN")]), 1)
+        self.assertIsNone(self.a.kick_reason)
+
+    def test_a_normal_spin_is_quiet(self):
+        logs = []
+        self.w.log = logs.append
+        self.w.track_spin(self.a, int(3.0 / 10.0 * 0x7FFF) << S.CAR_SPIN_OFFSET)
+        self.assertEqual(logs, [])
 
     def test_a_legal_speed_is_left_alone(self):
         self.drive(10, dx_kmh=300)

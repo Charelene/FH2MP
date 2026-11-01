@@ -13,6 +13,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db  # noqa: E402
 import drivatar  # noqa: E402
+from test_ghost_check import honest  # noqa: E402
 import notifstore  # noqa: E402
 import scoreboard  # noqa: E402
 
@@ -195,7 +196,7 @@ class ScoreTests(Base):
     def test_top_player_races_their_own_ghost(self):
         for xuid, t in ((10, 60.0), (11, 70.0)):
             self.sc.submit(xuid, "p%d" % xuid, 1, sub(t, sb=3))
-            self.sc.attach_ghost(self.sc.db.one("SELECT score_id FROM score_submissions WHERE xuid=?", (xuid,))[0], b"g", xuid)
+            self.sc.attach_ghost(self.sc.db.one("SELECT score_id FROM score_submissions WHERE xuid=?", (xuid,))[0], honest(score=t), xuid)
         args = (3, 1, 7, 1)
         self.assertEqual(self.sc.rival_for(11, *args)["xuid"], 10)                    # the row just above
         self.assertEqual(self.sc.rival_for(10, *args)["xuid"], 10)                    # #1: nobody above, so their own best

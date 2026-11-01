@@ -235,6 +235,9 @@ RACE_LAST_FINISHER_SECONDS = 30.0   # after the first finisher the others get th
 CAR_PREDICTION_BODY_BITS = 710      # CarPredictionFull body, see the handler
 CAR_UNIVERSE_OFFSET = 395          # CarPredictionState +0x33, five bits; confirmed chain in docs/protocol.md
 CAR_UNIVERSE_MASK = 31 << CAR_UNIVERSE_OFFSET
+CAR_TELEPORT_OFFSET = 392          # packed 0x31, two bits, 1..3 cycling on a teleport (AdvanceTeleportCounter 0x12e3200)
+CAR_SPIN_OFFSET = 0x12 * 8          # packed 0x12 of the state, 3 x int16 over +-10 rad/s (docs/exe/netv2.md 7.2)
+SPIN_LIMIT = 6.0                   # rad/s: the game clamps every substep (0x12e7170), so more means changed physics [log only until seen on real clients]
 CAR_POLICY = os.environ.get("FH2MP_CAR_POLICY", "kick")   # a car in BLOCKED_CARS (traffic vehicles): off = ignore, log = report it, kick = withhold it and end the account's connections
 PART_POLICY = os.environ.get("FH2MP_PART_POLICY", "fix").strip().lower()  # fix / kick / fix+kick / log / off
 if PART_POLICY not in {"fix", "kick", "fix+kick", "log", "off"}:
@@ -242,6 +245,7 @@ if PART_POLICY not in {"fix", "kick", "fix+kick", "log", "off"}:
 UNKNOWN_CAR_POLICY = os.environ.get("FH2MP_UNKNOWN_CAR_POLICY", "standin")   # a car that is in neither the game data, the synced car database nor data/dlc_cars.txt (a car pack the server does not have): standin = the others see STANDIN_CAR / off / log / kick
 TEST_CAR = int(os.environ.get("FH2MP_TEST_CAR", "0") or 0)    # dev test only: every relayed car is shown to the others as this car (stock parts)
 RENTAL_CLASS_ID = 7                  # CarClasses 7 = R: what a rental's PlayerChoices carry (the grid showed "R 999"), never a real car's class
+RENTAL_PI = 0.99995
 STANDIN_CAR = int(os.environ.get("FH2MP_STANDIN_CAR", "1215"))    # NUL_Car_00: the game's own placeholder car (Data_Car 1215, media/cars/nul_car_00.zip)
 SPEED_POLICY = os.environ.get("FH2MP_SPEED_POLICY", "kick")   # speed check: off / log / kick. kick (default since 2026-10-22): a car held above HARD_CAP_KMH for SPEED_SECONDS is removed; the soft per-car limit stays log only
 CAR_CAPTURE = bool(os.environ.get("FH2MP_CAR_CAPTURE"))   # dev only: log every car object message and every speed measurement (ground truth for the checks)
@@ -254,7 +258,6 @@ TELEPORT_KMH = 1000.0               # an apparent speed above this is a respawn 
 CHEATER_POOL_HOURS = float(os.environ.get("FH2MP_CHEATER_POOL_HOURS", "24"))   # how long a kicked player is matched only with other kicked players
 VISIBILITY_CHECK_SECONDS = 10.0      # how often audit_visibility looks
 VISIBILITY_MIN_PREDICTIONS = 300     # car predictions (about half a minute of driving) before a missing car model is reported
-STAMP_RATE_SAMPLES = 400            # one-second windows measured before the prediction timestamp's rate is logged
 SPEED_SECONDS = 3.0                 # how long a speed must hold before it is reported
 FLIGHT_CLIMB_KMH = 150.0            # vertical speed a car cannot hold: a ramp jump decays under gravity within a second (v0 would have to be 250 km/h straight up)
 FLIGHT_SECONDS = 3.0                # climbing faster than that for this long = flying (reported 2026-10-22: F2GR, "literally flying")
@@ -1543,35 +1546,27 @@ class Server:
         self.log(f"CAR POLICY (log only): owner {peer.owner_id} xuid {peer.xuid:#x} uses car {mid} ({name}), which players cannot get")
         return False
 
-    def note_stamp_rate(self, ticks: float) -> None:
-        """The unit of the prediction timestamp is not recovered (docs/protocol.md): 32 bits, advancing with the game's network clock. Until it
-        is known the speed check keeps using arrival time, whose jitter (packets arrive bunched) is part of why 445 sessions in a day show more
-        than 400 km/h. This logs the median ticks per wall-clock second over STAMP_RATE_SAMPLES one-second windows (about 1000 would be
-        milliseconds) so one day of logs settles it; the speed check can then use the car's own clock."""
-        samples = self.__dict__.setdefault("stamp_rates", [])
-        samples.append(ticks)
-        if len(samples) >= STAMP_RATE_SAMPLES:
-            samples.sort()
-            self.log(f"STAMP RATE: prediction timestamp advances {samples[len(samples) // 2]:.1f} ticks per second (median of {len(samples)} "
-                     f"windows, p10 {samples[len(samples) // 10]:.1f}, p90 {samples[len(samples) * 9 // 10]:.1f})")
-            samples.clear()
-
-    def track_speed(self, peer: Peer, pos, stamp=None) -> None:
-        """Measure the car's speed from its relayed positions (about once a second, 3D distance over arrival time). `stamp` is the prediction's own
-        32-bit timestamp, used for now only to measure its rate (note_stamp_rate)."""
+    def track_speed(self, peer: Peer, pos, stamp=None, scene=None) -> None:
+        """Measure the car's speed from its relayed positions, about once a second: 3D distance over the car's own clock. `stamp` is the prediction's
+        timestamp, milliseconds on the network clock (0x140e740; 1000.0 ticks/s on prod), so packets that arrive bunched no longer read as speed: arrival
+        time gave 445 sessions a day above 400 km/h. `scene` is its teleport counter and universe, which change exactly when the position is allowed to jump."""
         now = time.monotonic()
         ref = peer.speed_ref
-        if ref is None or now - ref[0] > 5.0:
-            peer.speed_ref, peer.hard_s, peer.soft_s = (now, pos, stamp), 0.0, 0.0
+        if ref is None or now - ref[0] > 5.0 or scene != ref[3]:
+            peer.speed_ref, peer.hard_s, peer.soft_s = (now, pos, stamp, scene), 0.0, 0.0
             return
-        dt = now - ref[0]
+        wall = now - ref[0]
+        dt = wall
+        if stamp is not None and ref[2] is not None:
+            dt = ((stamp - ref[2] + 0x80000000) & 0xFFFFFFFF) - 0x80000000
+            dt /= 1000.0
+            if not 0.5 * wall <= dt <= 2.0 * wall:      # the client's clock was re-based (TimeSync) or the packets are out of order
+                if wall >= 1.0:
+                    peer.speed_ref = (now, pos, stamp, scene)
+                return
         if dt < 1.0:
             return
-        if stamp is not None and len(ref) > 2 and ref[2] is not None:
-            ticks = (stamp - ref[2]) & 0xFFFFFFFF
-            if 0 < ticks < 0x80000000:
-                self.note_stamp_rate(ticks / dt)
-        peer.speed_ref = (now, pos, stamp)
+        peer.speed_ref = (now, pos, stamp, scene)
         d = math.dist(pos, ref[1])
         kmh = 3.6 * d / dt
         if not math.isfinite(kmh) or kmh > TELEPORT_KMH:
@@ -1602,6 +1597,16 @@ class Server:
         if peer.soft_s >= SPEED_SECONDS and "soft" not in peer.speed_flagged:
             peer.speed_flagged.add("soft")
             self.log(f"SPEED (log only): owner {peer.owner_id} xuid {peer.xuid:#x} car {peer.model_id} (stock {stock} km/h) drove {kmh:.0f} km/h for {peer.soft_s:.0f} s (soft limit {soft:.0f})")
+
+    def track_spin(self, peer: Peer, rest: int) -> None:
+        """Log only: the car's angular velocity against the game's own clamp."""
+        if "spin" in peer.speed_flagged:
+            return
+        words = [(rest >> (CAR_SPIN_OFFSET + 16 * i)) & 0xFFFF for i in range(3)]
+        spin = max(abs(w - 0x10000 if w & 0x8000 else w) for w in words) * 10.0 / 0x7FFF
+        if spin > SPIN_LIMIT + 0.5:
+            peer.speed_flagged.add("spin")
+            self.log(f"SPIN (log only): owner {peer.owner_id} xuid {peer.xuid:#x} car {peer.model_id}: {spin:.1f} rad/s on one axis (game clamp {SPIN_LIMIT:.0f})")
 
     def check_parts(self, peer: Peer, size: int, payload: int, oid=0):
         """Decode before validating; return (violation, withhold, size, payload).
@@ -1823,6 +1828,9 @@ class Server:
             if not self.rented(cls, pi):
                 peer.choices = (cls if cls is not None else (peer.choices or (None,))[0], pi)
                 return payload
+            if cls == RENTAL_CLASS_ID and pi < RENTAL_PI:
+                # DetectPerformanceTampering 0xf58a90 writes class 7, PI 0.9999; the one real rental capture sent 1.000. Logged before rented() relies on it.
+                self.log(f"{peer.addr[1]} class R with PI bits {struct.pack('<f', pi).hex()} ({pi:.5f}), car {car}: tamper marker or an unusual rental")
             if cls != want[0] or abs(pi - want[1]) > 0.002:
                 self.correct_owner_choices(peer, *want)
                 self.log(f"{peer.addr[1]} RENTAL: owner {peer.owner_id} car {car} sent class {cls} PI {pi:.3f}, shown as class {want[0]} PI {want[1]:.3f}")
@@ -3195,7 +3203,11 @@ class Server:
                     self.log(f"{addr[1]} car prediction #{peer.cars_relayed} flags={a}{b} id={cid} "
                              f"rest={rest_bits} bits -> {len(self.others(peer))} peer(s){ps}")
                 if pos is not None and a == 0 and b == 0 and SPEED_POLICY != "off" and math.isfinite(far):
-                    self.track_speed(peer, pos, (rest >> (CAR_PREDICTION_BODY_BITS - 32)) if rest_bits == CAR_PREDICTION_BODY_BITS else None)
+                    whole = rest_bits == CAR_PREDICTION_BODY_BITS
+                    self.track_speed(peer, pos, (rest >> (CAR_PREDICTION_BODY_BITS - 32)) if whole else None,
+                                     ((rest >> CAR_TELEPORT_OFFSET) & 3, (rest >> CAR_UNIVERSE_OFFSET) & 31) if whole else None)
+                    if whole:
+                        self.track_spin(peer, rest)
                 if peer.cars_relayed % 20 == 1 and pos is not None:
                     self.note("car", peer.owner_id, f"pos=({pos[0]:.0f},{pos[1]:.0f},{pos[2]:.0f}) id={cid}")
                 if a == 0 and b == 0 and not peer.kick_reason:
