@@ -453,6 +453,17 @@ class LspTests(unittest.TestCase):
         self.assertIn("1.1.2", params["Message"])
         self.assertEqual(L.NOTIF.visible(0), L.NOTIF.visible(0))           # nothing was stored for anybody
 
+    def test_a_banned_player_reads_the_end_date_and_reason_in_the_messages_tab(self):
+        out = L.ban_notice(L.auth.ban_message("Cheating in Monthly Rivals", 1793646495))
+        _result, _error, n = struct.unpack(">III", out[:12])
+        _name, rf = L.find_struct("Xls.WebServices.Notifications", "RetrieveForUser", "_Results")
+        res, rest = xls.decode(L.SC, rf, out[12 + n:])
+        self.assertEqual(rest, 0)
+        self.assertEqual([r["notificationType"] for r in res["results"]], [0x602])
+        params, _ = xls.decode(L.SC, L.notif_fields(0x602), bytes(res["parameterBlock"]))
+        self.assertIn("banned until 2026-11-02", params["Message"])
+        self.assertIn("Cheating in Monthly Rivals", params["Message"])
+
     def retrieve(self, **limits):
         for i in range(limits.pop("rows")):
             L.NOTIF.add(f"news {i}", "", 0x200)
