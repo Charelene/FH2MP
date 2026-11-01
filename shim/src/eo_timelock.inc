@@ -1,5 +1,5 @@
-/* FH2 Extra Options' Weather Control plugin (EO_WeatherControl.dll 1.0.4, EO 0.4.4) holds the free-roam clock and weather. EO ships it with
- * [TimeLock] Enabled=1, Hour=20:00. Its TimeOfDay::Update hook has no online check: while enabled it re-locks any running clock through
+/* FH2 Extra Options' Weather Control plugin (EO_WeatherControl.dll 1.0.4, EO 0.4.4) holds the free-roam clock and weather. The 0.4.4 zip the launcher
+ * pins has [TimeLock] Enabled=1, Hour=20:00 in its ini. The plugin's TimeOfDay::Update hook has no online check: while enabled it re-locks any running clock through
  * game+0x197aec0, which clears the network-sync flag +0x361, and turning it off starts the clock again without setting that flag back.
  * So a client that joins with the lock on stays at its own time, whatever the session says (issue 71).
  * While a session exists the two settings are parked here in the plugin's memory, not in its ini, so the player's choice is back after
