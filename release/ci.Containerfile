@@ -14,7 +14,7 @@ RUN set -eux; \
     apt-get -o Acquire::Retries=3 update; \
     apt-get install -y --no-install-recommends \
         postgresql-16 \
-        git gcc libc6-dev wine wine64 gcc-mingw-w64-x86-64 \
+        git gcc libc6-dev wine wine64 gcc-mingw-w64-x86-64 imagemagick \
         libegl1 libgl1 libfontconfig1 libdbus-1-3 libglib2.0-0 libxkbcommon0 libxkbcommon-x11-0 \
         libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0; \
     rm -rf /var/lib/apt/lists/* /tmp/pgdg.asc

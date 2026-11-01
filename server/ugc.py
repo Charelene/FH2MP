@@ -14,7 +14,9 @@ live traffic, so every blob and versioned row keeps whatever the client sent.
 """
 import json
 import lzma
+import shutil
 import struct
+import subprocess
 import time
 import zlib
 
@@ -38,6 +40,59 @@ MAX_UNPACKED = 32 << 20  # largest value unpack() will expand (twice the biggest
 
 
 CONTENT_KINDS = ("photo", "replay")     # storefront kinds whose payload is uploaded with UploadContent under the file id
+
+
+PHOTO_SIZE = (1920, 1080)         # the Xbox One's native photo size: the game shows a photo of any other size cropped
+PHOTO_MAX_DIM = 8192              # larger uploads are left alone (the resizer would need too much memory)
+PHOTO_QUALITY = 90
+PHOTO_TIMEOUT = 30
+
+
+def jpeg_size(data):
+    """(width, height) from the first start-of-frame marker of a JPEG, None for anything that is not a well-formed JPEG header."""
+    data = bytes(data)
+    if data[:3] != b"\xff\xd8\xff":
+        return None
+    i = 2
+    try:
+        while i + 4 <= len(data):
+            if data[i] != 0xFF:
+                return None
+            m = data[i + 1]
+            if m == 0xFF:
+                i += 1
+                continue
+            if m in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                h, w = struct.unpack(">HH", data[i + 5:i + 9])
+                return (w, h) if w and h else None
+            if m in (0xD8, 0x01) or 0xD0 <= m <= 0xD7:
+                i += 2
+                continue
+            i += 2 + struct.unpack(">H", data[i + 2:i + 4])[0]
+    except struct.error:
+        pass
+    return None
+
+
+def photo_1080p(data):
+    """A photo upload as 1920x1080 JPEG. The game saves photos at the player's render resolution but shows them for a 1080p screen, so a
+    photo of any other size appears cropped to every viewer. Other aspect ratios are scaled to cover the frame and cut in the middle.
+    Returns `data` unchanged when it already has that size, is not a JPEG (or is implausibly large) or ImageMagick is missing or fails."""
+    size = jpeg_size(data)
+    if size is None or size == PHOTO_SIZE or max(size) > PHOTO_MAX_DIM:
+        return data
+    tool = shutil.which("magick") or shutil.which("convert")
+    if tool is None:
+        return data
+    w, h = PHOTO_SIZE
+    # `jpeg:` pins the decoder to JPEG, whatever the bytes claim to be
+    cmd = [tool, "-limit", "memory", "512MiB", "-limit", "map", "512MiB", "-limit", "disk", "0", "jpeg:-", "-auto-orient", "-strip",
+           "-resize", f"{w}x{h}^", "-gravity", "center", "-extent", f"{w}x{h}", "-quality", str(PHOTO_QUALITY), "jpeg:-"]
+    try:
+        out = subprocess.run(cmd, input=bytes(data), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=PHOTO_TIMEOUT, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return data
+    return out if jpeg_size(out) == PHOTO_SIZE and len(out) <= MAX_BLOB_SIZE else data
 
 
 def pack(b):
@@ -144,17 +199,20 @@ class UgcStore:
             return c.execute("INSERT INTO ugc_blobs (owner, user_file_name, total_size, received, data, created) VALUES (?,?,?,0,?,?)",
                              (owner, name or "", total, b"", time.time())).lastrowid
 
-    def blob_write(self, blob_id, offset, data, owner):
+    def blob_write(self, blob_id, offset, data, owner, finish=None):
         """Writes a chunk at `offset` into a blob of `owner`; returns the number of bytes received so far (None for an unknown id or
         somebody else's blob). The chunk, its offset and the end of the write are checked against the declared total size BEFORE
-        any buffer is allocated."""
+        any buffer is allocated. `finish(bytes) -> bytes` converts the completed blob before it counts as complete (so nobody is served
+        the original); a blob and its listing then carry the converted size, the return value still counts the uploaded bytes."""
         offset = int(offset)
         if offset < 0 or len(data) > MAX_CHUNK:
             raise LimitError("bad upload chunk")
         with self.db.tx() as c:
-            r = c.execute("SELECT data, total_size FROM ugc_blobs WHERE id=? AND owner=?", (blob_id, owner)).fetchone()
+            r = c.execute("SELECT data, total_size, received FROM ugc_blobs WHERE id=? AND owner=?", (blob_id, owner)).fetchone()
             if r is None:
                 return None
+            if finish is not None and int(r["received"]) >= int(r["total_size"]):
+                return int(r["received"])             # a repeated last chunk: the stored blob is already converted
             if offset + len(data) > min(int(r["total_size"]), MAX_BLOB_SIZE):
                 raise LimitError("upload chunk beyond the declared size")
             buf = bytearray(unpack(r["data"]))
@@ -162,9 +220,15 @@ class UgcStore:
                 buf.extend(b"\0" * (offset - len(buf)))
             buf[offset:offset + len(data)] = data
             done = len(buf) >= int(r["total_size"])
+            uploaded = len(buf)
+            if done and finish is not None:
+                buf = bytearray(finish(bytes(buf)))
+                if len(buf) != uploaded:
+                    c.execute("UPDATE ugc_blobs SET total_size=? WHERE id=? AND owner=?", (len(buf), blob_id, owner))
+                    c.execute("UPDATE ugc_files SET payload_size=? WHERE blob_id=?", (len(buf), blob_id))
             n = c.execute("UPDATE ugc_blobs SET data=?, received=? WHERE id=? AND owner=?",
                           ((pack if done else pack_stored)(bytes(buf)), len(buf), blob_id, owner)).rowcount
-            return len(buf) if n else None
+            return uploaded if n else None
 
     def blob_read(self, blob_id, offset, size):
         """(chunk, is_last, total) or None."""
@@ -181,6 +245,9 @@ class UgcStore:
         r = self.db.one(f"SELECT blob_id FROM ugc_files WHERE id=? AND kind IN ({','.join('?' * len(CONTENT_KINDS))}) AND blob_id IS NOT NULL",
                         (content_id, *CONTENT_KINDS))
         return r["blob_id"] if r else content_id
+
+    def is_photo(self, content_id):
+        return self.db.one("SELECT 1 FROM ugc_files WHERE id=? AND kind='photo' AND blob_id IS NOT NULL", (content_id,)) is not None
 
     def blob_by_name(self, owner, name):
         r = self.db.one("SELECT id, data FROM ugc_blobs WHERE owner=? AND user_file_name=? ORDER BY id DESC LIMIT 1", (owner, name))
@@ -345,6 +412,21 @@ class UgcStore:
                 if new != old:
                     c.execute("UPDATE ugc_versioned SET data=? WHERE id=?", (pack(new), r["id"]))
                     n += 1
+        return n
+
+    def repair_photos(self):
+        """Converts completed photo uploads that are not 1920x1080 yet (see photo_1080p). Returns the number of photos rewritten."""
+        n = 0
+        for r in self.db.query("SELECT f.id AS fid, b.id AS bid, b.data FROM ugc_files f JOIN ugc_blobs b ON b.id = f.blob_id "
+                               "WHERE f.kind='photo' AND b.received >= b.total_size AND b.total_size > 0"):
+            old = unpack(r["data"])
+            new = photo_1080p(old)
+            if new == old:
+                continue
+            with self.db.tx() as c:
+                c.execute("UPDATE ugc_blobs SET data=?, total_size=?, received=? WHERE id=?", (pack(new), len(new), len(new), r["bid"]))
+                c.execute("UPDATE ugc_files SET payload_size=? WHERE id=?", (len(new), r["fid"]))
+            n += 1
         return n
 
     def stored_bytes(self):

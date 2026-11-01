@@ -863,7 +863,8 @@ def content_upload(req):
     xuid, _ = _me()
     data = bytes(req["uploadData"])
     try:
-        got = UGC.blob_write(UGC.content_blob(req["contentId"]), req["payloadOffset"], data, owner=xuid)
+        got = UGC.blob_write(UGC.content_blob(req["contentId"]), req["payloadOffset"], data, owner=xuid,
+                             finish=ugc.photo_1080p if UGC.is_photo(req["contentId"]) else None)
     except ugc.LimitError as e:
         raise XlsError(str(e))
     log(f"  Content.UploadContent id={req['contentId']} @{req['payloadOffset']} +{len(data)} of {req['payloadTotalSize']}: "
@@ -2713,6 +2714,9 @@ def setup(dsn=None):
     fixed = UGC.repair_liveries()
     if fixed:
         log(f"user content: repaired {fixed} livery row(s) stored with the old upload prefix")
+    fixed = UGC.repair_photos()
+    if fixed:
+        log(f"user content: converted {fixed} photo(s) to 1920x1080")
     b0, b1 = UGC.recompress()
     log(f"user content: {UGC.count()} files, {UGC.stored_bytes()} bytes stored" + (f" (recompressed {b0} -> {b1})" if b0 else ""))
     log(f"{NOTIF.count()} notifications")

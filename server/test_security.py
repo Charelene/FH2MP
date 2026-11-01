@@ -384,6 +384,12 @@ class FakeDb:
         if sql.startswith("SELECT data, total_size"):
             r = self.rows.get(p[0])
             return self.R([r] if r and r["owner"] == p[1] else [])
+        if sql.startswith("UPDATE ugc_blobs SET total_size"):
+            self.rows[p[1]]["total_size"] = p[0]
+            return self.R(rowcount=1)
+        if sql.startswith("UPDATE ugc_files SET payload_size"):
+            self.listed = (p[1], p[0])
+            return self.R(rowcount=1)
         if sql.startswith("UPDATE"):
             r = self.rows.get(p[2])
             if r and r["owner"] == p[3]:
@@ -391,6 +397,67 @@ class FakeDb:
                 return self.R(rowcount=1)
             return self.R()
         raise AssertionError(sql)
+
+
+def make_jpeg(w, h):
+    """A w x h JPEG made by ImageMagick (None when it is not installed)."""
+    import shutil
+    import subprocess
+    tool = shutil.which("magick") or shutil.which("convert")
+    if tool is None:
+        return None
+    return subprocess.run([tool, "-size", f"{w}x{h}", "gradient:red-blue", "jpeg:-"], stdout=subprocess.PIPE, check=True).stdout
+
+
+class PhotoSize(unittest.TestCase):
+    """The game shows photos for a 1080p screen: a photo saved at another render resolution is shown cropped, so uploads are converted."""
+
+    def test_jpeg_size_reads_the_frame_header_only(self):
+        jpg = make_jpeg(320, 200)
+        if jpg is None:
+            self.skipTest("ImageMagick not installed")
+        self.assertEqual(ugc.jpeg_size(jpg), (320, 200))
+        for bad in (b"", b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"\xff\xd8\xff\xe0\x00\x02", jpg[:10]):
+            self.assertIsNone(ugc.jpeg_size(bad))
+
+    def test_other_sizes_become_1080p(self):
+        for w, h in ((1280, 720), (2560, 1440), (1920, 1200), (3440, 1440)):
+            jpg = make_jpeg(w, h)
+            if jpg is None:
+                self.skipTest("ImageMagick not installed")
+            out = ugc.photo_1080p(jpg)
+            self.assertEqual(ugc.jpeg_size(out), (1920, 1080), (w, h))
+
+    def test_left_alone_when_nothing_to_do(self):
+        jpg = make_jpeg(1920, 1080)
+        if jpg is None:
+            self.skipTest("ImageMagick not installed")
+        self.assertIs(ugc.photo_1080p(jpg), jpg)
+        for data in (b"\x89PNG\r\n\x1a\nimage", b"random bytes", b""):
+            self.assertIs(ugc.photo_1080p(data), data)
+        small = make_jpeg(1280, 720)
+        with mock.patch("ugc.shutil.which", return_value=None):
+            self.assertIs(ugc.photo_1080p(small), small)                         # no resizer: the upload is kept as it is
+        with mock.patch("ugc.subprocess.run", side_effect=OSError):
+            self.assertIs(ugc.photo_1080p(small), small)
+
+    def test_upload_is_converted_before_it_counts_as_complete(self):
+        small = make_jpeg(1280, 720)
+        if small is None:
+            self.skipTest("ImageMagick not installed")
+        s = ugc.UgcStore(FakeDb())
+        bid = s.blob_create(1, "", len(small))
+        half = len(small) // 2
+        self.assertEqual(s.blob_write(bid, 0, small[:half], owner=1, finish=ugc.photo_1080p), half)
+        self.assertEqual(s.db.rows[bid]["total_size"], len(small))              # still the declared size while uploading
+        self.assertEqual(s.blob_write(bid, half, small[half:], owner=1, finish=ugc.photo_1080p), len(small))   # the client sees its own count
+        row = s.db.rows[bid]
+        stored = ugc.unpack(row["data"])
+        self.assertEqual(ugc.jpeg_size(stored), (1920, 1080))
+        self.assertEqual((row["total_size"], row["received"]), (len(stored), len(stored)))   # complete = listed with the new size
+        self.assertEqual(s.db.listed, (bid, len(stored)))
+        self.assertEqual(s.blob_write(bid, half, small[half:], owner=1, finish=ugc.photo_1080p), len(stored))   # a repeated last chunk
+        self.assertEqual(ugc.unpack(s.db.rows[bid]["data"]), stored)
 
 
 class VersionedDb:
