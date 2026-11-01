@@ -4244,6 +4244,7 @@ class Hub:
             self.tunnel = tunnel_mod.Tunnel(tport, log=self.log, admit=self.tunnel_admit, on_open=self.tunnel_open, on_close=self.tunnel_close)
         self.mux = tunnel_mod.MuxSock(self.sock, self.tunnel)
         self.idle = Server(port, None, sock=self.mux, log_file=self.log_file, tag="[idle] ", events=self.events)
+        diag.set_sink(lambda level, sub, msg: self.idle.log(msg, level, sub))          # modules with a diag.get() logger write to this log
         self.idle.is_idle = True
         self.idle.log(f"hub listening on udp/{port}, control udp/{self.ctl.getsockname()[1] if self.ctl else '-'}"
                       + (f", tunnel tcp/{self.tunnel.port}" if self.tunnel else ""))

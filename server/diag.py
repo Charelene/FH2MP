@@ -87,3 +87,51 @@ def where(exc):
 def stack(exc, limit=12):
     """The traceback as one indented block (for ERROR lines and the log file, never for a hot path)."""
     return scrub("".join(traceback.format_exception(type(exc), exc, exc.__traceback__, limit=-limit)).rstrip())
+
+
+# ---- modules that have no log function of their own (parts.py, xbl.py, scoreboard.py, ...): `LOG = diag.get("parts")`, then
+# LOG.warn("..."), LOG.exc("what was being done", exc). The process (game server, LSP) points the sink at its own log; until then lines go to stdout.
+_sink = None
+
+
+def set_sink(fn):
+    """fn(level, sub, message) writes the line; the game server and the LSP call this once at start."""
+    global _sink
+    _sink = fn
+
+
+class Logger:
+    def __init__(self, sub):
+        self.sub = sub
+
+    def _emit(self, level, msg):
+        if _sink is not None:
+            _sink(level, self.sub, msg)
+        elif VERBOSITY_DEFAULT.enabled(level, self.sub):
+            print(f"{time.strftime('%H:%M:%S')} {'' if level == 'INFO' else level + ' '}{scrub(msg)}", flush=True)
+
+    def debug(self, msg):
+        self._emit("DEBUG", f"{self.sub}: {msg}")
+
+    def info(self, msg):
+        self._emit("INFO", f"{self.sub}: {msg}")
+
+    def warn(self, msg):
+        self._emit("WARN", f"{self.sub}: {msg}")
+
+    def error(self, msg):
+        self._emit("ERROR", f"{self.sub}: {msg}")
+
+    def exc(self, msg, exc, level="ERROR"):
+        """A caught exception: what was being done, then type, message and the innermost frame; the stack follows at ERROR."""
+        self._emit(level, f"{self.sub}: {msg}: {where(exc)}")
+        if level == "ERROR":
+            for row in stack(exc).splitlines():
+                self._emit("ERROR", "  " + row)
+
+
+VERBOSITY_DEFAULT = Verbosity()
+
+
+def get(sub):
+    return Logger(sub)
