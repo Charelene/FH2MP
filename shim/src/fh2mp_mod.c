@@ -246,7 +246,7 @@ static int line_has(const char *l, int n, const char *pat)
 static int line_wanted(const char *l, int n)
 {
     static const char *const keep[] = {"attached", "session:", "identity:", "late:", "not patched", "NOT ", "unexpected", "fail", "error", "could not",
-                                       "refus", "crash", "xsbody", "xstoken", "mmtimeout", "mmtoast", "online-setup", "bindfix", "gamedb:", "timelock:", "rivalsleave", "bucketcars", "matchpoll", "sample", "carprobe", "probe:", "lighting:", 0};
+                                       "refus", "crash", "xsbody", "xstoken", "mmtimeout", "mmtoast", "online-setup", "bindfix", "gamedb:", "timelock:", "rivalsleave", "bucketcars", "matchpoll", "sample", "carprobe", "probe:", "lighting:", "grid:", 0};
     int i;
     for (i = 0; keep[i]; i++) {
         if (line_has(l, n, keep[i])) {
@@ -1593,9 +1593,10 @@ static int patch_match_poll(void)
             done++;
         }
     }
-    log_begin();
-    log_raw(done == 3 ? "matchpoll: the game polls a match ticket every 0.5 s instead of every 5 s\n"
-                      : "matchpoll: unexpected bytes at the ticket poll timers, not patched\n");
+    if (done != 3) {
+        log_begin();
+        log_raw("matchpoll: unexpected bytes at the ticket poll timers, not patched\n");
+    }
     return done == 3;
 }
 
@@ -1631,9 +1632,10 @@ static int patch_mm_timeouts(void)
          plat_patch("mmtimeout: second-state limit of the match request 30 s -> 3 s", img + FH2_MMTIMEOUT_B_RVA + 1, b_old + 1, b_new + 1, 4))) {
         done++;
     }
-    log_begin();
-    log_raw(done == 2 ? "mmtimeout: a match request that waits for an event that never comes gives up after 3 s, not 10 s / 30 s\n"
-                      : "mmtimeout: unexpected bytes in the match request tick, not patched\n");
+    if (done != 2) {
+        log_begin();
+        log_raw("mmtimeout: unexpected bytes in the match request tick, not patched\n");
+    }
     return done == 2;
 }
 
@@ -1667,8 +1669,10 @@ static int patch_mm_failed_toast(void)
             done++;
         }
     }
-    log_begin();
-    log_raw(done == 2 ? "mmtoast: the \"matchmaking failed, lost Xbox Live\" toast is off\n" : "mmtoast: unexpected bytes at the failure handler, not patched\n");
+    if (done != 2) {
+        log_begin();
+        log_raw("mmtoast: unexpected bytes at the failure handler, not patched\n");
+    }
     return done == 2;
 }
 
@@ -1844,8 +1848,6 @@ static int patch_same_session(void)
         log_raw("samesession: the session validation handler was not patched\n");
         return 0;
     }
-    log_begin();
-    log_raw("samesession: a found session with the same name as the remembered one is joined instead of ignored\n");
     return 1;
 }
 
@@ -2340,6 +2342,7 @@ static int patch_online_meet(void)
 #include "game_image.inc"
 #include "xsapi_image.inc"
 #include "net_string_guard.inc"
+#include "grid_trace.inc"
 #include "torque_load_guard.inc"
 
 static int patch_torque_load(void)
@@ -2592,9 +2595,7 @@ static int patch_xsapi_token(void)
         log_raw("xstoken: the XSAPI token functions were not patched\n");
         return 2;
     }
-    log_begin();
     g_xs_hooked_at = GetTickCount();
-    log_raw("xstoken: XSAPI GetTokenAndSignature(+ForAllUsers) now return a placeholder token\n");
     return 1;
 }
 
@@ -3187,7 +3188,7 @@ static const char RIVALS_LAUNCH_NEW[] =
 /* One exact replacement in a file of one of the game's media zips (stateflow.zip, UI.zip), handed to the platform (set_file <set_path>).
  * Nothing is changed unless the old text occurs exactly once. `tag` starts the log lines. */
 static int stateflow_replace(const WCHAR *zip_name, const char *file, const char *set_path, const char *old, size_t olen, const char *neu, size_t nlen,
-                             const char *tag, const char *done)
+                             const char *tag)
 {
     WCHAR zip[MAX_PATH];
     unsigned char *orig, *out;
@@ -3229,13 +3230,10 @@ static int stateflow_replace(const WCHAR *zip_name, const char *file, const char
     ok = g_api->set_file(g_mod, set_path, out, size - olen + nlen);
     HeapFree(GetProcessHeap(), 0, out);
     HeapFree(GetProcessHeap(), 0, orig);
+    if (ok) return ok;
     log_begin();
     log_raw(tag);
-    if (ok) {
-        log_raw(": ");
-        log_raw(done);
-        log_raw("\n");
-    } else {
+    {
         log_raw(": ");
         log_raw(file);
         log_raw(" was not changed (another mod replaces it, see fh2-mods\\platform.log)\n");
@@ -3246,7 +3244,7 @@ static int stateflow_replace(const WCHAR *zip_name, const char *file, const char
 static int stateflow_rivals_leave_session(void)
 {
     return stateflow_replace(L"\\media\\stateflow.zip", "global.xml", "stateflow/global.xml", RIVALS_LAUNCH_OLD, sizeof RIVALS_LAUNCH_OLD - 1, RIVALS_LAUNCH_NEW,
-                             sizeof RIVALS_LAUNCH_NEW - 1, "rivalsleave", "a Rival started inside an online session leaves the session first");
+                             sizeof RIVALS_LAUNCH_NEW - 1, "rivalsleave");
 }
 
 /*
@@ -3271,7 +3269,7 @@ static const char BUCKET_CARS_NEW[] =
 static int stateflow_bucket_cars_online(void)
 {
     return stateflow_replace(L"\\media\\stateflow.zip", "network.xml", "stateflow/network.xml", BUCKET_CARS_OLD, sizeof BUCKET_CARS_OLD - 1, BUCKET_CARS_NEW,
-                             sizeof BUCKET_CARS_NEW - 1, "bucketcars", "online Free Roam enables the bucket-list cars like offline Free Roam");
+                             sizeof BUCKET_CARS_NEW - 1, "bucketcars");
 }
 
 /*
@@ -5199,6 +5197,10 @@ static DWORD WINAPI late_init(LPVOID unused)
         {
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_NETSTRINGS", env, 8) == 0) patch_net_string_receivers();
+        }
+        {
+            wchar_t env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_GRIDTRACE", env, 8) == 0) patch_grid_trace();
         }
         {
             wchar_t it_env[8];

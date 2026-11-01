@@ -1140,7 +1140,5 @@ static int patch_xsapi_body(void)
             return 2;
         }
     }
-    log_begin();
-    log_raw("xsbody: XSAPI response bodies are now filled from the HTTP stream\n");
     return 1;
 }
