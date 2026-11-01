@@ -28,6 +28,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lighting
+import diag
 import event_log
 import probe  # noqa: E402
 import bucketlist  # noqa: E402
@@ -389,6 +390,8 @@ ROUTER_LIMITS = {1: (0x40, 1), 2: (0x40, 1), 3: (0x40, 1), 9: (13, 3), 12: (13, 
 SCORE_DOUBLES = {MSG_IN_PROGRESS_SCORE_UPDATE: 0, MSG_LAP_SCORE: 3, MSG_SCORE_KEYFRAME: 5}   # the game writes each as 8 bytes (FUN_14176abb0)
 RELAY_HISTORY_CAP = 8000       # stored messages per object, replayed to late joiners (compacted, see replay.py); a memory guard
 _log_day = None                # day of the year of the last log line (see Server.log)
+VERBOSITY = diag.Verbosity()   # FH2MP_LOG_LEVEL / FH2MP_LOG_SUB
+RATE = diag.RateLimit()        # Server.log_every
 # Outgoing messages are queued per client and sent together: one datagram per client every few ms instead of one per relayed car update.
 # On prod (2026-10-21, 72 players) half the server's time went into sendto (~12k datagrams/s), the receive queue overflowed and races rubberbanded.
 RELAY_FLUSH_SECONDS = float(os.environ.get("FH2MP_RELAY_FLUSH_MS", "10")) / 1000.0   # longest a relayed message waits for company
@@ -1876,10 +1879,14 @@ class Server:
                     shown += 1
                 self.log(f"WIPE:   {t - t0:+6.1f} s {kind:5s} owner {owner:3d} {detail}")
 
-    def log(self, msg: str) -> None:
+    def log(self, msg: str, level: str = "INFO", sub: str | None = None) -> None:
+        """One line. INFO has no level word (existing parsers); WARN / ERROR / DEBUG start with theirs. `sub` names the subsystem for
+        FH2MP_LOG_SUB. See diag.py."""
         global _log_day
+        if not VERBOSITY.enabled(level, sub):
+            return
         now = time.localtime()
-        line = f"{time.strftime('%H:%M:%S', now)} {self.tag}{msg}"
+        line = f"{time.strftime('%H:%M:%S', now)} {'' if level == 'INFO' else level + ' '}{self.tag}{diag.scrub(msg)}"
         if now.tm_yday != _log_day:
             # Lines carry only the time of day; a date line at start and at every midnight keeps a multi-day log unambiguous.
             _log_day = now.tm_yday
@@ -1888,6 +1895,28 @@ class Server:
             self.log_file.write(line + "\n")
         else:
             print(line, flush=True)
+
+    def warn(self, msg: str, sub: str | None = None) -> None:
+        self.log(msg, "WARN", sub)
+
+    def error(self, msg: str, sub: str | None = None) -> None:
+        self.log(msg, "ERROR", sub)
+
+    def debug(self, sub: str, msg: str) -> None:
+        self.log(msg, "DEBUG", sub)
+
+    def exc(self, msg: str, exc: BaseException, level: str = "ERROR") -> None:
+        """An exception that was caught: what was being done, then type, message and the innermost frame; the stack goes below it at ERROR."""
+        self.log(f"{msg}: {diag.where(exc)}", level)
+        if level == "ERROR" and VERBOSITY.enabled("ERROR"):
+            for row in diag.stack(exc).splitlines():
+                self.log("  " + row, "ERROR")
+
+    def log_every(self, key, interval: float, msg: str, level: str = "WARN", sub: str | None = None) -> None:
+        """A repeating condition: one line per `interval` seconds per key, saying how many it stood in for."""
+        ok, skipped = RATE.allow((self.tag, key), interval)
+        if ok:
+            self.log(msg + (f" (and {skipped} more in the last {interval:.0f} s)" if skipped else ""), level, sub)
 
     def send(self, peer: Peer, messages, fast: bool = False) -> None:
         """Queues messages (writers or baked) for one client; flush() sends them. An empty list still sends a datagram (an ack).
