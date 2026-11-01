@@ -85,6 +85,21 @@ class SchemaTests(Base):
         self.assertEqual(again.one("SELECT version FROM schema_version")[0], v)
         again.close()
 
+    def test_old_keyword_ids_move_to_the_new_lists(self):
+        def add(kind, k1, k2):
+            with self.db.tx() as c:
+                return c.execute("INSERT INTO ugc_files (kind, owner, created, keyword1, keyword2) VALUES (?,?,?,?,?)",
+                                 (kind, 1, 0.0, k1, k2)).lastrowid
+        # design: Drift(3) was a first-picker word, Cartoon(12) a second-picker one; both now sit in the lists the new ids say
+        a, b, c_, d = add("livery", 3, 12), add("livery", 2, 0), add("tune", 8, 13), add("photo", 15, 1)
+        with self.db._use() as conn:
+            db._remap_keywords(conn)
+        got = {i: tuple(self.db.one("SELECT keyword1, keyword2 FROM ugc_files WHERE id=?", (i,))) for i in (a, b, c_, d)}
+        self.assertEqual(got[a], (4, 19))         # Cartoon -> first picker (4), Drift -> second picker (19)
+        self.assertEqual(got[b], (0, 0))          # Rally has no counterpart
+        self.assertEqual(got[c_], (1, 13))        # Top Speed, Beginner
+        self.assertEqual(got[d], (4, 0))          # Sports -> Action takes the one first-picker slot
+
     def test_failed_tx_rolls_back(self):
         with self.assertRaises(RuntimeError):
             with self.db.tx() as c:

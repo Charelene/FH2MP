@@ -488,6 +488,17 @@ CREATE TABLE invites (
     """
     ALTER TABLE accounts ADD COLUMN ban_until DOUBLE PRECISION;
     """,
+    # 15: what a player did with a storefront file, once each: a download or a like counts one time per player and file (server/ugc.py record_action).
+    # The keyword ids change with it (_after_migration): the lists follow Forza Horizon 4's
+    """
+    CREATE TABLE ugc_actions (
+        file_id BIGINT NOT NULL,
+        xuid    BIGINT NOT NULL,
+        action  TEXT   NOT NULL,                  -- download | like
+        at      DOUBLE PRECISION NOT NULL,
+        PRIMARY KEY (file_id, xuid, action)
+    )
+    """,
 ]
 
 ADVISORY_LOCK = 7240001          # serialises write transactions (see tx)
@@ -757,7 +768,33 @@ class _Tx:
         return self._db._exec(self._conn, sql, args)
 
 
+# Migration 15: the old keyword ids (positions in the old lists) -> positions in the lists of fh2mp_lsp.KEYWORD_LISTS. A keyword the new list has no
+# word for becomes "none" (0). `first` is how many ids the first picker (keyword1) holds in the new list of that kind.
+_KEYWORD_REMAP = {
+    # kind: (first, {old id: new id})
+    "livery": (9, {1: 1, 3: 19, 4: 14, 5: 13, 12: 4, 13: 15, 16: 11, 17: 2}),
+    "photo": (5, {1: 1, 15: 4}),
+    "tune": (7, {1: 6, 3: 4, 4: 5, 7: 3, 8: 1, 9: 7, 13: 13, 14: 15, 16: 6}),
+}
+
+
+def _remap_keywords(conn):
+    for kind, (first, ids) in _KEYWORD_REMAP.items():
+        rows = conn.execute("SELECT id, keyword1, keyword2 FROM ugc_files WHERE kind=%s AND (keyword1<>0 OR keyword2<>0)", (kind,)).fetchall()
+        for r in rows:
+            new1 = new2 = 0
+            for old in (r["keyword1"], r["keyword2"]):
+                n = ids.get(old, 0)
+                if n and n <= first and not new1:
+                    new1 = n
+                elif n > first and not new2:
+                    new2 = n
+            conn.execute("UPDATE ugc_files SET keyword1=%s, keyword2=%s WHERE id=%s", (new1, new2, r["id"]))
+
+
 def _after_migration(conn, version):
+    if version == 15:
+        _remap_keywords(conn)
     if version == 1:
         # notification ids must keep growing past anything a client has ever seen: start the sequence at the current time
         conn.execute("SELECT setval(pg_get_serial_sequence('notifications', 'id'), %s)", (int(time.time()) - 1,))

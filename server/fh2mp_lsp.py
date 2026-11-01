@@ -902,18 +902,29 @@ def _stamp(t):
     return scoreboard.iso(t)
 
 
-KEYWORDS = ("Racing", "Rally", "Drift", "Retro", "Classic", "Anime", "Sponsored", "Clean", "Camo", "Flames",
-            "Stripes", "Cartoon", "Movie", "Game", "Sports", "Original", "Tribute", "Police", "Tuner", "Art")
-TUNE_KEYWORDS = ("Road Racing", "Street", "Drift", "Drag", "Rally", "Off-Road", "Grip", "Top Speed", "Balanced", "Stable",
-                 "Loose", "Wet Weather", "Beginner", "Expert", "Stock Plus", "Clean Racing")
-KEYWORDS_BY_FILE_TYPE = {0: TUNE_KEYWORDS}      # the client asks per file type (0..4): 0 = tune and 2 = livery [both confirmed from Create calls];
-                                                # 1, 3 and 4 (other content kinds, vinyl groups among them) keep the generic list for now
+# Keyword lists as Forza Horizon 4 has them: per file type two pickers (bucket 0 and bucket 1), a file carries one keyword of each (KeywordOne /
+# KeywordTwo). The client's file types (its search switch, FUN_140e3bd10): 0 tune, 1 vinyl group, 2 design (livery), 3 replay, 4 photo. A keyword's id is
+# its position in the two lists together, starting at 1 (db.py _KEYWORD_REMAP maps the ids of the lists before these).
+KEYWORD_LISTS = {
+    0: (("Top Speed", "Off the Line", "Grip", "Drift", "Drag", "Circuit", "All Around"),
+        ("Best for Speed", "Good for Speed", "Average", "Best for Handling", "Good for Handling", "Beginner", "Novice", "Expert",
+         "Good All Around", "Close-Ratio Gearbox", "Wide-Ratio Gearbox")),
+    1: (("Logo", "Racing", "Replica", "Real World", "Cartoon", "Funny", "Abstract", "Fantasy", "Sci-Fi", "Anime"),
+        ("Realistic", "Manufacturer", "Original", "Team", "Character", "Scary", "Humorous", "Big", "Small", "Narrow", "Wide")),
+    2: (("Racing", "Replica", "Real World", "Cartoon", "Funny", "Abstract", "Fantasy", "Sci-Fi", "Photo"),
+        ("Realistic", "Original", "Team", "Classic", "Throwback", "Scene", "Character", "Scary", "Humorous", "Drift")),
+    3: (("Racing", "Rally", "Drift", "Retro", "Classic", "Anime", "Sponsored", "Clean", "Camo", "Flames"),      # replays: FH4 has none
+        ("Stripes", "Cartoon", "Movie", "Game", "Sports", "Original", "Tribute", "Police", "Tuner", "Art")),
+    4: (("Racing", "Scenery", "Group", "Action", "Humorous"), ("Filtered", "B&W", "Stylized", "Untouched")),
+}
+KEYWORDS = KEYWORD_LISTS[3][0] + KEYWORD_LISTS[3][1]          # a file type the client has not been seen to ask for
 FILE_KIND = {}          # the client's file type number -> kind, learned from Create calls
 
 
 def ugc_keywords(req):
-    words = KEYWORDS_BY_FILE_TYPE.get(req["fileType"], KEYWORDS)
-    return {"keywords": [{"Keyword": k, "KeywordId": i + 1, "Bucket": 0 if i < 10 else 1} for i, k in enumerate(words)][:req["maxKeywordResults"]]}
+    first, second = KEYWORD_LISTS.get(req["fileType"], (KEYWORDS, ()))
+    rows = [{"Keyword": k, "KeywordId": i + 1, "Bucket": 0 if i < len(first) else 1} for i, k in enumerate(first + second)]
+    return {"keywords": rows[:req["maxKeywordResults"]]}
 
 
 def _ordinal(f):
@@ -924,7 +935,7 @@ def _ordinal(f):
 
 def _light(f, tmpl):
     r = _clone(tmpl)
-    r.update({"Id": f["id"], "PopularityRating": min(f["likes"], 5), "Creator": _owner(tmpl["Creator"], f["owner"]),
+    r.update({"Id": f["id"], "PopularityRating": ugc.popularity(f), "Creator": _owner(tmpl["Creator"], f["owner"]),
               "IsCreatorFollowed": False, "SubmissionTime": _stamp(f["created"]), "Ordinal": _ordinal(f), "MethodObtained": 0})
     return r
 
@@ -935,7 +946,7 @@ def _heavy(f, tmpl):
               "SubmissionTime": _stamp(f["created"]), "Owner": _owner(tmpl["Owner"], f["owner"]),
               "PayloadSize": f["payload_size"], "PreviewPayload": bytes(f["preview"] or b"")[:409600], "Ordinal": _ordinal(f),
               "IsUnderReview": False, "VersionedContentId": f["versioned_id"] or 0,
-              "PopularityRating": min(f["likes"], 5), "IsCreatorFollowed": False})
+              "PopularityRating": ugc.popularity(f), "IsCreatorFollowed": False})
     return r
 
 
@@ -1030,11 +1041,49 @@ def cv_create_livery(req):
     return {"versionedLiveryId": vid}
 
 
+def profile_update_layergroup(body):
+    """OnlineProfile.UpdateLiveryGroup: the upload of a vinyl group, the same request as UpdateLivery without the car (read from the client's
+    caller, FUN_140f07ce0): u32 name length + name, u16 layer count, u8 flag, u64 creator xuid, u32 blob length + the blob, which the
+    client later reads back through the same compression stream as a design's. It is kept under (owner, name) until CreateVersionedLayerGroup
+    names it."""
+    xuid, _ = _me()
+    up = ugc.parse_layergroup_upload(body)
+    if up is None:
+        log(f"  UpdateLiveryGroup: unparsable body ({len(body)}B)")
+        return b""
+    try:
+        bid = UGC.blob_create(xuid, up["name"], len(body))
+        UGC.blob_write(bid, 0, body, owner=xuid)
+    except ugc.LimitError as e:
+        log(f"  UpdateLiveryGroup refused: {e}")
+        return b""
+    log(f"  UpdateLiveryGroup {up['name']!r} layers={up['layers']} payload={len(up['payload'])}B -> kept as blob #{bid}")
+    return b""
+
+
 def cv_create_layergroup(req):
     xuid, _ = _me()
     vid = UGC.versioned_create("layergroup", xuid, req["name"], None, bytes(req["thumbnail"]))
-    log(f"  CreateVersionedLayerGroup {req['name']!r} thumb={len(req['thumbnail'])}B -> versioned {vid}")
+    note = "no matching UpdateLiveryGroup upload"
+    blob = UGC.blob_by_name(xuid, req["name"]) if req["name"] else None
+    up = ugc.parse_layergroup_upload(blob[1]) if blob else None
+    if up:
+        UGC.versioned_set_data(vid, up["payload"])
+        UGC.versioned_set_layers(vid, up["layers"], xuid)
+        note = f"data {len(up['payload'])}B, {up['layers']} layers"
+    log(f"  CreateVersionedLayerGroup {req['name']!r} thumb={len(req['thumbnail'])}B -> versioned {vid} ({note})")
     return {"versionedLayerGroupId": vid}
+
+
+def store_layergroup_create(req):
+    """StorefrontLayerGroup.Create: lists a vinyl group (title, keywords, preview); its data is the versioned item's."""
+    d = req["layerGroupDescription"]["base"]
+    fid = _create_file("layergroup", req["fileHeader"], d["VersionedLayerGroupId"], None, req["fileName"], req["previewData"])
+    return {"contentFileId": fid}
+
+
+def store_search_layergroups(req):
+    return _search_files("layergroup", "ForzaStorefrontSearchLayerGroupFiles_Results", "SearchLayerGroupFiles", req)
 
 
 def cv_create_tune_structs(req):
@@ -1097,6 +1146,13 @@ def design_has_layers(stored_layers, data):
     return container is None or len(container) > LIVERY_GATE_BYTES
 
 
+def _count_download(vid, xuid):
+    """A player fetched the full data of a shared item: one download of its listing, once per player (the creator's own fetches do not count)."""
+    fid = UGC.file_of_versioned(vid)
+    if fid is not None and UGC.record_action(fid, xuid, "download", "downloads"):
+        log(f"  download of file #{fid} counted for {xuid}")
+
+
 def cv_get_livery(req):
     v = UGC.versioned_get(req["versionedLiveryId"])
     if v is None or v["kind"] != "livery":
@@ -1128,6 +1184,8 @@ def cv_get_livery(req):
         # 2026-10-20: the owner removed the livery and the crashes stopped). Serve a plain thumbnail of the right size instead of nothing.
         d["liveryThumbnail"], d["liveryThumbnailSmall"] = _placeholder_thumbs()
     log(f"  RetrieveVersionedLivery {v['id']}: {len(d['data'])}B data, {d['numberOfLayers']} layers, thumb {len(d['liveryThumbnail'])}B")
+    if not req["returnThumbnail"]:          # the storefront's download asks for the data alone; a car seen in a lobby asks with its thumbnail
+        _count_download(v["id"], xuid)
     return res
 
 
@@ -1138,6 +1196,8 @@ def cv_get_layergroup(req):
     res = xls.default_struct(SC, SC.call_struct("ForzaContentVersioningRetrieveVersionedLayerGroupById_Results"))
     res["versionedLayerGroupData"].update({"name": v["name"], "numberOfLayers": _layer_count(v["layers"]), "creatorXuid": v["creator"],
                                            "data": bytes(v["data"] or b""), "thumbnailData": bytes(v["thumb"] or b"")})
+    log(f"  RetrieveVersionedLayerGroup {v['id']}: {len(v['data'] or b'')}B data, {_layer_count(v['layers'])} layers")
+    _count_download(v["id"], _me()[0])
     return res
 
 
@@ -1186,6 +1246,7 @@ def cv_get_tune(req):
         d["InstalledParts"] = _buildable_tune_parts(v["car_id"], json.loads(v["parts"]), req["versionedTuneId"])
     if v["tuning"]:
         d["Tuning"] = json.loads(v["tuning"])
+    _count_download(v["id"], _me()[0])
     return res
 
 
@@ -1215,6 +1276,11 @@ def _create_file(kind, header, versioned_id, car_id, file_name, preview, meta=No
         if r:
             m = {"make_id": r["make_id"], "model_id": r["model_id"], "class_id": r["class_id"]}
     m.update(meta or {})
+    if kind == "layergroup" and v is not None and blob and not v["data"]:       # normally attached when CreateVersionedLayerGroup ran
+        up = ugc.parse_layergroup_upload(blob[1])
+        if up:
+            UGC.versioned_set_data(versioned_id, up["payload"], creator=xuid)
+            UGC.versioned_set_layers(versioned_id, up["layers"], xuid)
     FILE_KIND[header["Type"]] = kind
     if kind == "livery" and v is not None and bytes(preview)[:4] == b"\x89PNG":
         big, small = livery_thumbs(bytes(preview))
@@ -1326,8 +1392,6 @@ def store_heavy(req):
     ids = req["fileIds"][:max(0, req["fileCount"])] if req["fileCount"] else req["fileIds"]
     files = UGC.files(ids)
     tmpl = _elem_template("ForzaStorefrontGetFileHeavyWeightData_Results", "fileData")
-    for f in files:
-        UGC.bump(f["id"], "downloads")
     log(f"  GetFileHeavyWeightData {list(ids)}: {len(files)} found")
     return {"fileData": [_heavy(f, tmpl) for f in files]}
 
@@ -1340,7 +1404,7 @@ def store_my_files(req):
     for f in files:
         r = _clone(tmpl)
         r.update({"Id": f["id"], "Title": f["title"], "Description": f["description"], "SubmissionTime": _stamp(f["created"]),
-                  "IsUnderReview": False, "VersionedContentId": f["versioned_id"] or 0, "PopularityRating": min(f["likes"], 5),
+                  "IsUnderReview": False, "VersionedContentId": f["versioned_id"] or 0, "PopularityRating": ugc.popularity(f),
                   "Ordinal": _ordinal(f),
                   "DownloadCount": f["downloads"], "LikeCount": f["likes"], "UseCount": f["uses"]})
         out.append(r)
@@ -1360,8 +1424,17 @@ def store_if_shared(req):
 
 
 def _bump_handler(column, field="fileId"):
+    """IncrementViews / IncrementUsage (a counter per call) and IncrementLikes (one like per player and file; the game remembers a like in the
+    profile, so a repeat only comes from a reinstalled or second profile). The client sends them as fire-and-forget calls."""
     def h(req):
-        UGC.bump(req[field], column)
+        fid = req[field]
+        if column == "likes":
+            xuid, _ = _me()
+            counted = UGC.record_action(fid, xuid, "like", "likes")
+            log(f"  IncrementLikes file #{fid} by {xuid}: {'counted' if counted else 'not counted (repeat, own file or unknown file)'}")
+        else:
+            UGC.bump(fid, column)
+            log(f"  Increment{column.capitalize()} file #{fid}")
         return None
     return h
 
@@ -1871,6 +1944,7 @@ def social_api(method, path, body):
 
 RAW_HANDLERS = {}        # (class, method) -> fn(body) for calls the exe has no descriptor for; returns the response payload bytes
 RAW_HANDLERS[("Forza.WebServices.OnlineProfile", "UpdateLivery")] = lambda body: profile_update_livery(body)
+RAW_HANDLERS[("Forza.WebServices.OnlineProfile", "UpdateLiveryGroup")] = lambda body: profile_update_layergroup(body)
 
 
 HANDLERS = {
@@ -1885,6 +1959,8 @@ HANDLERS = {
     ("Forza.WebServices.ContentVersioning", "RemoveReferenceToVersionedLivery"): ("", _cv_ref("versionedLiveryId", -1)),
     ("Forza.WebServices.StorefrontLivery", "Create"): ("", store_livery_create),
     ("Forza.WebServices.StorefrontTuning", "Create"): ("", store_tuning_create),
+    ("Forza.WebServices.StorefrontLayerGroup", "Create"): ("", store_layergroup_create),
+    ("Forza.WebServices.Storefront", "SearchLayerGroupFiles"): ("", store_search_layergroups),
     ("Forza.WebServices.Storefront", "SearchLiveryFiles"): ("", store_search_liveries),
     ("Forza.WebServices.Storefront", "SearchTuningFiles"): ("", store_search_tunes),
     ("Forza.WebServices.StorefrontPhoto", "Create"): ("", store_photo_create),
