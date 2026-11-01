@@ -402,6 +402,16 @@ class TuneBuildabilityTests(unittest.TestCase):
         self.assertEqual(parts.integrity_errors([w & 0xFFFFFFFF for w in out["m_CarParts"]]), [])
         self.assertEqual(out["m_CarParts"][12], 792000)          # the stock engine's camshaft, which holds the torque curve
 
+    def test_uploading_an_unbuildable_tune_is_refused(self):
+        req = {"carId": 1332, "installedParts": {"m_CarParts": self.BAD}, "tuning": {}}
+        with mock.patch.object(L, "_me", return_value=(7, "x")), mock.patch.object(L, "UGC") as ugc_store:
+            with self.assertRaises(L.XlsError):
+                L.cv_create_tune_structs(req)
+            ugc_store.versioned_create.assert_not_called()
+            ugc_store.versioned_create.return_value = 5
+            L.cv_create_tune_structs(dict(req, installedParts={"m_CarParts": self.SWAP}))
+            ugc_store.versioned_create.assert_called_once()
+
     def test_valid_swap_and_unknown_cars_are_served_as_stored(self):
         swap = {"m_CarParts": self.SWAP}
         self.assertIs(L._buildable_tune_parts(1332, swap, 15394), swap)

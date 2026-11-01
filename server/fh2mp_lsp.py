@@ -1021,6 +1021,10 @@ def cv_create_tune(req):
 
 def cv_create_tune_structs(req):
     xuid, _ = _me()
+    bad = _unbuildable_tune_parts(req["carId"], req["installedParts"])
+    if bad:
+        log(f"  CreateVersionedTuneFromStructs car={req['carId']} refused: {bad[:4]}")
+        raise XlsError("this tune has parts the game cannot build")
     vid = UGC.versioned_create("tune", xuid, "", req["carId"], parts=req["installedParts"], tuning=req["tuning"])
     log(f"  CreateVersionedTuneFromStructs car={req['carId']} -> versioned {vid}")
     return {"versionedTuneId": vid}
@@ -1119,22 +1123,31 @@ def cv_get_layergroup(req):
     return res
 
 
+def _unbuildable_tune_parts(car_id, installed):
+    """[(slot, id, why)] of the tune's part ids the game data does not have or that belong to another car; [] when the list is fine, the car
+    is one the catalog does not know (car packs) or the list has no part array."""
+    words = installed.get("m_CarParts") if isinstance(installed, dict) else None
+    if parts_check is None or not car_id or not isinstance(words, list) or len(words) != parts_check.P.PART_SLOTS:
+        return []
+    try:
+        if parts_check.stock_list(car_id) is None:
+            return []
+        return parts_check.integrity_errors([int(w) & 0xFFFFFFFF for w in words])
+    except (TypeError, ValueError, KeyError):
+        return []
+
+
 def _buildable_tune_parts(car_id, installed, tune_id):
     """The tune's installed parts, repaired when the game could not build the car from them. Opening a tune makes the client simulate the
     car for its stats (CarPerformance_SimulateAndComputeRatings -> CCarDynamics::BuildICEFromSetup); an engine slot without a catalog row
     leaves the torque curve empty and that loop reads past its buffer (2026-10-31: tune 5447 with 90002000 in the engine slots crashed a
     client that opened a listing). The part list becomes what the lobby check would make of it, or the car's stock parts when that still
     cannot be built. Cars the catalog does not know (car packs) and well-formed lists are served as stored."""
-    words = installed.get("m_CarParts") if isinstance(installed, dict) else None
-    if parts_check is None or not car_id or not isinstance(words, list) or len(words) != parts_check.P.PART_SLOTS:
+    if not _unbuildable_tune_parts(car_id, installed):
         return installed
     try:
         stock = parts_check.stock_list(car_id)
-        if stock is None:
-            return installed
-        raw = [int(w) & 0xFFFFFFFF for w in words]
-        if not parts_check.integrity_errors(raw):
-            return installed
+        raw = [int(w) & 0xFFFFFFFF for w in installed["m_CarParts"]]
         fixed, _, left = parts_check.neutralize(raw)
         if left or parts_check.integrity_errors(fixed):
             fixed = stock
