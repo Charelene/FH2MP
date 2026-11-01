@@ -1635,6 +1635,12 @@ def _invite(club, iid, sponsor, invitee):
     log(f"  club invite #{iid} [{club['tag']}] {sponsor:#x} -> {invitee:#x} (notification {n['id']})")
 
 
+def launcher_club_invite(sponsor, invitee):
+    """The launcher's club chat invite: the same rules and the same Message Center notice as the game's own invite."""
+    club, iid = CLUBS.invite(sponsor, invitee)
+    _invite(club, iid, sponsor, invitee)
+
+
 @_club_errors
 def club_invite(req):
     xuid, _ = _me()
@@ -2914,6 +2920,7 @@ def setup_auth():
         AUTH, SOCIAL, launcher_api.LauncherConfig(), online_count, log=log, on_login=on_login, on_logout=on_logout,
         lsp_public={"url": os.environ.get("FH2MP_LSP_URL", f"http://{host}:{os.environ.get('FH2MP_LSP_PUBLIC_PORT', '5080')}")},
         game_public=game_public, gamedb=gamedb_sync.GameDb(), crashes=crash_reports.CrashReports.from_env(log),
+        club_invite=launcher_club_invite,
         boards=lambda kind, n: (home.build(sys.modules[__name__]) if kind == "home"
                                 else (ops_api.challenges if kind == "challenges" else ops_api.leaderboards)(sys.modules[__name__], n)))
     global OPS

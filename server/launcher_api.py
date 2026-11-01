@@ -119,12 +119,13 @@ class LauncherConfig:
 class Ctx:
     def __init__(self, auth_service, social_store, config, online_count, log=lambda m: None, on_login=None, on_logout=None, lsp_public=None,
                  game_public=None,
-                 gamedb=None, boards=None, assets_dir=None, crashes=None):
+                 gamedb=None, boards=None, assets_dir=None, crashes=None, club_invite=None):
         self.auth, self.social, self.config, self.online_count, self.log = auth_service, social_store, config, online_count, log
         self.on_login = on_login or (lambda xuid, ip, token: None)
         self.on_logout = on_logout or (lambda xuid, token: None)    # the game server ends what that session's UDP ticket opened
         self.lsp_public, self.game_public = lsp_public or {}, game_public or {}
         self.gamedb = gamedb or gamedb_sync.GameDb("")
+        self.club_invite = club_invite    # (sponsor xuid, invitee xuid) -> None, raises clubs.ClubError; None = launcher club invites are off
         self.crashes = crashes            # crash_reports.CrashReports, or None = the endpoint is off
         self.boards = boards              # (kind "challenges" | "leaderboards", n) -> dict, from ops_api; None = not served
         self._boards_cache = {}

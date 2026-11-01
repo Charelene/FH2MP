@@ -195,6 +195,50 @@ class SocialTests(unittest.TestCase):
         with self.assertRaises(auth.AuthError): self.s.messages(2, 'club')
         with self.assertRaises(auth.AuthError): self.s.send(2, 'club', 'after leaving')
 
+    def test_messages_older_than_a_week_are_hidden_and_pruned(self):
+        self.friends()
+        old, new = time.time() - 8 * 86400, time.time() - 6 * 86400
+        with self.db.tx() as c:
+            for body, at in (('old', old), ('new', new)):
+                c.execute("INSERT INTO launcher_messages(sender,channel,body,created) VALUES (1,'dm:1:2',?,?)", (body, at))
+        self.assertEqual([m['body'] for m in self.s.messages(1, '2')['messages']], ['new'])
+        community._PRUNE['at'] = 0
+        self.assertEqual(self.s.prune_messages(), 1)
+        self.assertEqual(self.s.prune_messages(), 0)          # at most once an hour
+        self.assertEqual(self.db.one('SELECT COUNT(*) FROM launcher_messages')[0], 1)
+
+    def test_club_invite_suggestions_are_recent_friends_without_a_club(self):
+        for i, tag in ((4, 'FourthOne'), (5, 'FifthOne')):
+            with self.db.tx() as c:
+                c.execute('INSERT INTO accounts(xuid,pubkey,gamertag,gamertag_key,created) VALUES (?,?,?,?,0)', (i, bytes([i])*32, tag, auth.fold_tag(tag)))
+                c.execute('INSERT INTO players(xuid,gamertag,first_seen,last_seen) VALUES (?,?,0,0)', (i, tag))
+        with self.db.tx() as c:
+            for other, at in ((2, 10), (3, 30), (4, 20), (5, 40)):
+                c.execute('INSERT INTO friendships(a,b,created) VALUES (1,?,?)', (other, at))
+            c.execute("INSERT INTO clubs(id,tag,name,created) VALUES (1,'TEST','Test Club',0)")
+            c.execute('INSERT INTO club_members(xuid,club_id,joined,status_changed) VALUES (5,1,0,0)')
+        self.assertEqual([p['xuid'] for p in self.s.club_suggestions(1)['players']], [3, 4, 2])
+        self.assertEqual(len(self.s.club_suggestions(1, 2)['players']), 2)
+        self.assertEqual(self.route('GET', '/club/suggestions')[1]['players'][0]['xuid'], 3)
+
+    def test_club_invite_resolves_any_player_and_maps_club_rules(self):
+        calls = []
+        self.ctx.club_invite = lambda sponsor, invitee: calls.append((sponsor, invitee))
+        status, body, _ = self.route('POST', '/club/invite', {'player': 'thirddriver'})
+        self.assertEqual((status, calls, body['gamertag']), (200, [(1, 3)], 'ThirdDriver'))
+        for value in ('DriverOne', 'nobody'):
+            self.assertIn(self.route('POST', '/club/invite', {'player': value})[0], (400, 404))
+        import clubs
+
+        def refuse(sponsor, invitee):
+            raise clubs.ClubError('insufficient privileges', clubs.CODES['no_privilege'])
+        self.ctx.club_invite = refuse
+        status, body, _ = self.route('POST', '/club/invite', {'player': 'DriverTwo'})
+        self.assertEqual(status, 409)
+        self.assertIn('co-leaders', json.dumps(body))
+        self.ctx.club_invite = None
+        self.assertEqual(self.route('POST', '/club/invite', {'player': 'DriverTwo'})[0], 503)
+
     def test_launcher_presence_does_not_claim_game_presence(self):
         self.route('GET')
         self.assertEqual(self.s.profile(1)['state'], 'online')

@@ -233,6 +233,13 @@ class CommunityController(QObject):
     def lobbies(self):
         return self.show_dialog("lobbies", lambda: LobbiesDialog(self, self.window))
 
+    def can_invite_to_club(self):
+        club = (self.data.get('me') or {}).get('club')
+        return bool(club) and club.get('role', 0) >= 2          # leader 3, co-leader 2: the server checks again
+
+    def club_invite_dialog(self):
+        return self.show_dialog("club-invite", lambda: ClubInviteDialog(self, self.window))
+
     def reserve(self, row):
         return self.show_dialog("reserve", lambda: ReservationDialog(self, row, self.window))
 
@@ -586,6 +593,119 @@ class ProfilePopup(QFrame):
 
 class SocialDialog(Overlay):
     pass
+
+
+class ClubInviteDialog(SocialDialog):
+    """Invite anyone to the club: a search box (gamertag or ID) and the five friends added most recently who have no club."""
+
+    def __init__(self, c, parent):
+        club = (c.data.get('me') or {}).get('club') or {}
+        super().__init__(c, 'Invite to club', 460, parent)
+        self.invited, self.rows = set(), []
+        if club:
+            self.lay.addWidget(label(f"[{club['tag']}] {club['name']}", wrap=True))
+        search = Search('Gamertag or player ID')
+        self.player = search.edit
+        self.player.setMaxLength(80)
+        self.lay.addWidget(search)
+        self.heading = label('Recent friends', 'small')
+        self.lay.addWidget(self.heading)
+        self.friends = QVBoxLayout()
+        self.friends.setSpacing(4)
+        self.lay.addLayout(self.friends)
+        self.lay.addWidget(self.error)
+        foot = QHBoxLayout()
+        foot.setSpacing(12)
+        foot.addStretch(1)
+        foot.addWidget(Button('Close', self.close, height=44))
+        self.send = Button('Send invite', self.submit, True, height=44)
+        self.send.setEnabled(False)
+        foot.addWidget(self.send)
+        self.lay.addLayout(foot)
+        self.player.textChanged.connect(self.typed)
+        self.player.returnPressed.connect(self.submit)
+        self._load()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.player.setFocus()
+
+    def _load(self):
+        self.heading.hide()
+
+        def ok(data):
+            if not isValid(self):
+                return
+            players = data.get('players', [])
+            self.heading.setVisible(bool(players))
+            for person in players:
+                self.add_row(person)
+            self.place()
+
+        def fail(_):
+            pass                                    # the shortcut list is optional: the search box still works
+        run_async(lambda j: self.c.lc.community('/club/suggestions'), ok, fail)
+
+    def add_row(self, person):
+        row = QWidget()
+        row.setObjectName('clear')
+        line = QHBoxLayout(row)
+        line.setContentsMargins(0, 0, 0, 0)
+        line.setSpacing(8)
+        line.addWidget(PersonAvatar(person, controller=self.c))
+        name = label(person['gamertag'])
+        name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        line.addWidget(name, 1)
+        button = Button('Invite', lambda _=False, p=person: self.invite(p['gamertag']), height=32)
+        button.setFixedWidth(84)
+        button.setAccessibleName('Invite ' + person['gamertag'] + ' to the club')
+        line.addWidget(button)
+        self.friends.addWidget(row)
+        self.rows.append((person, row, button))
+
+    def typed(self, text):
+        needle = text.strip().casefold()
+        self.send.setEnabled(bool(needle))
+        for person, row, _ in self.rows:
+            row.setVisible(needle in person['gamertag'].casefold())
+        self.place()
+
+    def submit(self):
+        text = self.player.text().strip()
+        if text and self.send.isEnabled():
+            self.invite(text)
+
+    def invite(self, value):
+        self.error.hide()
+        self.send.setEnabled(False)
+        for _, _, button in self.rows:
+            button.setEnabled(False)
+
+        def sent(data):
+            tag = data.get('gamertag', value)
+            self.invited.add(tag.casefold())
+            if self.player.text().strip().casefold() == value.casefold():
+                self.player.clear()
+            self.error.setStyleSheet(f'color:{theme.GOOD};font-size:13px;')
+            self.error.setText(f'Invited {tag}.')
+            self.error.show()
+            self._restore()
+            self.place()
+        self.c.action('/club/invite', body={'player': value}, done=sent, owner=self)
+
+    def _restore(self):
+        for person, _, button in self.rows:
+            done = person['gamertag'].casefold() in self.invited
+            button.setText('Invited' if done else 'Invite')
+            button.tone = 'held' if done else None
+            button.setEnabled(not done)
+            button.update()
+        self.send.setEnabled(bool(self.player.text().strip()))
+
+    def failed(self, error):
+        self.error.setStyleSheet(f'color:{theme.BAD};font-size:13px;background:transparent;')
+        super().failed(error)
+        self._restore()
 
 
 class RemoveFriendDialog(SocialDialog):
@@ -988,6 +1108,7 @@ class ChatsDialog(SocialDialog):
         self._sending = False
         self._read_inflight = {}
         self._new_count = 0
+        self._follow = True        # stay at the newest message until the user scrolls up
         self._channel_signature = None
         body = QHBoxLayout()
         body.setSpacing(0)
@@ -1038,6 +1159,10 @@ class ChatsDialog(SocialDialog):
         titles.addWidget(self.title)
         titles.addWidget(self.subtitle)
         title_row.addLayout(titles, 1)
+        self.invite_button = IconButton('person-add', 36, 10, 18, label_text='Invite to club')
+        self.invite_button.clicked.connect(lambda _=False: self.c.club_invite_dialog())
+        self.invite_button.hide()
+        title_row.addWidget(self.invite_button)
         more = IconButton('more', 36, 10, 18, label_text='Chat options')
         self.options = menu(more)
         self.options.aboutToShow.connect(self.fill_options)
@@ -1056,6 +1181,7 @@ class ChatsDialog(SocialDialog):
         self.messages.setWidget(message_body)
         self.messages.viewport().installEventFilter(self)
         self.messages.verticalScrollBar().valueChanged.connect(self.scrolled)
+        self.messages.verticalScrollBar().rangeChanged.connect(self._range_changed)
         conversation.addWidget(self.messages, 1)
         self.new_messages = Button('', self.scroll_to_latest, height=30)
         self.new_messages.hide()
@@ -1088,6 +1214,7 @@ class ChatsDialog(SocialDialog):
 
     def render_channels(self):
         channels = self.c.data.get('chats', [])
+        self.invite_button.setVisible(self.ref == 'club' and self.c.can_invite_to_club())      # a role change arrives without a channel change
         needle = self.search.text().casefold()
         signature = repr(channels) + needle
         if signature == self._channel_signature: return
@@ -1167,7 +1294,9 @@ class ChatsDialog(SocialDialog):
             self.c.avatar(int(ch['id']))
             self.header_avatar.update()
         self._new_count = 0
+        self._follow = True
         self.new_messages.hide()
+        self.invite_button.setVisible(ch['id'] == 'club' and self.c.can_invite_to_club())
         self.edit.setPlaceholderText('Message ' + ch['title'])
         club = (self.c.data.get('me') or {}).get('club')
         self.subtitle.setText(f"Club chat · {club['members']} members" if self.ref == 'club' and club else "Direct message")
@@ -1213,7 +1342,7 @@ class ChatsDialog(SocialDialog):
 
     def render_messages(self):
         bar = self.messages.verticalScrollBar()
-        bottom, old = bar.maximum() - bar.value() < 30, bar.value()
+        bottom, old = self._follow or bar.maximum() - bar.value() < 30, bar.value()
         ids = [m['id'] for m in self._messages]
         append = ids[:len(self._rendered_ids)] == self._rendered_ids
         if not append:
@@ -1259,6 +1388,8 @@ class ChatsDialog(SocialDialog):
             self.options.addAction('View profile', lambda: self.show_person(person))
             self.options.addAction('Copy player ID', lambda: QGuiApplication.clipboard().setText(f"{person['xuid']:#x}"))
             self.options.addAction('Remove friend', lambda: self.c.remove_friend(person))
+        if self.ref == 'club' and self.c.can_invite_to_club():
+            self.options.addAction('Invite player to club', self.c.club_invite_dialog)
         self.options.addAction('Close chats', self.close)
 
     def show_person(self, person):
@@ -1279,11 +1410,18 @@ class ChatsDialog(SocialDialog):
         self.messages.verticalScrollBar().setValue(self.messages.verticalScrollBar().maximum())
         self.mark_visible_read()
 
+    def _range_changed(self, _low, high):
+        # Bubbles get their final height after the first layout pass, so the range keeps growing for a moment after a
+        # conversation is drawn: keep the view on the newest message while the user has not scrolled away.
+        if self._follow:
+            self.messages.verticalScrollBar().setValue(high)
+
     def scrolled(self, _=None):
         if not hasattr(self, 'new_messages'):
             return
         bar = self.messages.verticalScrollBar()
-        if bar.maximum() - bar.value() < 16:
+        self._follow = bar.maximum() - bar.value() < 16
+        if self._follow:
             self._new_count = 0
             self.new_messages.hide()
             self.mark_visible_read()

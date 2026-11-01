@@ -333,6 +333,63 @@ class FriendsUi(unittest.TestCase):
         QTest.mouseClick(dlg.new_messages, Qt.MouseButton.LeftButton)
         self.assertEqual(self.c.action.call_args.args, ('/chat/1', 'PATCH', {'lastId':51}))
 
+    def test_opening_a_long_chat_shows_the_newest_messages(self):
+        rows = [{'id': i, 'sender': 1, 'gamertag': 'DriftKing', 'body': f'Message {i} ' + 'word ' * (i % 12), 'created': 0} for i in range(1, 81)]
+        self.network.stop()
+        with patch.object(community, 'run_async', side_effect=lambda fn, ok, fail: ok({'messages': rows})):
+            self.c.data['chats'] = [{'id': '1', 'title': 'DriftKing', 'last': 'Hi', 'unread': 0}]
+            dlg = self.c.chats()
+            QTest.qWait(300)
+            bar = dlg.messages.verticalScrollBar()
+            self.assertGreater(bar.maximum(), 0)
+            self.assertEqual(bar.value(), bar.maximum())
+            # Scrolling up leaves the reader where they are when more messages arrive.
+            bar.setValue(0)
+            rows.append({'id': 81, 'sender': 1, 'gamertag': 'DriftKing', 'body': 'later', 'created': 0})
+            dlg.load()
+            QTest.qWait(60)
+            self.assertEqual(bar.value(), 0)
+            # Switching conversation follows the newest message again.
+            self.c.data['chats'].append({'id': 'club', 'title': '[TEST] Club', 'last': '', 'unread': 0})
+            self.c.changed.emit()
+            dlg.select('club')
+            QTest.qWait(300)
+            self.assertEqual(bar.value(), bar.maximum())
+        self.network.start()
+
+    def test_club_invite_is_offered_to_leaders_and_sends_the_typed_or_picked_player(self):
+        self.c.data['chats'] = [{'id': 'club', 'title': '[TEST] Club', 'last': '', 'unread': 0}]
+        self.c.data['me'] = {'xuid': 9, 'gamertag': 'TestDriver', 'club': {'id': 1, 'tag': 'TEST', 'name': 'Club', 'role': 1, 'members': 2}}
+        dlg = self.c.chats()
+        QTest.qWait(250)
+        self.assertTrue(dlg.invite_button.isHidden())               # plain members cannot invite
+        self.c.data['me']['club']['role'] = 2
+        self.c.changed.emit()
+        dlg.select('club')
+        QTest.qWait(30)
+        self.assertFalse(dlg.invite_button.isHidden())
+        shown = {'players': [{'xuid': i, 'gamertag': f'Friend{i}', 'state': 'offline', 'club': None} for i in range(1, 6)]}
+        answers = [shown]                                            # only the suggestions request; avatar downloads get nothing
+        with patch.object(community, 'run_async', side_effect=lambda fn, ok, fail: ok(answers.pop()) if answers else None):
+            dlg.invite_button.click()
+            QTest.qWait(250)
+        invite = self.c._dialogs['club-invite']
+        self.assertEqual(len(invite.rows), 5)
+        QTest.keyClicks(invite.player, 'friend3')
+        self.assertEqual([p['gamertag'] for p, row, _ in invite.rows if not row.isHidden()], ['Friend3'])
+        QTest.keyClick(invite.player, Qt.Key.Key_Return)
+        self.assertEqual(self.c.action.call_args.args[0], '/club/invite')
+        self.assertEqual(self.c.action.call_args.kwargs['body'], {'player': 'friend3'})
+        self.c.action.call_args.kwargs['done']({'ok': True, 'gamertag': 'Friend3'})
+        self.assertEqual(invite.rows[2][2].text(), 'Invited')
+        self.assertFalse(invite.rows[2][2].isEnabled())
+        invite.player.clear()
+        QTest.mouseClick(invite.rows[0][2], Qt.MouseButton.LeftButton)
+        self.assertEqual(self.c.action.call_args.kwargs['body'], {'player': 'Friend1'})
+        invite.failed(Exception('That player is already in a club.'))
+        self.assertTrue(invite.rows[0][2].isEnabled())
+        self.assertFalse(invite.error.isHidden())
+
     def test_chat_covered_by_another_panel_does_not_mark_read(self):
         self.c.data['chats'] = [{'id':'1', 'title':'DriftKing', 'last':'Hi', 'unread':2}]
         dlg = self.c.chats()

@@ -3,12 +3,20 @@ import time
 from urllib.parse import parse_qs
 
 import auth
+import clubs
 import db
 import launcher_lobbies
 import social
 import xbl
 
 LAUNCHER_SEEN = {}                  # independent of the game's presence poll
+MESSAGE_KEEP = 7 * 86400            # chat messages older than a week are deleted
+_PRUNE = {"at": 0.0}
+INVITE_ERRORS = {                   # ClubStore rule violations, in the launcher's words
+    "not_in_club": "You are not in a club.", "no_privilege": "Only the club leader and co-leaders can invite players.",
+    "no_invites": "That player does not accept club invites.", "in_club": "That player is already in a club.",
+    "already_invited": "That player is already invited.", "club_full": "The club is full.",
+}
 
 
 class Community:
@@ -105,7 +113,8 @@ class Community:
         out = []
         for ref, title in refs:
             channel = self.channel(me, ref)
-            last = self.db.one("SELECT id, body FROM launcher_messages WHERE channel=? ORDER BY id DESC LIMIT 1", (channel,))
+            last = self.db.one("SELECT id, body FROM launcher_messages WHERE channel=? AND created>? ORDER BY id DESC LIMIT 1",
+                               (channel, time.time() - MESSAGE_KEEP))
             read = self.db.one("SELECT last_id FROM launcher_chat_reads WHERE xuid=? AND channel=?", (me, channel))
             unread = self.db.one("SELECT COUNT(*) FROM launcher_messages WHERE channel=? AND sender<>? AND id>?", (channel, me, read[0] if read else 0))[0]
             incoming = self.db.one("SELECT id FROM launcher_messages WHERE channel=? AND sender<>? ORDER BY id DESC LIMIT 1", (channel, me))
@@ -117,7 +126,8 @@ class Community:
         channel = self.channel(me, ref)
         # On first open show the most recent page; then incrementally fetch forwards.
         rows = self.db.query("SELECT m.id,m.sender,a.gamertag,m.body,m.created FROM launcher_messages m JOIN accounts a ON a.xuid=m.sender "
-                             "WHERE m.channel=? AND m.id>? ORDER BY m.id " + ("ASC" if after else "DESC") + " LIMIT 100", (channel, after))
+                             "WHERE m.channel=? AND m.id>? AND m.created>? ORDER BY m.id " + ("ASC" if after else "DESC") + " LIMIT 100",
+                             (channel, after, time.time() - MESSAGE_KEEP))
         return {"messages": sorted([dict(r) for r in rows], key=lambda r: r["id"])}
 
     def send(self, me, ref, body):
@@ -136,6 +146,41 @@ class Community:
             c.execute("INSERT INTO launcher_chat_reads(xuid,channel,last_id) VALUES (?,?,?) ON CONFLICT (xuid,channel) "
                       "DO UPDATE SET last_id=GREATEST(launcher_chat_reads.last_id,excluded.last_id)", (me, channel, last))
         return {"ok": True}
+
+    def prune_messages(self, now=None):
+        """Deletes chat messages past MESSAGE_KEEP (at most once an hour per process)."""
+        now = time.time() if now is None else now
+        if now - _PRUNE["at"] < 3600:
+            return 0
+        _PRUNE["at"] = now
+        with self.db.tx() as c:
+            return c.execute("DELETE FROM launcher_messages WHERE created<?", (now - MESSAGE_KEEP,)).rowcount
+
+    def club_suggestions(self, me, limit=5):
+        """The friends added most recently who are not in a club yet: the shortcut list of the club invite screen."""
+        rows = self.db.query("SELECT CASE WHEN a=? THEN b ELSE a END AS xuid FROM friendships WHERE a=? OR b=? ORDER BY created DESC LIMIT 50", (me, me, me))
+        out = []
+        for r in rows:
+            person = self.profile(r[0])
+            if person["club"] is None:
+                out.append(person)
+            if len(out) >= limit:
+                break
+        return {"players": out}
+
+    def club_invite(self, me, value):
+        target = self.resolve(value)
+        if target == me:
+            raise auth.AuthError(400, "self_invite", "That is your own account.")
+        invite = getattr(self.ctx, "club_invite", None)
+        if invite is None:
+            raise auth.AuthError(503, "unavailable", "Club invites are not available on this server.")
+        try:
+            invite(me, target)
+        except clubs.ClubError as e:
+            code = next((k for k, v in clubs.CODES.items() if v == e.code), "unknown")
+            raise auth.AuthError(409, code, INVITE_ERRORS.get(code, e.text)) from None
+        return {"ok": True, "gamertag": self.profile(target)["gamertag"]}
 
     def lobbies(self, me):
         result = xbl.hub_lobbies()
@@ -179,6 +224,10 @@ def public_hold(h):
 def handle(ctx, method, p, u, body, acct):
     me, store = acct.xuid, Community(ctx)
     LAUNCHER_SEEN[me] = time.time()
+    try:
+        store.prune_messages()
+    except Exception:  # noqa: BLE001 - housekeeping must never fail a request
+        pass
     # Expired presence entries carry no durable meaning.
     for x, seen in list(LAUNCHER_SEEN.items()):
         if time.time() - seen > 120:
@@ -206,6 +255,10 @@ def handle(ctx, method, p, u, body, acct):
         if method == "DELETE":
             launcher_lobbies.cancel(me)
             return {"ok": True}
+    if p == "/v1/community/club/suggestions" and method == "GET":
+        return store.club_suggestions(me)
+    if p == "/v1/community/club/invite" and method == "POST":
+        return store.club_invite(me, body.get("player", ""))
     if len(parts) == 5 and parts[:4] == ["", "v1", "community", "chat"]:
         ref = parts[4]
         if method == "GET":
