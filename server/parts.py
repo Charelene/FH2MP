@@ -11,81 +11,6 @@ LO = 0                          # earliest bit offset tried. Creates carry the a
 MIN_BITS = 32 * P.PART_SLOTS    # an object shorter than the array itself cannot hold it
 
 
-def find_parts(size, payload):
-    """(bit offset, [43 words]) of the best match, or None. A match needs slots 3 and 26 == -1 and at least 34 of the other 41 words
-    valid (so a few bad ids do not hide the array)."""
-    best = None
-    top = size - 32 * P.PART_SLOTS
-    for o in range(LO, top + 1):
-        if (payload >> (o + 32 * 3)) & 0xFFFFFFFF != NONE or (payload >> (o + 32 * 26)) & 0xFFFFFFFF != NONE:
-            continue
-        words = [(payload >> (o + 32 * k)) & 0xFFFFFFFF for k in range(P.PART_SLOTS)]
-        good = sum(1 for k, w in enumerate(words) if k not in (3, 26) and (w == NONE or w in P.ALL_IDS))
-        if good >= 34 and (best is None or good > best[0]):
-            best = (good, o, words)
-            if good == 41:
-                break
-    return None if best is None else (best[1], best[2])
-
-
-def find_shaped(size, payload):
-    """(bit offset, [43 words]) of a part list found by its shape alone: slots 3 and 26 (no part type) hold -1. find_parts wants 34 of the
-    other 41 ids to be in the catalog, so a list with many ids the game does not have (a heavily modded car: prod 2026-10-23, 15 of 41 unknown)
-    was reported as "no part list" and relayed untouched, and every client that built that car crashed (11 at once, the same second). Two
-    -1 words at exactly this distance do not occur in noise (2^-64 per offset), so the shape is enough; the caller cleans the ids. None when
-    no offset has the shape; the best one (most known ids) when there are several."""
-    best = None
-    for o in range(LO, size - 32 * P.PART_SLOTS + 1):
-        if (payload >> (o + 32 * 3)) & 0xFFFFFFFF != NONE or (payload >> (o + 32 * 26)) & 0xFFFFFFFF != NONE:
-            continue
-        words = [(payload >> (o + 32 * k)) & 0xFFFFFFFF for k in range(P.PART_SLOTS)]
-        good = sum(1 for k, w in enumerate(words) if k not in (3, 26) and (w == NONE or w in P.ALL_IDS))
-        if best is None or good > best[0]:
-            best = (good, o, words)
-    return None if best is None else (best[1], best[2])
-
-
-def find_loose(size, payload):
-    """(bit offset, [43 words]) of a part list that find_shaped misses because slots 3 and 26 do not hold -1: a car whose owner's game
-    (a mod, a car pack) writes ids into the slots that have no part type, as well as ids this catalog does not have. Prod 2026-10-24 19:36:31:
-    one such Free Roam join (a TOY_SupraFast7_98 with rim, tire width, restrictor plate and motor ids in no catalog table, 9x000xxx in
-    slots 3, 22, 26, 42) was logged "no part list found", relayed untouched, and three clients and a rig died within a second. At least 34
-    of the 43 words must be -1 or catalog ids (noise matches that with probability ~0), and the body slot must hold a CarBody row. The best
-    window wins. None when no offset has it."""
-    best = None
-    for o in range(LO, size - 32 * P.PART_SLOTS + 1):
-        body = (payload >> (o + 64)) & 0xFFFFFFFF
-        if body not in P.TABLE_IDS["CarBody"]:
-            continue
-        words = [(payload >> (o + 32 * k)) & 0xFFFFFFFF for k in range(P.PART_SLOTS)]
-        if problem(0, words[0]) is not None or problem(1, words[1]) is not None:       # engine and drivetrain rows (or -1) come first
-            continue
-        good = sum(1 for k, w in enumerate(words) if w == NONE or problem(k, w) is None)     # fits its own slot: a window one word off does not
-        if good >= 30 and (best is None or good > best[0]):
-            best = (good, o, words)
-    return None if best is None else (best[1], best[2])
-
-
-def find_unknown_car(size, payload):
-    """(bit offset, [43 words]) of a part list whose car is not in the catalog (a car pack the server does not have), or None. Such a list
-    fails find_parts, because the car's own rows (body, bumpers, brakes, ...) are unknown too: here a word also counts when it is a row of
-    the same car (id // 1000 == the body's car id; body rows are car id x 1000). The body must be such an unknown row."""
-    best = None
-    top = size - 32 * P.PART_SLOTS
-    for o in range(LO, top + 1):
-        if (payload >> (o + 32 * 3)) & 0xFFFFFFFF != NONE or (payload >> (o + 32 * 26)) & 0xFFFFFFFF != NONE:
-            continue
-        body = (payload >> (o + 64)) & 0xFFFFFFFF
-        if body == NONE or body % 1000 or not 0 < body // 1000 < 100000 or body in P.TABLE_IDS["CarBody"]:
-            continue
-        words = [(payload >> (o + 32 * k)) & 0xFFFFFFFF for k in range(P.PART_SLOTS)]
-        car = body // 1000
-        good = sum(1 for k, w in enumerate(words) if k not in (3, 26) and (w == NONE or w in P.ALL_IDS or w // 1000 == car))
-        if good >= 34 and (best is None or good > best[0]):
-            best = (good, o, words)
-    return None if best is None else (best[1], best[2])
-
-
 def problem(slot, word):
     """Why `word` cannot be in `slot` (None when it can): the one classification audit_parts and neutralize share."""
     if word == NONE:
@@ -105,11 +30,6 @@ def must_replace(slot, word):
     reported: an electric car's slot 0, for one, may hold its Motor row (car 2101), which is not an Engine row."""
     text = problem(slot, word)
     return text is not None and P.SLOT_TABLE.get(slot) is not None and slot != 2 and ("no such id" in text or slot in (8, 12))
-
-
-def audit_parts(words):
-    """Problems in one car's part list: [(slot, word, text)]."""
-    return [(k, w, t) for k, w in enumerate(words) if (t := problem(k, w)) is not None]
 
 
 def _expected_owner(table, words):

@@ -125,7 +125,6 @@ RESPONSE_ACK = 6       # client's third handshake leg
 MSG_SERVER_TRAFFIC_MESSAGE = 71   # client -> server (traffic requests)
 MSG_CLIENT_TRAFFIC_MESSAGE = 72   # server -> clients (relay of the above, applied by everyone)
 MSG_FINALISE_SESSION_ENTRY = 34   # no payload, both directions
-MSG_FULL_WEATHER = 54             # atmosphere(3f,4i) + precipitation(3f) + 2 x s32
 KEEPALIVE_SECONDS = 1.0
 TIME_SYNC_SECONDS = 30.0
 CLOCK_OFFSET_MAX_MS = 86_400_000    # random start of each world's clock = its starting time of day
@@ -243,7 +242,6 @@ PART_POLICY = os.environ.get("FH2MP_PART_POLICY", "fix").strip().lower()  # fix 
 if PART_POLICY not in {"fix", "kick", "fix+kick", "log", "off"}:
     raise ValueError("invalid FH2MP_PART_POLICY")
 UNKNOWN_CAR_POLICY = os.environ.get("FH2MP_UNKNOWN_CAR_POLICY", "standin")   # a car that is in neither the game data, the synced car database nor data/dlc_cars.txt (a car pack the server does not have): standin = the others see STANDIN_CAR / off / log / kick
-TEST_CAR = int(os.environ.get("FH2MP_TEST_CAR", "0") or 0)    # dev test only: every relayed car is shown to the others as this car (stock parts)
 RENTAL_CLASS_ID = 7                  # CarClasses 7 = R: what a rental's PlayerChoices carry (the grid showed "R 999"), never a real car's class
 RENTAL_PI = 0.99995
 STANDIN_CAR = int(os.environ.get("FH2MP_STANDIN_CAR", "1215"))    # NUL_Car_00: the game's own placeholder car (Data_Car 1215, media/cars/nul_car_00.zip)
@@ -565,20 +563,6 @@ def ping(value: int):
     return write
 
 
-def client_traffic_message(kind: int, a: int, s14: int, u5: int, b: int, flag: int, seq: int):
-    """Relay of a ServerTrafficMessage: kind:4 | u8 | s14 | u5 | u8 | bool | s32 (raw bits)."""
-    def write(w: BitWriter):
-        w.bits(MSG_CLIENT_TRAFFIC_MESSAGE, 7)
-        w.bits(kind, 4)
-        w.bits(a, 8)
-        w.bits(s14, 14)
-        w.bits(u5, 5)
-        w.bits(b, 8)
-        w.bits(flag, 1)
-        w.bits(seq, 32)
-    return write
-
-
 def request_race_relay():
     """Server -> other clients: the leader requested a race. The client's MsgRequestRace Receive handler
     (FUN_1417f6fb0) calls CLobby slot 9, which fires NetworkRaceRequestingParticipants and pops the
@@ -591,26 +575,6 @@ def request_race_relay():
 def finalise_session_entry():
     def write(w: BitWriter):
         w.bits(MSG_FINALISE_SESSION_ENTRY, 7)
-    return write
-
-
-def full_weather(atmosphere=(0.0, 0.0, 0.0, 0, 0, 0, 0), precipitation=(0.0, 0.0, 0.0),
-                 a: int = 0, b: int = 0):
-    import struct
-
-    def f32(x: float) -> int:
-        return struct.unpack("<I", struct.pack("<f", x))[0]
-
-    def write(w: BitWriter):
-        w.bits(MSG_FULL_WEATHER, 7)
-        for v in atmosphere[:3]:
-            w.bits(f32(v), 32)
-        for v in atmosphere[3:7]:
-            w.bits(v, 32)
-        for v in precipitation:
-            w.bits(f32(v), 32)
-        w.bits(a, 32)
-        w.bits(b, 32)
     return write
 
 
@@ -1274,13 +1238,10 @@ class Peer:
         self.seen = set()
         self.connected = False
         self.client_counter = 0
-        self.sync_sent = False
         self.last_keepalive = time.monotonic()
         self.time_sync_seq = 0
         self.console_acked = False
         self.console_seq = 1
-        self.traffic_relayed = 0
-        self.next_traffic_id = 0
         self.owner_id = 0          # relay owner id other clients see this client's objects under
         self.entered = False       # sent FinaliseSessionEntry: may receive other clients' objects
         self.bl_oid = None         # id of this client's own bucket-list PlayerState object (router 12), once created
@@ -1297,7 +1258,6 @@ class Peer:
         self.vip_hidden = None        # (width, value) of PlayerFlags with the VIP bit cleared, to tell the owner once it has entered
         self.gopts_released = False   # message 12 was sent to this client and it has not been granted the options since
         self.gopts_own_seq = None  # sequence number of the last GameOptions write this client made itself (it applied that to its own copy)
-        self.gopts_created = False
         self.console_oid = None    # id of this client's ConsoleSynced object (router 3)
         self.last_rx = time.monotonic()
         self.last_time_sync = time.monotonic()    # the connect handshake sends the first TimeSync
@@ -1322,9 +1282,7 @@ class Peer:
         self.top_climb = 0.0       # fastest climb (km/h of vertical movement) over a second: a car does not do this on the ground
         self.car_payload_logs = 0
         self.kick_reason = None    # set by the car policy; acted on in tick()
-        self.parts = None          # the car's 43 part ids as sent at join (parts.find_parts)
         self.part_notes = 0
-        self.odd_dumps = 0        # raw dumps of unreadable player objects logged for this client (ODD OBJECT, at most 4)
         self.part_logged = None    # (part list, policy) last reported, so one car is reported once and not on every update
         self.speed_ref = None      # (monotonic, position) the last speed was measured from
         self.invisible_logged = False   # audit_visibility reported this player once
@@ -1417,6 +1375,7 @@ class Server:
         # tod_seconds = timescale * (network_ms / 1000) % 86400), so a clock that starts at 0 means every world starts at midnight.
         # A random start under 24 h gives each world its own time of day; it stays small so the plain comparisons on now_ms() hold.
         self.clock_offset_ms = int(os.environ.get("FH2MP_CLOCK_OFFSET_MS", random.randrange(CLOCK_OFFSET_MAX_MS)))
+        self.race_hard_deadline = 0.0
         self.traffic = traffic_mod.TrafficWorld(self.send, lambda: [p for p in self.peers.values() if p.connected and p.entered],
                                                 self.log, universe=self.traffic_universe, bake=bake)
         self.coop = bucketlist.Coop(self.bl_key, self.now_ms, time.monotonic)
@@ -1436,7 +1395,6 @@ class Server:
         self.owner_quarantine = {}   # relay owner id -> monotonic time it may be handed out again (see RELAY_OWNER_LAST)
         self.pending_race = None   # (deadline, leader Peer)
         self.race_requested_at = 0.0   # when the pending race was requested (peers' refused Readys are tied to it)
-        self.race_hard_deadline = 0.0
         self.game_options = None   # (size, payload) latest GameOptionsSynced written by the leader
         self.game_options_owner = None
         self.leader_since = 0.0
@@ -1671,7 +1629,6 @@ class Server:
                 else:
                     # Explicit diagnostic log policy; it is not protective.
                     return True, False, size, payload
-            peer.parts = words
         elif car is not None and peer.parts_repair_car is not None and car != peer.parts_repair_car:
             # Do not unlock a repaired setup with a model-only declaration.
             # A different car must supply its own validated parts first.
@@ -1690,7 +1647,6 @@ class Server:
             if repair is not None or (setup_ids.intersection(values) and attempted):
                 repair = correction
                 values.update(correction)
-                peer.parts = stock
                 if peer.parts_repair_car in CAR_CHOICES:
                     peer.choices = CAR_CHOICES[peer.parts_repair_car]
                 self.correct_owner_setup(peer, oid, correction)
@@ -3335,10 +3291,9 @@ class Server:
             elif mtype in traffic_mod.UPDATE_LAYOUT:
                 self.traffic.on_update(peer, mtype, r)
             elif mtype == MSG_FINALISE_SESSION_ENTRY:
-                self.log(f"{addr[1]} FinaliseSessionEntry -> echo + FullWeather + "
+                self.log(f"{addr[1]} FinaliseSessionEntry -> echo + "
                          f"Console.SessionEntryFinalised=1")
                 replies.append(finalise_session_entry())
-                replies.append(full_weather())
                 if not peer.entered:
                     peer.entered = True
                     self.replay_to(peer)
@@ -4091,7 +4046,7 @@ class Server:
             joining = [q for q in self.others(leader)
                        if q.connected and q.entered and q.console_vars.get(3) and not q.console_vars.get(4)
                        and abs(q.gopts_written_at - asked) > RACE_OWN_REQUEST_SECONDS]
-            if joining and leader.connected and now < getattr(self, "race_hard_deadline", 0):
+            if joining and leader.connected and now < self.race_hard_deadline:
                 self.pending_race = (now + 2.0, leader)   # accepted the invite, still choosing a car
             else:
                 self.pending_race = None

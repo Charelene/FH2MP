@@ -546,7 +546,7 @@ class HttpTests(unittest.TestCase):
     def test_admin_is_not_reachable_through_the_proxy(self):
         self.assertEqual(self.req("GET", "/api/players")[0], 200)
         self.assertEqual(self.req("GET", "/api/players", {"X-Real-IP": "198.51.100.77"})[0], 403)
-        self.assertEqual(self.req("GET", "/admin/list", {"X-Forwarded-For": "198.51.100.77"})[0], 403)
+        self.assertEqual(self.req("GET", "/admin/rivals", {"X-Forwarded-For": "198.51.100.77"})[0], 403)
 
     def test_status_over_http(self):
         st, body = self.req("GET", "/v1/status")
