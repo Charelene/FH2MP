@@ -386,6 +386,31 @@ class LayerCountTests(unittest.TestCase):
         self.assertEqual(L.pngtool.decode(small)[:2], L.SMALL_THUMB)
 
 
+class TuneBuildabilityTests(unittest.TestCase):
+    """Opening a tune makes the client build its car for the stats page; an engine slot without a catalog row crashed it (2026-10-31)."""
+    BAD = [1332002, 1332000, 1332000, -1, 1332003, 1332003, 1332003, 1332003, 1332009, 1332001, 1332000, 1332000, 90002000, 90002000, 90002000,
+           90002000, 90002000, 90002000, 90002000, 90002000, 90002000, -1, -1, 90002000, -1, 90002000, -1, -1, -1, 90002000, 736001, 736000,
+           736003, 736003, 1332001, 1332000, 1332001, 1332000, 1332000, 1332002, 1332003, 1332000, -1]
+    SWAP = [1332001, 1332001, 1332000, -1, 1332003, 1332003, 1332003, 1332003, 1332003, 1332000, 1332001, 1332000, 2144003, 2144003, 2144003,
+            2144003, 2144003, 2144003, 2144003, 2144003, 2144003, -1, -1, 2144000, -1, 2144003, -1, -1, -1, 2144002, 2102003, 2102003, 2102003,
+            2102003, 1332000, 1332000, 1332001, 1332000, 1332003, 1332006, 1332003, 1332001, -1]
+
+    def test_unbuildable_parts_become_the_cars_stock_parts(self):
+        import parts
+        out = L._buildable_tune_parts(1332, {"base": {"m_WheelStyle": 706}, "m_CarParts": self.BAD}, 5447)
+        self.assertEqual(out["base"], {"m_WheelStyle": 706})
+        self.assertEqual(parts.integrity_errors([w & 0xFFFFFFFF for w in out["m_CarParts"]]), [])
+        self.assertEqual(out["m_CarParts"][12], 792000)          # the stock engine's camshaft, which holds the torque curve
+
+    def test_valid_swap_and_unknown_cars_are_served_as_stored(self):
+        swap = {"m_CarParts": self.SWAP}
+        self.assertIs(L._buildable_tune_parts(1332, swap, 15394), swap)
+        bad = {"m_CarParts": self.BAD}
+        self.assertIs(L._buildable_tune_parts(999999, bad, 1), bad)
+        short = {"m_CarParts": [1, 2]}
+        self.assertIs(L._buildable_tune_parts(1332, short, 2), short)
+
+
 class LspTests(unittest.TestCase):
     def setUp(self):
         # Handlers mutate scores, gamertags and UGC. Sharing one public schema

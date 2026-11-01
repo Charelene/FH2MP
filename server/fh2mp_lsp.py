@@ -50,6 +50,10 @@ import crash_reports  # noqa: E402
 import launcher_api  # noqa: E402
 import ops_api  # noqa: E402
 import site_stats  # noqa: E402
+try:
+    import parts as parts_check  # noqa: E402     # part ids of the game data (the same catalog the game server checks lobby cars with)
+except ImportError:
+    parts_check = None
 
 SEQ = 0
 SC = None
@@ -1115,6 +1119,31 @@ def cv_get_layergroup(req):
     return res
 
 
+def _buildable_tune_parts(car_id, installed, tune_id):
+    """The tune's installed parts, repaired when the game could not build the car from them. Opening a tune makes the client simulate the
+    car for its stats (CarPerformance_SimulateAndComputeRatings -> CCarDynamics::BuildICEFromSetup); an engine slot without a catalog row
+    leaves the torque curve empty and that loop reads past its buffer (2026-10-31: tune 5447 with 90002000 in the engine slots crashed a
+    client that opened a listing). The part list becomes what the lobby check would make of it, or the car's stock parts when that still
+    cannot be built. Cars the catalog does not know (car packs) and well-formed lists are served as stored."""
+    words = installed.get("m_CarParts") if isinstance(installed, dict) else None
+    if parts_check is None or not car_id or not isinstance(words, list) or len(words) != parts_check.P.PART_SLOTS:
+        return installed
+    try:
+        stock = parts_check.stock_list(car_id)
+        if stock is None:
+            return installed
+        raw = [int(w) & 0xFFFFFFFF for w in words]
+        if not parts_check.integrity_errors(raw):
+            return installed
+        fixed, _, left = parts_check.neutralize(raw)
+        if left or parts_check.integrity_errors(fixed):
+            fixed = stock
+    except (TypeError, ValueError, KeyError):
+        return installed
+    log(f"  tune {tune_id} of car {car_id} has parts the game cannot build; served repaired")
+    return dict(installed, m_CarParts=[w - (1 << 32) if w >= 1 << 31 else w for w in fixed])
+
+
 def cv_get_tune(req):
     v = UGC.versioned_get(req["versionedTuneId"])
     if v is None or v["kind"] != "tune":
@@ -1123,7 +1152,7 @@ def cv_get_tune(req):
     d = res["versionedTuneData"]
     d.update({"CarId": v["car_id"] or 0, "CreatorName": TAGS.get(v["creator"]) or _tag_from_db(v["creator"]), "CreatorXuid": v["creator"]})
     if v["parts"]:
-        d["InstalledParts"] = json.loads(v["parts"])
+        d["InstalledParts"] = _buildable_tune_parts(v["car_id"], json.loads(v["parts"]), req["versionedTuneId"])
     if v["tuning"]:
         d["Tuning"] = json.loads(v["tuning"])
     return res
