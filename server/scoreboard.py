@@ -18,6 +18,11 @@ import struct
 import time
 import xp_audit
 import score_reports
+import diag
+
+LOG = diag.get("scores")
+_RATE = diag.RateLimit()
+XP_BUDGET_LOG_SECONDS = 600.0
 
 ASCENDING = {1}          # scoreTypes where a smaller score wins (lap/race times) [guess]
 # Confirmed by real count submissions: bonus boards and mainland roads.
@@ -87,17 +92,10 @@ class ScoreStore:
         (a NaN/inf time must never reach a public board), is negative, or is a zero time or the car is class X/R on a Rivals board (user
         decision: a maxed-out car must never appear on a Rivals leaderboard, not even disguised as S2), or a speed above SPEED_CAP."""
         score = u64_to_dbl(d["score"])
-        if not math.isfinite(score) or score < 0 or (score_type in ASCENDING and score == 0):
-            return None                 # no board has a negative score, and no race takes no time (audit 2026-10-25 F10)
-        limit = PROGRESS_LIMITS.get((d['scoreboardType'], score_type))
-        if limit is not None and (score > limit or not score.is_integer()):
-            return None
-        if d["scoreboardType"] in SPEED_BOARDS and score > SPEED_CAP:
-            return None
-        if d["scoreboardType"] in EVENT_BOARDS and d["carClassId"] in MAXED_CLASSES:
-            return None
-        required_class = self.event_class(d["scoreboardType"], d["gameScoreboardId"])
-        if required_class is not None and d["carClassId"] != required_class:
+        refused = self.refusal(score_type, d, score)
+        if refused:
+            LOG.warn(f"SubmitScore refused: {refused} " + diag.kv(xuid=f"{xuid:#x}", board=f"({d['scoreboardType']},{score_type})", gsid=d["gameScoreboardId"],
+                                                                  track=d["trackId"], car=d["carId"], cls=d["carClassId"], pi=f"{d['carPerformanceIndex']:.4f}"))
             return None
         now = time.time()
         score_id = os.urandom(16)
@@ -115,6 +113,24 @@ class ScoreStore:
                           (cur.lastrowid, now))
         return {"id": cur.lastrowid, "score_id": score_id, "xuid": xuid, "tag": tag, "sb": d["scoreboardType"],
                 "st": score_type, "score": score}
+
+    def refusal(self, score_type, d, score):
+        """Why submit() will not store this score (None when it will): the measured value and the limit it broke."""
+        if not math.isfinite(score):
+            return f"score {score!r} is not a finite number"
+        if score < 0 or (score_type in ASCENDING and score == 0):
+            return f"score {score:g} is not a possible {'time' if score_type in ASCENDING else 'score'}"    # no board has a negative score, and no race takes no time (audit 2026-10-25 F10)
+        limit = PROGRESS_LIMITS.get((d['scoreboardType'], score_type))
+        if limit is not None and (score > limit or not score.is_integer()):
+            return f"progress counter {score:g} is " + ("not a whole number" if score <= limit else f"above the {limit} this board can hold")
+        if d["scoreboardType"] in SPEED_BOARDS and score > SPEED_CAP:
+            return f"speed {score:.3f} m/s is above the {SPEED_CAP} m/s cap ({score * 3.6:.0f} km/h)"
+        if d["scoreboardType"] in EVENT_BOARDS and d["carClassId"] in MAXED_CLASSES:
+            return f"car class {d['carClassId']} (X/R) is not allowed on a Rivals board"
+        required_class = self.event_class(d["scoreboardType"], d["gameScoreboardId"])
+        if required_class is not None and d["carClassId"] != required_class:
+            return f"car class {d['carClassId']} does not match the event's class {required_class}"
+        return None
 
     def plausibility(self, r):
         """(hard, flags) of a stored submission from what the client claimed, ghost aside."""
@@ -170,13 +186,26 @@ class ScoreStore:
         data = bytes(data)
         r = self.db.one("SELECT s.*, g.submission_id AS stored, '' AS tag FROM score_submissions s LEFT JOIN score_ghosts g ON g.submission_id = s.id WHERE s.score_id=?",
                         (bytes(score_id),))
-        if r is None or r["xuid"] != xuid or len(data) > ghost.MAX_BLOB:
+        sid_text = bytes(score_id).hex()[:8]
+        if r is None:
+            LOG.warn("ghost upload refused: no submission has this scoreId (the SubmitScore was refused, or is from before a database restore) "
+                     + diag.kv(xuid=f"{xuid:#x}", score_id=sid_text, bytes=len(data)))
+            return None, False
+        if r["xuid"] != xuid or len(data) > ghost.MAX_BLOB:
+            LOG.warn("ghost upload refused: " + (f"the run belongs to xuid {r['xuid']:#x}" if r["xuid"] != xuid else f"{len(data)} bytes is above the {ghost.MAX_BLOB} byte limit")
+                     + " " + diag.kv(xuid=f"{xuid:#x}", submission=r["id"], score_id=sid_text))
             return None, False
         if r["stored"] is not None:
-            return (r["id"], False) if self.ghost(r["id"]) == data else (None, False)
+            if self.ghost(r["id"]) == data:
+                LOG.debug(f"ghost upload repeated, same bytes as the stored ghost (retry) submission={r['id']}")
+                return r["id"], False
+            LOG.warn("ghost upload refused: the run already has a different ghost and the first upload stands "
+                     + diag.kv(xuid=f"{xuid:#x}", submission=r["id"], stored_bytes=len(self.ghost(r["id"]) or b""), new_bytes=len(data)))
+            return None, False
         try:
             ghost.parse(data)        # every one of 17,011 real ghosts parses; what does not is never stored or served
-        except ghost.GhostError:
+        except ghost.GhostError as e:
+            LOG.warn(f"ghost upload refused: does not parse ({e}) " + diag.kv(xuid=f"{xuid:#x}", submission=r["id"], bytes=len(data), board=f"({r['sb']},{r['st']})"))
             return None, False
         judged = r["sb"] in GHOST_BOARDS and r["st"] in ASCENDING
         verdict = self.judge_run(dict(zip(r.keys(), r)), data) if judged else None    # outside the transaction: a parse must never hold the lock
@@ -184,7 +213,21 @@ class ScoreStore:
         with self.db.tx() as c:
             c.execute("INSERT INTO score_ghosts (submission_id, data, uploaded) VALUES (?,?,?) ON CONFLICT (submission_id) DO NOTHING", (r["id"], data, now))
             public = self.store_verdict(c, r["id"], *verdict, now) if judged else False
+        if judged:
+            self._log_verdict(r, verdict, public, len(data))
         return r["id"], public and verdict[0] != ghost_check.HARD
+
+    def _log_verdict(self, r, verdict, public, size):
+        """One line per judged run: the verdict, what the policy did with it, and the figures that decided it (reasons carry value against limit)."""
+        kind, reasons, measured = verdict
+        who = diag.kv(submission=r["id"], xuid=f"{r['xuid']:#x}", board=f"({r['sb']},{r['st']})", track=r["track"], car=r["car"], score=f"{r['score']:.3f}",
+                      ghost_bytes=size, policy=self.ghost_policy, shown=public)
+        if kind == ghost_check.PASS:
+            LOG.debug(f"ghost verdict pass {who} " + diag.kv(frames=measured.get("frames"), speed=f"{measured.get('speed', 0):.1f}", accel=f"{measured.get('acceleration', 0):.1f}",
+                                                           power=f"{measured.get('power', 0):.0f}"))
+        else:
+            LOG.warn(f"ghost verdict {kind} {who} reasons: " + "; ".join(reasons[:6]) + (" ..." if len(reasons) > 6 else "")
+                     + ("" if self.ghost_policy == "enforce" else " (policy=log: stays public)"))
 
     def by_score_id(self, score_id):
         """The stored submission a client refers to by the scoreId we issued (None if unknown)."""
@@ -216,6 +259,10 @@ class ScoreStore:
             recent = self.db.one("SELECT COALESCE(SUM(xp), 0) FROM xp_awards WHERE xuid=? AND at > ? AND verdict=?", (xuid, now - 3600, xp_audit.OK))[0]
             if recent + xp > xp_audit.HOUR_BUDGET:
                 reason = f"over the hourly budget ({recent + xp:g} of {xp_audit.HOUR_BUDGET:g})"       # counted, log first (docs/lsp.md)
+                ok, skipped = _RATE.allow(("xp-budget", xuid), XP_BUDGET_LOG_SECONDS)
+                if ok:
+                    LOG.warn("XP over the hourly budget, still counted (policy: report only) " + diag.kv(xuid=f"{xuid:#x}", this_award=f"{xp:g}", last_hour=f"{recent:g}",
+                                                                                                   budget=f"{xp_audit.HOUR_BUDGET:g}", suppressed=skipped or None))
         with self.db.tx() as c:
             db.touch_player(c, xuid, "", now)
             c.execute("INSERT INTO xp_awards (xuid, xp, at, verdict, reason) VALUES (?,?,?,?,?)",

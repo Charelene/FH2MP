@@ -16,7 +16,10 @@ import json
 import random
 import time
 
+import diag
 import rentals
+
+LOG = diag.get("rivals")
 
 CLASS_LETTERS = ("D", "C", "B", "A", "S1", "S2")
 ERAS = ((None, 1969, "Classics"), (1970, 1989, "Retro Icons"), (1990, 1999, "90s Heroes"), (2000, 2009, "2000s Icons"),
@@ -105,8 +108,9 @@ class RivalCatalog:
         if getattr(self, "_rentals", None) is None:
             try:
                 self._rentals = {r[0] for r in self.cars.db.execute("SELECT CarId FROM RentalCars")}
-            except Exception:  # noqa: BLE001 - a catalog without the table: no rental check
+            except Exception as e:  # noqa: BLE001 - a catalog without the table: no rental check
                 self._rentals = set()
+                LOG.warn(f"RentalCars could not be read from the catalog, so events are generated without a rental check and may offer nobody a car: {diag.where(e)}")
         return self._rentals
 
     def usable_themes(self):
@@ -118,6 +122,9 @@ class RivalCatalog:
             rent = self.rentals()
             if rent:
                 ok = [t for t in themes if rentals.enough({r[0] for r in self.cars_for(t["attrs"])}, rent)]
+                if not ok:
+                    LOG.warn(f"no theme has {rentals.RENTAL_MIN} rentals in the catalog's {len(rent)} RentalCars rows: all {len(themes)} themes stay in use "
+                             "and some events will offer a player without a fitting car nothing to drive")
                 themes = ok or themes
             self._usable = themes
         return self._usable

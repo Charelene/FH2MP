@@ -7,6 +7,10 @@ others. Only the admin API deletes the notification itself.
 import json
 import time
 
+import diag
+
+LOG = diag.get("notif")
+
 SELECT = ("SELECT n.id, n.type, n.message, n.sra, n.sent, n.xuid, n.car_id, n.params, "
           "r.read_at, r.cleared_at, r.claimed_at FROM notifications n "
           "LEFT JOIN notification_receipts r ON r.notification_id = n.id AND r.xuid = ?")
@@ -60,13 +64,17 @@ class NotificationStore:
     def claim(self, xuid, nid):
         """Marks a gift as retrieved by this player. True exactly once per (gift, player), even when two requests
         race: the conditional upsert only touches the row while claimed_at is still NULL."""
-        return self._receipt(xuid, nid, "claimed_at") == 1
+        done = self._receipt(xuid, nid, "claimed_at") == 1
+        if not done:
+            LOG.debug(f"claim of notification {nid} by xuid {xuid:#x} did not count: it was claimed before, or is not theirs / gone")
+        return done
 
     def _receipt(self, xuid, nid, column):
         now = time.time()
         self.generation += 1
         with self.db.tx() as c:
             if not c.execute("SELECT 1 FROM notifications WHERE id=? AND (xuid=0 OR xuid=?)", (nid, xuid)).fetchone():
+                LOG.debug(f"{column.split('_')[0]} of notification {nid} by xuid {xuid:#x} ignored: not theirs, or deleted")
                 return 0        # not theirs (or gone): ignore, the client may retry stale ids
             return c.execute(f"INSERT INTO notification_receipts (notification_id, xuid, {column}) VALUES (?,?,?) "
                              f"ON CONFLICT(notification_id, xuid) DO UPDATE SET {column}=excluded.{column} "

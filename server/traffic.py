@@ -16,7 +16,12 @@ import os
 import struct
 import time
 
+import diag
 import traffic_manager
+
+LOG = diag.get("traffic")
+_RATE = diag.RateLimit()
+IGNORED_LOG_SECONDS = 30.0
 
 # message ids
 MSG_SERVER_FULL_SYNC = 16
@@ -81,7 +86,8 @@ def load_models(path=None):
     try:
         with open(path) as f:
             return [int(x) for x in f.read().replace("\n", ",").split(",") if x.strip()]
-    except OSError:
+    except OSError as e:
+        LOG.warn(f"car model list {path} cannot be read, so there is no online traffic (TrafficWorld stays disabled): {diag.where(e)}")
         return []
 
 
@@ -232,6 +238,9 @@ class TrafficWorld:
 
     def denied(self, peer, vid):
         self.push(peer, C_OWNERSHIP_DENIED, a=vid)
+        ok, skipped = _RATE.allow(("denied", peer.addr), IGNORED_LOG_SECONDS)
+        if ok:
+            LOG.debug(f"{peer.addr[1]} ownership of car {vid} denied: {self.manager.refusal}" + (f" (+{skipped} more since the last line)" if skipped else ""))
 
     # ------------------------------------------------------------ lifecycle
     def join(self, peer, force=False):
@@ -297,7 +306,7 @@ class TrafficWorld:
             if m.spawned(peer, a, signed14(s14), CarData((a, s14, u5, b, flag)), now):
                 self.push(peer, C_TAKE_OWNERSHIP, a=a)       # the spawner drives the car; without this it despawns it after ~7 s
             else:
-                self.log(f"traffic: {peer.addr[1]} spawned car {a} it was not granted; ignored")
+                self.log(f"traffic: {peer.addr[1]} spawned car {a} it was not granted; ignored ({m.refusal})")
         elif kind == S_TRAFFIC_REMOVED:
             m.removed(peer, a)
         elif kind == S_REQUEST_DESPAWN:
@@ -325,6 +334,12 @@ class TrafficWorld:
         m = self.manager
         car = m.cars.get(vid)
         if not self.enabled or car is None or car.owner is not peer or self.flooding(peer, self.st(peer)):
+            if self.enabled and (car is None or car.owner is not peer):
+                ok, skipped = _RATE.allow(("stale", peer.addr), IGNORED_LOG_SECONDS)
+                if ok:
+                    LOG.debug(f"{peer.addr[1]} {UPDATE_NAMES[mtype]} for car {vid} ignored: "
+                              + ("no such car" if car is None else f"owned by {getattr(car.owner, 'addr', ('', car.owner))[1]}")
+                              + (f" (+{skipped} more since the last line)" if skipped else ""))
             return
         if mtype == MSG_SERVER_FULL_SYNC:
             car.info.full_sync = fields

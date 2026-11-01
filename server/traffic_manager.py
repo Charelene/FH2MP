@@ -5,6 +5,19 @@ when pushed out or when that player culls it; the car lives on for the others. T
 Addresses are build 1.0.0.64. Read in the exe except where marked [I]: the exe only holds the in-process offline server, so its network sends are vtable slots
 and the handover below is inferred from OnRequestOwnership, which does Drop and Take itself."""
 
+import diag
+
+LOG = diag.get("traffic")
+_RATE = diag.RateLimit()
+EXHAUSTED_LOG_SECONDS = 30.0
+
+
+def _name(key):
+    """How a player is named in a log line: the port traffic.py uses for peers, the key itself otherwise."""
+    addr = getattr(key, "addr", None)
+    return addr[1] if addr else key
+
+
 MAX_CARS = 216               # the loops in 0x1957e00 and 0x19580c0 stop at 0xd8
 HARD_CAP = 18                # AssignVehicleToPlayer 0x1955080
 BASE_CAPACITY = 10           # helper_1956690: 10 + car models in use - cars held
@@ -73,6 +86,7 @@ class TrafficManager:
         self.reserved = {}           # vid -> key: granted, not spawned yet (+0x88c)
         self.requests = {}           # universe -> [[key, count], ...] in arrival order (queue +0x8)
         self.placing = {}            # vid -> key: spawned, no position yet (queue +0x38), blocks spawns nearby
+        self.refusal = ""            # why the last spawned() / request_ownership() said no, for the caller's log line
 
     def join(self, key):
         return self.players.setdefault(key, Player(key))
@@ -115,6 +129,7 @@ class TrafficManager:
         """OnRequestTraffic 0x19578a0: ignored while earlier grants are unanswered."""
         p = self.players[key]
         if p.granted or p.universe == -1:
+            LOG.debug(f"request from {_name(key)} for {count} car(s) ignored: " + (f"{len(p.granted)} grant(s) not answered yet" if p.granted else "it is in no universe yet"))
             return
         p.canceled.clear()
         self.requests.setdefault(p.universe, []).append([key, count])
@@ -141,8 +156,10 @@ class TrafficManager:
         p = self.players[key]
         if vid in p.canceled:
             p.canceled.discard(vid)
+            self.refusal = "the grant was cancelled before the spawn arrived"
             return False
         if vid not in p.granted:
+            self.refusal = "no grant is outstanding for that id" + (" (a car with that id exists already)" if vid in self.cars else "")
             return False
         p.granted.discard(vid)
         self.reserved.pop(vid, None)
@@ -177,9 +194,11 @@ class TrafficManager:
         is the only thing that sends this."""
         p, car = self.players[key], self.cars.get(vid)
         if car is None or car.owner == key or vid not in p.held:
+            self.refusal = "no such car" if car is None else "the player owns it already" if car.owner == key else "the player does not hold it"
             self.out.denied(key, vid)
             return False
         if now - car.changed <= CHANGE_GAP_MS:
+            self.refusal = f"its owner changed {now - car.changed:.0f} ms ago, minimum {CHANGE_GAP_MS:.0f}"
             self.out.denied(key, vid)
             return False
         self._hand_over(car, key, now)
@@ -278,6 +297,10 @@ class TrafficManager:
                 continue
             vid = next((v for v in range(MAX_CARS) if v not in self.cars and v not in self.reserved), None)
             if vid is None:
+                ok, skipped = _RATE.allow("exhausted", EXHAUSTED_LOG_SECONDS)
+                if ok:
+                    LOG.warn(f"no free car id: all {MAX_CARS} are in use ({len(self.cars)} cars, {len(self.reserved)} granted and not spawned), "
+                             f"{sum(len(q) for q in self.requests.values())} request(s) wait" + (f" (+{skipped} more since the last line)" if skipped else ""))
                 return
             entry[1] -= 1
             if entry[1] <= 0:
