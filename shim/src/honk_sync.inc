@@ -4,7 +4,10 @@
  * on disk; the addresses below are for the pinned DLL (sha256 4ed6ba03...) and are checked byte for byte, another build is left alone.
  *
  * Controls: HonkHonk honks on the left stick (L3, XInput bit 0x40, one `test byte [rsp+0x2c], 0x40` in its input loop). Forza honks on the right
- * stick and Extra Options' headlights are moved to the left stick by the launcher, so the immediate is changed to 0x80 in memory.
+ * stick and Extra Options' headlights are moved to the left stick by the launcher, so the immediate is changed to 0x80 in memory. That is its own
+ * step: it happens whether or not horns can be shared, and only when FH2_ExtraOptions.ini has the headlight/roof toggles off the right stick, so the
+ * horn and a toggle never end up on one stick; data\bin\fh2mp-controls.txt tells the launcher where the horn is (launcher/fh2mp_launcher/shim.py).
+ * A function start another mod hooked through the platform (Horizon Wave Radio hooks createSound) is called through that hook, as the game does.
  *
  * Remote voices run on the game's audio update (AudioEngineFmod::vfunc_5, 0x10140d0: Studio::System::update(*(this+0x7f0)), the call HonkHonk hooks
  * one level down), so every FMOD call is made on the thread HonkHonk's own calls use. Three limits keep a voice from sticking: the server's 0.5 s
@@ -271,32 +274,114 @@ static int honk_move_button(unsigned char *hh)
     VirtualProtect(imm,1,old,&old);
     return 1;
 }
-/* -> 1 when HonkHonk.dll is loaded and recognised (sets g_honk_request, moves the button, loads the bank), 0 not loaded yet, -1 another build (said once) */
+
+/* ---- which stick the horn is on: never the one Extra Options' headlight or roof toggle uses ----
+ * The launcher moves those toggles to the left stick (launcher/fh2mp_launcher/shim.py swap_stick_bindings); the horn only goes to the right stick
+ * when FH2_ExtraOptions.ini really has them off it. The outcome goes to data\bin\fh2mp-controls.txt, from which the launcher puts the toggles back
+ * on the right stick when the horn could not be moved. */
+#define HH_STICK_LEFT 1u
+#define HH_STICK_RIGHT 2u
+static wchar_t g_honk_eo_ini[MAX_PATH+40];           /* <Azimuth>\FH2_ExtraOptions.ini, empty: not known */
+static wchar_t g_honk_status[MAX_PATH+40];           /* <data\bin>\fh2mp-controls.txt, empty: not written */
+
+/* The sticks one Extra Options binding uses ("LeftStick", "LB+RightStick", the aliases LS/RS, any case). */
+static unsigned honk_binding_sticks(const wchar_t *v)
+{
+    unsigned used=0;
+    while(*v) {
+        wchar_t token[24]; unsigned n=0;
+        while(*v==L' ' || *v==L'\t' || *v==L'+') v++;
+        while(*v && *v!=L'+') {if(n<23) token[n++]=*v; v++;}
+        while(n && (token[n-1]==L' ' || token[n-1]==L'\t' || token[n-1]==L'\r')) n--;
+        token[n]=0;
+        if(!lstrcmpiW(token,L"LeftStick") || !lstrcmpiW(token,L"LS")) used|=HH_STICK_LEFT;
+        else if(!lstrcmpiW(token,L"RightStick") || !lstrcmpiW(token,L"RS")) used|=HH_STICK_RIGHT;
+    }
+    return used;
+}
+/* The sticks Extra Options' headlight and roof toggles use; a key that is not in the file is Extra Options' default, RightStick. */
+static unsigned honk_eo_sticks(const wchar_t *ini)
+{
+    static const wchar_t *const keys[]={L"HeadlightsXbox",L"RoofXbox"};
+    unsigned used=0, k;
+    for(k=0;k<2;k++) {
+        wchar_t v[96];
+        GetPrivateProfileStringW(L"Bindings",keys[k],L"RightStick",v,96,ini);
+        used|=honk_binding_sticks(v);
+    }
+    return used;
+}
+/* The right stick (Forza's own horn button) unless a toggle sits there and the left stick is free. */
+static int honk_horn_goes_right(unsigned eo) {return !(eo&HH_STICK_RIGHT) || (eo&HH_STICK_LEFT);}
+static void honk_write_status(int right, int movable, const char *why)
+{
+    HANDLE f; DWORD written; char text[256]; unsigned i=0, k; const char *parts[4];
+    if(!g_honk_status[0]) return;
+    parts[0]=right?"horn=RightStick\r\n":"horn=LeftStick\r\n"; parts[1]=movable?"movable=1\r\nwhy=":"movable=0\r\nwhy="; parts[2]=why; parts[3]="\r\n";
+    for(k=0;k<4;k++) {const char *c=parts[k]; while(*c && i<sizeof text-1) text[i++]=*c++;}
+    f=CreateFileW(g_honk_status,GENERIC_WRITE,FILE_SHARE_READ,NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,NULL);
+    if(f==INVALID_HANDLE_VALUE) return;
+    WriteFile(f,text,i,&written,NULL);
+    CloseHandle(f);
+}
+/* Once per game: puts HonkHonk's horn button on the right stick when Extra Options' toggles are off it. -> 1 the horn is on the right stick. */
+static int honk_place_button(unsigned char *hh)
+{
+    unsigned eo;
+    if(honk_code_is(hh+HH_BUTTON_RVA,honk_moved_code,7)) {
+        honk_write_status(1,1,"already on the right stick");
+        return 1;
+    }
+    if(!honk_code_is(hh+HH_BUTTON_RVA,honk_button_code,7)) {
+        unsigned char now[7];
+        log_begin();log_raw("honk: the horn button stays on the left stick, HonkHonk.dll is not the known 0.3.4 build (at +0x");log_hex(HH_BUTTON_RVA,4);log_raw(" found ");
+        if(read_game_memory(hh+HH_BUTTON_RVA,now,7)) log_hexbytes(now,7); else log_raw("(unreadable)");
+        log_raw("); the launcher puts Extra Options' headlights/roof back on the right stick\n");
+        honk_write_status(0,0,"unknown HonkHonk build");
+        return 0;
+    }
+    eo=g_honk_eo_ini[0]?honk_eo_sticks(g_honk_eo_ini):HH_STICK_RIGHT;
+    if(!honk_horn_goes_right(eo)) {
+        log_begin();log_raw("honk: the horn button stays on the left stick, Extra Options' headlights/roof are on the right stick (FH2_ExtraOptions.ini)\n");
+        honk_write_status(0,1,"Extra Options uses the right stick");
+        return 0;
+    }
+    if(!honk_move_button(hh)) {
+        log_begin();log_raw("honk: could not move HonkHonk's horn button to the right stick (error ");log_dec(GetLastError());
+        log_raw("), it stays on the left stick; the launcher puts Extra Options' headlights/roof back on the right stick\n");
+        honk_write_status(0,0,"could not change HonkHonk's button");
+        return 0;
+    }
+    log_begin();log_raw("honk: the horn button is the right stick");
+    if(eo&HH_STICK_RIGHT) log_raw(" (Extra Options' headlights/roof use both sticks, so the right stick also works one of them)");
+    log_raw("\n");
+    honk_write_status(1,1,"moved");
+    return 1;
+}
+/* -> 1 when HonkHonk.dll is loaded and its horn can be shared (sets g_honk_request, loads the bank), 0 not loaded yet, -1 sharing is off or another
+ * build (said once). The horn button is placed on the first call that finds the DLL, whether or not horns are shared. */
 static int honk_attach(void)
 {
-    static int told_other, attached;
+    static int told_other, attached, placed;
     HMODULE m=GetModuleHandleW(L"HonkHonk.dll"); unsigned char *hh=(unsigned char *)m; wchar_t path[MAX_PATH+40]; DWORD n, i, slash=0;
     if(attached) return 1;
     if(!hh) return 0;
-    if(!honk_code_is(hh+HH_REQUEST_RVA,honk_request_code,7) ||
-       (!honk_code_is(hh+HH_BUTTON_RVA,honk_button_code,7) && !honk_code_is(hh+HH_BUTTON_RVA,honk_moved_code,7))) {
+    if(!placed) {placed=1; honk_place_button(hh);}
+    if(!g_honk_enabled) return -1;
+    if(!honk_code_is(hh+HH_REQUEST_RVA,honk_request_code,7)) {
         if(!told_other) {
             unsigned char now[7];
             told_other=1;
-            log_begin();log_raw("honk: unexpected HonkHonk.dll (only 0.3.4 is known), its horn is not shared and its button stays where it is; at +0x");
-            log_hex(HH_BUTTON_RVA,4);log_raw(" found ");
-            if(read_game_memory(hh+HH_BUTTON_RVA,now,7)) log_hexbytes(now,7); else log_raw("(unreadable)");
+            log_begin();log_raw("honk: unexpected HonkHonk.dll (only 0.3.4 is known), its horn is not shared; at +0x");
+            log_hex(HH_REQUEST_RVA,4);log_raw(" found ");
+            if(read_game_memory(hh+HH_REQUEST_RVA,now,7)) log_hexbytes(now,7); else log_raw("(unreadable)");
             log_raw("\n");
         }
         return -1;
     }
-    if(honk_code_is(hh+HH_BUTTON_RVA,honk_button_code,7) && !honk_move_button(hh)) {
-        if(!told_other) {told_other=1;log_begin();log_raw("honk: could not move HonkHonk's horn button to the right stick\n");}
-        return -1;
-    }
     g_honk_request=hh+HH_REQUEST_RVA+6+*(const int *)(honk_request_code+2);      /* mov [rip+disp32], ecx: next instruction + disp */
     attached=1;
-    log_begin();log_raw("honk: HonkHonk.dll found, its horn is read from its own state and its button is the right stick\n");
+    log_begin();log_raw("honk: HonkHonk.dll found, its horn is read from its own state\n");
     n=GetModuleFileNameW(m,path,MAX_PATH);
     if(n && n<MAX_PATH) {
         wchar_t volume[16]; HANDLE f; wchar_t dir[MAX_PATH+40];
@@ -346,6 +431,10 @@ static DWORD WINAPI honk_worker(void *unused)
     int (WSAAPI *close_socket)(SOCKET);
     u_long nb=1; int v6only=0, sent_horn=-2, previous=-1, socket_told=0, silent_told=0; unsigned short press=0, sent_press=0; unsigned rejected=0;
     (void)unused;
+    if(!g_honk_enabled) {                            /* horns are not shared: only the button is placed */
+        while(honk_attach()==0) Sleep(500);
+        return 0;
+    }
     if(ws) {
         make_socket=(void *)GetProcAddress(ws,"socket"); nonblocking=(void *)GetProcAddress(ws,"ioctlsocket");
         receive=(void *)GetProcAddress(ws,"recvfrom"); option=(void *)GetProcAddress(ws,"setsockopt");
@@ -433,7 +522,38 @@ static DWORD WINAPI honk_worker(void *unused)
     if(s!=INVALID_SOCKET && close_socket) close_socket(s);
     return 0;
 }
-static int patch_honk(void)
+/* A function start that another mod hooked through the platform: MinHook's jmp rel32 or jmp [rip+0] to code outside the game image. The game reaches
+ * it the same way, so it is called through that hook (Horizon Wave Radio hooks createSound and passes every sound but its own to the original). */
+static int honk_hooked_by_mod(const unsigned char *img, SIZE_T image_size, const unsigned char *at)
+{
+    const unsigned char *to;
+    if(at[0]==0xe9) to=at+5+*(const int *)(at+1);
+    else if(at[0]==0xff && at[1]==0x25 && !at[2] && !at[3] && !at[4] && !at[5]) to=*(const unsigned char *const *)(at+6);
+    else return 0;
+    return to<img || to>=img+image_size;
+}
+/* -> 1 the function starts with `want`, 2 another mod's hook is in front of it, 0 something else */
+static int honk_entry_ok(const unsigned char *img, SIZE_T image_size, unsigned rva, const unsigned char want[8])
+{
+    unsigned k;
+    for(k=0;k<8 && img[rva+k]==want[k];k++) {}
+    if(k==8) return 1;
+    return honk_hooked_by_mod(img,image_size,img+rva)?2:0;
+}
+static void honk_paths(const wchar_t *azimuth_dir, const wchar_t *bin_dir)
+{
+    g_honk_eo_ini[0]=g_honk_status[0]=0;
+    if(azimuth_dir && lstrlenW(azimuth_dir)<MAX_PATH) {lstrcpyW(g_honk_eo_ini,azimuth_dir); lstrcatW(g_honk_eo_ini,L"\\FH2_ExtraOptions.ini");}
+    if(bin_dir && lstrlenW(bin_dir)<MAX_PATH) {lstrcpyW(g_honk_status,bin_dir); lstrcatW(g_honk_status,L"\\fh2mp-controls.txt"); DeleteFileW(g_honk_status);}
+}
+/* FH2MP_NO_HONK: the button is not moved; the launcher reads that and leaves Extra Options' toggles on the right stick. */
+static void honk_switched_off(const wchar_t *azimuth_dir, const wchar_t *bin_dir)
+{
+    honk_paths(azimuth_dir,bin_dir);
+    honk_write_status(0,0,"FH2MP_NO_HONK");
+}
+/* The horn button is placed in every case (its own step); sharing horns needs the FMOD functions and the audio update. -> 1 horns are shared */
+static int patch_honk(const wchar_t *azimuth_dir, const wchar_t *bin_dir)
 {
     static const struct { unsigned rva; unsigned char bytes[8]; const char *what; } checks[]={
         {0x10140d0,{0x48,0x8b,0x89,0xf0,0x07,0x00,0x00,0xe9},"the audio engine update"},
@@ -448,32 +568,38 @@ static int patch_honk(void)
         {0x19a6730,{0x40,0x57,0x48,0x81,0xec,0x70,0x01,0x00},"FMOD stop"},
         {0x19a0960,{0x40,0x53,0x55,0x56,0x57,0x41,0x56,0x41},"FMOD setLoopPoints"},
     };
-    unsigned char *img=find_fh2_image(); unsigned i; HANDLE thread;
-    if(!img) return 0;
-    for(i=0;i<sizeof checks/sizeof checks[0];i++) {
-        unsigned k;
-        for(k=0;k<8 && img[checks[i].rva+k]==checks[i].bytes[k];k++) {}
-        if(k<8) {
-            log_begin();log_raw("honk: unexpected bytes in ");log_raw(checks[i].what);log_raw(" at game+0x");log_hex(checks[i].rva+k,8);
-            log_raw(", horns are not shared; not enabled\n");
-            return 0;
+    unsigned char *img=find_fh2_image(); unsigned i; HANDLE thread; int share=img!=NULL;
+    honk_paths(azimuth_dir,bin_dir);
+    if(!img) {log_begin();log_raw("honk: other players' horns are not shared (the game is not FH2 1.0.0.64); the horn button is still placed\n");}
+    for(i=0;share && i<sizeof checks/sizeof checks[0];i++) {
+        int ok=honk_entry_ok(img,FH2_SIZE_OF_IMAGE,checks[i].rva,checks[i].bytes);
+        if(ok==2) {
+            log_begin();log_raw("honk: ");log_raw(checks[i].what);log_raw(" at game+0x");log_hex(checks[i].rva,8);
+            log_raw(" is hooked by another mod; it is used through that hook, as the game uses it\n");
+        } else if(!ok) {
+            log_begin();log_raw("honk: unexpected bytes in ");log_raw(checks[i].what);log_raw(" at game+0x");log_hex(checks[i].rva,8);
+            log_raw(", other players' horns are not shared; the horn button is still placed\n");
+            share=0;
         }
     }
-    g_honk_fmod.get_low_level=(void *)(img+0x1a98080); g_honk_fmod.create_sound=(void *)(img+0x1997740); g_honk_fmod.play_sound=(void *)(img+0x199b0f0);
-    g_honk_fmod.get_listener=(void *)(img+0x1997c00); g_honk_fmod.set_3d=(void *)(img+0x19a3f50); g_honk_fmod.set_min_max=(void *)(img+0x19a4bc0);
-    g_honk_fmod.set_volume=(void *)(img+0x19a6470); g_honk_fmod.set_paused=(void *)(img+0x19a5e50); g_honk_fmod.stop=(void *)(img+0x19a6730);
-    g_honk_fmod.set_loop_points=(void *)(img+0x19a0960);
-    InterlockedExchange(&g_honk_enabled,1);
-    if(!plat_hook("honk: audio update",img+HH_SYSTEM_RVA,(void *)honk_audio_update,(void **)&g_honk_update_original)) {
-        log_begin();log_raw("honk: other players' horns cannot be played, the audio update could not be hooked (the horn button and your own horn are still handled)\n");
+    if(share) {
+        g_honk_fmod.get_low_level=(void *)(img+0x1a98080); g_honk_fmod.create_sound=(void *)(img+0x1997740); g_honk_fmod.play_sound=(void *)(img+0x199b0f0);
+        g_honk_fmod.get_listener=(void *)(img+0x1997c00); g_honk_fmod.set_3d=(void *)(img+0x19a3f50); g_honk_fmod.set_min_max=(void *)(img+0x19a4bc0);
+        g_honk_fmod.set_volume=(void *)(img+0x19a6470); g_honk_fmod.set_paused=(void *)(img+0x19a5e50); g_honk_fmod.stop=(void *)(img+0x19a6730);
+        g_honk_fmod.set_loop_points=(void *)(img+0x19a0960);
+        InterlockedExchange(&g_honk_enabled,1);
+        if(!plat_hook("honk: audio update",img+HH_SYSTEM_RVA,(void *)honk_audio_update,(void **)&g_honk_update_original)) {
+            log_begin();log_raw("honk: other players' horns cannot be played, the audio update could not be hooked (the horn button and your own horn are still handled)\n");
+        }
     }
     thread=CreateThread(NULL,0,honk_worker,NULL,0,NULL);
     if(!thread) {
         DWORD err=GetLastError();
         InterlockedExchange(&g_honk_enabled,0);
-        log_begin();log_raw("honk: not enabled, the thread could not be created, error ");log_dec(err);log_raw("\n");
+        log_begin();log_raw("honk: not enabled and the horn button stays on the left stick, the thread could not be created, error ");log_dec(err);log_raw("\n");
+        honk_write_status(0,0,"no thread");
         return 0;
     }
     CloseHandle(thread);
-    return 1;
+    return share;
 }

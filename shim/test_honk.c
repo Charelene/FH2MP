@@ -11,6 +11,7 @@
 static unsigned char g_ticket_key[32];
 static int g_ticket_ready;
 static unsigned long long g_xuid;
+#define FH2_SIZE_OF_IMAGE 0x3a18000u
 static int (WINAPI *g_r_wsasendto)(UINT_PTR,void *,DWORD,DWORD *,DWORD,const void *,int,void *,void *);
 static int read_game_memory(const void *p,void *out,SIZE_T n) { if(!p)return 0;memcpy(out,p,n);return 1; }
 static unsigned char *find_fh2_image(void) {return NULL;}
@@ -91,6 +92,17 @@ static void reset_voices(void)
 static void offer(ULONGLONG now,unsigned n,const honk_record *r)
 {
     unsigned i; for(i=0;i<n;i++) g_honk.records[i]=r[i]; g_honk.count=n; g_honk.response_at=now;
+}
+static void write_file(const wchar_t *path,const char *text)
+{
+    HANDLE f=CreateFileW(path,GENERIC_WRITE,0,NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,NULL); DWORD n;
+    assert(f!=INVALID_HANDLE_VALUE); WriteFile(f,text,(DWORD)strlen(text),&n,NULL); CloseHandle(f);
+}
+static int read_status(char *out,unsigned max)
+{
+    HANDLE f=CreateFileW(g_honk_status,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL); DWORD n=0;
+    if(f==INVALID_HANDLE_VALUE) return 0;
+    ReadFile(f,out,max-1,&n,NULL); CloseHandle(f); out[n]=0; return 1;
 }
 static honk_record rec(unsigned owner,unsigned horn,unsigned press,unsigned age,float x)
 {
@@ -230,6 +242,54 @@ int main(int argc,char **argv)
         assert(honk_move_button(base) && base[HH_BUTTON_RVA+4]==0x80 && honk_code_is(base+HH_BUTTON_RVA,honk_moved_code,7));
         assert(!honk_code_is(base+HH_BUTTON_RVA,honk_button_code,7));
         VirtualFree(base,0,MEM_RELEASE);
+    }
+    {   /* which stick the horn goes on: never the one Extra Options' headlight/roof toggle uses, and the launcher is told */
+        wchar_t dir[MAX_PATH], ini[MAX_PATH+40]; char st[256]; unsigned char *base; DWORD old;
+        static const char swapped[]="; Extra Options\r\n[Bindings]\r\nHeadlightsXbox=LeftStick\r\nHeadlightsKeyboard=F3\r\nRoofXbox = leftstick \r\n";
+        static const char stock[]="[Bindings]\r\nHeadlightsXbox=RightStick\r\nRoofXbox=RightStick\r\n";
+        assert(honk_binding_sticks(L"LeftStick")==HH_STICK_LEFT && honk_binding_sticks(L"rightstick")==HH_STICK_RIGHT);
+        assert(honk_binding_sticks(L"LB+RS")==HH_STICK_RIGHT && honk_binding_sticks(L" LS + RightStick ")==(HH_STICK_LEFT|HH_STICK_RIGHT));
+        assert(honk_binding_sticks(L"None")==0 && honk_binding_sticks(L"")==0 && honk_binding_sticks(L"DPadDown")==0 && honk_binding_sticks(L"RightStickX")==0);
+        assert(honk_horn_goes_right(HH_STICK_LEFT) && honk_horn_goes_right(0) && !honk_horn_goes_right(HH_STICK_RIGHT));
+        assert(honk_horn_goes_right(HH_STICK_LEFT|HH_STICK_RIGHT));                                        /* toggles on both: Forza's own horn stick */
+        GetTempPathW(MAX_PATH,dir); lstrcatW(dir,L"fh2mp-honk-test"); CreateDirectoryW(dir,NULL);
+        honk_paths(dir,dir); lstrcpyW(ini,g_honk_eo_ini);
+        assert(!read_status(st,sizeof st));
+        assert(honk_eo_sticks(ini)==HH_STICK_RIGHT);                                                        /* no ini: Extra Options' default */
+        write_file(ini,swapped); assert(honk_eo_sticks(ini)==HH_STICK_LEFT);
+        write_file(ini,"[Bindings]\r\nHeadlightsXbox=LeftStick\r\n"); assert(honk_eo_sticks(ini)==(HH_STICK_LEFT|HH_STICK_RIGHT));   /* RoofXbox missing */
+        base=VirtualAlloc(NULL,0x10000,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE); assert(base);
+        /* swapped toggles: the horn goes right */
+        write_file(ini,swapped); memcpy(base+HH_BUTTON_RVA,honk_button_code,7); VirtualProtect(base,0x10000,PAGE_EXECUTE_READ,&old);
+        assert(honk_place_button(base)==1 && base[HH_BUTTON_RVA+4]==0x80);
+        assert(read_status(st,sizeof st) && !strncmp(st,"horn=RightStick\r\nmovable=1\r\n",28));
+        assert(honk_place_button(base)==1);                                                                 /* already moved */
+        /* the stock toggles (the launcher did not or could not move them): the horn stays left, no conflict either way */
+        VirtualProtect(base,0x10000,PAGE_READWRITE,&old); memcpy(base+HH_BUTTON_RVA,honk_button_code,7);
+        write_file(ini,stock); assert(honk_place_button(base)==0 && base[HH_BUTTON_RVA+4]==0x40);
+        assert(read_status(st,sizeof st) && !strncmp(st,"horn=LeftStick\r\nmovable=1\r\n",27));
+        /* another HonkHonk build: nothing changed, and the launcher learns the horn cannot be moved */
+        write_file(ini,swapped); base[HH_BUTTON_RVA+4]=0x20;
+        assert(honk_place_button(base)==0 && base[HH_BUTTON_RVA+4]==0x20);
+        assert(read_status(st,sizeof st) && !strncmp(st,"horn=LeftStick\r\nmovable=0\r\n",27));
+        honk_switched_off(dir,dir); assert(read_status(st,sizeof st) && strstr(st,"movable=0") && strstr(st,"FH2MP_NO_HONK"));
+        honk_paths(dir,dir); assert(!read_status(st,sizeof st));                                           /* a new game drops the last game's note */
+        VirtualFree(base,0,MEM_RELEASE); DeleteFileW(ini); RemoveDirectoryW(dir);
+        g_honk_eo_ini[0]=g_honk_status[0]=0;
+    }
+    {   /* a function start: its own bytes, another mod's platform hook in front of it (called through), or something else */
+        static const unsigned char want[8]={0x40,0x53,0x55,0x56,0x57,0x41,0x56,0x41};
+        unsigned char *img=VirtualAlloc(NULL,0x1000,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE), *far_away=VirtualAlloc(NULL,0x1000,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
+        int rel; assert(img && far_away);
+        memcpy(img+0x100,want,8); assert(honk_entry_ok(img,0x1000,0x100,want)==1);
+        /* MinHook's jmp rel32 to its relay outside the image (what Horizon Wave Radio's createSound hook leaves) */
+        img[0x100]=0xe9; rel=(int)(0x800-0x105); memcpy(img+0x101,&rel,4); assert(honk_entry_ok(img,0x400,0x100,want)==2);
+        assert(honk_entry_ok(img,0x1000,0x100,want)==0);                                                     /* a jump inside the game: not a hook */
+        memset(img+0x100,0,16); img[0x100]=0xff; img[0x101]=0x25; memcpy(img+0x106,&far_away,8); assert(honk_entry_ok(img,0x1000,0x100,want)==2);
+        memcpy(img+0x106,&img,8); assert(honk_entry_ok(img,0x1000,0x100,want)==0);
+        img[0x102]=1; memcpy(img+0x106,&far_away,8); assert(honk_entry_ok(img,0x1000,0x100,want)==0);       /* jmp [rip+1]: not MinHook's form */
+        memcpy(img+0x100,want,8); img[0x107]^=1; assert(honk_entry_ok(img,0x1000,0x100,want)==0);            /* other code */
+        VirtualFree(img,0,MEM_RELEASE); VirtualFree(far_away,0,MEM_RELEASE);
     }
     puts("honk: PASS");
     return 0;

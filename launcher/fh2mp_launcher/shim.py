@@ -559,6 +559,55 @@ def swap_stick_bindings(folder):
     return True, [f"moved the Extra Options headlight/roof buttons to the left stick ({n} setting(s)); the right stick is the horn"]
 
 
+_UNSTICK_RE = re.compile(rb"^(" + b"|".join(k.encode() for k in STICK_KEYS) + rb")([ \t]*=[ \t]*)LeftStick([ \t]*\r?)$", re.I | re.M)
+
+
+def restore_stick_bindings_bytes(data):
+    """The reverse of swap_stick_bindings_bytes(): the headlight and roof toggles back on RightStick where they are LeftStick; every other byte
+    stays. -> (bytes, number of keys changed)."""
+    return _UNSTICK_RE.subn(rb"\1\2RightStick\3", data)
+
+
+def restore_stick_bindings(folder):
+    """restore_stick_bindings_bytes() on the FH2_ExtraOptions.ini in `folder` (the file is kept as .before-fh2mp-restore first).
+    -> (ini found, list of things done)."""
+    path = os.path.join(folder, EXTRA_INI)
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except FileNotFoundError:
+        return False, []
+    except OSError as e:
+        raise ShimError(f"could not read the FH2 Extra Options settings: {e.strerror or e}") from None
+    new, n = restore_stick_bindings_bytes(data)
+    if not n:
+        return True, []
+    try:
+        shutil.copy2(path, path + ".before-fh2mp-restore")
+        paths.atomic_write(path, new, 0o644)
+    except OSError as e:
+        raise ShimError(f"could not update the FH2 Extra Options settings: {e.strerror or e}. Is the game still running?") from None
+    return True, [f"put the Extra Options headlight/roof buttons back on the right stick ({n} setting(s)); the horn stayed on the left stick"]
+
+
+CONTROLS_NOTE_FILE = "fh2mp-controls.txt"    # written by the shim each game once HonkHonk is found (shim/src/honk_sync.inc honk_place_button)
+
+
+def read_controls_note(folder):
+    """Where the last game put HonkHonk's horn button -> {"horn": "RightStick" | "LeftStick", "movable": bool, "why": str}, or None when the
+    shim did not say (no game yet, HonkHonk not loaded, an older shim). movable False: the shim could not put the horn on the right stick."""
+    try:
+        with open(os.path.join(bin_dir(folder), CONTROLS_NOTE_FILE), "r", encoding="utf-8", errors="replace") as f:
+            text = f.read(4096)
+    except OSError:
+        return None
+    fields = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+    horn = fields.get("horn", "").strip()
+    if horn not in ("RightStick", "LeftStick"):
+        return None
+    return {"horn": horn, "movable": fields.get("movable", "").strip() == "1", "why": fields.get("why", "").strip()}
+
+
 # ---- HonkHonk (suderek22): fh2-mods\HonkHonk.dll, its bank folder and settings, loaded by the platform next to the shim.
 
 HONK_DLL = "fh2-mods/HonkHonk.dll"
