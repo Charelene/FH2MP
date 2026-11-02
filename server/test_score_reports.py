@@ -141,6 +141,45 @@ class Lobbies(unittest.TestCase):
         lsp.xbl.hub_lobbies = lambda: {'lobbies': []}
         self.assertEqual(call(lsp, 'GET', '/ops/v1/lobbies'), (200, {'lobbies': []}))
 
+class GhostFlag(unittest.TestCase):
+    """A flag verdict from the ghost rules shows on the website like a run with enough reports: the red stop sign, low confidence."""
+    def setUp(self):
+        self.lsp = make_lsp()
+        self.addCleanup(self.lsp.DB.c.close)
+        submit(self.lsp.SB, 1, 'Alice', 80)
+        self.sid = self.lsp.DB.one('SELECT id FROM score_submissions')[0]
+
+    def verdict(self, verdict, reviewed=0):
+        self.lsp.DB.execute("INSERT INTO score_verdicts (submission_id, version, verdict, reasons, measurements, decided_at, reviewed) "
+                            "VALUES (?, 1, ?, '[]', '{}', 0, ?)", (self.sid, verdict, reviewed))
+
+    def row(self):
+        return self.lsp.SB.top(3, 1, -1, 1000)[0]
+
+    def test_a_flag_verdict_marks_the_run_and_says_why(self):
+        self.assertFalse(self.row()['suspicious'])
+        self.verdict('flag')
+        self.assertTrue(self.row()['suspicious'])
+        self.assertEqual(self.row()['flaggedBy'], 'ghost')
+
+    def test_a_reviewed_flag_and_a_passing_verdict_do_not_mark_it(self):
+        self.verdict('flag', reviewed=1)
+        self.assertFalse(self.row()['suspicious'])
+        self.lsp.DB.execute('DELETE FROM score_verdicts')
+        self.verdict('pass')
+        self.assertFalse(self.row()['suspicious'])
+
+    def test_dismissing_the_run_clears_the_flag(self):
+        self.verdict('flag')
+        score_reports.moderate(self.lsp, self.sid, 'dismiss')
+        self.assertFalse(self.row()['suspicious'])
+
+    def test_reports_and_a_flag_together_are_named(self):
+        self.verdict('flag')
+        for i in range(10):
+            score_reports.report(self.lsp, self.sid, {'browser': identity(i), 'ip': identity(i)})
+        self.assertEqual(self.row()['flaggedBy'], 'reports and ghost')
+
 
 if __name__ == '__main__':
     unittest.main()

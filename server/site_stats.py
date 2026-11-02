@@ -131,7 +131,7 @@ _HISTORY_LOCK = threading.Lock()
 
 def _scan(lsp):
     h = _History(_Boards(lsp))
-    rows = lsp.DB.query(f"SELECT s.id, {score_reports.COUNTS} AS report_count, s.xuid, s.sb, s.st, s.gsid, s.track, s.car, s.cls, s.score, s.submitted, COALESCE(p.gamertag, '') AS tag "
+    rows = lsp.DB.query(f"SELECT s.id, {score_reports.COUNTS} AS report_count, {score_reports.GHOST_FLAG} AS ghost_flag, s.xuid, s.sb, s.st, s.gsid, s.track, s.car, s.cls, s.score, s.submitted, COALESCE(p.gamertag, '') AS tag "
                         "FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid "
                         f"WHERE {score_reports.VISIBLE} AND ((s.sb = ? AND s.st = ?) OR (s.sb = ? AND s.st = ?) OR s.sb = 9) ORDER BY s.submitted, s.id",
                         FESTIVAL + MONTHLY)
@@ -313,7 +313,7 @@ def car(lsp, car_id):
         raise ops_api.OpsError(404, "not_found", "unknown car")
     h = record_history(lsp)
     best = {}
-    for r in lsp.DB.query(f"SELECT s.id, {score_reports.COUNTS} AS report_count, s.xuid, s.sb, s.st, s.gsid, s.track, s.car, s.cls, s.score, s.submitted, COALESCE(p.gamertag, '') AS tag "
+    for r in lsp.DB.query(f"SELECT s.id, {score_reports.COUNTS} AS report_count, {score_reports.GHOST_FLAG} AS ghost_flag, s.xuid, s.sb, s.st, s.gsid, s.track, s.car, s.cls, s.score, s.submitted, COALESCE(p.gamertag, '') AS tag "
                           f"FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid WHERE s.car = ? AND {score_reports.VISIBLE} AND s.{RUN_FILTER}", (car_id,)):
         key = h.boards.key(r)
         if key is None:

@@ -430,7 +430,7 @@ def recent(lsp, limit):
     track_names = {t: f"{d['name']} {r['name']}" for d in route_catalog(lsp) for r in d["routes"] for t in r["tracks"]}
     events = {e["id"]: e["name"] for e in lsp.RIV.events()}
     names = lsp.RIV.names()["car"]
-    rows = lsp.DB.query(f"SELECT s.id, {score_reports.COUNTS} AS report_count, s.xuid, s.sb, s.gsid, s.track, s.car, s.cls, s.score, s.clean, s.submitted, COALESCE(p.gamertag, '') AS tag "
+    rows = lsp.DB.query(f"SELECT s.id, {score_reports.COUNTS} AS report_count, {score_reports.GHOST_FLAG} AS ghost_flag, s.xuid, s.sb, s.gsid, s.track, s.car, s.cls, s.score, s.clean, s.submitted, COALESCE(p.gamertag, '') AS tag "
                         f"FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid WHERE s.st = ? AND s.sb IN (?, ?) AND {score_reports.VISIBLE} "
                         "ORDER BY s.submitted DESC, s.id DESC LIMIT ?", (FESTIVAL_BOARD[1], FESTIVAL_BOARD[0], MONTHLY_BOARD[0], limit * 3))
     out = []

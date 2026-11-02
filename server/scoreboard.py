@@ -323,7 +323,8 @@ class ScoreStore:
         # Record ties retain their first submission; save snapshots follow submission order.
         order = 's.id DESC' if limit is not None else f"s.score {'ASC' if asc else 'DESC'}, s.id"
         reports = score_reports.COUNTS if counts else "0"        # the game never shows them; only the website does
-        sql = (f"SELECT * FROM (SELECT s.*, {reports} AS report_count, COALESCE(p.gamertag, '') AS tag, "
+        ghost_flag = score_reports.GHOST_FLAG if counts else "FALSE"
+        sql = (f"SELECT * FROM (SELECT s.*, {reports} AS report_count, {ghost_flag} AS ghost_flag, COALESCE(p.gamertag, '') AS tag, "
                f"CASE WHEN g.submission_id IS NULL OR length(g.data) > {ghost.MAX_SERVED} THEN 0 ELSE s.id END AS ghost, ROW_NUMBER() OVER "
                f"(PARTITION BY s.xuid ORDER BY {order}) AS rn "
                "FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid "

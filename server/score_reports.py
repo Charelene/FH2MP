@@ -12,6 +12,9 @@ VISIBLE = "NOT EXISTS (SELECT 1 FROM hidden_scores hs WHERE hs.submission_id = s
 COUNTS = "(SELECT COUNT(*) FROM score_reports sr WHERE sr.submission_id = s.id AND sr.dismissed = 0)"
 OWN_PENDING = "(s.xuid = ? AND EXISTS (SELECT 1 FROM hidden_scores hs WHERE hs.submission_id = s.id AND hs.source = 'pending'))"
 REVIEW_BOARDS = '(1,3,6,9)'
+# A run the ghost rules flagged (not hard: those are hidden) and nobody has reviewed. The website shows it with the same red stop sign as a run
+# with THRESHOLD reports: "possibly cheated, low confidence, under review". Dismissing the run (operator) or unhiding it clears the flag.
+GHOST_FLAG = "EXISTS (SELECT 1 FROM score_verdicts gv WHERE gv.submission_id = s.id AND gv.verdict = 'flag' AND gv.reviewed = 0)"
 
 
 def visible_to(viewer):
@@ -22,7 +25,9 @@ def visible_to(viewer):
 def fields(row):
     keys = row.keys()
     count = row['report_count'] if 'report_count' in keys else 0
-    return {'submissionId': row['id'], 'reports': count, 'suspicious': count >= THRESHOLD}
+    ghost = bool(row['ghost_flag']) if 'ghost_flag' in keys else False
+    return {'submissionId': row['id'], 'reports': count, 'suspicious': count >= THRESHOLD or ghost,
+            'flaggedBy': ('reports and ghost' if count >= THRESHOLD else 'ghost') if ghost else ('reports' if count >= THRESHOLD else None)}
 
 
 def report(lsp, submission_id, payload):
