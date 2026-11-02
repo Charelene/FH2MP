@@ -11,7 +11,7 @@ from . import azimuth, paths, shim, updater, upstream
 from .constants import AZIMUTH_TLS_HELPERS, AZIMUTH_VERSION, BUILTIN_AZIMUTH_BUILDS
 from .version import __version__
 
-REVISION = 2
+REVISION = 3
 MIN_AZIMUTH = AZIMUTH_VERSION
 
 
@@ -165,7 +165,7 @@ class Packages:
         return updater.Updater(channel=self.lc.settings['channel']).download_url(AZIMUTH_ARCHIVE['url'], AZIMUTH_ARCHIVE, progress, cancelled)
 
     def get_dependency(self, kind, progress=None, cancelled=lambda: False):
-        key = upstream.extra_options_kind(self.lc.settings['azimuth_dir']) if kind == 'extra' else 'platform'
+        key = {'extra': upstream.extra_options_kind(self.lc.settings['azimuth_dir']), 'honk': 'honkHonk'}.get(kind, 'platform')
         self.dependencies[kind] = upstream.fetch(key, updater.Updater(channel=self.lc.settings['channel']), progress, cancelled)
 
     def shim_current(self):
@@ -192,12 +192,16 @@ class Packages:
     def install_dependencies(self):
         folder = self.lc.settings['azimuth_dir']
         if ('platform' not in self.dependencies and not shim.platform_ok(folder)
-                or 'extra' not in self.dependencies and not shim.extra_options_complete(folder)):
+                or 'extra' not in self.dependencies and not shim.extra_options_complete(folder)
+                or 'honk' not in self.dependencies and not shim.honk_complete(folder)):
             raise ValueError('Download the missing add-ons first.')
         if 'platform' in self.dependencies:
             shim._install_platform(folder, self.dependencies['platform'])
         if 'extra' in self.dependencies:
             shim.install_extra(folder, self.dependencies['extra'])
+        if 'honk' in self.dependencies:
+            shim.install_honk(folder, self.dependencies['honk'])
+        self.lc.ensure_controls()
         self.lc.repair_tls_helper()
 
     def get_shim(self, progress=None, cancelled=lambda: False):

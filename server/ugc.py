@@ -14,9 +14,17 @@ live traffic, so every blob and versioned row keeps whatever the client sent.
 """
 import json
 import lzma
+import shutil
 import struct
+import subprocess
 import time
 import zlib
+
+import diag
+
+LOG = diag.get("ugc")
+_RATE = diag.RateLimit()
+DAMAGED_LOG_SECONDS = 600.0
 
 
 MAX_REQUEST_BODY = 16 << 20       # largest HTTP body the LSP reads from a game client
@@ -38,6 +46,68 @@ MAX_UNPACKED = 32 << 20  # largest value unpack() will expand (twice the biggest
 
 
 CONTENT_KINDS = ("photo", "replay")     # storefront kinds whose payload is uploaded with UploadContent under the file id
+
+
+PHOTO_SIZE = (1920, 1080)         # the Xbox One's native photo size: the game shows a photo of any other size cropped
+PHOTO_MAX_DIM = 8192              # larger uploads are left alone (the resizer would need too much memory)
+PHOTO_QUALITY = 90
+PHOTO_TIMEOUT = 30
+
+
+def jpeg_size(data):
+    """(width, height) from the first start-of-frame marker of a JPEG, None for anything that is not a well-formed JPEG header."""
+    data = bytes(data)
+    if data[:3] != b"\xff\xd8\xff":
+        return None
+    i = 2
+    try:
+        while i + 4 <= len(data):
+            if data[i] != 0xFF:
+                return None
+            m = data[i + 1]
+            if m == 0xFF:
+                i += 1
+                continue
+            if m in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                h, w = struct.unpack(">HH", data[i + 5:i + 9])
+                return (w, h) if w and h else None
+            if m in (0xD8, 0x01) or 0xD0 <= m <= 0xD7:
+                i += 2
+                continue
+            i += 2 + struct.unpack(">H", data[i + 2:i + 4])[0]
+    except struct.error:
+        pass
+    return None
+
+
+def photo_1080p(data):
+    """A photo upload as 1920x1080 JPEG. The game saves photos at the player's render resolution but shows them for a 1080p screen, so a
+    photo of any other size appears cropped to every viewer. Other aspect ratios are scaled to cover the frame and cut in the middle.
+    Returns `data` unchanged when it already has that size, is not a JPEG (or is implausibly large) or ImageMagick is missing or fails."""
+    size = jpeg_size(data)
+    if size is None or size == PHOTO_SIZE or max(size) > PHOTO_MAX_DIM:
+        return data
+    tool = shutil.which("magick") or shutil.which("convert")
+    if tool is None:
+        ok, skipped = _RATE.allow("photo-no-tool", DAMAGED_LOG_SECONDS)
+        if ok:
+            LOG.warn(f"photo stays {size[0]}x{size[1]} instead of {PHOTO_SIZE[0]}x{PHOTO_SIZE[1]}: ImageMagick (magick / convert) is not installed, so the game shows it cropped"
+                     + (f" ({skipped} photos since the last line)" if skipped else ""))
+        return data
+    w, h = PHOTO_SIZE
+    # `jpeg:` pins the decoder to JPEG, whatever the bytes claim to be
+    cmd = [tool, "-limit", "memory", "512MiB", "-limit", "map", "512MiB", "-limit", "disk", "0", "jpeg:-", "-auto-orient", "-strip",
+           "-resize", f"{w}x{h}^", "-gravity", "center", "-extent", f"{w}x{h}", "-quality", str(PHOTO_QUALITY), "jpeg:-"]
+    try:
+        out = subprocess.run(cmd, input=bytes(data), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=PHOTO_TIMEOUT, check=True).stdout
+    except (OSError, subprocess.SubprocessError) as e:
+        LOG.warn(f"photo {size[0]}x{size[1]} ({len(data)} bytes) not converted to {PHOTO_SIZE[0]}x{PHOTO_SIZE[1]}, stored as uploaded: {type(e).__name__}: {e}")
+        return data
+    if jpeg_size(out) == PHOTO_SIZE and len(out) <= MAX_BLOB_SIZE:
+        return out
+    LOG.warn(f"photo {size[0]}x{size[1]} ({len(data)} bytes) not converted: the converter produced {jpeg_size(out)} in {len(out)} bytes "
+             f"(wanted {PHOTO_SIZE} within {MAX_BLOB_SIZE} bytes), stored as uploaded")
+    return data
 
 
 def pack(b):
@@ -76,19 +146,28 @@ def unpack(b):
     return out
 
 
+def _livery_chunk(blob):
+    """(inflated container, None) or (None, why it is not one)."""
+    try:
+        comp, raw = struct.unpack("<II", blob[:8])
+        if len(blob) != 8 + comp or raw > MAX_LIVERY_RAW:
+            return None, (f"header says {comp} compressed bytes (blob has {len(blob) - 8}) and {raw} raw bytes (limit {MAX_LIVERY_RAW})")
+        d = zlib.decompressobj()
+        out = d.decompress(blob[8:], raw + 1)
+        if len(out) == raw and not d.unconsumed_tail and d.eof:
+            return out, None
+        return None, f"inflates to {len(out)} bytes, the header says {raw}" + ("" if d.eof else " and the zlib stream does not end")
+    except struct.error:
+        return None, f"blob is {len(blob)} bytes, shorter than the 8 byte chunk header"
+    except zlib.error as e:
+        return None, f"zlib: {e}"
+
+
 def livery_chunk(blob):
     """Checks a livery blob in the game's compression-stream form (IOSys::CCompressionStream, zlib mode, recovered from the exe):
     one chunk = u32 LE compressed size + u32 LE raw size + that many zlib bytes. Returns the inflated 'vlrc' container or None.
     The inflate never produces more than the declared raw size (itself capped), so a small upload cannot expand into gigabytes."""
-    try:
-        comp, raw = struct.unpack("<II", blob[:8])
-        if len(blob) != 8 + comp or raw > MAX_LIVERY_RAW:
-            return None
-        d = zlib.decompressobj()
-        out = d.decompress(blob[8:], raw + 1)
-        return out if len(out) == raw and not d.unconsumed_tail and d.eof else None
-    except (struct.error, zlib.error):
-        return None
+    return _livery_chunk(blob)[0]
 
 
 def strip_livery_prefix(data):
@@ -96,6 +175,29 @@ def strip_livery_prefix(data):
     if data and len(data) > 13 and livery_chunk(data) is None and int.from_bytes(data[9:13], "big") == len(data) - 13:
         return data[13:]
     return data
+
+
+def parse_layergroup_upload(body):
+    """`OnlineProfile.UpdateLiveryGroup` request body: u32 name length + name, u16 layer count, u8 flag, u64 creator xuid, then the blob
+    (u32 length + bytes). The client builds the call like UpdateLivery's without the car id (FUN_140f07ce0 against FUN_140f07b50); the blob is
+    kept and served exactly as sent, as a design's is. Returns {"name", "layers", "payload"} or None when the body does not fit that layout."""
+    try:
+        n = struct.unpack(">I", body[:4])[0]
+        name = body[4:4 + n].decode("utf-8", "replace")
+        if len(name.encode()) > 4096:
+            LOG.warn(f"UpdateLiveryGroup body ({len(body)} bytes) refused: name of {len(name.encode())} bytes (limit 4096)")
+            return None
+        (layers,) = struct.unpack(">H", body[4 + n:6 + n])
+        p = 6 + n + 1 + 8
+        ln = struct.unpack(">I", body[p:p + 4])[0]
+        blob = body[p + 4:p + 4 + ln]
+        if len(blob) != ln or ln == 0:
+            LOG.warn(f"UpdateLiveryGroup body ({len(body)} bytes, name {name[:30]!r}) is not a vinyl group: {ln} bytes declared, {len(blob)} present")
+            return None
+        return {"name": name, "layers": layers, "payload": blob}
+    except (struct.error, ValueError) as e:
+        LOG.warn(f"UpdateLiveryGroup body ({len(body)} bytes) does not follow the recovered layout: {type(e).__name__}: {e}")
+        return None
 
 
 def parse_livery_upload(body):
@@ -111,11 +213,13 @@ def parse_livery_upload(body):
         p = 4 + n + 6 + 1 + 8
         ln = struct.unpack(">I", body[p:p + 4])[0]
         blob = body[p + 4:p + 4 + ln]
-        container = livery_chunk(blob)
+        container, why = _livery_chunk(blob)
         if container is None:
+            LOG.warn(f"UpdateLivery body ({len(body)} bytes, name {name[:30]!r}, car {car_id}) is not a livery: the blob of {ln} declared bytes ({len(blob)} present) {why}")
             return None
         return {"name": name, "car_id": car_id, "layers": layers, "container": container, "payload": blob}
-    except (struct.error, ValueError):
+    except (struct.error, ValueError) as e:
+        LOG.warn(f"UpdateLivery body ({len(body)} bytes) does not follow the recovered layout: {type(e).__name__}: {e}")
         return None
 
 
@@ -128,6 +232,18 @@ LIST_COLS = ("id, kind, type, owner, title, description, created, payload_size, 
              "class_id, keyword1, keyword2, env, track, pi, downloads, likes, uses, views, popularity, removed")
 
 
+# how well a file is liked, for ordering lists and for the star rating: a like says the most, a use (the item was put on a car or in a race)
+# less, a download least
+SCORE_SQL = "(f.likes * 3 + f.uses * 2 + f.downloads)"
+STAR_STEPS = (1, 6, 20, 60, 150)
+
+
+def popularity(f):
+    """The 0-5 PopularityRating the client shows (a byte in the file lists): one more star at each step of the like/use/download score."""
+    score = f["likes"] * 3 + f["uses"] * 2 + f["downloads"]
+    return sum(score >= t for t in STAR_STEPS)
+
+
 class UgcStore:
     def __init__(self, db):
         self.db = db
@@ -136,35 +252,44 @@ class UgcStore:
     def blob_create(self, owner, name, total):
         total = int(total)
         if not 0 <= total <= MAX_BLOB_SIZE:
-            raise LimitError(f"a blob may be at most {MAX_BLOB_SIZE} bytes")
+            raise LimitError(f"a blob may be at most {MAX_BLOB_SIZE} bytes (declared {total})")
         with self.db.tx() as c:
             q = c.execute("SELECT COUNT(*) AS n, COALESCE(SUM(total_size), 0) AS b FROM ugc_blobs WHERE owner=?", (owner,)).fetchone()
             if q["n"] >= MAX_BLOBS_PER_OWNER or q["b"] + total > MAX_BYTES_PER_OWNER:
-                raise LimitError("upload quota of this account reached")
+                raise LimitError(f"upload quota of this account reached ({q['n']} of {MAX_BLOBS_PER_OWNER} blobs, {q['b']} + {total} of {MAX_BYTES_PER_OWNER} bytes)")
             return c.execute("INSERT INTO ugc_blobs (owner, user_file_name, total_size, received, data, created) VALUES (?,?,?,0,?,?)",
                              (owner, name or "", total, b"", time.time())).lastrowid
 
-    def blob_write(self, blob_id, offset, data, owner):
+    def blob_write(self, blob_id, offset, data, owner, finish=None):
         """Writes a chunk at `offset` into a blob of `owner`; returns the number of bytes received so far (None for an unknown id or
         somebody else's blob). The chunk, its offset and the end of the write are checked against the declared total size BEFORE
-        any buffer is allocated."""
+        any buffer is allocated. `finish(bytes) -> bytes` converts the completed blob before it counts as complete (so nobody is served
+        the original); a blob and its listing then carry the converted size, the return value still counts the uploaded bytes."""
         offset = int(offset)
         if offset < 0 or len(data) > MAX_CHUNK:
-            raise LimitError("bad upload chunk")
+            raise LimitError(f"bad upload chunk (offset {offset}, {len(data)} bytes, limit {MAX_CHUNK} per chunk) for blob {blob_id}")
         with self.db.tx() as c:
-            r = c.execute("SELECT data, total_size FROM ugc_blobs WHERE id=? AND owner=?", (blob_id, owner)).fetchone()
+            r = c.execute("SELECT data, total_size, received FROM ugc_blobs WHERE id=? AND owner=?", (blob_id, owner)).fetchone()
             if r is None:
                 return None
+            if finish is not None and int(r["received"]) >= int(r["total_size"]):
+                return int(r["received"])             # a repeated last chunk: the stored blob is already converted
             if offset + len(data) > min(int(r["total_size"]), MAX_BLOB_SIZE):
-                raise LimitError("upload chunk beyond the declared size")
+                raise LimitError(f"upload chunk beyond the declared size (blob {blob_id}: offset {offset} + {len(data)} bytes, declared {r['total_size']})")
             buf = bytearray(unpack(r["data"]))
             if offset > len(buf):
                 buf.extend(b"\0" * (offset - len(buf)))
             buf[offset:offset + len(data)] = data
             done = len(buf) >= int(r["total_size"])
+            uploaded = len(buf)
+            if done and finish is not None:
+                buf = bytearray(finish(bytes(buf)))
+                if len(buf) != uploaded:
+                    c.execute("UPDATE ugc_blobs SET total_size=? WHERE id=? AND owner=?", (len(buf), blob_id, owner))
+                    c.execute("UPDATE ugc_files SET payload_size=? WHERE blob_id=?", (len(buf), blob_id))
             n = c.execute("UPDATE ugc_blobs SET data=?, received=? WHERE id=? AND owner=?",
                           ((pack if done else pack_stored)(bytes(buf)), len(buf), blob_id, owner)).rowcount
-            return len(buf) if n else None
+            return uploaded if n else None
 
     def blob_read(self, blob_id, offset, size):
         """(chunk, is_last, total) or None."""
@@ -181,6 +306,9 @@ class UgcStore:
         r = self.db.one(f"SELECT blob_id FROM ugc_files WHERE id=? AND kind IN ({','.join('?' * len(CONTENT_KINDS))}) AND blob_id IS NOT NULL",
                         (content_id, *CONTENT_KINDS))
         return r["blob_id"] if r else content_id
+
+    def is_photo(self, content_id):
+        return self.db.one("SELECT 1 FROM ugc_files WHERE id=? AND kind='photo' AND blob_id IS NOT NULL", (content_id,)) is not None
 
     def blob_by_name(self, owner, name):
         r = self.db.one("SELECT id, data FROM ugc_blobs WHERE owner=? AND user_file_name=? ORDER BY id DESC LIMIT 1", (owner, name))
@@ -204,8 +332,11 @@ class UgcStore:
         for k in ("data", "thumb", "thumb_small"):
             try:
                 d[k] = unpack(d[k])
-            except LimitError:
+            except LimitError as e:
                 d[k] = b""              # a damaged row reads as empty instead of failing every listing that contains it
+                ok, skipped = _RATE.allow(("damaged", vid, k), DAMAGED_LOG_SECONDS)
+                if ok:
+                    LOG.error(f"versioned item {vid} ({d.get('kind')}, creator {d.get('creator')}) has a damaged {k}, served empty: {e}")
         return d
 
     def versioned_set_data(self, vid, data, creator=None):
@@ -262,7 +393,7 @@ class UgcStore:
             f"SELECT {LIST_COLS} FROM ugc_files WHERE owner=? AND type=? AND removed=0 ORDER BY id DESC LIMIT ?", (owner, ftype, limit))]
 
     def search(self, kind, make=0, model=0, cls=-1, kw1=0, kw2=0, env=0, track=0, layers=0, gamertag="", text="", limit=50):
-        """Public files of a kind, newest first; 0 / -1 mean "any" [guess: the client's "no filter" values are unknown]."""
+        """Public files of a kind, best liked first (then newest); 0 / -1 mean "any" [guess: the client's "no filter" values are unknown]."""
         where, args = ["f.kind=?", "f.removed=0", COMPLETE], [kind]
         for col, val in (("make_id", make), ("model_id", model), ("keyword1", kw1), ("keyword2", kw2), ("env", env), ("track", track)):
             if val and val > 0:
@@ -278,28 +409,48 @@ class UgcStore:
             where.append("f.owner IN (SELECT xuid FROM players WHERE lower(gamertag)=lower(?))")
             args.append(gamertag)
         return [dict(r) for r in self.db.query(
-            f"SELECT {', '.join('f.' + c.strip() for c in LIST_COLS.split(','))} FROM ugc_files f WHERE {' AND '.join(where)} ORDER BY f.likes DESC, f.id DESC LIMIT ?", args + [limit])]
+            f"SELECT {', '.join('f.' + c.strip() for c in LIST_COLS.split(','))} FROM ugc_files f WHERE {' AND '.join(where)} ORDER BY {SCORE_SQL} DESC, f.id DESC LIMIT ?", args + [limit])]
 
     def curated(self, ctype, car_id, limit):
         """Recommended content: files of a type for a car (any car when `car_id` <= 0), most liked first."""
         return [dict(r) for r in self.db.query(
-            f"SELECT {LIST_COLS} FROM ugc_files WHERE removed=0 AND type=? AND (?<=0 OR car_id=?) ORDER BY likes DESC, id DESC LIMIT ?",
+            f"SELECT {', '.join('f.' + c.strip() for c in LIST_COLS.split(','))} FROM ugc_files f WHERE f.removed=0 AND f.type=? "
+            f"AND (?<=0 OR f.car_id=?) ORDER BY {SCORE_SQL} DESC, f.id DESC LIMIT ?",
             (ctype, car_id, car_id, limit))]
 
     def popular(self, kind, limit, since=None):
-        """Complete public files of a kind, most liked first (then most viewed, newest); `since` keeps files shared after that time."""
+        """Complete public files of a kind, best liked first (then most viewed, newest); `since` keeps files shared after that time."""
         where, args = ["f.kind=?", "f.removed=0", COMPLETE], [kind]
         if since is not None:
             where.append("f.created >= ?")
             args.append(since)
         return [dict(r) for r in self.db.query(
             f"SELECT {', '.join('f.' + c.strip() for c in LIST_COLS.split(','))} FROM ugc_files f WHERE {' AND '.join(where)} "
-            "ORDER BY f.likes DESC, f.views DESC, f.id DESC LIMIT ?", args + [limit])]
+            f"ORDER BY {SCORE_SQL} DESC, f.views DESC, f.id DESC LIMIT ?", args + [limit])]
 
     def bump(self, fid, column):
         assert column in ("views", "likes", "uses", "downloads")
         with self.db.tx() as c:
             c.execute(f"UPDATE ugc_files SET {column}={column}+1 WHERE id=?", (fid,))
+
+    def record_action(self, fid, xuid, action, column):
+        """Counts `column` of file `fid` once for this player and action; True when it counted, False for a repeat, the file's own creator
+        or an unknown / removed file. (A download or a like is one per player and file, whatever the client sends again.)"""
+        assert action in ("download", "like") and column in ("downloads", "likes")
+        with self.db.tx() as c:
+            f = c.execute("SELECT owner FROM ugc_files WHERE id=? AND removed=0", (fid,)).fetchone()
+            if f is None or f["owner"] == xuid:
+                return False
+            if not c.execute("INSERT INTO ugc_actions (file_id, xuid, action, at) VALUES (?,?,?,?) ON CONFLICT DO NOTHING",
+                             (fid, xuid, action, time.time())).rowcount:
+                return False
+            c.execute(f"UPDATE ugc_files SET {column}={column}+1 WHERE id=?", (fid,))
+            return True
+
+    def file_of_versioned(self, vid):
+        """The newest public file that lists a versioned item (a design shared twice counts for its latest listing), or None."""
+        r = self.db.one("SELECT id FROM ugc_files WHERE versioned_id=? AND removed=0 ORDER BY id DESC LIMIT 1", (vid,))
+        return r["id"] if r else None
 
     def remove(self, fid, owner):
         with self.db.tx() as c:
@@ -345,6 +496,21 @@ class UgcStore:
                 if new != old:
                     c.execute("UPDATE ugc_versioned SET data=? WHERE id=?", (pack(new), r["id"]))
                     n += 1
+        return n
+
+    def repair_photos(self):
+        """Converts completed photo uploads that are not 1920x1080 yet (see photo_1080p). Returns the number of photos rewritten."""
+        n = 0
+        for r in self.db.query("SELECT f.id AS fid, b.id AS bid, b.data FROM ugc_files f JOIN ugc_blobs b ON b.id = f.blob_id "
+                               "WHERE f.kind='photo' AND b.received >= b.total_size AND b.total_size > 0"):
+            old = unpack(r["data"])
+            new = photo_1080p(old)
+            if new == old:
+                continue
+            with self.db.tx() as c:
+                c.execute("UPDATE ugc_blobs SET data=?, total_size=?, received=? WHERE id=?", (pack(new), len(new), len(new), r["bid"]))
+                c.execute("UPDATE ugc_files SET payload_size=? WHERE id=?", (len(new), r["fid"]))
+            n += 1
         return n
 
     def stored_bytes(self):

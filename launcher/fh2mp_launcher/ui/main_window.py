@@ -812,27 +812,13 @@ class MainWindow(QMainWindow):
             self.render()
             self.on_play()
 
-    def _auto_restart(self):
-        """The game never started its online setup (the shim says so): it does not recover, so start it again."""
-        lc = self.lc
-        self.set_busy(True, "The game didn't start its online features. Restarting it...")
-
-        def ok(_res):
-            import time
-            self._launched_at = time.time()
-            self.set_busy(False, "Game restarted. Have fun!")
-            self.render()
-
-        def fail(e):
-            self.set_busy(False)
-            self.render()
-            self.say(str(e) if isinstance(e, (PlayBlocked, launch.LaunchError)) else friendly(e), theme.BAD)
-        run_async(lambda j: lc.restart_game(), ok, fail)
-
     def _tick(self):
         lc = self.lc
-        if not self._busy and lc.process is not None and lc.restart_requested():
-            return self._auto_restart()
+        if not self._busy and lc.process is not None:
+            note = lc.online_setup_note()       # diagnosis only: the game is never restarted for it
+            if note:
+                self.say("Online didn't start in this game run (\"Unable to connect to the Live configuration servers\"). "
+                         "The game keeps running offline; to play online, close the game and press Play. Logs has the details.", theme.BAD)
         if lc.process is not None and not lc.game_running():
             import time
             code = lc.process.returncode

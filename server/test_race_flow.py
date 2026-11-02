@@ -112,6 +112,8 @@ class Receiver:
         self.slot_messages = []  # (kind, type, id, seq, body) of the server's own router 12 object
         self.bucket = []        # bucket-list messages 61 and 65 to 68, as the client reads them
         self.bucket_owner = {}  # (router 12 object id) -> relay owner of the objects this client was given
+        self.taken = []         # message 12 (ownership taken back): (router, key flags, object id, seq)
+        self.players = []       # router 1 messages: (kind, (A, B), object id, relay owner or None, body copy)
 
     def receive(self, data):
         _ack, _remote, _bits, count, length = struct.unpack('<HHIBH', data[:11])
@@ -131,6 +133,8 @@ class Receiver:
                     self.bucket_owner[oid] = owner
                 seq, size = r.take(8), r.take(14)
                 body = Bits(r.take(size), size)
+                if router == 1:
+                    self.players.append((kind, (a, b), oid, owner, Bits(body.value, body.size)))
                 if router == 12 and (a, b) == (0, 0):
                     self.slot_messages.append((kind, tid12, oid, seq, body))      # the server-owned slot array
                 if router == 6 and (a, b, oid) == (1, 0, 0):
@@ -143,13 +147,20 @@ class Receiver:
                     if kind == 11:
                         self.options_seq = 0  # observed native writer reset after grant
                 elif router == 6 and (a, b, oid) == (0, 0, 0) and kind != 7:
-                    self.session.update(decode_fields(body, {4: 1, 5: 1, 6: 1}, 4))
+                    # SessionHostSynced (ctor 0x180ff70): CountdownType 2 (2 bits, ReadValue 0x18109a0), RaceReady 4,
+                    # RaceParticipantsSelected 5, InRace 6, RaceStartTime 9 (u32), NumLapsCompleted 10 (u8), FurthestProgress 11 (f32)
+                    self.session.update(decode_fields(body, {2: 2, 4: 1, 5: 1, 6: 1, 9: 32, 10: 8, 11: 32}, 4))
                     self.events.append(('session', dict(self.session)))
                 elif router == 3 and (a, b, oid) == (1, 1, 0):
                     self.console.update(decode_fields(body, dict.fromkeys(range(7), 1), 4))
                     self.events.append(('console', dict(self.console)))
                 # Relay player/console objects, Weather and initial SessionHost
                 # are length-delimited; their contents aren't this contract.
+            elif kind == 12:      # TransferOwnership: router | A | B | id | seq (ClientSyncedObjectManager::ReceiveObjectTransferOwnership)
+                router = r.take(4)
+                a, b = r.take(1), r.take(1)
+                oid = r.take({1: 7, 3: 7, 6: 2, 10: 1, 12: 4}[router])
+                self.taken.append((router, (a, b), oid, r.take(8)))
             elif kind == 1:
                 r.take(2)
                 assert r.take(3) == 0, 'handshake rejected'
@@ -172,6 +183,12 @@ class Receiver:
             elif kind == 42:
                 assert r.take(4) == 0
                 self.responses.append(r.take(2))
+            elif kind == 43:      # relayed MsgInProgressScoreUpdate: car key | f32 | bool
+                a, b = r.take(1), r.take(1)
+                r.take(7)
+                if (a, b) == (0, 1):
+                    r.take(8)
+                r.take(33)
             elif kind == 44:
                 a, b = r.take(1), r.take(1)
                 r.take(7)
@@ -425,17 +442,20 @@ class RaceFlow(unittest.TestCase):
         self.advance(2)
         self.go()
 
-    def test_illegal_mixed_car_change_during_loading_cancels_before_grid(self):
+    def test_illegal_mixed_car_change_during_loading_leaves_only_that_car_out_of_the_grid(self):
         self.select()
         self.car(self.b, 4, .850, extra={90: 0}, full=False)
         self.console(self.a, {5: 1})
         self.console(self.b, {5: 1})
-        self.assertFalse(self.a.grids or self.b.grids, 'wrong-class car reached the grid')
-        self.assertFalse(self.a.starts or self.b.starts)
-        for client in (self.a, self.b):
-            self.assertEqual(client.console.get(2), 0, 'cancel did not clear participation')
+        self.assertFalse(self.b.grids, 'wrong-class car reached the grid')
+        self.assertEqual(self.b.console.get(2), 0, 'the wrong-class car is still a participant')
+        self.assertEqual(self.a.console.get(2), 1, 'the eligible player was thrown out with it')
+        self.assertEqual([len(g) for g in self.a.grids], [1], 'the eligible player got no grid of its own')
+        self.console(self.a, {0: 1, 6: 1})
+        self.assertEqual(len(self.a.starts), 1)
+        self.assertFalse(self.b.starts)
 
-    def test_illegal_car_change_on_grid_prevents_go(self):
+    def test_illegal_car_change_on_grid_gets_no_go_and_the_others_race(self):
         self.select()
         for client in (self.a, self.b):
             self.console(client, {5: 1})
@@ -443,8 +463,103 @@ class RaceFlow(unittest.TestCase):
         self.car(self.b, 4, .850, extra={90: 0}, full=False)
         for client in (self.a, self.b):
             self.console(client, {0: 1, 6: 1})
-        self.assertFalse(self.a.starts or self.b.starts, 'wrong-class car received GO')
+        self.assertFalse(self.b.starts, 'wrong-class car received GO')
         self.assertEqual(self.b.console.get(2), 0)
+        self.assertEqual(len(self.a.starts), 1, 'one wrong car stopped the race for everybody')
+
+    def test_leader_in_the_wrong_class_is_not_thrown_out_while_it_picks_its_car(self):
+        # dev 2026-11-01 21:29:22-21:29:39, lobby 0f670da3: the leader set up a B event in an A car; the server cancelled the setup for
+        # everybody 1.5 s after the invitee's Ready, while the leader's game was still in the event car select (B car picked at 21:29:39)
+        self.grant(self.a)
+        self.options(self.a, {4: 1001, 30: 2})
+        self.car(self.a, 3, .650)
+        self.car(self.b, 3, .686)
+        self.assertNotEqual(self.ready(self.a), 0)
+        self.request(self.a)
+        self.assertNotEqual(self.ready(self.b), 0)
+        self.car(self.b, 2, .608)              # the invitee's class-restricted pick
+        self.advance(2)
+        for client in (self.a, self.b):
+            self.assertEqual(client.console.get(2), 1, 'a player of the setup was not selected')
+            self.assertNotEqual(client.session.get(4), 0, 'the setup was cancelled')
+        self.car(self.a, 2, .560)              # the leader's pick, after the start
+        self.go()
+        self.assertEqual(len(self.a.grids[-1]), 2)
+
+    def progress(self, client, laps):
+        # MsgInProgressScoreUpdate of a race: the lap tracker progress (0xfdd2b0 / 0x99e210), positive on the wire (dev 2026-11-01 23:14:22)
+        self.send(client, message(43, (0, 1), (0, 1), (0, 7), (float_bits(laps), 32), (0, 1)))
+
+    def test_free_roam_sees_the_leaders_progress_and_completed_laps(self):
+        self.select()
+        self.go()
+        self.advance(1.5)
+        self.progress(self.a, .22)
+        self.progress(self.b, .10)
+        for client in (self.a, self.b):
+            self.assertAlmostEqual(struct.unpack('<f', struct.pack('<I', client.session.get(11)))[0], .22, places=5)
+            self.assertEqual(client.session.get(10), 0)
+        self.advance(1.5)
+        self.progress(self.b, .05)                      # behind the leader: no change
+        self.assertAlmostEqual(struct.unpack('<f', struct.pack('<I', self.b.session.get(11)))[0], .22, places=5)
+        score = message(44, (0, 2), (0, 7))
+        for seconds in (60., 60., 60.):
+            score.put(0, 2).put(8, 6).put(int.from_bytes(struct.pack('<d', seconds), 'little'), 64)
+        self.send(self.a, score.put(1, 32).put(0, 2))     # a completes the only lap
+        self.assertEqual(self.b.session.get(10), 1, 'NumLapsCompleted not sent')
+        self.assertEqual(struct.unpack('<f', struct.pack('<I', self.b.session.get(11)))[0], 1.0)
+
+    def test_an_out_of_range_progress_is_ignored(self):
+        self.select()
+        self.go()
+        self.progress(self.a, 250.0)
+        self.assertFalse(self.b.session.get(11))
+
+    def test_the_event_is_complete_only_when_the_finisher_leaves_its_results(self):
+        # dev 2026-11-01 23:14:27 / 23:16:28 / 23:16:32, lobby 694b7b20: one player left early, the other finished; RaceReady went to 0 on a
+        # 4 s timer ('event complete' in free roam) while the winner sat on its results screen until 23:17:02
+        self.select()
+        self.go()
+        self.console(self.b, {3: 0})                      # b quits to free roam
+        score = message(44, (0, 2), (0, 7))
+        for seconds in (60., 60., 60.):
+            score.put(0, 2).put(8, 6).put(int.from_bytes(struct.pack('<d', seconds), 'little'), 64)
+        self.send(self.a, score.put(1, 32).put(0, 2))
+        self.advance(.5)
+        self.assertEqual(self.b.session.get(6), 0, 'race not over when the last racer finished')
+        self.advance(20)
+        self.assertEqual(self.b.session.get(4), 1, "'event complete' before the finisher left its results screen")
+        self.console(self.a, {3: 0, 4: 0, 5: 0, 6: 0})     # a closes its results
+        self.advance(.5)
+        self.assertEqual((self.b.session.get(4), self.b.session.get(5)), (0, 0))
+
+    def test_a_results_screen_that_never_closes_is_ended_by_the_backstop(self):
+        self.select()
+        self.go()
+        self.finish_scores()
+        self.advance(S.RACE_FLAGS_CLEAR_SECONDS + 1)
+        self.assertEqual(self.b.session.get(4), 0)
+
+    def finish_scores(self):
+        for client in (self.a, self.b):
+            score = message(44, (0, 2), (0, 7))
+            for seconds in (60., 60., 60.):
+                score.put(0, 2).put(8, 6).put(int.from_bytes(struct.pack('<d', seconds), 'little'), 64)
+            self.send(client, score.put(1, 32).put(0, 2))
+
+    def test_a_running_race_tells_free_roam_it_is_in_progress(self):
+        # NetworkEventProgressHudComponent 0x7dc4b0: IDS_Lobby_RaceInProgress needs CountdownType 2 and 0 < RaceStartTime <= now,
+        # otherwise a bystander reads 'An event is about to start' for the whole race (dev 2026-11-01 21:43)
+        self.select()
+        self.assertFalse(self.a.session.get(2))
+        self.go()
+        for client in (self.a, self.b):
+            self.assertEqual(client.session.get(2), 2)
+            self.assertEqual(client.session.get(9), client.starts[-1])
+        self.finish()
+        for client in (self.a, self.b):
+            self.assertEqual((client.session.get(2), client.session.get(9)), (0, 0), 'race clock left set after the event')
+            self.assertEqual((client.session.get(10), client.session.get(11)), (0, 0), 'race progress left set after the event')
 
     def test_sparse_options_preserve_class_and_pi_on_the_wire(self):
         self.grant(self.a)
@@ -463,6 +578,7 @@ class RaceFlow(unittest.TestCase):
     def test_returning_host_snapshot_is_delivered_before_invite(self):
         self.grant(self.a)
         self.options(self.a, {4: 1001, 30: 3})
+        self.advance(S.LEADER_SETUP_SECONDS + 1)       # a's setup lapses, or b's grant would be refused while a leads
         self.grant(self.b)
         self.options(self.b, {4: 1002, 30: 4})
         # Production ordering: former owner writes without a new grant.
@@ -479,6 +595,7 @@ class RaceFlow(unittest.TestCase):
     def test_returning_host_can_wait_in_setup_before_requesting_race(self):
         self.grant(self.a)
         self.options(self.a, {4: 1001, 30: 3})
+        self.advance(S.LEADER_SETUP_SECONDS + 1)       # a's setup lapses, or b's grant would be refused while a leads
         self.grant(self.b)
         self.options(self.b, {4: 1002, 30: 4})
         self.options(self.a, {4: 1003, 30: 5})

@@ -4,6 +4,9 @@ static unsigned g_lsp_port = 5080;
 static int g_lsp_secure;
 /* 0 = not started, 1 = reading, 2 = complete (including default/failure). */
 static volatile LONG g_lsp_cfg_loaded;
+/* Why the default endpoint is in use, or NULL when fh2mp-lsp.txt named one (the first request logs it: xhr2.inc). */
+static const char *g_lsp_cfg_why;
+static DWORD g_lsp_cfg_err;
 
 static void xhr_read_cfg(void)
 {
@@ -17,9 +20,13 @@ static void xhr_read_cfg(void)
     lstrcatW(path, L"\\fh2mp-lsp.txt");
     f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (f == INVALID_HANDLE_VALUE) {
+        g_lsp_cfg_err = GetLastError();
+        g_lsp_cfg_why = g_lsp_cfg_err == ERROR_FILE_NOT_FOUND || g_lsp_cfg_err == ERROR_PATH_NOT_FOUND ? "does not exist" : "could not be opened";
         return;
     }
     if (!ReadFile(f, raw, sizeof raw - 1, &got, NULL)) {
+        g_lsp_cfg_err = GetLastError();
+        g_lsp_cfg_why = "could not be read";
         got = 0;
     }
     CloseHandle(f);
@@ -44,6 +51,9 @@ static void xhr_read_cfg(void)
             n++;
         }
         if (n == 0) {
+            if (!g_lsp_cfg_why) {
+                g_lsp_cfg_why = "names no host";
+            }
             return;
         }
         for (i = 0; i < (colon >= 0 ? colon : n) && i < 120; i++) {

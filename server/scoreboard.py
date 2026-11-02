@@ -8,13 +8,21 @@ fake rivals (drawn from the Drivatar names) when FH2MP_FAKE_ROWS > 0 (default 0:
 Persistence: score_submissions / player_xp tables (db.py, PostgreSQL); best-per-player is a query, not a cached table.
 """
 import db
+import ghost
+import ghost_check
 import hashlib
+import json
 import os
 import math
 import struct
 import time
 import xp_audit
 import score_reports
+import diag
+
+LOG = diag.get("scores")
+_RATE = diag.RateLimit()
+XP_BUDGET_LOG_SECONDS = 600.0
 
 ASCENDING = {1}          # scoreTypes where a smaller score wins (lap/race times) [guess]
 # Confirmed by real count submissions: bonus boards and mainland roads.
@@ -30,6 +38,13 @@ GSID_BOARDS = {9}        # scoreboardType with one board per trap/zone: GetRows 
                          # scoreType 6 zones ids 36-50 in the live data) [C]. Without this every trap and zone shared one board per player.
 SPEED_CAP = 127.4        # m/s (285 mph): highest speed a trap can really show (Ultima GTR with bounce wheelies; Sisteron Highway record 283 mph,
                          # GitHub #12). Faster speed-board scores are rejected on submit and hidden on read (older ones are still stored).
+GHOST_BOARDS = {1, 3, 6}  # scoreboardType of the time boards every run of which uploads a ghost: 97-99% of 17,330 stored runs, p99 2.4 s after the score
+GHOST_POLICY = os.environ.get("FH2MP_GHOST_POLICY", "log")   # log: verdicts are stored, nothing is hidden; enforce: a run shows once its ghost passes
+# Top PI of classes D..S2, and the rest up to 1 for X and rentals. Every one of 17,011 runs lies inside the band of its class.
+CLASS_TOP_PI = (0.4345, 0.525628, 0.6179, 0.748432, 0.846368, 0.997086, 1.0, 1.1)     # CarClasses.MaxPerformanceIndex, D to R
+CLASS_PI_SLACK = 0.002
+MAX_ROUTE_SPEED = SPEED_CAP   # m/s, average over a route. All 4 of 11,376 Festival runs faster than this are cheats.
+BIG_IMPROVEMENT = 0.6     # a new best under this share of the old one, same car and PI: 76.0 to 38.0 s, 96.5 to 31.1 s. Honest gains are far smaller.
 
 
 def dbl_to_u64(x):
@@ -61,6 +76,7 @@ class ScoreStore:
         self.event_cars = event_cars or (lambda event: None)       # rival event id -> [(car id, class, PI, top m/s)] the event allows
         self.names = list(dict.fromkeys(n for n in names if n)) or ["Rival"]   # unique, order kept
         self.cars = sorted(cars or [], key=lambda c: c[2])   # (carId, class, pi, top m/s) from the game database, by PI
+        self.ghost_policy = GHOST_POLICY
 
     def count(self):
         return self.db.one("SELECT COUNT(*) FROM score_submissions")[0]
@@ -76,20 +92,14 @@ class ScoreStore:
         (a NaN/inf time must never reach a public board), is negative, or is a zero time or the car is class X/R on a Rivals board (user
         decision: a maxed-out car must never appear on a Rivals leaderboard, not even disguised as S2), or a speed above SPEED_CAP."""
         score = u64_to_dbl(d["score"])
-        if not math.isfinite(score) or score < 0 or (score_type in ASCENDING and score == 0):
-            return None                 # no board has a negative score, and no race takes no time (audit 2026-10-25 F10)
-        limit = PROGRESS_LIMITS.get((d['scoreboardType'], score_type))
-        if limit is not None and (score > limit or not score.is_integer()):
-            return None
-        if d["scoreboardType"] in SPEED_BOARDS and score > SPEED_CAP:
-            return None
-        if d["scoreboardType"] in EVENT_BOARDS and d["carClassId"] in MAXED_CLASSES:
-            return None
-        required_class = self.event_class(d["scoreboardType"], d["gameScoreboardId"])
-        if required_class is not None and d["carClassId"] != required_class:
+        refused = self.refusal(score_type, d, score)
+        if refused:
+            LOG.warn(f"SubmitScore refused: {refused} " + diag.kv(xuid=f"{xuid:#x}", board=f"({d['scoreboardType']},{score_type})", gsid=d["gameScoreboardId"],
+                                                                  track=d["trackId"], car=d["carId"], cls=d["carClassId"], pi=f"{d['carPerformanceIndex']:.4f}"))
             return None
         now = time.time()
         score_id = os.urandom(16)
+        expects_ghost = self.ghost_policy == "enforce" and d["scoreboardType"] in GHOST_BOARDS and score_type in ASCENDING
         with self.db.tx() as c:
             db.touch_player(c, xuid, tag, now)
             cur = c.execute("INSERT INTO score_submissions (xuid, sb, st, gsid, track, car, cls, cpi, score, clean, stm, tcs, "
@@ -98,20 +108,126 @@ class ScoreStore:
                              d["carClassId"], d["carPerformanceIndex"], score, int(d["isClean"]), int(d["usedSTM"]),
                              int(d["usedTCS"]), int(d["usedABS"]), int(d.get("usedAutoBrake", False)),
                              int(d.get("usedAutoShifting", False)), int(d.get("usedClutch", False)), now, score_id))
+            if expects_ghost:       # public once its ghost has passed (user decision); its owner sees it meanwhile, score_reports.visible_to
+                c.execute("INSERT INTO hidden_scores (submission_id, hidden_at, source, reason) VALUES (?,?,'pending','no ghost yet')",
+                          (cur.lastrowid, now))
         return {"id": cur.lastrowid, "score_id": score_id, "xuid": xuid, "tag": tag, "sb": d["scoreboardType"],
                 "st": score_type, "score": score}
 
-    def attach_ghost(self, score_id, data):
-        """Stores the ghost the client uploads for a SubmitScore (matched by the scoreId we issued). Returns the
-        submission id, or None if the id is unknown."""
+    def refusal(self, score_type, d, score):
+        """Why submit() will not store this score (None when it will): the measured value and the limit it broke."""
+        if not math.isfinite(score):
+            return f"score {score!r} is not a finite number"
+        if score < 0 or (score_type in ASCENDING and score == 0):
+            return f"score {score:g} is not a possible {'time' if score_type in ASCENDING else 'score'}"    # no board has a negative score, and no race takes no time (audit 2026-10-25 F10)
+        limit = PROGRESS_LIMITS.get((d['scoreboardType'], score_type))
+        if limit is not None and (score > limit or not score.is_integer()):
+            return f"progress counter {score:g} is " + ("not a whole number" if score <= limit else f"above the {limit} this board can hold")
+        if d["scoreboardType"] in SPEED_BOARDS and score > SPEED_CAP:
+            return f"speed {score:.3f} m/s is above the {SPEED_CAP} m/s cap ({score * 3.6:.0f} km/h)"
+        if d["scoreboardType"] in EVENT_BOARDS and d["carClassId"] in MAXED_CLASSES:
+            return f"car class {d['carClassId']} (X/R) is not allowed on a Rivals board"
+        required_class = self.event_class(d["scoreboardType"], d["gameScoreboardId"])
+        if required_class is not None and d["carClassId"] != required_class:
+            return f"car class {d['carClassId']} does not match the event's class {required_class}"
+        return None
+
+    def plausibility(self, r):
+        """(hard, flags) of a stored submission from what the client claimed, ghost aside."""
+        hard, flags = [], []
+        cls, cpi, score = r["cls"], r["cpi"], r["score"]
+        if not 0 <= cls < len(CLASS_TOP_PI) or not 0 <= cpi <= 1 + CLASS_PI_SLACK or (
+                cpi > CLASS_TOP_PI[cls] + CLASS_PI_SLACK or (0 < cls < 6 and cpi < CLASS_TOP_PI[cls - 1] - CLASS_PI_SLACK)):
+            hard.append(f"PI {cpi:.4f} does not belong to class {cls}")
+        length = self.route_length(r["track"]) if r["sb"] in CLASS_PIVOT_BOARDS else None
+        if length and score < length / MAX_ROUTE_SPEED:
+            hard.append(f"{score:.3f} s is faster than {MAX_ROUTE_SPEED:g} m/s over the {length:.0f} m route")
+        if r["sb"] == 3:
+            allowed = self.event_cars(r["gsid"])
+            if allowed and r["car"] not in {c[0] for c in allowed}:
+                flags.append(f"car {r['car']} is not on the event's list")
+        before = self.db.one("SELECT MIN(score) FROM score_submissions WHERE xuid=? AND sb=? AND st=? AND track=? AND gsid=? AND car=? AND ABS(cpi - ?) < 0.002 AND id < ?",
+                             (r["xuid"], r["sb"], r["st"], r["track"], r["gsid"], r["car"], cpi, r["id"]))[0]
+        if before and score < before * BIG_IMPROVEMENT:
+            flags.append(f"{score:.3f} s after {before:.3f} s in the same car")
+        return hard, flags
+
+    def judge_run(self, r, data):
+        """(verdict, reasons, measurements) of a stored submission and its ghost."""
+        verdict, reasons, measured = ghost_check.check(data, r["score"], r["car"])
+        hard, flags = self.plausibility(r)
+        if hard:
+            verdict = ghost_check.HARD
+        elif flags and verdict == ghost_check.PASS:
+            verdict = ghost_check.FLAG
+        return verdict, hard + reasons + flags, measured
+
+    def store_verdict(self, c, sid, verdict, reasons, measured, now):
+        """Records a verdict and, when enforcing, applies it. True if the run is public afterwards; an operator's hide stays and a restored run stays shown."""
+        c.execute("INSERT INTO score_verdicts (submission_id, version, verdict, reasons, measurements, decided_at) VALUES (?,?,?,?,?,?) "
+                  "ON CONFLICT (submission_id) DO UPDATE SET version=excluded.version, verdict=excluded.verdict, reasons=excluded.reasons, "
+                  "measurements=excluded.measurements, decided_at=excluded.decided_at",
+                  (sid, ghost_check.VERSION, verdict, json.dumps(reasons), json.dumps(measured), now))
+        if self.ghost_policy != "enforce":
+            return True
+        restored = c.execute("SELECT 1 FROM score_overrides WHERE submission_id=?", (sid,)).fetchone()
+        if verdict == ghost_check.HARD and not restored:
+            c.execute("INSERT INTO hidden_scores (submission_id, hidden_at, source, reason) VALUES (?,?,'auto',?) ON CONFLICT (submission_id) "
+                      "DO UPDATE SET source='auto', reason=excluded.reason WHERE hidden_scores.source='pending'",
+                      (sid, now, "; ".join(reasons)[:500]))
+            return False
+        c.execute("DELETE FROM hidden_scores WHERE submission_id=? AND source='pending'", (sid,))
+        return c.execute("SELECT 1 FROM hidden_scores WHERE submission_id=?", (sid,)).fetchone() is None
+
+    def attach_ghost(self, score_id, data, xuid):
+        """Stores the ghost `xuid` uploads for its own SubmitScore (matched by the scoreId we issued) and judges the run. The first upload
+        stands: the same bytes again are a harmless retry, anything else is refused. Returns (submission id, run is newly public), or
+        (None, False) if it is refused."""
+        data = bytes(data)
+        r = self.db.one("SELECT s.*, g.submission_id AS stored, '' AS tag FROM score_submissions s LEFT JOIN score_ghosts g ON g.submission_id = s.id WHERE s.score_id=?",
+                        (bytes(score_id),))
+        sid_text = bytes(score_id).hex()[:8]
+        if r is None:
+            LOG.warn("ghost upload refused: no submission has this scoreId (the SubmitScore was refused, or is from before a database restore) "
+                     + diag.kv(xuid=f"{xuid:#x}", score_id=sid_text, bytes=len(data)))
+            return None, False
+        if r["xuid"] != xuid or len(data) > ghost.MAX_BLOB:
+            LOG.warn("ghost upload refused: " + (f"the run belongs to xuid {r['xuid']:#x}" if r["xuid"] != xuid else f"{len(data)} bytes is above the {ghost.MAX_BLOB} byte limit")
+                     + " " + diag.kv(xuid=f"{xuid:#x}", submission=r["id"], score_id=sid_text))
+            return None, False
+        if r["stored"] is not None:
+            if self.ghost(r["id"]) == data:
+                LOG.debug(f"ghost upload repeated, same bytes as the stored ghost (retry) submission={r['id']}")
+                return r["id"], False
+            LOG.warn("ghost upload refused: the run already has a different ghost and the first upload stands "
+                     + diag.kv(xuid=f"{xuid:#x}", submission=r["id"], stored_bytes=len(self.ghost(r["id"]) or b""), new_bytes=len(data)))
+            return None, False
+        try:
+            ghost.parse(data)        # every one of 17,011 real ghosts parses; what does not is never stored or served
+        except ghost.GhostError as e:
+            LOG.warn(f"ghost upload refused: does not parse ({e}) " + diag.kv(xuid=f"{xuid:#x}", submission=r["id"], bytes=len(data), board=f"({r['sb']},{r['st']})"))
+            return None, False
+        judged = r["sb"] in GHOST_BOARDS and r["st"] in ASCENDING
+        verdict = self.judge_run(dict(zip(r.keys(), r)), data) if judged else None    # outside the transaction: a parse must never hold the lock
+        now = time.time()
         with self.db.tx() as c:
-            r = c.execute("SELECT id FROM score_submissions WHERE score_id=?", (bytes(score_id),)).fetchone()
-            if r is None:
-                return None
-            c.execute("INSERT INTO score_ghosts (submission_id, data, uploaded) VALUES (?,?,?) ON CONFLICT (submission_id) "
-                      "DO UPDATE SET data=excluded.data, uploaded=excluded.uploaded",
-                      (r["id"], bytes(data), time.time()))
-            return r["id"]
+            c.execute("INSERT INTO score_ghosts (submission_id, data, uploaded) VALUES (?,?,?) ON CONFLICT (submission_id) DO NOTHING", (r["id"], data, now))
+            public = self.store_verdict(c, r["id"], *verdict, now) if judged else False
+        if judged:
+            self._log_verdict(r, verdict, public, len(data))
+        return r["id"], public and verdict[0] != ghost_check.HARD
+
+    def _log_verdict(self, r, verdict, public, size):
+        """One line per judged run: the verdict, what the policy did with it, and the figures that decided it (reasons carry value against limit)."""
+        kind, reasons, measured = verdict
+        who = diag.kv(submission=r["id"], xuid=f"{r['xuid']:#x}", board=f"({r['sb']},{r['st']})", track=r["track"], car=r["car"], score=f"{r['score']:.3f}",
+                      ghost_bytes=size, policy=self.ghost_policy, shown=public)
+        if kind == ghost_check.PASS:
+            LOG.debug(f"ghost verdict pass {who} " + diag.kv(frames=measured.get("frames"), speed=f"{measured.get('speed', 0):.1f}", accel=f"{measured.get('acceleration', 0):.1f}",
+                                                           power=f"{measured.get('power', 0):.0f}"))
+        else:
+            LOG.warn(f"ghost verdict {kind} {who} reasons: " + "; ".join(reasons[:6]) + (" ..." if len(reasons) > 6 else "")
+                     + ("" if self.ghost_policy == "enforce" else " (policy=log: stays public)"))
 
     def by_score_id(self, score_id):
         """The stored submission a client refers to by the scoreId we issued (None if unknown)."""
@@ -123,6 +239,15 @@ class ScoreStore:
         r = self.db.one("SELECT data FROM score_ghosts WHERE submission_id=?", (ghost_id,))
         return bytes(r["data"]) if r else None
 
+    def public_ghost(self, ghost_id):
+        """The ghost a player may race: never that of a hidden run, whose id is public."""
+        r = self.db.one("SELECT g.data FROM score_ghosts g JOIN score_submissions s ON s.id = g.submission_id "
+                        f"WHERE g.submission_id=? AND {score_reports.VISIBLE}", (ghost_id,))
+        return bytes(r["data"]) if r else None
+
+    def is_visible(self, submission_id):
+        return self.db.one(f"SELECT 1 FROM score_submissions s WHERE s.id=? AND {score_reports.VISIBLE}", (submission_id,)) is not None
+
     def add_xp(self, xuid, xp):
         """Records the award in the XP ledger and, when xp_audit accepts it, adds it to the total (atomic increment, so concurrent
         submissions cannot lose an update). Returns (total, verdict, reason)."""
@@ -130,6 +255,14 @@ class ScoreStore:
         if verdict == xp_audit.OK and xp == 0:
             return self.xp_of(xuid), verdict, reason        # nothing to add, nothing worth a ledger row
         now = time.time()
+        if verdict == xp_audit.OK:
+            recent = self.db.one("SELECT COALESCE(SUM(xp), 0) FROM xp_awards WHERE xuid=? AND at > ? AND verdict=?", (xuid, now - 3600, xp_audit.OK))[0]
+            if recent + xp > xp_audit.HOUR_BUDGET:
+                reason = f"over the hourly budget ({recent + xp:g} of {xp_audit.HOUR_BUDGET:g})"       # counted, log first (docs/lsp.md)
+                ok, skipped = _RATE.allow(("xp-budget", xuid), XP_BUDGET_LOG_SECONDS)
+                if ok:
+                    LOG.warn("XP over the hourly budget, still counted (policy: report only) " + diag.kv(xuid=f"{xuid:#x}", this_award=f"{xp:g}", last_hour=f"{recent:g}",
+                                                                                                   budget=f"{xp_audit.HOUR_BUDGET:g}", suppressed=skipped or None))
         with self.db.tx() as c:
             db.touch_player(c, xuid, "", now)
             c.execute("INSERT INTO xp_awards (xuid, xp, at, verdict, reason) VALUES (?,?,?,?,?)",
@@ -157,16 +290,17 @@ class ScoreStore:
     def better(self, st, a, b):
         return a < b if st in ASCENDING else a > b
 
-    def _best_per_player(self, sb, st, track, xuid=None, pivot=-1):
+    def _best_per_player(self, sb, st, track, xuid=None, pivot=-1, viewer=None, counts=True):
         """Each player's best submission on a board (any track when `track` is -1/65535), as row dicts keyed by
-        xuid. Progress counters use the latest valid snapshot of the active save."""
+        xuid. Progress counters use the latest valid snapshot of the active save. `viewer` also sees their own run awaiting its ghost."""
         asc = st in ASCENDING
-        where, args = "s.sb=? AND s.st=? AND " + score_reports.VISIBLE, [sb, st]
+        shown, shown_args = score_reports.visible_to(viewer)
+        where, args = "s.sb=? AND s.st=? AND " + shown, [sb, st] + shown_args
         limit = PROGRESS_LIMITS.get((sb, st))
         if limit is not None:
             where += " AND s.score BETWEEN 0 AND ? AND s.score = FLOOR(s.score)"
             args.append(limit)
-        if sb in EVENT_BOARDS:    # class X/R must never surface on a Rivals board, read or write (user decision); belt-and-suspenders
+        if sb in EVENT_BOARDS or sb in CLASS_PIVOT_BOARDS:    # class X/R must never surface on a Rivals board, read or write (user decision)
             where += f" AND s.cls NOT IN ({','.join(str(c) for c in MAXED_CLASSES)})"
         if sb in SPEED_BOARDS:    # impossible speeds submitted before the cap existed stay stored but never show
             where += f" AND s.score <= {SPEED_CAP}"
@@ -188,8 +322,9 @@ class ScoreStore:
             args.append(pivot)
         # Record ties retain their first submission; save snapshots follow submission order.
         order = 's.id DESC' if limit is not None else f"s.score {'ASC' if asc else 'DESC'}, s.id"
-        sql = (f"SELECT * FROM (SELECT s.*, {score_reports.COUNTS} AS report_count, COALESCE(p.gamertag, '') AS tag, "
-               "CASE WHEN g.submission_id IS NULL THEN 0 ELSE s.id END AS ghost, ROW_NUMBER() OVER "
+        reports = score_reports.COUNTS if counts else "0"        # the game never shows them; only the website does
+        sql = (f"SELECT * FROM (SELECT s.*, {reports} AS report_count, COALESCE(p.gamertag, '') AS tag, "
+               f"CASE WHEN g.submission_id IS NULL OR length(g.data) > {ghost.MAX_SERVED} THEN 0 ELSE s.id END AS ghost, ROW_NUMBER() OVER "
                f"(PARTITION BY s.xuid ORDER BY {order}) AS rn "
                "FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid "
                f"LEFT JOIN score_ghosts g ON g.submission_id = s.id WHERE {where}) ranked WHERE rn = 1")
@@ -197,7 +332,7 @@ class ScoreStore:
         return best
 
     def best_of(self, xuid, sb, st, track, pivot=-1):
-        return self._best_per_player(sb, st, track, xuid, pivot).get(xuid)
+        return self._best_per_player(sb, st, track, xuid, pivot, viewer=xuid, counts=False).get(xuid)
 
     def top(self, sb, st, track=-1, pivot=-1, limit=25):
         """Real players only (no synthesized rivals), best first, each row with its `position`. For the website's public boards."""
@@ -291,7 +426,7 @@ class ScoreStore:
 
     def rows(self, xuid, sb, st, track, start_at, max_results, pivot=-1):
         """Sorted best-per-player rows (real + fake) and the requesting player's row."""
-        best = self._best_per_player(sb, st, track, pivot=pivot)
+        best = self._best_per_player(sb, st, track, pivot=pivot, viewer=xuid, counts=False)
         me = best.get(xuid)
         real = list(best.values())
         fake = [] if (sb, st) in PROGRESS_LIMITS else self._fake(sb, st, track, me["score"] if me else None, max(0, FAKE_ROWS - len(real)), pivot)
@@ -309,11 +444,12 @@ class ScoreStore:
         preferred over a made-up one: for a newcomer any real ghost on the board, otherwise one within 4 rows above the player's
         best. The player's own row is the rival when they are #1 (nobody is above them, so they race their own best ghost) or when
         the client asks for their own xuid (picking yourself on the board); the caller pays no bounty for it. On an empty board it
-        is the world record ("World Record", no ghost, never listed on the board; see record_target), or None when there is no
-        record: GetRival has no "not found" flag, and the client spins forever on an all-zero answer (GitHub #12)."""
+        is the world record ("World Record", no ghost, never listed on the board; see record_target), or a made-up time when there is
+        no record: GetRival has no "not found" flag, and the client spins forever on an all-zero answer (GitHub #12), which a board
+        whose only run was hidden would otherwise cause."""
         rows, mine, _, _ = self.rows(xuid, sb, st, track, 1, 1000, pivot)
         if not rows:
-            return self._record_row(sb, st, track, pivot)
+            return self._record_row(sb, st, track, pivot) or self._fake(sb, st, track, None, 1, pivot)[0] | {"position": 1}
         picked = next((r for r in rows if rival_xuid and r["xuid"] == rival_xuid), None)
         if picked is not None:
             return picked

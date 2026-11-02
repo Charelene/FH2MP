@@ -1,5 +1,6 @@
 """Submission reporting/moderation contracts, on the same SQLite fixtures as the operator API tests."""
 import hashlib
+import json
 import os
 import sys
 import unittest
@@ -104,6 +105,33 @@ class Lobbies(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(data['lobbies'][0]['members'], ['<Driver>', 'Alice'])
         self.assertNotIn('memberXuids', data['lobbies'][0])
+
+    def test_map_status_lists_cars_of_public_worlds_that_have_a_position(self):
+        def peer(i, pos):
+            return SimpleNamespace(connected=True, xuid=100 + i, owner_id=i, pos=pos, model_id=7)
+        roam = SimpleNamespace(peers={1: peer(1, (10.4, 99.0, -20.6)), 2: peer(2, None)}, rt_state=0, rt_idx=0)
+        trip = SimpleNamespace(peers={3: peer(3, (1.0, 2.0, 3.0))}, rt_state=game.RT_DESTINATION_VOTE, rt_idx=0)
+        meet = SimpleNamespace(peers={4: peer(4, (5.0, 6.0, 7.0))}, rt_state=0, rt_idx=0)
+        hub = SimpleNamespace(worlds={(2, 'one'): roam, (1, 'trip'): trip, (3, 'meet'): meet}, WORLD_CAPACITY=12)
+        hub.lobby_status = lambda: game.Hub.lobby_status(hub)
+        rows = {r['kind']: r for r in game.Hub.map_status(hub)['lobbies']}
+        self.assertEqual(set(rows), {'freeroam', 'roadtrip'})
+        self.assertEqual(rows['freeroam']['cars'], [{'id': 1, 'xuid': '65', 'x': 10, 'z': -21, 'car': 7}])
+        self.assertEqual(rows['roadtrip']['cars'][0]['z'], 3)
+
+    def test_positions_name_drivers_without_exposing_ids(self):
+        lsp = make_lsp()
+        self.addCleanup(lsp.DB.c.close)
+        submit(lsp.SB, 3, '<Driver>', 80)
+        lsp.xbl.hub_positions = lambda: {'lobbies': [{'kind': 'freeroam', 'id': 'one', 'players': 1, 'capacity': 12, 'memberXuids': ['3'],
+                                                      'cars': [{'id': 2, 'xuid': '3', 'x': 5, 'z': -6, 'car': 7}]}]}
+        status, data = call(lsp, 'GET', '/ops/v1/positions')
+        self.assertEqual(status, 200)
+        self.assertEqual(data['lobbies'][0]['cars'], [{'id': 2, 'name': '<Driver>', 'x': 5, 'z': -6, 'car': 'Test Car'}])
+        self.assertNotIn('memberXuids', data['lobbies'][0])
+        self.assertNotIn('xuid', json.dumps(data))
+        lsp.xbl.hub_positions = lambda: None
+        self.assertEqual(call(lsp, 'GET', '/ops/v1/positions')[0], 503)
 
     def test_ops_reports_unavailable_when_hub_is_down(self):
         lsp = make_lsp()

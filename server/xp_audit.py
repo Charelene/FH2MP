@@ -27,6 +27,7 @@ XP_SCALE = float(os.environ.get("FH2MP_XP_SCALE", "10"))
 MAX_AWARD = float(os.environ.get("FH2MP_XP_MAX", str(56000 * XP_SCALE)))
 RARE_USERS = 10          # an amount fewer accounts than this ever received is "rare"
 REPEATS = 20             # ... and one account receiving it this often is a suspect
+HOUR_BUDGET = float(os.environ.get("FH2MP_XP_HOUR_BUDGET", str(MAX_AWARD * 3)))  # reported only, until real play shows where honest hours end
 BEFORE_PLAUSIBLE = 5e6   # a balance carried into the log above this is reported (the honest leader had under 1M on 2026-10-20, issue 18)
 
 OK, REJECTED = "ok", "rejected"
@@ -61,7 +62,7 @@ def suspects(awards, rare_users=RARE_USERS, repeats=REPEATS):
 # ---- the existing log (lsp.log): `#N POST ... SubmitXpScore body=4 user=0x..` then `HH:MM:SS   SubmitXpScore +X -> total T` (since
 # 2026-10-22 the award line ends with ` user=0x..` itself)
 _POST = re.compile(r"SubmitXpScore body=\d+ user=(0x[0-9a-f]+)")
-_AWARD = re.compile(r"^(\d\d):(\d\d):(\d\d)   SubmitXpScore \+(\S+) -> total (\S+)(?: user=(0x[0-9a-f]+))?")
+_AWARD = re.compile(r"^(\d\d):(\d\d):(\d\d)   (?:#\d+ )?SubmitXpScore \+(\S+) -> total (\S+)(?: user=(0x[0-9a-f]+))?")
 
 
 def _close(a, b):

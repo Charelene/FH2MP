@@ -303,27 +303,58 @@ class RaceRestrictions(unittest.TestCase):
                 self.w.start_event(self.host)
                 self.assertEqual(self.w.event['people'], [self.host])
 
-    def test_wrong_class_leader_cancels_start(self):
+    def test_wrong_class_leader_is_selected_and_checked_after_its_car_select(self):
+        # retail: the leader's event car select comes after the selection (network_freeroam_states.xml pre_event_ui), so a start is
+        # not cancelled for its old car (dev 2026-11-01 21:29:34); the car it loads with is what counts
         self.setup_b()
         self.host.choices = (1, .583)
         self.w.start_event(self.host)
-        self.assertIsNone(self.w.event)
+        self.assertEqual(self.w.event['people'], [self.host, self.guest])
+        self.host.choices = (2, .640)                   # picked in the event car select
+        self.loaded()
+        self.w.maybe_begin_race()
+        self.assertTrue(self.w.event['begun'])
+        self.assertEqual(self.w.event['people'], [self.host, self.guest])
+
+    def test_leader_that_loads_a_wrong_class_car_leaves_only_the_event(self):
+        self.setup_b()
+        self.host.choices = (1, .583)
+        self.w.start_event(self.host)
+        self.loaded()
+        self.w.maybe_begin_race()
+        self.assertEqual(self.w.event['people'], [self.guest])
+        self.assertTrue(self.w.event['begun'])
+        self.assertEqual(self.host.console_vars[S.CONSOLE_VAR_PARTICIPATING_IN_RACE], 0)
+        self.assertIn(self.host, self.w.peers.values())  # out of the event, never out of the session
+
+    def loaded(self):
+        for q in (self.host, self.guest):
+            q.console_vars[S.CONSOLE_VAR_HAS_LOADED_CARS] = 1
 
     def test_car_change_while_loading_cannot_bypass_the_rule(self):
         self.setup_b()
         self.w.start_event(self.host)
-        for q in (self.host, self.guest):
-            q.console_vars[S.CONSOLE_VAR_HAS_LOADED_CARS] = 1
+        self.loaded()
         self.guest.choices = (1, .583)
         self.w.maybe_begin_race()
-        self.assertIsNone(self.w.event)
-        self.assertEqual(self.host.console_vars[S.CONSOLE_VAR_PARTICIPATING_IN_RACE], 0)
+        self.assertEqual(self.w.event['people'], [self.host])
+        self.assertEqual(self.guest.console_vars[S.CONSOLE_VAR_PARTICIPATING_IN_RACE], 0)
+        self.assertTrue(self.w.event['begun'], 'the eligible host did not get its grid')
 
     def test_car_change_on_grid_cannot_bypass_the_rule(self):
         self.setup_b()
         self.w.start_event(self.host)
         self.guest.choices = (1, .583)
         self.w.go_race()
+        self.assertEqual(self.w.event['people'], [self.host])
+        self.assertTrue(self.w.event['racing'])
+
+    def test_every_car_wrong_ends_the_event(self):
+        self.setup_b()
+        self.w.start_event(self.host)
+        self.host.choices = self.guest.choices = (1, .583)
+        self.loaded()
+        self.w.maybe_begin_race()
         self.assertIsNone(self.w.event)
 
     def test_rule_is_fixed_for_the_event_that_is_loading(self):
@@ -333,8 +364,9 @@ class RaceRestrictions(unittest.TestCase):
         self.assertEqual(gameopts.car_rule(self.w.game_options)[0], 2)
         self.assertEqual(gameopts.car_rule(self.read_options(self.host)[1:])[0], 2)
         self.guest.choices = (1, .583)
+        self.loaded()
         self.w.maybe_begin_race()
-        self.assertIsNone(self.w.event)
+        self.assertEqual(self.w.event['people'], [self.host])
 
     def test_malformed_delta_does_not_erase_restrictions(self):
         self.setup_b()
@@ -355,6 +387,9 @@ class RaceRestrictions(unittest.TestCase):
     def former_owner(self):
         self.w.ownership_grant(self.host, S.ROUTER_LOBBY, S.TYPE_GAME_OPTIONS, 0, S.LOBBY_ID_BITS)
         self.write_options(*gameopts.encode_fields({30: (8, 3)}))
+        # the host leaves the setup (DropLeadership) and the server takes the options back from it; this client missed that, as a
+        # stale or older one would, and keeps writing as if it still owned them
+        self.w.handle(S.build_packet([lambda w: w.bits(S.MSG_DROP_LEADERSHIP, 7)]), self.host.addr)
         self.w.ownership_grant(self.guest, S.ROUTER_LOBBY, S.TYPE_GAME_OPTIONS, 0, S.LOBBY_ID_BITS)
 
     def test_returning_host_uses_its_own_class_before_inviting_guests(self):

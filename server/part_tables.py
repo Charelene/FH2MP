@@ -3,6 +3,10 @@ sync, gamedb_sync.py). Shared by tools/make_part_ids.py, which writes part_ids.p
 canonical database (car packs) at run time. Only ids are read, plus media names and top speeds for the car policy."""
 import sqlite3
 
+import diag
+
+LOG = diag.get("cardb")
+
 # PartEnum -> table (names from UpgradeTypes, resolved through the game's strings: 12 = Camshaft, 13 = Valves, ...)
 SLOT_TABLE = {
     0: "Engine", 1: "Drivetrain", 2: "CarBody", 4: "Brakes", 5: "SpringDamper", 6: "AntiSwayFront", 7: "AntiSwayRear", 8: "TireCompound",
@@ -60,7 +64,8 @@ def read_car_choices(c):
     """-> {car id: (class id, performance index)} from Data_Car: what the PlayerChoices of a stock car say."""
     try:
         return {i: (cl, round(pi, 6)) for i, cl, pi in c.execute("select Id, ClassID, PerformanceIndex from Data_Car")}
-    except sqlite3.Error:
+    except sqlite3.Error as e:
+        LOG.warn(f"Data_Car class and PI could not be read, so rentals are not restored to their real class and PI: {diag.where(e)}")
         return {}
 
 
@@ -68,5 +73,6 @@ def read_rentals(c):
     """-> set of car ids in RentalCars (empty when the table is missing)."""
     try:
         return {r[0] for r in c.execute("select CarId from RentalCars")}
-    except sqlite3.Error:
+    except sqlite3.Error as e:
+        LOG.warn(f"RentalCars could not be read from the car database, so no car counts as a rental: {diag.where(e)}")
         return set()

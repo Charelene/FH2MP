@@ -12,6 +12,12 @@ import socket
 import struct
 import time
 
+import diag
+
+LOG = diag.get("tunnel")
+_RATE = diag.RateLimit()
+REFUSE_LOG_SECONDS = 60.0
+
 MAX_FRAME = 2048            # the game's packets are at most MAX_PACKET_BYTES (about 1.3 kB)
 RECV_BUFFER = 65536         # an unfinished frame can never be larger than this
 SEND_BACKLOG = 48 * 1024    # bytes waiting for a slow connection; beyond it datagrams are dropped
@@ -28,6 +34,8 @@ class Conn:
         self.wbuf = bytearray()
         self.born = self.last_rx = now
         self.dead = False
+        self.why = ""                 # what ended it, for the close line
+        self.rx_bytes = self.tx_frames = self.dropped = 0
 
     def fileno(self):
         return self.sock.fileno()
@@ -58,10 +66,19 @@ class Tunnel:
                 s, addr = self.listener.accept()
             except (BlockingIOError, InterruptedError):
                 return
-            except OSError:
+            except OSError as e:
+                ok, skipped = _RATE.allow("accept", REFUSE_LOG_SECONDS)
+                if ok:
+                    LOG.warn(f"accept failed, new TCP connections are not taken until it works again: {diag.where(e)}")
                 return
             ip = addr[0]
             if len(self.conns) >= MAX_CONNECTIONS or sum(1 for a in self.conns if a[0] == ip) >= PER_IP or not self.admit(ip):
+                why = ("the server holds the maximum of %d connections" % MAX_CONNECTIONS if len(self.conns) >= MAX_CONNECTIONS else
+                       "this address already has %d connections" % PER_IP if sum(1 for a in self.conns if a[0] == ip) >= PER_IP else
+                       "no player is signed in from this address (UDP auth required)")
+                ok, skipped = _RATE.allow(("refuse", why), REFUSE_LOG_SECONDS)
+                if ok:
+                    LOG.warn(f"TCP connection refused: {why}" + (f" (+{skipped} like it since the last line)" if skipped else ""))
                 s.close()
                 continue
             s.setblocking(False)
@@ -80,18 +97,19 @@ class Tunnel:
             chunk = conn.sock.recv(65536)
         except (BlockingIOError, InterruptedError):
             return out
-        except OSError:
-            conn.dead = True
+        except OSError as e:
+            conn.dead, conn.why = True, conn.why or f"receive error {e}"
             return out
         if not chunk:
-            conn.dead = True
+            conn.dead, conn.why = True, conn.why or "the client closed the connection"
             return out
         conn.last_rx = now
+        conn.rx_bytes += len(chunk)
         conn.rbuf += chunk
         while len(conn.rbuf) >= 2:
             n = struct.unpack(">H", conn.rbuf[:2])[0]
             if n > MAX_FRAME:
-                conn.dead = True
+                conn.dead, conn.why = True, f"frame of {n} bytes announced, limit {MAX_FRAME} (not our framing, or a corrupt stream)"
                 break
             if len(conn.rbuf) < 2 + n:
                 break
@@ -99,7 +117,7 @@ class Tunnel:
                 out.append(bytes(conn.rbuf[2:2 + n]))
             del conn.rbuf[:2 + n]
         if len(conn.rbuf) > RECV_BUFFER:
-            conn.dead = True
+            conn.dead, conn.why = True, conn.why or f"{len(conn.rbuf)} bytes buffered without a complete frame (limit {RECV_BUFFER})"
         return out
 
     # -- writing ---------------------------------------------------------------------------------------------------------------
@@ -109,6 +127,11 @@ class Tunnel:
         if conn is None or conn.dead:
             return False
         if len(data) > MAX_FRAME or len(conn.wbuf) > SEND_BACKLOG:
+            conn.dropped += 1
+            if conn.dropped == 1 or conn.dropped % 500 == 0:
+                LOG.warn(f"datagram dropped for port {addr[1]}: " + (f"{len(data)} bytes is above the frame limit {MAX_FRAME}" if len(data) > MAX_FRAME else
+                                                                    f"{len(conn.wbuf)} bytes are waiting to be sent (limit {SEND_BACKLOG}), the connection is too slow")
+                         + f"; {conn.dropped} dropped on this connection so far")
             return False
         conn.wbuf += struct.pack(">H", len(data)) + data
         self.flush(conn)
@@ -121,8 +144,8 @@ class Tunnel:
             n = conn.sock.send(conn.wbuf)
         except (BlockingIOError, InterruptedError):
             return
-        except OSError:
-            conn.dead = True
+        except OSError as e:
+            conn.dead, conn.why = True, conn.why or f"send error {e}"
             return
         del conn.wbuf[:n]
 
@@ -136,11 +159,16 @@ class Tunnel:
         """Marks connections dead that sent nothing for IDLE_SECONDS or never opened a game connection (`opened(addr)` -> bool) within
         HELLO_SECONDS, then closes and returns every dead connection's address."""
         for addr, conn in self.conns.items():
-            if now - conn.last_rx > IDLE_SECONDS or (now - conn.born > HELLO_SECONDS and not opened(addr)):
-                conn.dead = True
+            if conn.dead:
+                continue
+            if now - conn.last_rx > IDLE_SECONDS:
+                conn.dead, conn.why = True, f"silent for {now - conn.last_rx:.0f} s (limit {IDLE_SECONDS:g}, the proxy sends a keep-alive every 15 s)"
+            elif now - conn.born > HELLO_SECONDS and not opened(addr):
+                conn.dead, conn.why = True, f"no game connection opened within {HELLO_SECONDS:g} s (the first datagrams were rejected, or none came)"
         gone = [a for a, c in self.conns.items() if c.dead]
         for a in gone:
             conn = self.conns.pop(a)
+            LOG.info(f"TCP connection closed: port={a[1]} {conn.why or 'ended'} " + diag.kv(lived_s=int(now - conn.born), rx_bytes=conn.rx_bytes, dropped=conn.dropped or None))
             self.on_close(conn)
             try:
                 conn.sock.close()

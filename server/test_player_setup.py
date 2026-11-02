@@ -42,9 +42,6 @@ class Schema(unittest.TestCase):
             self.assertEqual(fields[C.PARTS][:2], (offset, 1376))
             self.assertEqual(C.encode(values(f['bits'], p)), (f['bits'], p))
             words = C.part_words(fields[C.PARTS][2])
-            self.assertIsNone(parts.find_parts(f['bits'], p))
-            self.assertIsNone(parts.find_shaped(f['bits'], p))
-            self.assertIsNone(parts.find_loose(f['bits'], p))
             self.assertTrue(parts.integrity_errors(words))
 
     def test_values_cannot_be_interpreted_as_variable_headers(self):

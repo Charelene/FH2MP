@@ -38,6 +38,10 @@ string in 65, and of the s32 in 66 to 68 (slot or challenge; FH2MP_BL_STATUS).
 import os
 import struct
 
+import diag
+
+LOG = diag.get("bucketlist")
+
 ROUTER = 12
 TYPE_PLAYER_STATE, TYPE_SLOT_ARRAY = 0, 1
 ID_BITS, TYPE_BITS = 4, 2     # 13 objects, 2 types; bit_length(numTypes) = 2 type bits on a create (proved by the padding of a real create datagram)
@@ -167,6 +171,8 @@ class SlotTable:
         else:
             free = [i for i, e in enumerate(self.entries) if e[0] == 0]
             if not free or slot == 0:
+                LOG.warn(f"slot array entry not created for owner {owner}, slot {slot}, challenge {challenge}: "
+                         + ("slot id 0 means unused" if slot == 0 else f"all {SLOT_COUNT} entries are in use"))
                 return None
             i = free[0]
         if self.entries[i] == [slot, challenge, owner]:

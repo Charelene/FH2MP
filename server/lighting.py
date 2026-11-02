@@ -5,8 +5,15 @@ records name the relay owner/car id already observed in native predictions.
 """
 import hashlib
 import hmac
+import itertools
 import struct
 import time
+
+import diag
+
+LOG = diag.get("lighting")
+_RATE = diag.RateLimit()
+REJECT_LOG_SECONDS = 60.0     # per player and reason: a client sends 10 requests a second
 
 MAGIC = b'FH2MPLT1'
 HEADER = bytes.fromhex('fffffeff00000000000000') + MAGIC
@@ -23,11 +30,41 @@ def signed(payload, key):
     return payload + hmac.new(key, payload, hashlib.sha256).digest()
 
 
+def _why_unmatched(hub, xuid, data, now):
+    """(why no live, authenticated game connection of `xuid` accepts this request, expected = True when it is normal around a join). Only called
+    after a request failed, never on the normal path; the checks follow the order of the match in handle()."""
+    for main_addr, binding in hub.bound.items():
+        if binding[0] != xuid:
+            continue
+        world = hub.route.get(main_addr)
+        peer = world.peers.get(main_addr) if world is not None else None
+        if peer is None:
+            return "its game connection is in no world", True
+        if not peer.connected or not peer.entered:
+            return "its game connection has not entered the world yet" if peer.connected else "its game connection is gone", True
+        if peer.xuid != xuid or not 1 <= peer.owner_id <= 254:
+            return f"the connection's xuid is {peer.xuid} and its owner id {peer.owner_id}", False
+        if peer.car_id != data[52]:
+            return f"the request names car {data[52]}, the game server has car {peer.car_id}", True
+        key = binding[2]
+        if hub.keys.get(xuid, {}).get(key, 0) <= now:
+            return "the ticket key has expired", False
+        if hub.ticket_epochs.get(main_addr) != data[36:52]:
+            return "the ticket epoch differs from the one of the game connection (the client holds an older or newer ticket)", False
+        return "the signature does not match the ticket key", False
+    return "no game connection of this player is bound to a ticket", False
+
+
 def handle(hub, data, addr):
     """Consume a lighting request. Called before native parsing, never forwarded."""
     if len(data) != REQUEST_SIZE or data[:9] != HEADER[:9] or data[11:19] != MAGIC:
         return
     if int.from_bytes(data[9:11], 'little') != len(data) or data[19] != 1 or data[54] or data[52] > 127 or data[53] > 7:
+        ok, skipped = _RATE.allow("malformed", REJECT_LOG_SECONDS)
+        if ok:
+            LOG.warn(f"request with the lighting magic is malformed and ignored: length field {int.from_bytes(data[9:11], 'little')} of {len(data)} bytes, "
+                     f"type {data[19]} (expected 1), reserved byte {data[54]} (expected 0), car {data[52]} (max 127), flags {data[53]} (max 7)"
+                     + (f" (+{skipped} more since the last line)" if skipped else ""))
         return
     xuid, seq = struct.unpack_from('<QQ', data, 20)
     now = time.monotonic()
@@ -36,7 +73,13 @@ def handle(hub, data, addr):
     # The auxiliary socket has its own NAT mapping. Authenticate against the key
     # and epoch of the player's existing native connection, not its claimed IP.
     found = None
-    for main_addr, world in hub.route.items():
+    # Normally the address that matched last time; one lobby of 12 at 10 Hz was a walk of every connection, 120 times a second.
+    routes = getattr(hub, 'lighting_routes', None)
+    if routes is None:
+        routes = hub.lighting_routes = {}
+    last = routes.get(xuid)
+    candidates = ((last, hub.route[last]),) if last in hub.route else ()
+    for main_addr, world in itertools.chain(candidates, hub.route.items()):
         binding = hub.bound.get(main_addr)
         peer = world.peers.get(main_addr)
         if (not binding or binding[0] != xuid or not peer or not peer.connected or not peer.entered
@@ -48,8 +91,14 @@ def handle(hub, data, addr):
                 or not hmac.compare_digest(hmac.new(key, data[:-MAC_SIZE], hashlib.sha256).digest(), data[-MAC_SIZE:])):
             continue
         found = world, peer, key
+        routes[xuid] = main_addr
         break
     if found is None:
+        routes.pop(xuid, None)
+        ok, skipped = _RATE.allow(("unmatched", xuid), REJECT_LOG_SECONDS)
+        if ok:
+            why, expected = _why_unmatched(hub, xuid, data, now)
+            (LOG.debug if expected else LOG.warn)(f"request from xuid {xuid} ignored: {why}" + (f" (+{skipped} more since the last line)" if skipped else ""))
         return
     world, peer, key = found
     old = getattr(peer, 'lighting', None)

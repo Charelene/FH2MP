@@ -84,6 +84,46 @@ class StringValidationTests(unittest.TestCase):
             self.assertEqual(status, 400, body)
 
 
+class GiftingFailsSafelyTests(unittest.TestCase):
+    def test_sending_a_car_is_refused_so_the_game_puts_it_back(self):
+        for cls, method in (("Forza.WebServices.Gifting, Forza.WebServices", "SendCarGift"),
+                            ("Forza.WebServices.Auction, Forza.WebServices", "UploadAuctionTextures"),
+                            ("Forza.WebServices.GiftLivery, Forza.WebServices", "Create")):
+            self.assertEqual(struct.unpack(">I", L.handle_xls(cls, method, b"")[:4])[0], 2, method)
+
+
+class AuthShareTests(unittest.TestCase):
+    def test_one_line_an_hour_with_requests_and_players_on_each_side(self):
+        now, lines = [0.0], []
+        share = L.AuthShare(clock=lambda: now[0], sink=lines.append)
+        for xuid, authed in ((1, True), (1, True), (2, True), (3, False), (3, False), (4, False), (5, False)):
+            share.note(xuid, authed)
+        self.assertEqual(lines, [])
+        now[0] = 3600.0
+        share.note(1, True)
+        self.assertEqual(lines, ["auth share: last hour 3 requests with a token from 2 players, 4 without from 3"])
+        now[0] = 7200.0
+        share.note(9, False)
+        self.assertEqual(lines[1], "auth share: last hour 1 requests with a token from 1 players, 0 without from 0")
+
+
+class HandlerDecodeTests(unittest.TestCase):
+    def test_a_method_without_a_handler_is_not_decoded(self):
+        key = ("Forza.WebServices.OnlineProfile", "UpdateAllNoHandler")
+        self.assertNotIn(key, L.HANDLERS)
+        with mock.patch.object(L, "SC", mock.Mock()), mock.patch.object(L, "find_struct", return_value=("x", [])), \
+                mock.patch.object(L.xls, "decode", side_effect=AssertionError("decoded")), \
+                mock.patch.object(L.xls, "default_struct", return_value={}), mock.patch.object(L.xls, "encode", return_value=b""):
+            out = L.handle_xls(key[0], key[1], b"\x00" * 64)
+        self.assertEqual(struct.unpack(">III", out[:12]), (0, 0, 0))
+
+
+class NotificationSessionTests(unittest.TestCase):
+    def test_the_fallback_session_never_asks_for_an_immediate_poll(self):
+        handler = L.HANDLERS[("Xls.WebServices.Notifications", "StartNewSession")][1]
+        self.assertGreater(handler({})["nextRetrieveSeconds"], 0)
+
+
 class LayerCountTests(unittest.TestCase):
     def test_operator_preview_content_type_matches_the_stored_image(self):
         handler = object.__new__(L.Handler)
@@ -117,9 +157,9 @@ class LayerCountTests(unittest.TestCase):
         self.assertEqual([f(v) for v in ("", "junk", "1.0.0-rc1", "1.0.0-rc2")], [False] * 4)
         self.assertEqual([f(v) for v in ("1.0.0-rc3", "1.0.0-rc10", "1.0.0", "1.0.1", "1.1.0-rc1", "1.0.0-rc2-debug")], [True] * 6)
 
-    def test_an_outdated_clients_logon_is_answered_without_admitting_it(self):
-        """Prod 2026-10-29: a refused Logon made the game retry it forever and never poll the Message Center, so the update notice could not
-        be read. Logon is answered with the empty result; no ticket is announced, and every other call stays refused."""
+    def test_an_outdated_clients_logon_is_refused_like_every_other_call(self):
+        """Prod 2026-10-30: answering an outdated client's Logon with the empty result crashed every such game 10-30 s after it started
+        (game+0x9c898f, a null CGameplayLog). Logon gets the 426 again; no ticket is announced."""
         cfg = L.launcher_api.LauncherConfig()
         cfg.overlay = {"minShim": "1.1.2"}
         old = (L.LAUNCHER, L.AUTH)
@@ -134,7 +174,7 @@ class LayerCountTests(unittest.TestCase):
             _reply_json = lambda self, status, obj, ctype="application/json", *a, **k: replies.append((status, ctype, obj))   # noqa: E731
         try:
             with mock.patch.object(L, "announce_auth", lambda *a: announced.append(a)), \
-                    mock.patch.object(L, "outdated_logon", lambda: frame), mock.patch.object(L, "SC", object()):
+                    mock.patch.object(L, "SC", object()):
                 def ask(cls, method, shim="1.1.1"):
                     replies.clear()
                     r = Req()
@@ -142,8 +182,7 @@ class LayerCountTests(unittest.TestCase):
                     return L.Handler._identify(r), list(replies)
                 ok, got = ask("Forza.WebServices.User, Forza.WebServices", "Logon")
                 self.assertFalse(ok)                                     # the request is answered here and goes no further
-                self.assertEqual((got[0][0], got[0][1]), (200, "bin/xtsw"))
-                self.assertEqual(struct.unpack(">III", got[0][2][:12])[0], 0)
+                self.assertEqual(got[0][0], 426)
                 self.assertEqual(announced, [])
                 ok, got = ask("Forza.WebServices.Scoreboard, Forza.WebServices", "GetRowsAnthem")
                 self.assertEqual((ok, got[0][0]), (False, 426))          # everything else is still refused
@@ -347,6 +386,41 @@ class LayerCountTests(unittest.TestCase):
         self.assertEqual(L.pngtool.decode(small)[:2], L.SMALL_THUMB)
 
 
+class TuneBuildabilityTests(unittest.TestCase):
+    """Opening a tune makes the client build its car for the stats page; an engine slot without a catalog row crashed it (2026-10-31)."""
+    BAD = [1332002, 1332000, 1332000, -1, 1332003, 1332003, 1332003, 1332003, 1332009, 1332001, 1332000, 1332000, 90002000, 90002000, 90002000,
+           90002000, 90002000, 90002000, 90002000, 90002000, 90002000, -1, -1, 90002000, -1, 90002000, -1, -1, -1, 90002000, 736001, 736000,
+           736003, 736003, 1332001, 1332000, 1332001, 1332000, 1332000, 1332002, 1332003, 1332000, -1]
+    SWAP = [1332001, 1332001, 1332000, -1, 1332003, 1332003, 1332003, 1332003, 1332003, 1332000, 1332001, 1332000, 2144003, 2144003, 2144003,
+            2144003, 2144003, 2144003, 2144003, 2144003, 2144003, -1, -1, 2144000, -1, 2144003, -1, -1, -1, 2144002, 2102003, 2102003, 2102003,
+            2102003, 1332000, 1332000, 1332001, 1332000, 1332003, 1332006, 1332003, 1332001, -1]
+
+    def test_unbuildable_parts_become_the_cars_stock_parts(self):
+        import parts
+        out = L._buildable_tune_parts(1332, {"base": {"m_WheelStyle": 706}, "m_CarParts": self.BAD}, 5447)
+        self.assertEqual(out["base"], {"m_WheelStyle": 706})
+        self.assertEqual(parts.integrity_errors([w & 0xFFFFFFFF for w in out["m_CarParts"]]), [])
+        self.assertEqual(out["m_CarParts"][12], 792000)          # the stock engine's camshaft, which holds the torque curve
+
+    def test_uploading_an_unbuildable_tune_is_refused(self):
+        req = {"carId": 1332, "installedParts": {"m_CarParts": self.BAD}, "tuning": {}}
+        with mock.patch.object(L, "_me", return_value=(7, "x")), mock.patch.object(L, "UGC") as ugc_store:
+            with self.assertRaises(L.XlsError):
+                L.cv_create_tune_structs(req)
+            ugc_store.versioned_create.assert_not_called()
+            ugc_store.versioned_create.return_value = 5
+            L.cv_create_tune_structs(dict(req, installedParts={"m_CarParts": self.SWAP}))
+            ugc_store.versioned_create.assert_called_once()
+
+    def test_valid_swap_and_unknown_cars_are_served_as_stored(self):
+        swap = {"m_CarParts": self.SWAP}
+        self.assertIs(L._buildable_tune_parts(1332, swap, 15394), swap)
+        bad = {"m_CarParts": self.BAD}
+        self.assertIs(L._buildable_tune_parts(999999, bad, 1), bad)
+        short = {"m_CarParts": [1, 2]}
+        self.assertIs(L._buildable_tune_parts(1332, short, 2), short)
+
+
 class LspTests(unittest.TestCase):
     def setUp(self):
         # Handlers mutate scores, gamertags and UGC. Sharing one public schema
@@ -378,6 +452,81 @@ class LspTests(unittest.TestCase):
         self.assertIn("open the FH2MP launcher and press Play", params["Message"])
         self.assertIn("1.1.2", params["Message"])
         self.assertEqual(L.NOTIF.visible(0), L.NOTIF.visible(0))           # nothing was stored for anybody
+
+    def test_a_banned_player_reads_the_end_date_and_reason_in_the_messages_tab(self):
+        out = L.ban_notice(L.auth.ban_message("Cheating in Monthly Rivals", 1793646495))
+        _result, _error, n = struct.unpack(">III", out[:12])
+        _name, rf = L.find_struct("Xls.WebServices.Notifications", "RetrieveForUser", "_Results")
+        res, rest = xls.decode(L.SC, rf, out[12 + n:])
+        self.assertEqual(rest, 0)
+        self.assertEqual([r["notificationType"] for r in res["results"]], [0x602])
+        params, _ = xls.decode(L.SC, L.notif_fields(0x602), bytes(res["parameterBlock"]))
+        self.assertIn("banned until 2026-11-02", params["Message"])
+        self.assertIn("Cheating in Monthly Rivals", params["Message"])
+
+    def retrieve(self, **limits):
+        for i in range(limits.pop("rows")):
+            L.NOTIF.add(f"news {i}", "", 0x200)
+        out = L.notif_retrieve(limits)
+        _name, rf = L.find_struct("Xls.WebServices.Notifications", "RetrieveForUser", "_Results")
+        res, rest = xls.decode(L.SC, rf, xls.encode(L.SC, rf, out))
+        self.assertEqual(rest, 0)
+        self.assertEqual(sum(r["cbParameters"] for r in res["results"]), len(res["parameterBlock"]))
+        return res, [r["id"] for r in res["results"]]
+
+    def test_the_message_center_reply_keeps_to_the_count_the_client_asked_for(self):
+        res, ids = self.retrieve(rows=8, maxResults=5, cbParameterBlockSize=L.NOTIF_MAX_BLOCK)
+        self.assertEqual(len(ids), 5)
+        self.assertEqual(ids, sorted(n["id"] for n in L.NOTIF.visible(L.CTX.xuid))[-5:])         # the newest, in id order
+        self.assertEqual(list(res["activeNotificationIds"]), ids)
+
+    def test_the_message_center_reply_keeps_to_the_bytes_the_client_asked_for(self):
+        whole, ids = self.retrieve(rows=6, maxResults=L.NOTIF_MAX_RESULTS, cbParameterBlockSize=L.NOTIF_MAX_BLOCK)
+        self.assertEqual(len(ids), 6)
+        each = len(whole["parameterBlock"]) // 6
+        res, kept = self.retrieve(rows=0, maxResults=L.NOTIF_MAX_RESULTS, cbParameterBlockSize=each * 2 + each // 2)
+        self.assertEqual(kept, ids[-2:])
+        self.assertLessEqual(len(res["parameterBlock"]), each * 2 + each // 2)
+        self.assertEqual(list(res["activeNotificationIds"]), kept)
+        fields = L.notif_fields(0x200)
+        first, _ = xls.decode(L.SC, fields, bytes(res["parameterBlock"]))        # blocks stay in the order of their results
+        self.assertEqual(first["Message"], "news 4")
+
+    def test_a_notification_reply_is_reused_until_something_changes(self):
+        L.NOTIF.add("first", "", 0x200)
+        built = []
+        real = L._notif_reply
+        with mock.patch.object(L, "_notif_reply", lambda *a: built.append(a) or real(*a)):
+            first = L.notif_retrieve({"maxResults": 512, "cbParameterBlockSize": 51200})
+            self.assertEqual(L.notif_retrieve({"maxResults": 512, "cbParameterBlockSize": 51200})["activeNotificationIds"], first["activeNotificationIds"])
+            self.assertEqual(len(built), 1)
+            L.NOTIF.add("second", "", 0x200)
+            after = L.notif_retrieve({"maxResults": 512, "cbParameterBlockSize": 51200})
+        self.assertEqual(len(built), 2)
+        self.assertEqual(len(after["activeNotificationIds"]), len(first["activeNotificationIds"]) + 1)
+        self.assertEqual(after["nextRetrieveSeconds"], L.POLL_SECONDS)
+
+    def test_the_poll_slows_once_nothing_has_changed_for_a_while(self):
+        L.NOTIF.add("first", "", 0x200)
+        L.notif_retrieve({})
+        L._NOTIF_CHANGE[1] -= L.POLL_BUSY_WINDOW + 1
+        self.assertEqual(L.notif_retrieve({})["nextRetrieveSeconds"], L.POLL_IDLE_SECONDS)
+
+    def test_best_score_on_a_class_board_is_the_best_in_that_class(self):
+        x = L.CTX.xuid
+
+        def run(cls, seconds):
+            return L.SB.submit(x, "Tester", 1, {"scoreboardType": 1, "gameScoreboardId": -1, "trackId": 300, "carId": 283, "carClassId": cls,
+                                                "carPerformanceIndex": 0.5, "score": L.scoreboard.dbl_to_u64(seconds), "isClean": True,
+                                                "usedSTM": False, "usedTCS": False, "usedABS": False})
+        self.assertIsNotNone(run(4, 60.0))
+        self.assertIsNotNone(run(1, 90.0))
+
+        def best(cls):
+            return L.sb_best({"scoreboardType": 1, "scoreType": 1, "gameScoreboardId": -1, "trackId": 300, "carId": 283, "carClassId": cls})
+        self.assertEqual(L.scoreboard.u64_to_dbl(best(4)["bestScore"]["score"]), 60.0)
+        self.assertEqual(L.scoreboard.u64_to_dbl(best(1)["bestScore"]["score"]), 90.0)
+        self.assertFalse(best(2)["scoreFound"])                                  # S2 best no longer stops a first D-class run
 
     def test_handlers_accept_default_parameters_except_rival_notifications(self):
         failures = []
@@ -455,6 +604,101 @@ class LspTests(unittest.TestCase):
         r, res = call(S, "GetFileKeywords", {"fileType": 0, "maxKeywordResults": 50})
         self.assertIn("Drift", [k["Keyword"] for k in res["keywords"]])
 
+    def test_keyword_lists_follow_fh4_in_two_pickers(self):
+        S = "Forza.WebServices.Storefront"
+        want = {0: (7, 11, "Top Speed", "Wide-Ratio Gearbox"), 1: (10, 11, "Logo", "Wide"), 2: (9, 10, "Racing", "Drift"),
+                4: (5, 4, "Racing", "Untouched")}
+        for ftype, (n1, n2, first, last) in want.items():
+            r, res = call(S, "GetFileKeywords", {"fileType": ftype, "maxKeywordResults": 128})
+            kws = res["keywords"]
+            self.assertEqual([k["KeywordId"] for k in kws], list(range(1, n1 + n2 + 1)), ftype)
+            self.assertEqual([k["Bucket"] for k in kws], [0] * n1 + [1] * n2, ftype)
+            self.assertEqual((kws[0]["Keyword"], kws[-1]["Keyword"]), (first, last), ftype)
+
+    def test_downloads_and_likes_count_once_per_other_player(self):
+        S = "Forza.WebServices.Storefront"
+        owner, other, third = L.CTX.xuid, 0x0009000000000043, 0x0009000000000044
+        r, res = call("Forza.WebServices.ContentVersioning", "CreateVersionedTuneFromStructs", {"carId": 325})
+        vid = res["versionedTuneId"]
+        r, res = call("Forza.WebServices.StorefrontTuning", "Create", {
+            "fileHeader": {"Title": "Grip tune", "Type": 0, "PayloadSize": 10, "KeywordOne": 3, "KeywordTwo": 13},
+            "tuningDescription": {"base": {"VersionedTuneId": vid, "MakeId": 21, "ModelId": 325, "ClassId": 3, "PerformanceIndex": 700}},
+            "fileName": "tune", "previewData": b"\x89PNG"})
+        fid = res["contentFileId"]
+
+        def counts():
+            f = L.UGC.file_get(fid)
+            return f["downloads"], f["likes"]
+        call(S, "GetFileHeavyWeightData", {"fileCount": 1, "fileIds": [fid]})
+        call(S, "SearchTuningFiles", {"searchParameters": {"ClassId": -1}, "maxFiles": 10})
+        self.assertEqual(counts(), (0, 0))                                            # browsing is not downloading
+        retrieve = lambda: call("Forza.WebServices.ContentVersioning", "RetrieveVersionedTuneById", {"versionedTuneId": vid})  # noqa: E731
+        retrieve()
+        call(S, "IncrementLikes", {"fileId": fid})
+        self.assertEqual(counts(), (0, 0))                                            # the creator's own fetch and like do not count
+        L.CTX.xuid = other
+        retrieve()
+        retrieve()
+        call(S, "IncrementLikes", {"fileId": fid})
+        call(S, "IncrementLikes", {"fileId": fid})
+        self.assertEqual(counts(), (1, 1))                                            # once per player
+        L.CTX.xuid = third
+        retrieve()
+        call(S, "IncrementLikes", {"fileId": fid})
+        self.assertEqual(counts(), (2, 2))
+        L.CTX.xuid = owner
+        r, res = call(S, "GetMyFileList", {"fileType": 0, "maxFiles": 10})
+        mine = [x for x in res["files"] if x["Id"] == fid][0]
+        self.assertEqual((mine["DownloadCount"], mine["LikeCount"], mine["PopularityRating"]), (2, 2, ugc.popularity(L.UGC.file_get(fid))))
+        self.assertEqual(mine["PopularityRating"], 2)                                 # score 2*3 + 2 = 8 -> two stars
+
+    def test_a_design_seen_in_a_lobby_is_not_a_download(self):
+        owner, other = L.CTX.xuid, 0x0009000000000043
+        vid = L.UGC.versioned_create("livery", owner, "Stripe", 325, b"", layers=0)
+        fid = L.UGC.file_create("livery", owner, "Stripe", "", 2, vid, 0, b"\x89PNG", None, 325)
+        L.CTX.xuid = other
+        with mock.patch.dict(os.environ, {"FH2MP_LIVERY_GATE_OFF": "1"}):
+            call("Forza.WebServices.ContentVersioning", "RetrieveVersionedLiveryById", {"versionedLiveryId": vid, "returnThumbnail": True})
+            self.assertEqual(L.UGC.file_get(fid)["downloads"], 0)
+            call("Forza.WebServices.ContentVersioning", "RetrieveVersionedLiveryById", {"versionedLiveryId": vid, "returnThumbnail": False})
+        self.assertEqual(L.UGC.file_get(fid)["downloads"], 1)
+
+    def test_popular_files_come_first(self):
+        owner = L.CTX.xuid
+        quiet = L.UGC.file_create("livery", owner, "Quiet", "", 2, None, 0, b"x")
+        loved = L.UGC.file_create("livery", owner, "Loved", "", 2, None, 0, b"x")
+        for _ in range(3):
+            L.UGC.bump(loved, "likes")
+        self.assertEqual([f["id"] for f in L.UGC.search("livery")][:2], [loved, quiet])
+        self.assertEqual([ugc.popularity({"likes": n, "uses": 0, "downloads": 0}) for n in (0, 1, 2, 7, 20, 50)], [0, 1, 2, 3, 4, 5])
+
+    def test_vinyl_group_share_search_and_download(self):
+        S = "Forza.WebServices.Storefront"
+        owner, other = L.CTX.xuid, 0x0009000000000043
+        name, blob = b"Flames", os.urandom(300)
+        body = (struct.pack(">I", len(name)) + name + struct.pack(">H", 4) + b"\x00" + struct.pack(">Q", owner)
+                + struct.pack(">I", len(blob)) + blob)
+        self.assertEqual(ugc.parse_layergroup_upload(body), {"name": "Flames", "layers": 4, "payload": blob})
+        self.assertIsNone(ugc.parse_layergroup_upload(body[:-1]))                     # shorter than it declares
+        L.profile_update_layergroup(body)
+        vid = L.cv_create_layergroup({"name": "Flames", "thumbnail": b"\x89PNG"})["versionedLayerGroupId"]
+        v = L.UGC.versioned_get(vid)
+        self.assertEqual((v["data"], v["layers"]), (blob, 4))
+        r, res = call("Forza.WebServices.StorefrontLayerGroup", "Create", {
+            "fileHeader": {"Title": "Flames", "Type": 1, "PayloadSize": len(blob), "KeywordOne": 2, "KeywordTwo": 13},
+            "layerGroupDescription": {"base": {"VersionedLayerGroupId": vid, "NumberOfLayers": 4}},
+            "fileName": "Flames", "previewData": b"\x89PNG"})
+        self.assertEqual(r, 0)
+        fid = res["contentFileId"]
+        L.CTX.xuid = other
+        for kw, found in ((0, True), (2, True), (3, False)):
+            r, res = call(S, "SearchLayerGroupFiles", {"searchParameters": {"ClassId": -1, "KeywordOneId": kw}, "maxFiles": 10})
+            self.assertEqual(fid in [x["Id"] for x in res["searchResults"]], found, kw)
+        r, res = call("Forza.WebServices.ContentVersioning", "RetrieveVersionedLayerGroupById", {"versionedLayerGroupId": vid})
+        d = res["versionedLayerGroupData"]
+        self.assertEqual((bytes(d["data"]), d["numberOfLayers"], d["creatorXuid"]), (blob, 4, owner))
+        self.assertEqual(L.UGC.file_get(fid)["downloads"], 1)
+
     def test_photo_share_upload_list_and_download(self):
         S = "Forza.WebServices.Storefront"
         X = "Xls.WebServices.Content"
@@ -513,23 +757,30 @@ class LspTests(unittest.TestCase):
         cid = res["clubId"]
         r, _ = call(C, "CreateClub", {"clubTag": "zoom", "clubName": "Other"})
         self.assertEqual(r, 2)                                                 # tag exists (case-insensitive)
-        r, res = call("Xls.WebServices.Club", "GetClubStatus", {"xuid": A})        # the client's class name for the Club* calls
-        self.assertEqual(res["clubStatus"]["clubId"], cid)
         r, res = call("Xls.WebServices.User", "GetUserData")                        # the client's own club tag / role after a change
         self.assertEqual((res["userData"]["clubTag"], res["userData"]["roleInClub"], res["userData"]["clubId"]), ("ZOOM", clubs_role("leader"), cid))
-        r, res = call(K, "GetClubFullInfo", {"clubId": cid, "maxLeaders": 5})
-        d = res["clubDetails"]
-        self.assertEqual((d["clubTag"], d["memberCount"], d["clubLeader"]["qwXuid"], d["regionKeyword"]["Keyword"]),
-                         ("ZOOM", 1, A, "Europe"))
-        self.assertEqual([u["qwXuid"] for u in res["leaders"]], [A])
         r, res = call("Forza.WebServices.Scoreboard", "GetLadderRows", {"clubId": cid, "startAt": 1, "maxResults": 10, "maxTiers": 5})
         self.assertEqual((r, [x["user"]["qwXuid"] for x in res["rows"]], res["userRow"]["rank"], res["available"], len(res["ladderTiers"])),
                          (0, [A], 1, 1, 5))                                      # the club's members, ranked by XP earned in it
         self.assertEqual(res["rows"][0]["user"]["clubTag"], "ZOOM")
+        th = [t["xpThreshold"] for t in res["ladderTiers"]]
+        self.assertEqual((th, [t["tierNumber"] for t in res["ladderTiers"]]), (sorted(th, reverse=True), [1, 2, 3, 4, 5]))   # Tier 1 = highest
         r, res = call("Forza.WebServices.Scoreboard", "GetRows", {"scoreboardType": 8, "scoreType": 4, "view": 0, "isClubBoard": True,
                                                                   "startAt": 1, "maxResults": 20})
         self.assertEqual([(x["rank"], x["clubData"]["clubTag"], x["clubData"]["memberCount"]) for x in res["rows"]], [(1, "ZOOM", 1)])
         self.assertEqual((res["userRow"]["rank"], res["available"]), (1, 1))
+        L.SB.submit(A, "Racer0", 1, {"scoreboardType": 1, "gameScoreboardId": -1, "trackId": 300, "carId": 283, "carClassId": 3,
+                                     "carPerformanceIndex": 0.5, "score": L.scoreboard.dbl_to_u64(61.0), "isClean": True,
+                                     "usedSTM": False, "usedTCS": False, "usedABS": False})
+        r, res = call("Forza.WebServices.Scoreboard", "GetRows", {"scoreboardType": 1, "scoreType": 1, "trackId": 300, "pivotId": 3,
+                                                                  "view": 0, "startAt": 1, "maxResults": 20})
+        mine = [x["user"] for x in res["rows"] if x["user"]["qwXuid"] == A]
+        self.assertEqual([(u["clubTag"], u["clubId"], u["roleInClub"]) for u in mine], [("ZOOM", cid, clubs_role("leader"))])   # the player boards show [TAG] too
+        board = {"scoreboardType": 1, "scoreType": 1, "trackId": 300, "pivotId": 3, "view": 0, "startAt": 1, "maxResults": 20}
+        r, res = call("Forza.WebServices.Scoreboard", "GetRowsAnthem", board)               # Rivals pages: the same rows, no handler error
+        self.assertEqual((r, res["userRow"]["user"]["clubTag"]), (0, "ZOOM"))
+        r, res = call("Forza.WebServices.Scoreboard", "GetRival", dict(board, rivalXuid=A))
+        self.assertEqual((r, res["rival"]["scoreData"]["user"]["clubTag"]), (0, "ZOOM"))
         r, res = call(K, "SearchForClubByTag", {"clubTag": "zoom"})
         self.assertEqual(res["clubDetails"]["clubName"], "Zoomers")
         r, res = call(K, "SearchForClubsByName", {"clubName": "zoo", "maxResults": 5})
@@ -561,51 +812,18 @@ class LspTests(unittest.TestCase):
         r, _ = call(C, "InviteToClub", {"userToInvite": E})
         self.assertEqual(r, 2)                                                 # a plain member may not invite
 
-        asx(B)                                                                 # Club Garage: B shares a car, A sees and borrows it
-        S = "Forza.WebServices.SharedCar"
-        r, res = call(S, "UploadCarTextures", {"liveryTexture": b"T" * 300, "LiveryThumbnail": b"P" * 200})
-        tid = res["texturesId"]
-        guid = bytes(range(16))
-        data = {"gameCarId": guid, "ProfileId": bytes(24), "modelId": 325, "perfIndex": 0.74, "classId": 3, "carColorRGB": 255, "isStock": False,
-                "speedRating": 6.5, "simPeakPower": 400.0}
-        r, res = call(S, "Create", {"completeCarData": data, "texturesId": tid, "liveryDetails": b"LIV" * 10, "tuning": b"TUN" * 5,
-                                    "overWriteExisting": False})
-        self.assertEqual(r, 0)
-        car_id = res["carId"]
-        r, res = call(S, "Create", {"completeCarData": data, "texturesId": tid, "liveryDetails": b"NEW", "tuning": b"NEW", "overWriteExisting": True})
-        self.assertEqual(res["carId"], car_id)                                 # sharing the same car again overwrites it
-        asx(A)
-        r, res = call(S, "GetClubCars", {"maxResults": 10})
-        c = res["carData"][0]
-        self.assertEqual((len(res["carData"]), c["sharedCarId"], c["modelId"], c["makeName"], c["modelName"], c["owner"]["qwXuid"], c["version"]),
-                         (1, car_id, 325, "Lamborghini", "Diablo SV", B, 2))
-        self.assertAlmostEqual(c["performanceIndex"], 0.74, places=2)
-        r, res = call(S, "GetCarDetails", {"carCount": 1, "carIds": [car_id]})
-        self.assertEqual((bytes(res["carData"][0]["thumbnail"]), res["carData"][0]["carColorRGB"]), (b"P" * 200, 255))
-        r, res = call(S, "DownloadSharedCar", {"carId": car_id, "version": 2, "maxLiveryLength": 1000, "maxTuningLength": 1000})
-        self.assertEqual((bytes(res["liveryDetails"]), bytes(res["tuningDetails"])), (b"NEW", b"NEW"))
-        r, _ = call(S, "IncrementRaceCount", {"carId": car_id})
-        self.assertIn(0x8301, [t for t, _ in notes(B)])                        # the owner hears that someone raced the car
-        self.assertEqual(L.CLUBS.club_cars(A, 5)[0]["race_count"], 1)
-
         asx(A)                                                                 # roles
         r, _ = call(C, "ChangeMemberRole", {"userToChange": B, "newRole": clubs_role("co")})
         self.assertEqual(r, 0)
         self.assertIn(0x708, [t for t, _ in notes(B)])
         r, _ = call(C, "ChangeMemberRole", {"userToChange": B, "newRole": clubs_role("member")})
         self.assertIn(0x704, [t for t, _ in notes(B)])
-        r, _ = call(C, "RecommendMemberForRemoval", {"userToRemove": D})
-        self.assertEqual(r, 0)
-        r, _ = call(C, "RecommendMemberForRemoval", {"userToRemove": D})
-        self.assertEqual(r, 2)                                                 # already recommended
         r, res = call(C, "CreateNoticeBoardNotification", {"noticeBoardMessage": "race at 9"})
         self.assertEqual(r, 0)
         self.assertIn(0x709, [t for t, _ in notes(B)])
         r, _ = call(C, "DeleteNoticeBoardNotification", {"notificationId": res["notificationId"]})
         self.assertNotIn(0x709, [t for t, _ in notes(B)])
 
-        r, res = call("Forza.WebServices.SharedCar", "GetClubCars", {"maxResults": 10})
-        self.assertEqual(len(res["carData"]), 1)
         r, _ = call(C, "RemoveFromClub", {"userToRemove": D})                    # kick
         self.assertEqual(r, 0)
         self.assertIn(0x703, [t for t, _ in notes(D)])
@@ -613,9 +831,6 @@ class LspTests(unittest.TestCase):
         r, _ = call(C, "LeaveClub")                                              # quit (the Leave Club button; RemoveFromClub on oneself does the same)
         self.assertEqual(r, 0)
         self.assertEqual(L.CLUBS.member_info(B), (0, "", 0))
-        self.assertEqual(L.CLUBS.club_cars(A, 5), [])                          # a member's shared cars leave with them
-        r, res = call(C, "GetClubHistory", {"userXuid": B, "maxEntries": 10})
-        self.assertEqual(len(res["userClubHistory"]), 4)                       # joined, promoted, demoted, quit
         asx(A)
         r, _ = call(C, "LeaveClub")                                              # the game's Leave Club button: a leader leaving disbands the club
         self.assertEqual((r, L.CLUBS.club(cid)), (0, None))

@@ -34,6 +34,7 @@ from urllib.parse import parse_qs, urlparse
 
 import auth
 import crash_reports
+import diag
 import gamedb_sync
 import pngtool
 import social
@@ -43,6 +44,9 @@ MAX_BODY = 1_200_000
 GAMERPIC_MAX_DIM = 512
 GAMERPIC_MIN_DIM = 32
 SERVER_VERSION = "1"
+LOG = diag.get("launcher")
+_RATE = diag.RateLimit()
+REFUSAL_LOG_SECONDS = 120.0         # one line per refusal code, route and player: a launcher retries a refused poll every few seconds
 
 DEFAULT_CONFIG = {
     "motd": "",
@@ -111,20 +115,31 @@ class LauncherConfig:
                     data.update({k: v for k, v in loaded.items() if k in DEFAULT_CONFIG})
                     data["links"] = {**DEFAULT_CONFIG["links"], **(loaded.get("links") or {})}
                     self._data, self._mtime = data, m
-            except (OSError, ValueError):
-                pass                      # keep the last good copy
+            except (OSError, ValueError) as e:
+                # keep the last good copy; say so once per file version, or an edit with a typo (minShim, maintenance ...) does nothing unseen
+                if getattr(self, "_failed_mtime", False) != self._stat_mtime():
+                    self._failed_mtime = self._stat_mtime()
+                    LOG.exc(f"{self.path} not reloaded, the last good settings stay in force (minShim {self._data.get('minShim')!r}, "
+                            f"maintenance {self._data.get('maintenance')!r})", e, level="WARN")
         return self._data
+
+    def _stat_mtime(self):
+        try:
+            return os.stat(self.path).st_mtime
+        except OSError:
+            return None
 
 
 class Ctx:
     def __init__(self, auth_service, social_store, config, online_count, log=lambda m: None, on_login=None, on_logout=None, lsp_public=None,
                  game_public=None,
-                 gamedb=None, boards=None, assets_dir=None, crashes=None):
+                 gamedb=None, boards=None, assets_dir=None, crashes=None, club_invite=None):
         self.auth, self.social, self.config, self.online_count, self.log = auth_service, social_store, config, online_count, log
         self.on_login = on_login or (lambda xuid, ip, token: None)
         self.on_logout = on_logout or (lambda xuid, token: None)    # the game server ends what that session's UDP ticket opened
         self.lsp_public, self.game_public = lsp_public or {}, game_public or {}
         self.gamedb = gamedb or gamedb_sync.GameDb("")
+        self.club_invite = club_invite    # (sponsor xuid, invitee xuid) -> None, raises clubs.ClubError; None = launcher club invites are off
         self.crashes = crashes            # crash_reports.CrashReports, or None = the endpoint is off
         self.boards = boards              # (kind "challenges" | "leaderboards", n) -> dict, from ops_api; None = not served
         self._boards_cache = {}
@@ -148,7 +163,7 @@ def _asset(ctx, name):
 
 def _boards(ctx, kind, n):
     if ctx.boards is None:
-        raise auth.AuthError(404, "not_found", "no leaderboards on this server")
+        raise auth.AuthError(404, "not_found", "no leaderboards on this server", detail="Ctx.boards is not set")
     hit = ctx._boards_cache.get((kind, n))
     if hit and time.time() - hit[0] < BOARDS_TTL:
         return hit[1]
@@ -171,13 +186,13 @@ def body_limit(path):
 
 def _json(body, limit=64 * 1024):
     if len(body) > limit:
-        raise auth.AuthError(413, "too_large")
+        raise auth.AuthError(413, "too_large", detail=f"body {len(body)} bytes, limit {limit}")
     try:
         d = json.loads(body or b"{}")
-    except ValueError:
-        raise auth.AuthError(400, "bad_request", "invalid JSON")
+    except ValueError as e:
+        raise auth.AuthError(400, "bad_request", "invalid JSON", detail=f"{e} (body {len(body)} bytes)")
     if not isinstance(d, dict):
-        raise auth.AuthError(400, "bad_request", "expected a JSON object")
+        raise auth.AuthError(400, "bad_request", "expected a JSON object", detail=f"body is a {type(d).__name__}")
     return d
 
 
@@ -195,18 +210,18 @@ def _bearer(headers):
 def clean_gamerpic(png):
     """Validates an uploaded PNG and returns a freshly encoded one (the original bytes never reach other players' game clients)."""
     if png[:8] != b"\x89PNG\r\n\x1a\n" or len(png) > social.MAX_GAMERPIC:
-        raise auth.AuthError(400, "bad_image", "send a PNG of at most 1 MB")
+        raise auth.AuthError(400, "bad_image", "send a PNG of at most 1 MB", detail=f"{len(png)} bytes (limit {social.MAX_GAMERPIC}), " + ("PNG signature present" if png[:8] == b"\x89PNG\r\n\x1a\n" else "no PNG signature"))
     if png[12:16] != b"IHDR":
-        raise auth.AuthError(400, "bad_image", "that PNG cannot be read")
+        raise auth.AuthError(400, "bad_image", "that PNG cannot be read", detail="no IHDR chunk after the signature")
     w0, h0 = struct.unpack(">II", png[16:24])                      # checked before inflating, so a tiny file cannot claim gigabytes
     if not (GAMERPIC_MIN_DIM <= w0 <= GAMERPIC_MAX_DIM and GAMERPIC_MIN_DIM <= h0 <= GAMERPIC_MAX_DIM):
-        raise auth.AuthError(400, "bad_image", f"the picture must be between {GAMERPIC_MIN_DIM} and {GAMERPIC_MAX_DIM} pixels each way")
+        raise auth.AuthError(400, "bad_image", f"the picture must be between {GAMERPIC_MIN_DIM} and {GAMERPIC_MAX_DIM} pixels each way", detail=f"header says {w0}x{h0}")
     try:
         w, h, ch, rows = pngtool.decode(png, max_dim=GAMERPIC_MAX_DIM)
-    except Exception:  # noqa: BLE001 - any malformed input
-        raise auth.AuthError(400, "bad_image", "that PNG cannot be read (8-bit, not interlaced, please)")
+    except Exception as e:  # noqa: BLE001 - any malformed input
+        raise auth.AuthError(400, "bad_image", "that PNG cannot be read (8-bit, not interlaced, please)", detail=f"decoder: {diag.where(e)}")
     if not (GAMERPIC_MIN_DIM <= w <= GAMERPIC_MAX_DIM and GAMERPIC_MIN_DIM <= h <= GAMERPIC_MAX_DIM):
-        raise auth.AuthError(400, "bad_image", f"the picture must be between {GAMERPIC_MIN_DIM} and {GAMERPIC_MAX_DIM} pixels each way")
+        raise auth.AuthError(400, "bad_image", f"the picture must be between {GAMERPIC_MIN_DIM} and {GAMERPIC_MAX_DIM} pixels each way", detail=f"decoded {w}x{h}, the header said {w0}x{h0}")
     return pngtool.encode(w, h, ch, rows)
 
 
@@ -218,7 +233,7 @@ def _require_launcher(ctx, client):
     if m and not version_at_least(m.group(1), c["minLauncher"]):
         site = (c["links"] or {}).get("website") or ""
         raise auth.AuthError(426, "launcher_too_old", f"This launcher ({m.group(1)}) is out of date. Download the latest FH2MP launcher"
-                             + (f" from {site}" if site else "") + ".")
+                             + (f" from {site}" if site else "") + ".", detail=f"launcher {m.group(1)} is older than minLauncher {c['minLauncher']}")
 
 
 def handle(ctx, method, path, headers, body, ip):
@@ -226,7 +241,26 @@ def handle(ctx, method, path, headers, body, ip):
     try:
         return _route(ctx, method, path, headers, body, ip)
     except auth.AuthError as e:
+        _note_refusal(method, path, e)
         return e.status, {"error": e.code, "message": e.message}, "application/json"
+
+
+def _family(path):
+    """The route without ids and query, so a refusal repeated on /v1/community/chat/<id> counts as one."""
+    return re.sub(r"/\d+", "/N", path.split("?")[0].rstrip("/"))[:80]
+
+
+def _note_refusal(method, path, e):
+    """One line per refusal code, route and player (every 120 s), saying who, what and why. Policy refusals (401/403/426/429, 5xx) are WARN,
+    the player's own mistakes (400/404/409 ...) INFO. The client sees e.message only; e.detail (the compared values) is for this line."""
+    route = _family(path)
+    who = f"{e.xuid:#x}" if e.xuid else None
+    ok, skipped = _RATE.allow(("refused", e.status, e.code, route, who), REFUSAL_LOG_SECONDS)
+    if not ok:
+        return
+    line = (f"refused {e.status} {e.code}: {method} {route} " + diag.kv(xuid=who, detail=e.detail or None, message=e.message if e.message != e.code else None)
+            + (f" (and {skipped} more in the last {REFUSAL_LOG_SECONDS:.0f} s)" if skipped else ""))
+    (LOG.warn if e.status in (401, 403, 426, 429) or e.status >= 500 else LOG.info)(line)
 
 
 def _route(ctx, method, path, headers, body, ip):
@@ -267,7 +301,7 @@ def _route(ctx, method, path, headers, body, ip):
         _require_launcher(ctx, str(d.get("client", "")))
         token, acct, ttl = a.login(ip, str(d.get("challenge", "")), str(d.get("pubkey", "")), str(d.get("sig", "")), str(d.get("client", "")))
         ctx.on_login(acct.xuid, ip, token)
-        ctx.log(f"  v1 login {acct.xuid:#x} {acct.gamertag!r}")
+        ctx.log((f"  v1 login {acct.xuid:#x} {acct.gamertag!r} " + diag.kv(client=str(d.get("client", ""))[:80] or None)).rstrip())
         return 200, {"token": token, "idleSeconds": int(ttl), "account": _account_json(acct), "lsp": ctx.lsp_public,
                      "game": ctx.game_public}, ok
     if p == "/v1/gamertags/check" and method == "GET":
@@ -288,9 +322,11 @@ def _route(ctx, method, path, headers, body, ip):
 
     if p == "/v1/crash-reports" and method == "POST":
         if ctx.crashes is None:
-            raise auth.AuthError(503, "crash_reports_off", "this server does not take crash reports")
-        if not a.hit(("crash", ip), 5, 3600) or not a.hit(("crash", "all"), 300, 86400):
-            raise auth.AuthError(429, "rate_limited", "too many crash reports, try again later")
+            raise auth.AuthError(503, "crash_reports_off", "this server does not take crash reports", detail="no crash report store is configured")
+        by_ip = a.hit(("crash", ip), 5, 3600)
+        if not by_ip or not a.hit(("crash", "all"), 300, 86400):
+            raise auth.AuthError(429, "rate_limited", "too many crash reports, try again later",
+                                 detail="crash reports: over 5 per hour from this address" if not by_ip else "crash reports: over 300 per day in all")
         return 202, {"id": ctx.crashes.submit(_json(body, crash_reports.MAX_BODY))}, ok
     if p == "/v1/auth/logout" and method == "POST":
         acct = a.authenticate(_bearer(headers), ip)
@@ -298,26 +334,26 @@ def _route(ctx, method, path, headers, body, ip):
         ctx.on_logout(acct.xuid, _bearer(headers))
         return 200, {"ok": True}, ok
     if p == "/v1/gamedb" and method == "GET":
-        a.authenticate(_bearer(headers), ip)
+        acct = a.authenticate(_bearer(headers), ip)
         m = ctx.gamedb.manifest()
         if m is None:
-            raise auth.AuthError(404, "no_gamedb", "this server does not set a car database")
+            raise auth.AuthError(404, "no_gamedb", "this server does not set a car database", xuid=acct.xuid, detail="gamedb manifest is None")
         return 200, m, ok
     if p == gamedb_sync.DOWNLOAD_PATH and method == "GET":
         acct = a.authenticate(_bearer(headers), ip)
         if not a.hit(("gamedb", acct.xuid), 10, 3600):
-            raise auth.AuthError(429, "rate_limited", "too many car database downloads, wait a while")
+            raise auth.AuthError(429, "rate_limited", "too many car database downloads, wait a while", xuid=acct.xuid, detail="gamedb downloads: over 10 per hour for this account")
         blob = ctx.gamedb.download()
         if blob is None:
-            raise auth.AuthError(404, "no_gamedb", "this server does not set a car database")
+            raise auth.AuthError(404, "no_gamedb", "this server does not set a car database", xuid=acct.xuid, detail="manifest exists but the file could not be read")
         ctx.log(f"  v1 gamedb download {acct.xuid:#x} {len(blob)} bytes")
         return 200, blob, "application/x-xz"
     if p == "/v1/community" or p.startswith("/v1/community/"):
         acct = a.authenticate(_bearer(headers), ip)
         if not a.hit(("community", acct.xuid), 120, 60):
-            raise auth.AuthError(429, "rate_limited", "Please wait a moment before trying again.")
+            raise auth.AuthError(429, "rate_limited", "Please wait a moment before trying again.", xuid=acct.xuid, detail="community: over 120 requests per minute for this account")
         if method != "GET" and not a.hit(("community-write", acct.xuid), 30, 60):
-            raise auth.AuthError(429, "rate_limited", "Please wait a moment before trying again.")
+            raise auth.AuthError(429, "rate_limited", "Please wait a moment before trying again.", xuid=acct.xuid, detail="community writes: over 30 per minute for this account")
         return 200, community.handle(ctx, method, p, u, _json(body), acct), ok
     if p == "/v1/me" or p.startswith("/v1/me/"):
         acct = a.authenticate(_bearer(headers), ip)
@@ -332,13 +368,13 @@ def _route(ctx, method, path, headers, body, ip):
             return 200, _account_json(auth.Account(acct.xuid, tag)), ok
         if p == "/v1/me/gamerpic" and method == "PUT":
             if len(body) > MAX_BODY:
-                raise auth.AuthError(413, "too_large")
+                raise auth.AuthError(413, "too_large", xuid=acct.xuid, detail=f"picture {len(body)} bytes, limit {MAX_BODY}")
             if not a.hit(("gamerpic", acct.xuid), 6, 600):
-                raise auth.AuthError(429, "rate_limited", "too many picture uploads, wait a few minutes")
+                raise auth.AuthError(429, "rate_limited", "too many picture uploads, wait a few minutes", xuid=acct.xuid, detail="gamerpic uploads: over 6 per 10 minutes for this account")
             png = clean_gamerpic(body)
             ctx.social.set_gamerpic(acct.xuid, png)
             return 200, {"bytes": len(png)}, ok
         if p == "/v1/me/gamerpic" and method == "DELETE":
             ctx.social.clear_gamerpic(acct.xuid)
             return 200, {"ok": True}, ok
-    raise auth.AuthError(404, "not_found", "unknown endpoint")
+    raise auth.AuthError(404, "not_found", "unknown endpoint", detail=f"no route for {method} {p}")

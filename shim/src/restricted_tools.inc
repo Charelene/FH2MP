@@ -2,6 +2,10 @@
  * NitroSystem registers this exact platform name; Redline's published executable is Redline.exe. */
 #include <tlhelp32.h>
 
+/* Why the last process scan could not run (1 session id, 2 process snapshot) and its Windows error: the header then claims no tools, which
+ * would pass for a clean machine. The monitor thread logs a change. */
+static volatile LONG g_tools_scan_fault, g_tools_scan_error;
+
 static LONG scan_restricted_tools(void)
 {
     LONG found = 0;
@@ -15,12 +19,17 @@ static LONG scan_restricted_tools(void)
         found |= 1;
     }
     if (!ProcessIdToSessionId(GetCurrentProcessId(), &session)) {
+        g_tools_scan_error = (LONG)GetLastError();
+        g_tools_scan_fault = 1;
         return found;
     }
     snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE) {
+        g_tools_scan_error = (LONG)GetLastError();
+        g_tools_scan_fault = 2;
         return found;
     }
+    g_tools_scan_fault = 0;
     entry.dwSize = sizeof entry;
     if (Process32FirstW(snapshot, &entry)) {
         do {
