@@ -27,6 +27,7 @@ import traceback
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import honk
 import lighting
 import diag
 import event_log
@@ -203,7 +204,18 @@ SESSION_HOST_VAR_ID_BITS = 4        # 13 vars
 SH_RACE_READY = 4
 SH_RACE_PARTICIPANTS_SELECTED = 5
 SH_IN_RACE = 6
-MSG_STARTING_GRID = 39              # count:4 | key(idBits 7) x count (FUN_141824040)
+# SessionHostSynced (ctor 0x180ff70): CountdownType var 2 (SyncedEnum<Nerd::CountdownType,0,2,0>, ReadValue 0x18109a0 reads 2 bits; 0 none,
+# 1 Launch, 2 StartRace) and RaceStartTime var 9 (u32, network clock ms). A bystander's NetworkEventProgressHudComponent (0x7dc4b0 / 0x7dcf00)
+# shows IDS_Lobby_RaceInProgress (lap or percent text, 0x7c8870) only when CountdownType == 2 and 0 < RaceStartTime <= its network clock
+# (session vslots 0xc0 / 0x130 -> +0xe8 / +0x1f0); with both left at 0 it says IDS_Lobby_RaceAboutToStart for the whole race. [C]
+SH_COUNTDOWN_TYPE, SH_COUNTDOWN_TYPE_BITS, SH_COUNTDOWN_START_RACE = 2, 2, 2
+SH_RACE_START_TIME = 9
+# NumLapsCompleted var 10 (u8, +0x210, session vslot 0x140) and FurthestProgress var 11 (f32, +0x230, vslot 0x150): the in-progress text
+# (0x7c8870) shows "x % complete" = FurthestProgress * 100 for events of fewer than 2 laps and "Race complete" once NumLapsCompleted != 0;
+# from 2 laps on it shows lap NumLapsCompleted + 1 of the GameOptions count. No client writes them (server-owned) [C].
+SH_NUM_LAPS_COMPLETED, SH_FURTHEST_PROGRESS = 10, 11
+PROGRESS_SEND_SECONDS = 1.0         # FurthestProgress at most this often (a new completed lap goes out at once)
+MSG_STARTING_GRID = 39             # count:4 | key(idBits 7) x count (FUN_141824040)
 MSG_START_RACE = 40                 # start time:32 on the server clock (FUN_1418241e0)
 MSG_READY_REQUEST_RESPONSE = 42     # response:2 (FUN_141824250)
 RACE_COUNTDOWN_MS = 5000
@@ -236,14 +248,20 @@ MSG_CAR_COLLISION = 21             # key | 6 x u32 (contact point, 3 values)  (F
 MSG_IN_PROGRESS_SCORE_UPDATE = 43   # key | u32 | bool                       (FUN_1418041b0)
 MSG_LAP_SCORE = 44                  # key | 3 x blob | u32 lap | bool | bool  (FUN_141804380)
 MSG_SCORE_KEYFRAME = 45             # key | 5 x blob | u32 | 3 x u8 | 3 x bool (FUN_141804660)
-RACE_FLAGS_CLEAR_SECONDS = 4.0       # after InRace=0, drop RaceReady/ParticipantsSelected as well
+# After InRace=0 a bystander's NetworkEventProgressHudComponent (0x7dc4b0) shows IDS_Lobby_RaceGoingBackToLobby while RaceReady is still 1, and
+# IDS_Lobby_RaceReturnedToLobby ('event complete') for a fixed time once RaceReady goes 0; RaceReady=1 also keeps the activation tiles on
+# EventInProgress (race_trigger_activation.xml is_online_freeroam_activation_available). So RaceReady/ParticipantsSelected stay set until every
+# participant is back in free roam (Console.RaceInProgress=0, end_event); this is only the backstop for a client stuck on its results
+# screen. It used to be a flat 4 s after InRace=0 (dev 2026-11-01 23:16:28-32: 'event complete' while the winner still sat on its results).
+RACE_FLAGS_CLEAR_SECONDS = 120.0
 RACE_LAST_FINISHER_SECONDS = 30.0   # after the first finisher the others get this long (client UI: RACE ENDS IN)
 CAR_PREDICTION_BODY_BITS = 710      # CarPredictionFull body, see the handler
 CAR_UNIVERSE_OFFSET = 395          # CarPredictionState +0x33, five bits; confirmed chain in docs/protocol.md
 CAR_UNIVERSE_MASK = 31 << CAR_UNIVERSE_OFFSET
 CAR_TELEPORT_OFFSET = 392          # packed 0x31, two bits, 1..3 cycling on a teleport (AdvanceTeleportCounter 0x12e3200)
 CAR_SPIN_OFFSET = 0x12 * 8          # packed 0x12 of the state, 3 x int16 over +-10 rad/s (docs/exe/netv2.md 7.2)
-SPIN_LIMIT = 6.0                   # rad/s: the game clamps every substep (0x12e7170), so more means changed physics [log only until seen on real clients]
+CLOCK_SAMPLES = 30                 # Pings (one a second) per "clock" line, see Server.clock_sample
+SPIN_LIMIT = 6.0                  # rad/s: the game clamps every substep (0x12e7170), so more means changed physics [log only until seen on real clients]
 CAR_POLICY = os.environ.get("FH2MP_CAR_POLICY", "kick")   # a car in BLOCKED_CARS (traffic vehicles): off = ignore, log = report it, kick = withhold it and end the account's connections
 PART_POLICY = os.environ.get("FH2MP_PART_POLICY", "fix").strip().lower()  # fix / kick / fix+kick / log / off
 if PART_POLICY not in {"fix", "kick", "fix+kick", "log", "off"}:
@@ -427,6 +445,18 @@ RESULT_OK, RESULT_VERSION_MISMATCH, RESULT_GAME_MISMATCH, RESULT_BANNED = 0, 1, 
 # sent the deletes of all its objects to everyone, and the receivers' per-owner replay counters for it are cleared; then it is handed out again.
 RELAY_OWNER_LAST = 127
 OWNER_QUARANTINE_S = float(os.environ.get("FH2MP_OWNER_QUARANTINE", "30"))
+
+# When a Free Roam joiner is shown the players already there (FH2MP_INTRODUCE_AT, docs/protocol.md "Join order"). handshake (default): with
+# the connect replies, before the client loads the session group that holds the join HUD (network_matchmaking.xml wait_for_session_join),
+# so the PlayerJoined events (game+A2D890) find no NetworkPlayerJoinHudComponent and the Syncing toast (game+81A710) counts the players.
+# finalise: on its FinaliseSessionEntry, after the car-loading flow has started, so that flow finds nobody and each player becomes a
+# "has joined" toast (dev 2026-11-01, two real clients). console: on the client's own Console create, same datagram in 85 of 92 dev joins.
+INTRODUCE_POINTS = ("finalise", "console", "handshake")
+# An early introduction holds back the players' cars (router 2) until the joiner's FinaliseSessionEntry, which comes after its car-loading
+# flow started (Started is broadcast before initial_entry_common sends it). NetworkWaitForAllPlayerCarsLoaded (0x8e06b0 / 0x7cbf10) then
+# waits for each known player's car (IPlayer slot 20, CPlayer +0x320) and the toast names the one still loading (0x81a710, car cache
+# state 1): "Syncing <name> a/b". With the cars sent at the handshake they had loaded before Started and the line never showed (dev 2026-11-01).
+ENTRY_ONLY_ROUTERS = frozenset((ROUTER_CAR,))
 
 
 class BitReader:
@@ -1253,6 +1283,8 @@ class Peer:
         self.console_seq = 1
         self.owner_id = 0          # relay owner id other clients see this client's objects under
         self.entered = False       # sent FinaliseSessionEntry: may receive other clients' objects
+        self.introduced = False    # was replayed the other clients' objects (Server.introduce): their object messages reach it from then on
+        self.cars_held = False     # introduced early: the other clients' cars (ENTRY_ONLY_ROUTERS) follow at its FinaliseSessionEntry
         self.bl_oid = None         # id of this client's own bucket-list PlayerState object (router 12), once created
         self.bl_state = {}         # its last decoded variables (bucketlist.decode_player_state)
         self.bl_check_at = 0.0     # when to look whether a RequestingPartner state arrived without its RequestSynchronize message (bl_fallback)
@@ -1275,6 +1307,7 @@ class Peer:
         self.car_prediction = None # last (id, body, bits), for immediate rephasing when event membership changes
         self.car_prediction_stamp = None # newest forwarded prediction time, including synthetic rephasing updates
         self.car_prediction_refreshable = True
+        self.clock_samples = []    # (rtt, stamp lag) in ms from our Pings, see Server.clock_sample (log only)
         self.private_universe = None # assigned at session entry; never shared with another connected player
         self.lobby_type = 0        # OpenConnection field a: Nerd::NetworkLobbyType the client joined (1 RoadTrip, 2 FreeRoam, 3 CarMeet)
         self.xuid = 0              # the client's Xbox user id (OpenConnection playerId)
@@ -1382,6 +1415,9 @@ class Server:
         self.is_idle = False       # the hub's catch-all: answers strangers with CloseConnection and never keeps a peer
         self.carmeet = carmeet     # serve a Car Meet session (SessionHost.LobbyType = 3)
         self.roadtrip = roadtrip   # serve a Road Trip session (router 9 RoadTripSynced) instead of Free Roam
+        self.introduce_at = os.environ.get("FH2MP_INTRODUCE_AT", "handshake").strip().lower()
+        if self.introduce_at not in INTRODUCE_POINTS:
+            raise SystemExit(f"FH2MP_INTRODUCE_AT={self.introduce_at!r}: expected one of {', '.join(INTRODUCE_POINTS)}")
         self.rt_seq = 1
         self.server_counter = 1
         self.start = time.monotonic()
@@ -1570,6 +1606,30 @@ class Server:
         if peer.soft_s >= SPEED_SECONDS and "soft" not in peer.speed_flagged:
             peer.speed_flagged.add("soft")
             self.log(f"SPEED (log only): owner {peer.owner_id} xuid {peer.xuid:#x} car {peer.model_id} (stock {stock} km/h) drove {kmh:.0f} km/h for {peer.soft_s:.0f} s (soft limit {soft:.0f})")
+
+    def clock_sample(self, peer: Peer, echo: int) -> None:
+        """Log only (sub "clock", DEBUG): the delay and clock error behind this client's car on the other screens. A receiver predicts a remote car
+        (its clock - the car's stamp) + 120 ms ahead with a physics step of that car alone (0x9e9f70, vt928 slots 359/360) and sets the car to the
+        blended state every frame (0x9effa0), so the other car's push is never in the prediction. rtt is exact in server time (echo = our now_ms());
+        lag = now_ms() - the stamp of the latest cached prediction = one-way delay minus the client's clock error (plus up to one frame, hence the
+        minimum). Client clock error ~ rtt/2 - lag; receiver B extrapolates A's car by about lag_A + rtt_B - lag_B + 120 ms."""
+        pred = peer.car_prediction
+        if pred is None:
+            return
+        now = self.now_ms()
+        rtt = (now - echo) & 0xFFFFFFFF
+        lag = ((now - (pred[1] >> (CAR_PREDICTION_BODY_BITS - 32)) + 0x80000000) & 0xFFFFFFFF) - 0x80000000
+        if rtt >= 5000 or not -5000 < lag < 5000:
+            return
+        peer.clock_samples.append((rtt, lag))
+        if len(peer.clock_samples) < CLOCK_SAMPLES:
+            return
+        rtts = sorted(s[0] for s in peer.clock_samples)
+        lags = sorted(s[1] for s in peer.clock_samples)
+        peer.clock_samples = []
+        self.debug("clock", f"{peer.addr[1]} owner {peer.owner_id}: rtt min {rtts[0]} median {rtts[len(rtts) // 2]} ms; car stamp lag min {lags[0]} "
+                            f"median {lags[len(lags) // 2]} ms; client clock {rtts[0] / 2 - lags[0]:+.0f} ms against the server's "
+                            f"(over {len(rtts)} pings; others extrapolate this car by about its lag + their rtt - their lag + 120 ms)")
 
     def track_spin(self, peer: Peer, rest: int) -> None:
         """Log only: the car's angular velocity against the game's own clamp."""
@@ -2078,6 +2138,13 @@ class Server:
         return [q for q in self.peers.values()
                 if q is not peer and q.connected and q.entered and q.world == peer.world]
 
+    def audience(self, peer: Peer, router=None):
+        """Who gets peer's object messages: others() plus anyone introduced before entering, whose in-order object streams would stall on a gap.
+        Messages of ENTRY_ONLY_ROUTERS wait for the entry (introduce replays them then)."""
+        early = router not in ENTRY_ONLY_ROUTERS
+        return [q for q in self.peers.values()
+                if q is not peer and q.connected and (q.entered or (q.introduced and early)) and q.world == peer.world]
+
     def bl_key(self, subject, receiver):
         """The key of subject's bucket-list PlayerState as receiver knows it (bucketlist.write_key), or None before it exists."""
         if subject is None or subject.bl_oid is None:
@@ -2148,7 +2215,7 @@ class Server:
 
     def remember_and_relay(self, peer: Peer, mtype, router, oid, tid, seq, size, payload) -> None:
         id_bits, type_bits = ROUTER_BITS[router]
-        if peer.owner_id:
+        if peer.owner_id or peer.xuid:
             # Every client's objects carried the same local user id (XUID_PATTERN, Azimuth's default), so they were made unique per
             # client by adding the relay owner id. Clients now have their own xuid; use it, so the id other players resolve names and
             # pictures from (XSAPI profile lookups) is the real one. A client whose xuid IS the pattern needs no rewrite.
@@ -2173,8 +2240,26 @@ class Server:
             peer.compact_at[(router, oid)] = max(256, 2 * len(hist))
             if len(hist) > RELAY_HISTORY_CAP:
                 del hist[1:len(hist) - RELAY_HISTORY_CAP + 1]                  # keep the create; the oldest updates go
+        if not peer.owner_id:
+            # Before the handshake ends there is no relay owner id yet (it comes with the ack). A client that reconnects inside one game
+            # process sends its creates right behind its OpenConnection (prod 2026-11-01 23:07:06, lobby acd40e38): relayed now, they
+            # went out under owner 0 and the leave's deletes under the real id, so every player there kept a player object nobody owned
+            # and the HUD list counted 13 with 12 connected (crash in its 12 slots, game+0x144661D). Kept; relay_held_objects sends them.
+            return
         self.relay_numbered(peer, (router, oid), n,
                             lambda sq: relay_object_message(mtype, router, oid, peer.owner_id, tid, sq, id_bits, type_bits, size, payload))
+
+    def relay_held_objects(self, peer: Peer) -> None:
+        """At the end of the handshake: relay what the client sent before it had a relay owner id (remember_and_relay), in its order."""
+        for (router, oid), hist in list(peer.objs.items()):
+            id_bits, type_bits = ROUTER_BITS[router]
+            for n, (mtype, tid, _seq, size, payload) in enumerate(hist):
+                if not peer.xuid:                       # stored before the owner id existed, so not rewritten (remember_and_relay)
+                    payload, _n = rewrite_xuid(payload, size, XUID_PATTERN + peer.owner_id)
+                    hist[n] = (mtype, tid, _seq, size, payload)
+                self.relay_numbered(peer, (router, oid), n,
+                                    lambda sq, mtype=mtype, router=router, oid=oid, tid=tid, size=size, payload=payload, id_bits=id_bits, type_bits=type_bits:
+                                    relay_object_message(mtype, router, oid, peer.owner_id, tid, sq, id_bits, type_bits, size, payload))
 
     def relay_numbered(self, sender: Peer, key, n: int, build) -> None:
         """relay() for a message numbered by the server (its n-th of that object): `build(seq)` writes it. A client that joined late was
@@ -2182,7 +2267,7 @@ class Server:
         baked, alt = bake(build(n % 0xFF)), {}
         due = time.monotonic() + RELAY_FLUSH_SECONDS
         skey = (sender.owner_id,) + tuple(key)
-        for q in self.others(sender):
+        for q in self.audience(sender, key[0]):
             b = baked
             shift = q.seq_shift.get(skey) if q.seq_shift else 0
             if shift:
@@ -2275,13 +2360,15 @@ class Server:
         self.log(f"{q.addr[1]} <- GameOptions forwarded as transfer-object update ({size} bits, seq "
                  f"{(q.gopts_seq - 1) % 0xFF})")
 
-    def replay_to(self, newcomer: Peer) -> None:
-        """Late joiner: announce everything the other clients already created."""
+    def replay_to(self, newcomer: Peer, routers=None, skip=()) -> None:
+        """Late joiner: announce everything the other clients already created (only `routers` when given, none of `skip`)."""
         for q in self.peers.values():
             if q is newcomer or not q.connected or q.world != newcomer.world:
                 continue
             batch, stored = [], 0
             for (router, oid), hist in q.objs.items():
+                if router in skip or (routers is not None and router not in routers):
+                    continue
                 id_bits, type_bits = ROUTER_BITS[router]
                 entries = replay.renumber(replay.compact(router, hist, MSG_OBJECT_UPDATE))
                 stored += len(hist)
@@ -2300,6 +2387,25 @@ class Server:
                 self.log(f"{newcomer.addr[1]} <- replayed {len(batch)} object messages "
                          f"of owner {q.owner_id} ({q.addr[1]})" + (f", {stored} stored" if stored != len(batch) else ""))
 
+    def early_introduction(self, peer: Peer, point: str):
+        """`point` when FH2MP_INTRODUCE_AT asks for it here and this connected client is in Free Roam, else None."""
+        free_roam = not self.roadtrip and peer.lobby_type != LOBBY_TYPE_CAR_MEET
+        return point if point == self.introduce_at and peer.connected and free_roam else None
+
+    def introduce(self, peer: Peer, point: str) -> None:
+        """Shows a joiner the players already here, once. FinaliseSessionEntry always does it if nothing did earlier."""
+        if peer.introduced:
+            if point == "finalise" and peer.cars_held:
+                peer.cars_held = False
+                self.log(f"{peer.addr[1]} given the cars {(time.monotonic() - peer.connected_at) * 1000:.0f} ms after connect")
+                self.replay_to(peer, routers=ENTRY_ONLY_ROUTERS)
+            return
+        peer.introduced = True
+        peer.cars_held = point != "finalise"
+        self.log(f"{peer.addr[1]} introduced ({point}) {(time.monotonic() - peer.connected_at) * 1000:.0f} ms after connect"
+                 + (", cars at its FinaliseSessionEntry" if peer.cars_held else ""))
+        self.replay_to(peer, skip=ENTRY_ONLY_ROUTERS if peer.cars_held else ())
+
     def set_session_host_bool(self, var_id: int, value: int, why: str) -> None:
         for q in self.peers.values():
             if not q.connected or q.lobby_type == LOBBY_TYPE_CAR_MEET:
@@ -2311,6 +2417,71 @@ class Server:
             self.send(q, [session_host_update(q.host_seq, vars_)])
             q.host_seq = (q.host_seq + 1) % 0xFF
         self.log(f"SessionHost var {var_id} = {value} sent to all ({why})")
+
+    def set_race_clock(self, start_ms: int, why: str) -> None:
+        """SessionHost CountdownType + RaceStartTime in one update (ids ascending): StartRace and the GO time while an event races, 0 / 0
+        after it, so a player in free roam sees 'race in progress' instead of 'an event is about to start' (see SH_COUNTDOWN_TYPE)."""
+        if self.roadtrip:
+            return
+        kind = SH_COUNTDOWN_START_RACE if start_ms else 0
+        if (kind, start_ms) == getattr(self, "race_clock", (0, 0)):
+            return
+        self.race_clock = (kind, start_ms)
+        self.race_progress = (0, 0.0)
+        # a new race (or none) starts from lap 0 / 0 %
+        self.send_session_host_vars([(SH_COUNTDOWN_TYPE, SH_COUNTDOWN_TYPE_BITS, kind), (SH_RACE_START_TIME, 32, start_ms & 0xFFFFFFFF),
+                                     (SH_NUM_LAPS_COMPLETED, 8, 0), (SH_FURTHEST_PROGRESS, 32, 0)])
+        self.log(f"SessionHost CountdownType = {kind}, RaceStartTime = {start_ms}, NumLapsCompleted = 0, FurthestProgress = 0 sent to all ({why})")
+
+    def send_session_host_vars(self, values) -> None:
+        """One SessionHost update of (var id, width, value) triples, ids ascending, to every connected Free Roam / Road Trip client."""
+        for q in self.peers.values():
+            if not q.connected or q.lobby_type == LOBBY_TYPE_CAR_MEET:
+                continue
+
+            def vars_(w):
+                for var, width, value in values:
+                    w.bits(var, SESSION_HOST_VAR_ID_BITS)
+                    w.bits(value, width)
+            self.send(q, [session_host_update(q.host_seq, vars_)])
+            q.host_seq = (q.host_seq + 1) % 0xFF
+
+    def note_progress(self, peer: Peer, raw: int) -> None:
+        """MsgInProgressScoreUpdate of a racer: for a race (ForzaTimeBasedScoringMetric) the f32 is metric+0x60 (0xf924b0), which
+        CTimeBasedScoringMetric::Update (0xfdd2b0) sets to MINUS the end condition's progress of the car (race+0x20 vslot 0x60 =
+        CNumLapsEndCondition 0x99e210 -> lap tracker +0x78, the progress in laps: 0.22 = 22 % into lap 1, 1.5 = half way through lap 2;
+        CDistanceScoringMetric 0x997490 multiplies the same value by the track length) [C for the chain, I for 'laps' as the unit].
+        On the wire it arrives POSITIVE (dev 2026-11-01 23:14:22, 5 s after GO of a 1-lap sprint: 0.00505 and 0.00337), so the sign flip
+        in 0xfdd2b0 is undone before it is sent or the end condition returns minus the progress; the magnitude is used."""
+        ev = self.event
+        if self.roadtrip or not ev or not ev.get("racing") or ev.get("tag") or not ev.get("numlaps") or peer not in ev["people"]:
+            return
+        progress = abs(struct.unpack("<f", (raw & 0xFFFFFFFF).to_bytes(4, "little"))[0])
+        if not math.isfinite(progress) or not 0.0 <= progress <= ev["numlaps"] + 1.0:
+            self.log_every(("progress-range", peer.owner_id), 30.0, f"{peer.addr[1]} in-progress score {progress!r} is not a lap "
+                           f"progress of a {ev['numlaps']}-lap event; ignored")
+            return
+        best = ev.setdefault("progress", {})
+        best[peer] = max(best.get(peer, 0.0), progress)
+        self.publish_progress()
+
+    def publish_progress(self) -> None:
+        """NumLapsCompleted / FurthestProgress of the leading racer (see SH_NUM_LAPS_COMPLETED)."""
+        ev = self.event
+        if self.roadtrip or not ev or not ev.get("racing") or not ev.get("numlaps"):
+            return
+        laps = ev["numlaps"]
+        done = min(max(ev.get("laps", {}).values(), default=0), laps, 255)
+        frac = min(1.0, max(ev.get("progress", {}).values(), default=0.0) / laps)
+        frac = max(frac, done / laps)
+        last_done, last_frac = getattr(self, "race_progress", (0, 0.0))
+        now = time.monotonic()
+        if done == last_done and (abs(frac - last_frac) < 0.005 or now - ev.get("progress_at", 0.0) < PROGRESS_SEND_SECONDS):
+            return
+        ev["progress_at"] = now
+        self.race_progress = (done, frac)
+        self.send_session_host_vars([(SH_NUM_LAPS_COMPLETED, 8, done),
+                                     (SH_FURTHEST_PROGRESS, 32, struct.unpack("<I", struct.pack("<f", frac))[0])])
 
     def set_console_bool(self, peer: Peer, var_id: int, value: int, why: str) -> None:
         """Server-side write of a Console var: to the owner (server update) and relayed to the others."""
@@ -2448,6 +2619,7 @@ class Server:
         self.refresh_car_phasing()
         for var in (SH_IN_RACE, SH_RACE_PARTICIPANTS_SELECTED, SH_RACE_READY):
             self.set_session_host_bool(var, 0, f"event over: {why}")
+        self.set_race_clock(0, f"event over: {why}")
         for q in self.peers.values():
             q.console_vars.pop(4, None)
         if self.roadtrip:
@@ -2826,11 +2998,26 @@ class Server:
         return False
 
     def validate_event_cars(self) -> bool:
+        """A participant whose car does not meet the event's class/PI rule leaves the EVENT (Console.ParticipatingInRace = 0, its game goes
+        back to free roam through wait_for_event_to_start_without_us); the others race on. Nobody leaves the session over a class mismatch,
+        and one wrong car no longer ends the event for everybody (dev 2026-11-01 21:29:34 / 21:30:09, lobby 0f670da3: the leader was still in
+        the event car select when the server checked it, and the whole setup was cancelled). False only when no participant is left."""
         ev = self.event
         if not ev or ev.get("car_rule") is None:
             return True
-        if any(not self.eligible_for_event(q, ev["car_rule"]) for q in ev["people"]):
-            self.end_event("a selected car no longer meets the event restrictions")
+        wrong = [q for q in ev["people"] if not self.eligible_for_event(q, ev["car_rule"])]
+        if not wrong:
+            return True
+        for q in wrong:
+            ev["people"].remove(q)
+            if q.connected:
+                self.set_console_bool(q, CONSOLE_VAR_PARTICIPATING_IN_RACE, 0, "car does not meet the event restrictions")
+                q.console_vars[CONSOLE_VAR_PARTICIPATING_IN_RACE] = 0
+        self.warn(f"event: {[q.owner_id for q in wrong]} out of the event (car does not meet the restrictions, see the 'not eligible' line above); "
+                  f"{len(ev['people'])} participant(s) remain {[q.owner_id for q in ev['people']]}")
+        self.refresh_car_phasing()
+        if not any(q.connected for q in ev["people"]):
+            self.end_event("no participant's car meets the event restrictions")
             return False
         return True
 
@@ -2852,8 +3039,12 @@ class Server:
                     if q.connected:
                         self.send_game_options(q)
         if not self.eligible_for_event(leader):
-            self.end_event("the leader's car does not meet the event restrictions")
-            return
+            # Retail flow (network_freeroam_states.xml): the leader reaches its event car select (pre_event_ui -> event_car_select, a 20 s
+            # local countdown, NetworkSelectDefaultCar when nothing valid is picked) only AFTER a remote console is Ready or it is selected
+            # as a participant, i.e. after this point. So its car is checked when every participant has loaded (validate_event_cars), not
+            # here; cancelling here threw everybody out of the setup (dev 2026-11-01 21:29:34: leader picked its B car at 21:29:39).
+            self.log(f"event start: leader owner {leader.owner_id}'s car does not meet the restrictions yet; it is selected and gets the "
+                     f"event car select, its car is checked again when every participant has loaded")
         people = [leader]
         excluded = {}       # peer -> why it is not in the event
         for q in self.peers.values():
@@ -2941,9 +3132,11 @@ class Server:
         ev = self.event
         if not ev or ev["begun"]:
             return
-        if not self.validate_event_cars():
-            return
         if not all(q.connected and q.console_vars.get(5) for q in ev["people"]):
+            return
+        # only now: every participant has been through its event car select and reloaded its car (HasLoadedCarsForAllParticipants
+        # follows wait_for_cars_loaded_for_race_participants); an earlier check catches a car that is still being chosen
+        if not self.validate_event_cars():
             return
         ev["begun"] = True
         self.log(f"all {len(ev['people'])} participant(s) loaded cars -> starting grid; loaded after "
@@ -3021,6 +3214,7 @@ class Server:
         if ev and ev.get("racing") and peer in ev["people"]:
             done = ev.setdefault("laps", {})
             done[peer] = max(done.get(peer, 0), lap)
+            self.publish_progress()
         if not ev or not ev.get("racing") or peer not in ev["people"] or peer in ev["finished"]:
             return
         total_t, _, lap_t = (struct.unpack("<d", x.to_bytes(8, "little"))[0] for x in blobs)
@@ -3056,10 +3250,15 @@ class Server:
 
     def check_race_end(self, now: float) -> None:
         ev = self.event
+        if ev and ev.get("over") and not any(q.connected for q in ev["people"]):
+            # participant_left takes out whoever reports RaceInProgress=0 (results closed); the rest disconnected
+            self.end_event("every participant is back in free roam or gone")
+            return
         if ev and ev.get("clear_at") and now >= ev["clear_at"]:
             ev["clear_at"] = None      # the "event is about to start" HUD follows RaceReady/ParticipantsSelected
             for var in (SH_RACE_PARTICIPANTS_SELECTED, SH_RACE_READY):
                 self.set_session_host_bool(var, 0, "race over: lobby flags cleared")
+            self.set_race_clock(0, "race over: lobby flags cleared")
         if ev and ev.get("tag") and not ev.get("racing") and not ev.get("over") and ev["tag"].get("assign_at") is not None:
             self.tag_tick(now)          # the first It car is drawn while the starting grid is up, before GO
             return
@@ -3142,6 +3341,7 @@ class Server:
             ev["tag"]["repeats"] = [time.monotonic() + x for x in (0.5, 2.0)]     # the buckets again at GO
         go = (self.now_ms() + RACE_COUNTDOWN_MS) & 0xFFFFFFFF
         self.log(f"MsgStartRace start time {go} (server clock now {self.now_ms()})")
+        self.set_race_clock(go or 1, "race begun")
         for q in ev["people"]:
             self.send(q, [start_race(go)])
 
@@ -3227,7 +3427,7 @@ class Server:
         if RELIABLE and peer.owner_id:
             for q in self.peers.values():
                 q.window.forget_owner(peer.owner_id, ROUTER_BITS)
-        for (router, oid) in peer.objs:
+        for (router, oid) in (peer.objs if peer.owner_id else ()):     # without an owner id nothing was relayed (remember_and_relay)
             id_bits, _ = ROUTER_BITS[router]
             n = peer.relay_next.get((router, oid), 0)
             self.relay_numbered(peer, (router, oid), n, lambda sq, router=router, oid=oid, id_bits=id_bits:
@@ -3326,6 +3526,7 @@ class Server:
         peer.window.ack(hdr["remote_ack"], hdr["ack_bits"])
         peer.last_rx = time.monotonic()
         replies = []
+        early = None      # the point at which this datagram makes the client meet the other players (early_introduction)
         types = []
         self.rx = (peer, len(data), types)
         for _ in range(hdr["count"]):
@@ -3459,6 +3660,9 @@ class Server:
                     self.log(f"{addr[1]} *** CONNECTED *** (relay owner id {peer.owner_id}; xuid {peer.xuid:#x}, lobby type {peer.lobby_type}, "
                              f"handshake {(peer.connected_at - peer.opened_at) * 1000:.0f} ms, {len(self.others_connected(peer))} other player(s) here)")
                     self.note("join", peer.owner_id, f"xuid {peer.xuid:#x} lobby type {peer.lobby_type}")
+                    if peer.objs:
+                        self.log(f"{addr[1]} {len(peer.objs)} object(s) sent before the handshake ended: relayed now under owner {peer.owner_id}")
+                        self.relay_held_objects(peer)
                     replies.append(time_sync(0, self.now_ms()))
                     replies.append(connection_sync_done(self.server_counter))
                     if self.roadtrip or peer.lobby_type == LOBBY_TYPE_CAR_MEET:
@@ -3481,6 +3685,7 @@ class Server:
                     if peer.lobby_type == LOBBY_TYPE_CAR_MEET:
                         replies.append(car_meet_create(seq=1))
                     self.debug("handshake", f"{addr[1]} -> TimeSync, ConnectionSyncDone, SessionHost + Weather create")
+                    early = self.early_introduction(peer, "handshake") or early
                     if self.roadtrip:
                         # Created in Initialising; the switch to DestinationVote follows from tick() once the client has
                         # entered. The leader's client picks the vote candidates when it sees that state *change*.
@@ -3497,7 +3702,9 @@ class Server:
                 value = r.bits(32)
                 replies.append(pong(value, self.now_ms()))
             elif mtype == MSG_PONG:
-                r.bits(32), r.bits(32)
+                echo, _ = r.bits(32), r.bits(32)    # our Ping's now_ms(), the client's local ms (0x17690b0); echo 0 answers our Pong
+                if echo and peer.connected:
+                    self.clock_sample(peer, echo)
             elif mtype == MSG_SERVER_TRAFFIC_MESSAGE:
                 kind = r.bits(4)
                 a, s14, u5, b, flag = r.bits(8), r.bits(14), r.bits(5), r.bits(8), r.bits(1)
@@ -3512,7 +3719,7 @@ class Server:
                 replies.append(finalise_session_entry())
                 if not peer.entered:
                     peer.entered = True
-                    self.replay_to(peer)
+                    self.introduce(peer, "finalise")
                     self.send_game_options(peer)
                     self.traffic.join(peer)
                     self.assign_private_universe(peer)
@@ -3816,6 +4023,7 @@ class Server:
                             self.check_invitees_ready()
                 if mtype == MSG_OBJECT_CREATE and router == 3:
                     peer.console_oid = oid
+                    early = self.early_introduction(peer, "console") or early
                 if mtype == MSG_OBJECT_CREATE and router == 3 and not peer.console_acked:
                     peer.console_acked = True
                     replies.append(server_update(router, oid, id_bits, 0))
@@ -3845,8 +4053,10 @@ class Server:
                 if len(blobs) != SCORE_DOUBLES[mtype]:
                     self.malformed(peer, f"score message {mtype}")     # relayed, it would put receivers out of step
                     break
+                progress_raw = None
                 if mtype == MSG_IN_PROGRESS_SCORE_UPDATE:
-                    r.bits(32), r.bits(1)
+                    progress_raw = r.bits(32)
+                    r.bits(1)
                 elif mtype == MSG_LAP_SCORE:
                     lap = r.bits(32)
                     r.bits(2)
@@ -3863,6 +4073,8 @@ class Server:
                     self.note_lap_score(peer, lap, blobs)
                 elif mtype == MSG_SCORE_KEYFRAME:
                     self.note_score_keyframe(peer)
+                else:
+                    self.note_progress(peer, progress_raw)
             elif mtype == MSG_TAG_COLLISION:
                 k1, k2 = read_car_key(r), read_car_key(r)
                 olds_news = [r.bits(3) for _ in range(4)]
@@ -3928,6 +4140,8 @@ class Server:
             self.log(f"{addr[1]} big packet {len(data)} bytes types={types}: {data.hex()}")
         if replies or hdr["ack_id"] != UNRELIABLE_ID:
             self.send(peer, replies)
+        if early:
+            self.introduce(peer, early)         # after the replies: the client meets the players with SessionHost in hand
 
     # ---- Car Meet: game-mode invites (Free Roam / Road Trip / Showdown) ----
     def cm_members(self):
@@ -4746,6 +4960,9 @@ class Hub:
     def handle(self, data: bytes, addr) -> None:
         if len(data) >= 19 and data[11:19] == lighting.MAGIC:
             lighting.handle(self, data, addr)
+            return
+        if len(data) >= 19 and data[11:19] == honk.MAGIC:
+            honk.handle(self, data, addr)
             return
         if probe.handle(self, data, addr):
             return

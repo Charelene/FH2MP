@@ -73,6 +73,11 @@ UPDATE_NAMES = {MSG_SERVER_FULL_SYNC: "FullSync", MSG_SERVER_ROUTE_PROGRESS: "Ro
 
 TRAFFIC_LIMIT = traffic_manager.HARD_CAP
 GRANT_TIMEOUT_S = 15.0    # a granted id that is never spawned is taken back
+# InitialJoinComplete is held until the client has loaded the announced models and been sent the cars around it, or this long. The client
+# loads models while it waits (SyncTrafficModule 0x729ca0 runs its model queue with +0xad set) and leaves "Syncing traffic"
+# (wait_for_all_pending_traffic: +0xae) only after InitialJoinComplete (0x720950 clears +0xad) and once its pending AddTraffic cars spawned.
+JOIN_WAIT_S = 15.0
+SUMMARY_S = 30.0          # log_summary while anyone is in the traffic
 TICK_S = 0.2              # holders and ownership change with distance, at driving speed; retail did this every frame
 MAX_MESSAGES_PER_S = 400  # per client, requests and updates together; far above what a client sends
 RADIUS_KINDS = frozenset((0, 1, 2, 4, 5, 6))   # these carry the client's radius (callers of SetPlayerTrafficBudget); in 3, 7 and 8 the field is the car model
@@ -139,15 +144,27 @@ class PeerState:
         self.window_at = 0.0         # start of the current rate window
         self.window_n = 0
         self.flooded = False
+        self.join_until = None       # InitialJoinComplete held until the models are in (JOIN_WAIT_S), then sent from tick()
 
 
 class CarData:
     """What traffic_manager calls a car's info: its AddTraffic struct and the last state of each kind, for whoever gets it next."""
-    __slots__ = ("struct", "full_sync", "full_route", "stationary")
+    __slots__ = ("struct", "full_sync", "full_route", "stationary", "order")
 
     def __init__(self, struct_):
         self.struct = struct_        # (a, s14, u5, b, flag) as the owner sent it
         self.full_sync = self.full_route = self.stationary = None
+        self.order = {}              # message id -> arrival number of the stored fields
+
+    def latest(self):
+        """The stored states as a new holder must apply them: in the order the owner sent them, without a Stationary that a later FullSync
+        or FullRoute replaced. In a fixed order a car stopped once and driving again was handed over parked, and stood still on the new
+        holder while it drove on its owner (dev 2026-11-01)."""
+        stored = [(self.order.get(m, 0), m, f) for m, f in ((MSG_SERVER_FULL_SYNC, self.full_sync), (MSG_SERVER_FULL_ROUTE, self.full_route),
+                                                            (MSG_SERVER_STATIONARY, self.stationary)) if f]
+        stored.sort(key=lambda e: e[0])
+        moved = max((n for n, m, _ in stored if m != MSG_SERVER_STATIONARY), default=-1)
+        return [(m, f) for n, m, f in stored if not (m == MSG_SERVER_STATIONARY and n < moved)]
 
 
 def update_position(mtype, fields):
@@ -175,6 +192,9 @@ class TrafficWorld:
         self.counters = {}
         self.manager = traffic_manager.TrafficManager(self)
         self.next_tick = 0.0
+        self.next_summary = 0.0      # log_summary
+        self.arrivals = 0            # numbers the stored car states in arrival order (CarData.latest)
+        self.summary_sent = {}
         self._batch = None
         if not self.enabled:
             self.log("traffic: disabled (no model list or FH2MP_TRAFFIC=0)")
@@ -210,9 +230,8 @@ class TrafficWorld:
         d = car.info
         a, s14, u5, b, flag = d.struct
         self.push(peer, C_ADD_TRAFFIC, a=a, s14=s14, u5=u5, b=b, flag=flag)
-        for mtype, fields in ((MSG_SERVER_FULL_SYNC, d.full_sync), (MSG_SERVER_FULL_ROUTE, d.full_route), (MSG_SERVER_STATIONARY, d.stationary)):
-            if fields:
-                self.emit(peer, update_message(mtype, fields))
+        for mtype, fields in d.latest():
+            self.emit(peer, update_message(mtype, fields))
 
     def remove(self, peer, vid):
         if peer in self.state:
@@ -261,10 +280,10 @@ class TrafficWorld:
             self.push(peer, C_LOAD_CAR_MODEL, s14=model)
         self.push(peer, C_ALL_MODELS_SENT)
         self.push(peer, C_TRAFFIC_LIMIT, a=TRAFFIC_LIMIT)
-        self.push(peer, C_INITIAL_JOIN_COMPLETE)
         batch, self._batch = self._batch, None
         self.send(peer, batch)
-        self.log(f"traffic: join {peer.addr[1]}: {len(self.models)} models, limit {TRAFFIC_LIMIT}")
+        s.join_until = time.monotonic() + JOIN_WAIT_S
+        self.log(f"traffic: join {peer.addr[1]}: {len(self.models)} models, limit {TRAFFIC_LIMIT}; InitialJoinComplete once they are loaded")
 
     def leave(self, peer):
         if self.state.pop(peer, None) is not None:
@@ -341,6 +360,9 @@ class TrafficWorld:
                               + ("no such car" if car is None else f"owned by {getattr(car.owner, 'addr', ('', car.owner))[1]}")
                               + (f" (+{skipped} more since the last line)" if skipped else ""))
             return
+        if mtype in (MSG_SERVER_FULL_SYNC, MSG_SERVER_FULL_ROUTE, MSG_SERVER_STATIONARY):
+            self.arrivals += 1
+            car.info.order[mtype] = self.arrivals
         if mtype == MSG_SERVER_FULL_SYNC:
             car.info.full_sync = fields
         elif mtype == MSG_SERVER_FULL_ROUTE:
@@ -380,4 +402,36 @@ class TrafficWorld:
                     self.log(f"traffic: grant of car {vid} to {peer.addr[1]} timed out")
                     m.withdraw_one(peer, vid)
                     self.push(peer, C_SPAWN_CANCELED, a=vid)
-        m.tick(now * 1000.0)
+        waiting = [(peer, s) for peer, s in self.state.items() if s.join_until is not None]
+        done = [(peer, s) for peer, s in waiting if now >= s.join_until or self.models_in(peer)]
+        m.tick(now * 1000.0)                     # adds the cars around a client that is done, before its InitialJoinComplete
+        for peer, s in done:
+            p = m.players.get(peer)
+            reported = len(p.models) if p else 0
+            if reported or not now >= s.join_until:
+                self.log(f"traffic: {peer.addr[1]} InitialJoinComplete {now - s.joined_at:.1f} s after the join, {reported}/{len(self.models)} "
+                         f"models loaded, {len(p.held) if p else 0} cars sent" + ("" if self.models_in(peer) else " (gave up waiting)"))
+            s.join_until = None
+            self.push(peer, C_INITIAL_JOIN_COMPLETE)
+        if now >= self.next_summary:
+            self.next_summary = now + SUMMARY_S
+            self.log_summary()
+
+    def models_in(self, peer):
+        """The client reported every announced model loaded (CarModelLoaded) and its position is known, so the tick can send it cars."""
+        p = self.manager.players.get(peer)
+        return p is not None and p.pos is not None and all(model in p.models for model in self.models)
+
+    def log_summary(self):
+        """Who holds and owns what, and what went out since the last line: the evidence for "both players see the same traffic"."""
+        m = self.manager
+        if not m.players:
+            return
+        sent = {k: v for k, v in self.counters.items() if not k.startswith("rx_")}
+        delta = {k: v - self.summary_sent.get(k, 0) for k, v in sent.items() if v != self.summary_sent.get(k, 0)}
+        self.summary_sent = sent
+        shared = sum(1 for c in m.cars.values() if len(c.holders) >= 2)
+        people = "; ".join(f"{getattr(k, 'addr', ('', k))[1]} u{p.universe} r{p.radius}{'' if p.pos else ' no-pos'} held {len(p.held)} "
+                           f"owns {sum(1 for c in m.cars.values() if c.owner == k)} ready {len(p.held & p.can_take)} granted {len(p.granted)}"
+                           for k, p in m.players.items())
+        self.log(f"traffic: {len(m.cars)} cars, {shared} held by 2+; {people}; sent " + (", ".join(f"{k} {v}" for k, v in sorted(delta.items())) or "nothing"))

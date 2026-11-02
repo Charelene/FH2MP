@@ -529,12 +529,15 @@ def drv_for_race(req):
 
 # ---------------------------------------------------------------- scoreboards (Rivals / leaderboards)
 
-def _score_row(sc_row, rowdict):
-    """Fill a ScoreboardRow (wire dict) from a scoreboard.py row."""
+def _score_row(sc_row, rowdict, club_infos=None):
+    """Fill a ScoreboardRow (wire dict) from a scoreboard.py row; club_infos = CLUBS.member_infos() of the page (looked up alone when None)."""
     user = rowdict["user"]
     lvl = db.clean_level(LEVELS.get(sc_row["xuid"], 0))
+    if club_infos is None:
+        club_infos = CLUBS.member_infos([sc_row["xuid"]]) if CLUBS else {}
+    club_id, club_tag, role = club_infos.get(sc_row["xuid"], (0, "", 0))
     user.update({"qwXuid": sc_row["xuid"], "wzGamerTag": (sc_row["tag"] or TAGS.get(sc_row["xuid"], ""))[:15],
-                 "currentCareerLevel": lvl})
+                 "currentCareerLevel": lvl, "clubId": club_id, "clubTag": club_tag[:9], "roleInClub": clubs.wire_role(role)})
     rowdict.update({
         "position": sc_row["position"], "rank": sc_row["position"], "score": scoreboard.dbl_to_u64(sc_row["score"]),
         "submittedTime": scoreboard.iso(sc_row["t"]), "carId": sc_row["car"], "carClassId": min(sc_row["cls"], TOP_CLASS),
@@ -780,9 +783,10 @@ def sb_rows(req, results="ForzaWebServicesScoreboardGetRowsAnthem_Results"):
         mine = dict(mine, position=1) if mine is not None else None
     res = xls.default_struct(SC, SC.call_struct(results))
     tmpl = res["userRow"]
-    res["rows"] = [_score_row(r, json.loads(json.dumps(tmpl))) for r in page]
+    infos = CLUBS.member_infos([r["xuid"] for r in page] + ([mine["xuid"]] if mine is not None else [])) if CLUBS else {}
+    res["rows"] = [_score_row(r, json.loads(json.dumps(tmpl)), infos) for r in page]
     if mine is not None:
-        res["userRow"] = _score_row(mine, res["userRow"])
+        res["userRow"] = _score_row(mine, res["userRow"], infos)
     # `available` (GetRows) / `totalRowCount` (GetRowsAnthem) = size of the whole board. Left at 0 the
     # leaderboard page shows "RESULTS UNAVAILABLE" even with valid rows [inferred from the schema; verify in game].
     total = 1 if req["view"] == FRIENDS_VIEW and mine is not None else (0 if req["view"] == FRIENDS_VIEW else nreal + nfake)
@@ -2366,11 +2370,17 @@ def verify_strings(body):
 
 def _log_auth_refusal(headers, e, sent):
     """A session token that does not check out: who (when the token's account is known), which call, why, with the compared values. One line per
-    code and player every 5 minutes: a client with a dead token repeats its polls every few seconds. The token itself is never written."""
+    code, player and call every 5 minutes: a client with a dead token repeats its polls every few seconds, and a refused request gets no request
+    line, so each call it lost is named once (dev 2026-11-01: a launcher sign-in ended a running game's session and the calls it then lost were
+    not in the log). Calls the server has no handler for share one line. The token itself is never written."""
     shim = getattr(CTX, "shim", "") or "(none)"
     who = f"{e.xuid:#x}" if e.xuid else None
-    log_every(("auth-refused", e.code, e.xuid or shim), 300,
-              f"  refused: {e.status} {e.code} on {call_name(headers)} ({sent}) " + diag.kv(xuid=who, shim=shim, detail=e.detail or None)
+    claimed = claimed_xuid(headers)
+    cls = (headers.get("X-ClassName", "") or "").split(",")[0].strip()
+    known = (cls, headers.get("X-Method", "") or "") in HANDLERS or (cls, headers.get("X-Method", "") or "") in RAW_HANDLERS
+    log_every(("auth-refused", e.code, e.xuid or shim, call_name(headers) if known else "other"), 300,
+              f"  refused: {e.status} {e.code} on {call_name(headers)} ({sent}) "
+              + diag.kv(xuid=who, claims=None if who or not claimed else f"{claimed:#x} (unverified)", shim=shim, detail=e.detail or None)
               + (f" {e.message}" if e.code == "banned" else ""), "WARN")
 
 
@@ -2987,6 +2997,8 @@ def setup_auth():
         game_public["tcp"] = int(os.environ["FH2MP_GAME_TCP_PORT"])         # the game server's experimental TCP carrier (FH2MP_TUNNEL_PORT)
     if os.environ.get("FH2MP_GAME_PROBE") == "1":
         game_public["probe"] = 1       # the game server answers UDP reachability probes (probe.py): launchers may then switch to TCP by themselves
+    if os.environ.get("FH2MP_NET_TRAFFIC") == "1":
+        game_public["traffic"] = 1     # launchers start the game with FH2MP_NET_TRAFFIC=1: the shim keeps the game's networked traffic (traffic.py serves it)
     LAUNCHER = launcher_api.Ctx(
         AUTH, SOCIAL, launcher_api.LauncherConfig(), online_count, log=log, on_login=on_login, on_logout=on_logout,
         lsp_public={"url": os.environ.get("FH2MP_LSP_URL", f"http://{host}:{os.environ.get('FH2MP_LSP_PUBLIC_PORT', '5080')}")},

@@ -290,6 +290,20 @@ class Ownership(unittest.TestCase):
         self.assertIn(("drop", "a", vid), out.log)
         self.assertIn(("take", "b", vid), out.log)
 
+    def test_an_exact_tie_between_unorderable_players_does_not_stop_the_tick(self):
+        """dev 2026-11-01: the keys are Peer objects; a tie on score and car made the sort compare them"""
+        a, b = object(), object()
+        m, out = manager(a, b)
+        vid = spawn(m, a, pos=(1.0, 0.0, 0.0))
+        m.tick(0.0)
+        m.can_take(b, vid)
+        m.set_position(a, (111.0, 0.0, 0.0))      # 110 - 10 for the owner
+        m.set_position(b, (101.0, 0.0, 0.0))      # 100
+        m.request(a, 1)
+        m.tick(20000.0)
+        self.assertIn(m.cars[vid].owner, (a, b))
+        self.assertTrue(m.players[a].granted)    # _grant ran after _rebalance
+
     def test_the_owner_keeps_a_car_on_a_near_tie(self):
         """-10 for the current owner"""
         m, out, vid = self.two_holders()
@@ -437,6 +451,54 @@ class Wire(unittest.TestCase):
         self.assertEqual(w.manager.players[a].radius, 180)
         w.on_message(a, traffic.S_CAR_MODEL_LOADED, 0xFF, 77, 0, 0, 0, 0)
         self.assertEqual(w.manager.players[a].radius, 180)
+
+    def test_initial_join_complete_waits_for_the_models_and_follows_the_cars(self):
+        """SyncTrafficModule 0x729ca0 loads models while +0xad waits, and leaves "Syncing traffic" once InitialJoinComplete came and its
+        pending AddTraffic cars spawned: so the cars around the joiner go first"""
+        import time
+        w, (a, b, c), sent = self.world()
+        told = []
+        push = w.push
+        w.push = lambda peer, kind, **f: (told.append((peer, kind)), push(peer, kind, **f))
+        w.on_message(a, traffic.S_REQUEST_TRAFFIC, 1, 250, 0, 0, 0, 0)
+        w.manager._grant(0)
+        vid = next(iter(w.manager.reserved))
+        w.on_message(a, traffic.S_TRAFFIC_SPAWNED, vid, MODEL, 0, 0, 0, 0)
+        one = traffic.struct.unpack("<I", traffic.struct.pack("<f", 5.0))[0]
+        w.on_update(a, traffic.MSG_SERVER_ROUTE_PROGRESS, self.Reader([vid] + [0] * 3 + [one, 0, 0]))
+        d = self.Peer(4)
+        w.join(d)
+        now = time.monotonic()
+        w.tick(now)
+        self.assertNotIn((d, traffic.C_INITIAL_JOIN_COMPLETE), told)          # no models yet
+        w.on_message(d, traffic.S_CAR_MODEL_LOADED, 0xFF, MODEL, 0, 0, 0, 0)
+        w.tick(now + 1.0)
+        mine = [k for p, k in told if p is d]
+        self.assertIn(traffic.C_ADD_TRAFFIC, mine)
+        self.assertLess(mine.index(traffic.C_ADD_TRAFFIC), mine.index(traffic.C_INITIAL_JOIN_COMPLETE))
+
+    def test_a_new_holder_gets_the_states_in_the_order_the_owner_sent_them(self):
+        """a car that stopped (Stationary) and drives again (FullRoute) must not be handed over parked"""
+        d = traffic.CarData((1, MODEL, 0, 0, 0))
+        w, _, _ = self.world()
+        for mtype, fields in ((traffic.MSG_SERVER_FULL_SYNC, "sync"), (traffic.MSG_SERVER_STATIONARY, "stop"), (traffic.MSG_SERVER_FULL_ROUTE, "route")):
+            w.arrivals += 1
+            d.order[mtype] = w.arrivals
+            setattr(d, {traffic.MSG_SERVER_FULL_SYNC: "full_sync", traffic.MSG_SERVER_STATIONARY: "stationary",
+                        traffic.MSG_SERVER_FULL_ROUTE: "full_route"}[mtype], fields)
+        self.assertEqual([f for _, f in d.latest()], ["sync", "route"])
+        d.order[traffic.MSG_SERVER_STATIONARY] = w.arrivals + 1                 # stopped again: that is the newest state
+        self.assertEqual([f for _, f in d.latest()], ["sync", "route", "stop"])
+
+    def test_initial_join_complete_is_not_held_forever(self):
+        w, (a, b, c), sent = self.world()
+        told = []
+        push = w.push
+        w.push = lambda peer, kind, **f: (told.append((peer, kind)), push(peer, kind, **f))
+        d = self.Peer(4)
+        w.join(d)
+        w.tick(w.state[d].join_until + 0.1)                                    # a client on local traffic never reports models
+        self.assertIn((d, traffic.C_INITIAL_JOIN_COMPLETE), told)
 
     def test_a_flood_is_ignored(self):
         w, (a, b, c), sent = self.world()
