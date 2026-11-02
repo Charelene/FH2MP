@@ -153,6 +153,29 @@ class Phasing(unittest.TestCase):
         self.server.refresh_car_phasing()
         self.assertEqual(self.last_body(self.b) >> (S.CAR_PREDICTION_BODY_BITS - 32), 102)
 
+    def test_clock_line_measures_rtt_stamp_lag_and_clock_error(self):
+        lines, now = [], [50000]
+        self.server.log = lines.append
+        self.server.now_ms = lambda: now[0]
+        def prediction(stamp):
+            def write(w):
+                w.bits(S.MSG_CAR_PREDICTION_FULL, 7)
+                w.bits(0, 2)
+                w.bits(7, 7)
+                w.bits((stamp << (S.CAR_PREDICTION_BODY_BITS - 32)) | (24 << S.CAR_UNIVERSE_OFFSET), S.CAR_PREDICTION_BODY_BITS)
+            return write
+        for i in range(S.CLOCK_SAMPLES):
+            now[0] += 1000
+            # The client's clock runs 10 ms behind the server's; the car arrives 20 ms after it left (rtt 40).
+            self.server.handle(S.build_packet([prediction(now[0] - 30 - (i % 3)), S.pong(0, 5), S.pong(now[0] - 40 - i, 123)]), self.a.addr)
+            self.assertEqual(self.last_body(self.b) >> (S.CAR_PREDICTION_BODY_BITS - 32), now[0] - 30 - (i % 3))
+        clock = [l for l in lines if "client clock" in l]
+        self.assertEqual(len(clock), 1)
+        self.assertIn("rtt min 40 ", clock[0])
+        self.assertIn("lag min 30 ", clock[0])
+        self.assertIn("client clock -10 ms", clock[0])
+        self.assertEqual(self.a.clock_samples, [])
+
     def test_outsider_scores_do_not_reach_race_results(self):
         def score(w):
             w.bits(S.MSG_IN_PROGRESS_SCORE_UPDATE, 7)

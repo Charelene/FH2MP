@@ -285,7 +285,8 @@ def put_session(path, body, xuid=None):
             if name == "me" and xuid:     # "me" is the caller: key members by xuid so several clients can share a session
                 name = xuid
             if m is None:
-                rec["members"].pop(name, None)
+                if rec["members"].pop(name, None) is not None and xuid and name == xuid and "qos" not in key[1].lower():
+                    _LEFT[str(xuid)] = (key[2].lower(), time.time())   # one dict store, no lock: _new_lobby calls this with _LOBBY_LOCK held
                 continue
             m = copy.deepcopy(m)
             if xuid:
@@ -377,6 +378,8 @@ _RESERVED = {}  # session name -> {xuid: time}: players matched into a lobby tha
 _LOBBY_LOCK = threading.Lock()
 _GUID = re.compile(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 LOBBY_CAPACITY = 12
+_LEFT = {}      # xuid (decimal str) -> (session name lower, time): the game-mode session a player last left through MPSD (members.me = null)
+LEFT_AVOID_SECONDS = 120.0  # a search started in, or right after leaving, a lobby is never matched back into it (see _avoided)
 RESERVE_SECONDS = 30.0     # a matched player that has not connected after this long no longer holds a seat (the game connects within ~10 s)
 _POP_DOWN_UNTIL = 0.0      # the game server did not answer: do not ask again before this
 
@@ -615,6 +618,30 @@ def pool_fits(name, pops, flagged, mine):
     return not any(m in flagged for m in members)
 
 
+def _avoided(xuid, pops, now=None):
+    """Lobbies a ticket of this player must not be matched into: the one the game server has it connected to (it is searching from
+    inside a session, "find a new session"), and the one it left through MPSD within LEFT_AVOID_SECONDS. Offered either, the game
+    leaves that session and then tries to join it as the "new" one: on dev 2026-11-01 that ended in "Unable to join session"
+    (22:31:03-22:31:16 UTC, lobby 096892f7, matched as "2 of 12" with itself counted) or in a search that sat on Found for 111 s
+    (21:34:40-21:36:31, lobby 0f670da3, matched in the same second as its leave). A player whose game dropped without leaving (no
+    connection, no MPSD leave) is still matched back to its friends' lobby."""
+    now = time.time() if now is None else now
+    out = set()
+    if not xuid or not str(xuid).isdigit():
+        return out
+    me = "%x" % int(xuid)
+    for name, xs in (pops or {}).items():
+        if not name.startswith("!") and any(x.lstrip("0") == me for x in xs):
+            out.add(name.lower())
+    left = _LEFT.get(str(xuid))
+    if left is not None:
+        if now - left[1] <= LEFT_AVOID_SECONDS:
+            out.add(left[0])
+        else:
+            _LEFT.pop(str(xuid), None)
+    return out
+
+
 def _lobby_for(scid, hopper, attrs, ref, xuid=None):
     """The lobby a ticket is matched into: of the hopper's lobbies the one with the most players that still has room (12 per lobby), so
     that players arriving one after another fill lobbies up (12, 12, 1) instead of leaving every lobby partly empty (8, 10, 6, 1).
@@ -624,16 +651,22 @@ def _lobby_for(scid, hopper, attrs, ref, xuid=None):
     with _LOBBY_LOCK:
         names = _LOBBIES.setdefault(key, [])
         import launcher_lobbies
+        avoid = _avoided(xuid, pops)
         preferred = launcher_lobbies.pick(xuid, key, attrs, ref, pops) if xuid else None
+        if preferred and preferred.lower() in avoid:
+            preferred = None
         best, best_n = preferred, LOBBY_CAPACITY if preferred else -1
         flagged = flagged_set(pops)
         mine = int(xuid) in flagged if xuid and str(xuid).isdigit() else False
-        full = pooled = 0
+        full = pooled = avoided = 0
         for name in list(names):
             rec = _SESSIONS.get((scid.lower(), TARGET_TEMPLATE.lower(), name.lower()))
             if rec is None:
                 names.remove(name)
                 _RESERVED.pop(name, None)
+                continue
+            if name.lower() in avoid:
+                avoided += 1
                 continue
             _prune(rec)
             cap = min(_max_players(rec, LOBBY_CAPACITY), LOBBY_CAPACITY)
@@ -652,6 +685,12 @@ def _lobby_for(scid, hopper, attrs, ref, xuid=None):
         rec = _SESSIONS.get((scid.lower(), TARGET_TEMPLATE.lower(), name.lower()))
         if rec is not None:
             rec["used"] = time.time()
+        released = 0
+        for old in avoid:                       # the lobby it searched from / left: its MPSD seat goes now, not when its game gets round to it
+            old_rec = _SESSIONS.get((scid.lower(), TARGET_TEMPLATE.lower(), old))
+            if old_rec is not None and old != name.lower() and old_rec["members"].pop(str(xuid), None) is not None:
+                old_rec["change"] += 1
+                released += 1
         if xuid:
             for res in _RESERVED.values():
                 res.pop(str(xuid), None)        # one seat per player: a new match replaces the one it made before
@@ -659,7 +698,7 @@ def _lobby_for(scid, hopper, attrs, ref, xuid=None):
         MATCH.info("ticket matched " + diag.kv(
             xuid=xuid, lobby=name[:8], how="new lobby" if created else "held seat" if name == preferred else f"fullest with room ({best_n} of {LOBBY_CAPACITY})",
             hopper=hopper, location=attrs.get("Location"), gsi=str(attrs.get("gsiSetId", ""))[-3:] or None, lobbies=len(names), full=full or None,
-            pool_skipped=pooled or None, flagged_player=True if mine else None, occupancy_source="game server" if pops is not None else "MPSD members (game server silent)"))
+            pool_skipped=pooled or None, left_or_inside_skipped=avoided or None, released=released or None, flagged_player=True if mine else None, occupancy_source="game server" if pops is not None else "MPSD members (game server silent)"))
     return name
 
 

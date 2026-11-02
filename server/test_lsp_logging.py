@@ -101,7 +101,25 @@ class IdentifyRefusals(unittest.TestCase):
         for part in ("refused: 401 token_expired on Scoreboard.SubmitScore", "xuid=0x900000000abc", "shim=1.1.2", "detail='idle limit passed 340 s ago'"):
             self.assertIn(part, lines[0])
         self.assertNotIn("SECRET", lines[0])
-        self.assertEqual(self.ask(**{"X-FH2MP-Shim": "1.1.2", "X-FH2MP-Token": "fh2.SECRETSECRETSECRET"}), [])      # one line per code and player
+        again = {"X-FH2MP-Shim": "1.1.2", "X-FH2MP-Token": "fh2.SECRETSECRETSECRET", "X-ClassName": "Forza.WebServices.Scoreboard", "X-Method": "SubmitScore"}
+        self.assertEqual(self.ask(**again), [])                             # one line per code, player and call
+        other = self.ask(**dict(again, **{"X-ClassName": "Forza.WebServices.Storefront, Forza.WebServices", "X-Method": "GetCuratedContent"}))
+        self.assertEqual(len(other), 1)                                     # a refused request has no request line: each lost call is named
+        self.assertIn("on Storefront.GetCuratedContent", other[0])
+        self.assertEqual(len(self.ask(**dict(again, **{"X-Method": "MadeUp1"}))), 1)       # calls without a handler share one line,
+        self.assertEqual(self.ask(**dict(again, **{"X-Method": "MadeUp2"})), [])          # so made-up names cannot fill the log
+
+    def test_a_dead_unknown_token_names_the_claimed_user(self):
+        class FakeAuth:
+            mode = "required"
+
+            def authenticate(self, token, ip):
+                raise auth.AuthError(401, "invalid_token", "session ended", detail="no live session for this token")
+        L.AUTH = FakeAuth()
+        lines = self.ask(**{"X-FH2MP-Shim": "1.1.3", "X-FH2MP-Token": "fh2.SECRETSECRETSECRET", "X-UserId": "0x900000000abd",
+                            "X-ClassName": "Xls.WebServices.Notifications, Xls.WebServices", "X-Method": "RetrieveForUser"})
+        self.assertEqual(self.replies[0], (401, "invalid_token"))
+        self.assertIn("claims='0x900000000abd (unverified)'", lines[0])
 
     def test_a_missing_token_names_the_call_the_shim_and_the_claimed_user(self):
         class FakeAuth:

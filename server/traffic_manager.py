@@ -262,7 +262,9 @@ class TrafficManager:
                     if age < RECENT_MS:
                         score -= int((RECENT_MS - age) * RECENT_FACTOR)
                 scores.append((score, car.vid, key))
-        scores.sort()
+        # Score, then car; never the player: keys are Peer objects, and two holders of one car at the same score made tick() raise TypeError
+        # every round on dev (2026-11-01), so no spawn was granted while it lasted. Retail's sort (0x1953d40) leaves such ties in any order.
+        scores.sort(key=lambda entry: entry[:2])
         done = set()
         while scores:
             budget = dict.fromkeys(by_key, ROUND_BUDGET)

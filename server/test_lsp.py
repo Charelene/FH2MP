@@ -769,6 +769,18 @@ class LspTests(unittest.TestCase):
                                                                   "startAt": 1, "maxResults": 20})
         self.assertEqual([(x["rank"], x["clubData"]["clubTag"], x["clubData"]["memberCount"]) for x in res["rows"]], [(1, "ZOOM", 1)])
         self.assertEqual((res["userRow"]["rank"], res["available"]), (1, 1))
+        L.SB.submit(A, "Racer0", 1, {"scoreboardType": 1, "gameScoreboardId": -1, "trackId": 300, "carId": 283, "carClassId": 3,
+                                     "carPerformanceIndex": 0.5, "score": L.scoreboard.dbl_to_u64(61.0), "isClean": True,
+                                     "usedSTM": False, "usedTCS": False, "usedABS": False})
+        r, res = call("Forza.WebServices.Scoreboard", "GetRows", {"scoreboardType": 1, "scoreType": 1, "trackId": 300, "pivotId": 3,
+                                                                  "view": 0, "startAt": 1, "maxResults": 20})
+        mine = [x["user"] for x in res["rows"] if x["user"]["qwXuid"] == A]
+        self.assertEqual([(u["clubTag"], u["clubId"], u["roleInClub"]) for u in mine], [("ZOOM", cid, clubs_role("leader"))])   # the player boards show [TAG] too
+        board = {"scoreboardType": 1, "scoreType": 1, "trackId": 300, "pivotId": 3, "view": 0, "startAt": 1, "maxResults": 20}
+        r, res = call("Forza.WebServices.Scoreboard", "GetRowsAnthem", board)               # Rivals pages: the same rows, no handler error
+        self.assertEqual((r, res["userRow"]["user"]["clubTag"]), (0, "ZOOM"))
+        r, res = call("Forza.WebServices.Scoreboard", "GetRival", dict(board, rivalXuid=A))
+        self.assertEqual((r, res["rival"]["scoreData"]["user"]["clubTag"]), (0, "ZOOM"))
         r, res = call(K, "SearchForClubByTag", {"clubTag": "zoom"})
         self.assertEqual(res["clubDetails"]["clubName"], "Zoomers")
         r, res = call(K, "SearchForClubsByName", {"clubName": "zoo", "maxResults": 5})

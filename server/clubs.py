@@ -89,6 +89,15 @@ class ClubStore:
         club, role = self.membership(xuid)
         return (club["id"], club["tag"], role) if club else (0, "", 0)
 
+    def member_infos(self, xuids):
+        """{xuid: (clubId, clubTag, role)} for the players that are in a club, one query for a whole leaderboard page."""
+        xuids = list({int(x) for x in xuids})
+        if not xuids:
+            return {}
+        rows = self.db.query("SELECT m.xuid, m.role, c.id, c.tag FROM club_members m JOIN clubs c ON c.id = m.club_id "
+                             f"WHERE m.xuid IN ({','.join('?' * len(xuids))})", tuple(xuids))
+        return {r["xuid"]: (r["id"], r["tag"], r["role"]) for r in rows}
+
     def member_count(self, club_id):
         return self.db.one("SELECT COUNT(*) FROM club_members WHERE club_id=?", (club_id,))[0]
 
