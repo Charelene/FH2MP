@@ -5,7 +5,7 @@ import re
 import time
 import threading
 
-from . import azimuth, gamedb, keystore, launch, paths, shim, tunnel, updater, upstream
+from . import azimuth, gamedb, keystore, launch, logs, paths, shim, tunnel, updater, upstream
 from .api import Api, ApiError
 from .constants import AZIMUTH_VERSION, BUILTIN_AZIMUTH_BUILDS, DEFAULT_WEBSITE, MODS_DIR, PLATFORM_VERSION, SHIM_DLL
 from .identity import Identity
@@ -195,15 +195,16 @@ class Launcher:
             self._extras_at["releases"] = now
             try:
                 self.releases = updater.Updater(channel=self.settings["channel"]).releases()
-            except Exception:  # noqa: BLE001 - no card is better than an error about a card
+            except Exception as e:  # noqa: BLE001 - no card is better than an error about a card
                 self._extras_at["releases"] = now - 3300           # try again in 5 minutes
+                logs.swallowed("home", "home.releases_failed", e, level="INFO")
         if now - self._extras_at.get("stats", 0) > 300:
             self._extras_at["stats"] = now
             try:
                 st = self.api().get_json(self.links["website"].rstrip("/") + "/api/stats/")
                 self.stats = st if isinstance(st, dict) and st.get("available") else {}
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                logs.swallowed("home", "home.stats_failed", e, level="INFO")
 
     def home_data(self):
         """The /v1/home document, or the same shape put together from the server config, GitHub and the website for an older server."""
@@ -345,9 +346,14 @@ class Launcher:
     def _sign_in(self):
         if not self.identity:
             raise PlayBlocked("no key yet")
+        # One session per account: the sign-in ends any token handed out before (auth.session_replaced on the server), a running game's too.
+        t0 = time.monotonic()
+        replacing = bool(self.token)
         r = self.api().login(self.identity, f"launcher/{__version__} {platform.system().lower()}")
         self.token, self.account = r["token"], r["account"]
         self._login_reply = r
+        logs.info("auth", "auth.signed_in", xuid=f"{self.account['xuid']:#x}", replacing_session=replacing, game_running=self.game_running(),
+                  elapsed_ms=int((time.monotonic() - t0) * 1000))
         self.settings["gamertag"], self.settings["xuid"] = self.account["gamertag"], self.account["xuid"]
         self.settings.save()
         return self.account
@@ -360,6 +366,7 @@ class Launcher:
             if not self.token:
                 if self.game_running():
                     raise PlayBlocked("The game session is unavailable. Close the game before signing in again.")
+                logs.info("auth", "auth.sign_in_needed", why="social call without a token", path=path or None)
                 self._sign_in()
             try:
                 return self.api().community(self.token, path, method, body)
@@ -368,6 +375,7 @@ class Launcher:
                 # Automatically signing in here would revoke its token in turn.
                 if e.code != "token_expired" or self.game_running():
                     raise
+                logs.info("auth", "auth.sign_in_needed", why="token_expired", path=path or None)
                 self._sign_in()
                 return self.api().community(self.token, path, method, body)
 
@@ -487,6 +495,7 @@ class Launcher:
         if not s["azimuth_dir"]:
             raise PlayBlocked("Choose your Azimuth folder.", "no_azimuth")
         self.refresh_server()
+        logs.step("server")
         if self.launcher_outdated():
             raise PlayBlocked(f"This launcher ({__version__}) is out of date and can't connect any more. Update it to keep playing.", "launcher_outdated")
         info = self.azimuth_info()
@@ -506,6 +515,7 @@ class Launcher:
             self.repair_tls_helper()
         except shim.ShimError as e:
             raise PlayBlocked(str(e), "tls_helper") from None
+        logs.step("checks")
         try:
             self.ensure_extra_options()          # only when the player has no copy of the supported build
         except Exception as e:  # noqa: BLE001
@@ -530,26 +540,32 @@ class Launcher:
         except shim.ShimError as e:                  # not worth stopping a game over: the toggles just stay where they are
             from .api import log_failure
             log_failure("PLAY", "controls", e, str(e))
+        logs.step("mods")
         self.ensure_game()
         if require_game and not azimuth.has_game_configured(s["azimuth_dir"]):
             raise PlayBlocked("Couldn't find your Forza Horizon 2 files.", "no_game")
         if (self.server or {}).get("maintenance"):
             raise PlayBlocked(self.server["maintenance"], "maintenance")
+        logs.info("auth", "auth.sign_in_needed", why="play")
         acct = self.sign_in()
+        logs.step("sign_in")
         adopted = self.prepare_saves(acct["xuid"])
+        logs.step("saves")
         cars = self.car_database_step()
+        logs.step("car_database")
         r = self._login_reply
         lsp = (r.get("lsp") or {}).get("url") or (self.server.get("lsp") or {}).get("url")
         if not lsp:
             raise PlayBlocked("The server sent no address.", "no_lsp")
         self.game_env = game_port_env(r.get("game") or (self.server or {}).get("game"))
         d = s["azimuth_dir"]
-        shim.write_session(d, acct["xuid"], self.token, lsp, gamedb.session_path() if self.gamedb_synced else "")
+        shim.write_session(d, acct["xuid"], self.token, lsp, gamedb.session_path() if self.gamedb_synced else "", run=logs.run())
         shim.write_identity(d, acct["xuid"])
         notes = [cars] if cars else []
         if enabled:
             notes.append("turned FH2MP back on in the MODS tab")
         tcp_note = self.start_tunnel(r.get("game") or (self.server or {}).get("game"))
+        logs.step("tunnel")
         if tcp_note:
             notes.append(tcp_note)
         saves = adopted or "nothing to adopt"
@@ -558,7 +574,6 @@ class Launcher:
         shown = azimuth.ingame_name(acct["gamertag"])       # Azimuth shows "Player 1" for a name it does not accept
         if azimuth.set_player_name(d, shown):
             notes.append(f"set the in-game name to {shown}")
-        from .api import log_note
         applied = azimuth.read_ini(d).get("launcher", {}).get("player_name") == shown
         if not applied:
             # Azimuth's own default is "Player 1"; the leaderboards show the local name from here (GitHub issue #2)
@@ -569,7 +584,7 @@ class Launcher:
             from .api import log_failure
             log_failure("PLAY", "gamerpic", e, str(e))
             pic = "picture not updated"
-        log_note(f"PLAY name={acct['gamertag']!r} ingame={shown!r} written={'yes' if applied else 'NO'} gamerpic={pic or 'unchanged'} saves={saves!r} azimuth_dir={d}")
+        logs.info("play", "play.prepared", name=acct["gamertag"], ingame=shown, name_written=applied, gamerpic=pic or "unchanged", saves=saves, azimuth_dir=d)
         return acct, notes
 
     def prepare_saves(self, xuid):
@@ -683,7 +698,9 @@ class Launcher:
 
     def prepare_session_only(self):
         """Developer: sign in and write the session next to the shim without starting the game (start it yourself: rig, Steam, a debugger)."""
-        return self.prepare_play()
+        logs.new_run()
+        with logs.op("play", "play", mode="session only"):
+            return self.prepare_play()
 
     def online_setup_note(self):
         """The shim's note that this online game run never started its online setup ("Unable to connect to the Live configuration
@@ -709,11 +726,12 @@ class Launcher:
             else:
                 import signal
                 os.killpg(os.getpgid(p.pid), signal.SIGTERM)
-        except (OSError, subprocess.SubprocessError):
-            pass
+        except (OSError, subprocess.SubprocessError) as e:
+            logs.swallowed("game", "game.stop_failed", e, pid=p.pid, how="terminate")
         try:
             p.wait(timeout=wait)
         except subprocess.TimeoutExpired:
+            logs.warn("game", "game.stop_slow", pid=p.pid, waited_s=wait, then="kill")
             try:
                 if os.name == "nt":
                     p.kill()
@@ -721,26 +739,38 @@ class Launcher:
                     import signal
                     os.killpg(os.getpgid(p.pid), signal.SIGKILL)
                 p.wait(timeout=10)
-            except (OSError, subprocess.SubprocessError):
-                pass
-        launch.end_leftover_game(self.settings["azimuth_dir"])
+            except (OSError, subprocess.SubprocessError) as e:
+                logs.swallowed("game", "game.stop_failed", e, pid=p.pid, how="kill")
+        left = launch.end_leftover_game(self.settings["azimuth_dir"])
+        logs.info("game", "game.stopped", pid=p.pid, code=p.returncode, leftover_processes=left or None)
         self.process = None
 
     def play(self, azimuth_window=False):
         """azimuth_window: start Azimuth's own launcher window (its settings) instead of going straight into the game."""
-        if self.settings["azimuth_dir"]:
-            shim.take_online_setup_note(self.settings["azimuth_dir"])      # a note left by an earlier game start is not this one's
-        if self.settings["offline_mode"]:
-            self.play_offline(azimuth_window=azimuth_window)
-            return None, ["offline mode: online features and progress sync are off"]
-        acct, notes = self.prepare_play(require_game=not azimuth_window)
-        try:
-            self.process = launch.start(self.settings, self.settings["azimuth_dir"], skip_launcher=not azimuth_window,
-                                        extra_env=getattr(self, "game_env", None))
-        except launch.LaunchError:
-            launch.cleanup(self.settings["azimuth_dir"])
-            raise
-        return acct, notes
+        logs.new_run()
+        with logs.op("play", "play", offline=self.settings["offline_mode"] or None, azimuth_window=azimuth_window or None):
+            if self.settings["azimuth_dir"]:
+                shim.take_online_setup_note(self.settings["azimuth_dir"])      # a note left by an earlier game start is not this one's
+            if self.settings["offline_mode"]:
+                self.play_offline(azimuth_window=azimuth_window)
+                self.game_started_at = time.monotonic()
+                return None, ["offline mode: online features and progress sync are off"]
+            acct, notes = self.prepare_play(require_game=not azimuth_window)
+            try:
+                self.process = launch.start(self.settings, self.settings["azimuth_dir"], skip_launcher=not azimuth_window,
+                                            extra_env=getattr(self, "game_env", None))
+            except launch.LaunchError:
+                launch.cleanup(self.settings["azimuth_dir"])
+                raise
+            self.game_started_at = time.monotonic()
+            logs.step("start")
+            return acct, notes
+
+    def note_game_exit(self, code):
+        """The game's process ended by itself. On Windows a crash shows as an NTSTATUS exit code, which is only readable in hex."""
+        began = getattr(self, "game_started_at", None)
+        logs.event("INFO" if code in (0, None) else "WARN", "game", "game.exited", code=code, code_hex=f"{code & 0xffffffff:#x}" if code not in (0, None) else None,
+                   ran_s=int(time.monotonic() - began) if began else None, offline=getattr(self, "offline_run", False) or None)
 
     def play_offline(self, azimuth_window=False):
         """Solo play with the account's local save. The shim only sets the save ID; online hooks stay off."""

@@ -5,7 +5,7 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from . import paths
+from . import logs, paths
 from .constants import BUILTIN_AZIMUTH_BUILDS
 
 EXE = "azimuth.exe"
@@ -68,7 +68,8 @@ def read_ini(folder):
     out, sec = {}, None
     try:
         text = _read_text(os.path.join(folder, "data", "azimuth.ini"))
-    except OSError:
+    except OSError as e:
+        logs.swallowed("azimuth", "azimuth.ini_unreadable", e, effect="no game folder or player name known")
         return out
     for line in text.splitlines():
         line = line.strip()

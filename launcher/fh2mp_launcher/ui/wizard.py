@@ -7,7 +7,7 @@ from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QProgressBar,
                                QPushButton, QRadioButton, QSizePolicy, QLayout, QStackedWidget, QVBoxLayout, QWidget)
 
-from .. import azimuth, identity
+from .. import azimuth, identity, logs
 from ..api import ApiError
 from ..constants import AZIMUTH_PAGE, AZIMUTH_VERSION
 from ..core import friendly
@@ -970,6 +970,7 @@ class Wizard(AccountWizard):
                 try:
                     ok(result)
                 except Exception as e:
+                    logs.exc("WARN", "setup", "setup.step_failed", e)
                     banner.show_message(friendly(e), 'bad')
             self._refresh_acquire_controls()
             self._schedule_size()

@@ -11,6 +11,8 @@ import struct
 import threading
 import time
 
+from . import logs
+
 MAX_FRAME = 2048
 SEND_BACKLOG = 48 * 1024
 KEEPALIVE_SECONDS = 15.0
@@ -59,6 +61,7 @@ class UdpOverTcp:
             pass
         self.udp.close()
         self.sel.close()
+        logs.info("tunnel", "tunnel.stopped", **self.stats)
 
     # ------------------------------------------------------------------------------------------------------------------------
     def run(self):
@@ -79,13 +82,16 @@ class UdpOverTcp:
                 data, addr = self.udp.recvfrom(65535)
             except (BlockingIOError, InterruptedError):
                 return
-            except OSError:
+            except OSError as e:
+                logs.every(60, "DEBUG", "tunnel", "tunnel.game_read_failed", error=f"{type(e).__name__}: {e}")
                 return                  # e.g. ICMP "port unreachable" echoed back on Windows
             link = self.links.get(addr)
             if link is None:
                 link = self._connect(addr)
             if link is None or len(data) > MAX_FRAME or len(link.wbuf) > SEND_BACKLOG:
                 self.stats["dropped"] += 1
+                logs.every(10, "WARN", "tunnel", "tunnel.dropped", port=addr[1], why="no connection" if link is None else f"frame of {len(data)} bytes" if len(data) > MAX_FRAME else
+                           f"send backlog {len(link.wbuf)} bytes", dropped=self.stats["dropped"], sent=self.stats["sent"])
                 continue
             link.wbuf += struct.pack(">H", len(data)) + data
             self.stats["sent"] += 1
@@ -120,7 +126,8 @@ class UdpOverTcp:
             n = link.sock.send(link.wbuf)
         except (BlockingIOError, InterruptedError):
             return
-        except OSError:
+        except OSError as e:
+            self.log(f"tunnel: send to the server failed for the game's port {addr[1]} ({type(e).__name__}: {e}), {len(link.wbuf)} bytes unsent: connection closed")
             self._close(addr)
             return
         del link.wbuf[:n]
@@ -134,7 +141,8 @@ class UdpOverTcp:
             chunk = link.sock.recv(65536)
         except (BlockingIOError, InterruptedError):
             return
-        except OSError:
+        except OSError as e:
+            self.log(f"tunnel: read from the server failed for the game's port {addr[1]} ({type(e).__name__}: {e})")
             chunk = b""
         if not chunk:
             self.log(f"tunnel: the server closed the connection for port {addr[1]}")
@@ -144,6 +152,7 @@ class UdpOverTcp:
         while len(link.rbuf) >= 2:
             n = struct.unpack(">H", link.rbuf[:2])[0]
             if n > MAX_FRAME:
+                self.log(f"tunnel: the server sent a frame of {n} bytes (limit {MAX_FRAME}) for port {addr[1]}: stream out of step, connection closed")
                 self._close(addr)
                 return
             if len(link.rbuf) < 2 + n:
@@ -152,8 +161,8 @@ class UdpOverTcp:
                 try:
                     self.udp.sendto(bytes(link.rbuf[2:2 + n]), addr)
                     self.stats["received"] += 1
-                except OSError:
-                    pass
+                except OSError as e:
+                    logs.every(10, "WARN", "tunnel", "tunnel.game_write_failed", port=addr[1], bytes=n, error=f"{type(e).__name__}: {e}")
             del link.rbuf[:2 + n]
 
     def _flush_and_keepalive(self):

@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 
-from . import azimuth, paths, shim
+from . import azimuth, logs, paths, shim
 from .constants import WINE_DLL_OVERRIDES
 
 WIN = sys.platform == "win32"
@@ -204,7 +204,11 @@ def start(settings, folder, extra_args=(), skip_launcher=True, extra_env=None):
             p = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                                  **({"creationflags": 0x00000008 | 0x00000200} if WIN else {"start_new_session": True}))
     except OSError as e:
+        logs.error("game", "game.start_failed", command=argv[0], cwd=cwd, error=f"{type(e).__name__}: {e}")
         raise LaunchError(f"could not start the game: {e.strerror or e}") from None
+    # Names only: the environment can hold a developer's own lines (Settings, extra environment).
+    logs.info("game", "game.started", pid=getattr(p, "pid", None), command=os.path.basename(argv[0]), mode=settings["launch_mode"], skip_launcher=skip_launcher, cwd=cwd,
+              env=",".join(sorted({*env_add, *(extra_env or {})})) or None)
     return p
 
 
@@ -224,8 +228,10 @@ def end_leftover_game(folder):
             if args and args[0].lower() == want:
                 os.kill(int(pid), 9)
                 n += 1
-        except OSError:
-            pass
+        except FileNotFoundError:
+            pass                        # the process ended while the list was walked
+        except OSError as e:
+            logs.swallowed("game", "game.leftover_not_ended", e, pid=pid)
     return n
 
 

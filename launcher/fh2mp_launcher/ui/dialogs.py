@@ -7,7 +7,7 @@ from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
                                QFrame, QLayout, QPlainTextEdit, QPushButton, QScrollArea, QToolButton, QVBoxLayout, QWidget)
 
-from .. import azimuth, crashreport, keystore, launch, paths, saves
+from .. import azimuth, crashreport, keystore, launch, logs, paths, saves
 from ..api import ApiError
 from ..core import friendly
 from . import images, theme
@@ -838,6 +838,7 @@ class SettingsDialog(QDialog):
             self.shim_msg.setStyleSheet(f"color: {theme.GOOD};")
             self.shim_msg.setText("; ".join(did).capitalize() + ".")
         except Exception as e:  # noqa: BLE001
+            logs.exc("WARN", "update", "update.shim_file_failed", e)
             self.shim_msg.setStyleSheet(f"color: {theme.BAD};")
             self.shim_msg.setText(str(e))
 

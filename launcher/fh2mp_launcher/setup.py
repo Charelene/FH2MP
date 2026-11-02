@@ -7,7 +7,7 @@ import tempfile
 import zipfile
 from pathlib import PurePosixPath
 
-from . import azimuth, paths, shim, updater, upstream
+from . import azimuth, logs, paths, shim, updater, upstream
 from .constants import AZIMUTH_TLS_HELPERS, AZIMUTH_VERSION, BUILTIN_AZIMUTH_BUILDS
 from .version import __version__
 
@@ -177,7 +177,8 @@ class Packages:
                 return False
             try:
                 manifest = up.fetch_manifest(tag=f'v{__version__}')
-            except updater.UpdateError:
+            except updater.UpdateError as e:
+                logs.swallowed('setup', 'setup.manifest_failed', e, effect='the installed shim is not compared with the signed one')
                 return False
         expected = manifest.get('shim', {}).get('dllSha256')
         if manifest.get('shim', {}).get('version') != __version__:
@@ -186,7 +187,8 @@ class Packages:
             from .constants import MODS_DIR, SHIM_DLL
             target = os.path.join(self.lc.settings['azimuth_dir'], MODS_DIR, SHIM_DLL)
             return bool(expected) and updater.sha256_file(target) == expected
-        except OSError:
+        except OSError as e:
+            logs.swallowed('setup', 'setup.shim_unreadable', e)
             return False
 
     def install_dependencies(self):

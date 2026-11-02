@@ -47,8 +47,10 @@ def main(argv=None):
     app = QApplication([sys.argv[0]] + argv)
     app.setApplicationName("FH2MP Dev" if os.environ.get("FH2MP_DEV") == "1" else "FH2MP")
     app.setOrganizationName("FH2MP")
-    from . import paths
+    from . import logs, paths
     from .instance import InstanceServer, request_activation
+    from .version import __version__
+    logs.start(__version__)
     folder = paths.config_dir()
     try:
         profile_lock = lock_profile(folder)

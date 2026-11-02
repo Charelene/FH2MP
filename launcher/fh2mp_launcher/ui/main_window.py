@@ -6,7 +6,7 @@ from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar, QScrollArea,
                                QVBoxLayout, QWidget, QWidgetAction)
 
-from .. import azimuth, crashreport, keystore, launch, paths, saves, shim, updater
+from .. import azimuth, crashreport, keystore, launch, logs, paths, saves, shim, updater
 from ..api import ApiError
 from ..constants import AZIMUTH_PAGE, AZIMUTH_VERSION, GITHUB_REPO
 from ..core import Launcher, PlayBlocked, friendly
@@ -560,7 +560,8 @@ class MainWindow(QMainWindow):
             self.lc.check_updates()
             try:
                 return self.lc.auto_update_shim()
-            except Exception:  # noqa: BLE001 - the update button and Play still offer it, with the reason
+            except Exception as e:  # noqa: BLE001 - the update button and Play still offer it, with the reason
+                logs.swallowed("update", "update.shim_auto_failed", e)
                 return False
         run_async(check, lambda _m: self.render(), fail)
 
@@ -743,8 +744,8 @@ class MainWindow(QMainWindow):
                     if lc.update_status()["shim"]:
                         job.progress("Updating the shim...")
                         lc.install_shim()
-                except Exception:  # noqa: BLE001 - play with what is installed
-                    pass
+                except Exception as e:  # noqa: BLE001 - play with what is installed
+                    logs.swallowed("update", "update.before_play_failed", e, then="plays with what is installed")
             job.progress("Signing in...")
             return lc.play(azimuth_window=azimuth_window)
 
@@ -822,6 +823,7 @@ class MainWindow(QMainWindow):
         if lc.process is not None and not lc.game_running():
             import time
             code = lc.process.returncode
+            lc.note_game_exit(code)
             lc.process = None
             quick = time.time() - self._launched_at < 25
             run_async(lambda j: lc.after_game(), lambda _r: None, lambda e: None)
