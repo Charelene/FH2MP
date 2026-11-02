@@ -398,8 +398,10 @@ static ULONG STDMETHODCALLTYPE xhr_release(void *self)
  * fails before any HTTP request is made and stays failed for the whole process: every search then sits on "Finding session" and the banner says
  * "Unable to connect to the Live configuration servers"; only a new start fixes it. Memory of a good and a bad process was compared (the
  * Xbox Live context exists in both; the cloud-config state is 3 in a good one, 4 in the bad one); the cause inside the game is not known.
- * option_monitor writes fh2mp-restart.txt when the first LSP request is 20 s old and no game-server directory request was ever made; the
- * launcher then restarts the game once.
+ * option_monitor watches for it (first LSP request 20 s old, no game-server directory request) and, since 2026-11-01, never restarts the game:
+ * it logs the state, retries the cloud configuration in-process (online_setup.inc fix 3: the configuration sits in state 1 because its
+ * variants request was refused by the web transport before its logon) and only when that does not help writes fh2mp-online-setup.txt,
+ * which the launcher shows as a note.
  */
 static volatile LONG g_gsds_seen;
 static volatile DWORD g_lsp_first_tick;
