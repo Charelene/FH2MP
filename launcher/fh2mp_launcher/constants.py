@@ -112,6 +112,22 @@ UPSTREAM = {
             'mods/Extra Options - Weather Control/plugins/EO_WeatherControl.dll': '4df33e3bc229e43c00bb631f4c8543e6803a9cc677721df2883342831d67dc24',
         },
     },
+    "honkHonk": {
+        "name": "HonkHonk", "author": "suderek22", "license": "GPL-3.0", "version": "0.3.4",
+        "url": "https://github.com/suderek22/FH2_HonkHonk/releases/download/v0.3.4/HonkHonk_v0.3.4.zip",
+        "mirror": MIRROR_BASE + "HonkHonk_v0.3.4.zip",
+        "sha256": "50368e9ac257c858b75b863e8ada55116367feb98c01fad416120177d4a49fd3", "size": 5716563,
+        "dll": "HonkHonk_v0.3.4/fh2-mods/HonkHonk.dll", "dllSha256": "4ed6ba03ec271e525f13cf8a24917b97fc2cfcb689cff55768dd1431238113f0",
+        "files": {
+            "HonkHonk_v0.3.4/fh2-mods/HonkHonk.dll": "fh2-mods/HonkHonk.dll",
+            "HonkHonk_v0.3.4/fh2-mods/HonkHonk.ini": "fh2-mods/HonkHonk.ini",
+            "HonkHonk_v0.3.4/fh2-mods/HonkHonk/HZ2_SFX_HonkHonk.bank": "fh2-mods/HonkHonk/HZ2_SFX_HonkHonk.bank",
+        },
+        "fileSha256": {
+            "fh2-mods/HonkHonk.dll": "4ed6ba03ec271e525f13cf8a24917b97fc2cfcb689cff55768dd1431238113f0",
+            "fh2-mods/HonkHonk/HZ2_SFX_HonkHonk.bank": "6f657bf3258670838bdaef1d1b18dfa198d11e39efa961d1fb2f036fce501063",
+        },
+    },
 }
 # The exact platform build in this release's supported combination.
 PLATFORM_VERSION = UPSTREAM["platform"]["version"]

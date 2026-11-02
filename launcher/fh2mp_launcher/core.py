@@ -47,11 +47,19 @@ def friendly(e):
 
 def game_port_env(game):
     """The game server's UDP port as the shim wants it: the game has the port 5000 built in, the shim changes it when FH2MP_SERVER_PORT (exactly 4 digits)
-    is set. Without this, a client signed in to another stack (dev) would still talk to production's game server. `game` is the server's {"host", "port"}."""
-    port = (game or {}).get("port") if isinstance(game, dict) else None
+    is set. Without this, a client signed in to another stack (dev) would still talk to production's game server. `game` is the server's {"host", "port"}.
+    A server that says "traffic": 1 (LSP env FH2MP_NET_TRAFFIC=1, dev) also gets FH2MP_NET_TRAFFIC=1: the shim then leaves the game's networked
+    traffic on instead of making every client simulate its own (the shim only looks whether the variable exists)."""
+    if not isinstance(game, dict):
+        return {}
+    env = {}
+    port = game.get("port")
     if isinstance(port, int) and not isinstance(port, bool) and 1000 <= port <= 9999:
-        return {"FH2MP_SERVER_PORT": str(port)}
-    return {}
+        env["FH2MP_SERVER_PORT"] = str(port)
+    traffic = game.get("traffic")
+    if traffic == 1 and not isinstance(traffic, bool):
+        env["FH2MP_NET_TRAFFIC"] = "1"
+    return env
 
 
 def read_shim_zip(path):
@@ -459,6 +467,8 @@ class Launcher:
         did = shim.install(self.settings["azimuth_dir"], dll, e.get("dllSha256"), self.platform_files(progress, cancelled))
         did += self.repair_tls_helper()
         did += self.ensure_extra_options(progress, cancelled)
+        did += self.ensure_honk(progress, cancelled)
+        did += self.ensure_controls()
         return did
 
     def platform_files(self, progress=None, cancelled=lambda: False):
@@ -507,6 +517,19 @@ class Launcher:
             raise PlayBlocked(f"FH2MP needs FH2 Extra Options {shim.extra_options_version(s['azimuth_dir'])} (winmm.dll next to azimuth.exe) and yours is another version. "
                               "Turn on \"Install FH2 Extra Options\" in Settings and press Play: the launcher installs it and keeps your "
                               "old winmm.dll in the fh2extra folder.", "extra_options")
+        try:
+            self.ensure_honk()
+        except Exception as e:  # noqa: BLE001
+            from .api import log_failure
+            log_failure("PLAY", "honk", e, str(e))
+            raise PlayBlocked(f"HonkHonk {shim.honk_version()} could not be installed: {e}. Run setup from Settings to get it.", "honk") from None
+        if not self.honk_state()[0]:
+            raise PlayBlocked(f"FH2MP needs HonkHonk {shim.honk_version()} (fh2-mods\\HonkHonk.dll and its HonkHonk folder). Run setup from Settings to install it.", "honk")
+        try:
+            self.ensure_controls()
+        except shim.ShimError as e:                  # not worth stopping a game over: the toggles just stay where they are
+            from .api import log_failure
+            log_failure("PLAY", "controls", e, str(e))
         self.ensure_game()
         if require_game and not azimuth.has_game_configured(s["azimuth_dir"]):
             raise PlayBlocked("Couldn't find your Forza Horizon 2 files.", "no_game")
@@ -662,14 +685,17 @@ class Launcher:
         """Developer: sign in and write the session next to the shim without starting the game (start it yourself: rig, Steam, a debugger)."""
         return self.prepare_play()
 
-    AUTO_RESTARTS = 2          # per Play: a game start that skipped its online setup is started again this many times at most
-
-    def restart_requested(self):
-        """The shim saw this game start skip its online setup (it then never recovers: every search sits on "Finding session"; a new start
-        is fine). Online play only; two automatic restarts per Play at most."""
+    def online_setup_note(self):
+        """The shim's note that this online game run never started its online setup ("Unable to connect to the Live configuration
+        servers"), read once -> its text or ''. Diagnosis only: nothing restarts the game (user decision 2026-11-01)."""
         d = self.settings["azimuth_dir"]
-        return bool(d and self.game_running() and not getattr(self, "offline_run", False)
-                    and getattr(self, "auto_restarts", 0) < self.AUTO_RESTARTS and shim.restart_requested(d))
+        if not (d and self.game_running() and not getattr(self, "offline_run", False) and shim.online_setup_note_present(d)):
+            return ""
+        text = shim.take_online_setup_note(d)
+        if text:
+            from .api import log_failure
+            log_failure("GAME", "online-setup", None, f"the game did not start its online setup: {text}")
+        return text
 
     def stop_game(self, wait=20):
         """Ends the game the launcher started (its whole process group) and waits for it."""
@@ -697,27 +723,13 @@ class Launcher:
                 p.wait(timeout=10)
             except (OSError, subprocess.SubprocessError):
                 pass
+        launch.end_leftover_game(self.settings["azimuth_dir"])
         self.process = None
 
-    def restart_game(self):
-        """Starts a game that skipped its online setup again -> what play() returns."""
-        d = self.settings["azimuth_dir"]
-        why = shim.take_restart_request(d)
-        self.auto_restarts = getattr(self, "auto_restarts", 0) + 1
-        self.stop_game()
-        import time
-        time.sleep(2.0)                      # Wine keeps the prefix busy for a moment after its last process ends
-        launch.cleanup(d)
-        from .api import log_failure
-        log_failure("GAME", "restart", None, f"game start restarted automatically: {why}")
-        return self.play(_auto=True)
-
-    def play(self, azimuth_window=False, _auto=False):
+    def play(self, azimuth_window=False):
         """azimuth_window: start Azimuth's own launcher window (its settings) instead of going straight into the game."""
-        if not _auto:
-            self.auto_restarts = 0
         if self.settings["azimuth_dir"]:
-            shim.take_restart_request(self.settings["azimuth_dir"])        # a note left by an earlier game start is not this one's
+            shim.take_online_setup_note(self.settings["azimuth_dir"])      # a note left by an earlier game start is not this one's
         if self.settings["offline_mode"]:
             self.play_offline(azimuth_window=azimuth_window)
             return None, ["offline mode: online features and progress sync are off"]
@@ -819,6 +831,38 @@ class Launcher:
             raise updater.UpdateError(str(e)) from None
         return shim.install_extra(d, files)
 
+    # ---- HonkHonk (required: the horns other players hear)
+    def honk_state(self):
+        """-> (the pinned HonkHonk is in place, version)."""
+        d = self.settings["azimuth_dir"]
+        if not d or not os.path.isdir(d) or not shim.honk_complete(d):
+            return False, ""
+        return True, shim.honk_version()
+
+    def ensure_honk(self, progress=None, cancelled=lambda: False):
+        """Install the pinned HonkHonk release when the DLL or the horn bank is missing or another build; the player's HonkHonk.ini stays.
+        -> list of things done."""
+        d = self.settings["azimuth_dir"]
+        if not d or not os.path.isdir(d) or shim.honk_complete(d):
+            return []
+        try:
+            files = upstream.fetch("honkHonk", updater.Updater(channel=self.settings["channel"]), progress, cancelled)
+        except upstream.UpstreamError as e:
+            raise updater.UpdateError(str(e)) from None
+        return shim.install_honk(d, files)
+
+    def ensure_controls(self):
+        """Extra Options' headlight and roof toggles leave the right stick (the horn) once; a binding the player chose is never touched, and
+        a player who sets RightStick again afterwards keeps it. -> list of things done."""
+        d = self.settings["azimuth_dir"]
+        if self.settings["controls_swapped"] or not d or not os.path.isdir(d):
+            return []
+        found, did = shim.swap_stick_bindings(d)
+        if found:                                   # no Extra Options settings yet: install_extra writes them already swapped
+            self.settings["controls_swapped"] = True
+            self.settings.save()
+        return did
+
     def repair_tls_helper(self):
         """An old FH2 Extra Options (0.2.7x) replaced data\\bin\\azimuth-tls.dll; next to 0.2.98 that patches the game twice and 0.2.98
         refuses to start (GitHub #20). Puts Azimuth's own file back. -> list of things done; raises shim.ShimError when it cannot."""
@@ -859,6 +903,8 @@ class Launcher:
         have, eo_ver, _target = shim.extra_options_installed(d)
         want_eo = shim.extra_options_version(d)
         out.append(("FH2 Extra Options", eo_ver if have else "not installed", want_eo, have and eo_ver == want_eo))
+        hh_ok, hh_ver = shim.honk_installed(d)
+        out.append(("HonkHonk", hh_ver if hh_ok else "not installed", shim.honk_version(), shim.honk_complete(d)))
         session = os.path.exists(os.path.join(shim.bin_dir(d), shim.SESSION_FILE))
         out.append(("Session for the game", "present (written by Play)" if session else "none: the game starts offline", "Play writes it", None))
         out.append(("Car database", "your own car packs kept: no play with other people" if s["keep_car_packs"] else "the server's, put in place at Play", "-", None))
