@@ -73,10 +73,17 @@ UPDATE_NAMES = {MSG_SERVER_FULL_SYNC: "FullSync", MSG_SERVER_ROUTE_PROGRESS: "Ro
 
 TRAFFIC_LIMIT = traffic_manager.HARD_CAP
 GRANT_TIMEOUT_S = 15.0    # a granted id that is never spawned is taken back
-# InitialJoinComplete is held until the client has loaded the announced models and been sent the cars around it, or this long. The client
-# loads models while it waits (SyncTrafficModule 0x729ca0 runs its model queue with +0xad set) and leaves "Syncing traffic"
-# (wait_for_all_pending_traffic: +0xae) only after InitialJoinComplete (0x720950 clears +0xad) and once its pending AddTraffic cars spawned.
-JOIN_WAIT_S = 15.0
+# InitialJoinComplete is held until the client's model report is in and it has been sent the cars around it. The client leaves
+# "Syncing traffic" (wait_for_all_pending_traffic: +0xae) only after InitialJoinComplete (0x720950 clears +0xad) and once its pending
+# AddTraffic cars spawned (0x729ca0); models play no part in that.
+# CarModelLoaded does not mean "asset loaded": SyncTrafficModule sends it when the first car of a model appears on the client (OnCarAdded
+# 0x7220e0, per-model car count +0x98 going 0 -> 1), and on going online for every model that has cars (ReportCarModelLoaded 0x726230,
+# all in one frame). Announced models wait in a queue (+0x70) that 0x729ca0 drains only while fewer than 8 models have cars
+# ("8 - models in use" per frame), so a client whose offline traffic already uses 8 models reports those 8 and no more: 8 of 17
+# announced, never all of them (dev 2026-11-01, every join then waited the whole limit).
+REPORT_SETTLE_S = 0.5     # after the first CarModelLoaded of the join: the go-online report is sent in one frame
+NO_REPORT_S = 2.0         # a client with no traffic cars reports nothing; dev: the report came 0-1 s after the join
+JOIN_WAIT_S = 15.0        # the hard limit, when the client's position stays unknown (the cars around it cannot be chosen)
 SUMMARY_S = 30.0          # log_summary while anyone is in the traffic
 TICK_S = 0.2              # holders and ownership change with distance, at driving speed; retail did this every frame
 MAX_MESSAGES_PER_S = 400  # per client, requests and updates together; far above what a client sends
@@ -144,7 +151,10 @@ class PeerState:
         self.window_at = 0.0         # start of the current rate window
         self.window_n = 0
         self.flooded = False
-        self.join_until = None       # InitialJoinComplete held until the models are in (JOIN_WAIT_S), then sent from tick()
+        self.join_until = None       # InitialJoinComplete held until the model report is in (JOIN_WAIT_S at most), then sent from tick()
+        self.report_at = None        # first CarModelLoaded since the join sequence (the client's go-online report)
+        self.early = {}              # model -> loaded, reported before the join: a client switching worlds goes online before its
+                                     # FinaliseSessionEntry (dev 2026-11-01 23:09:53, all 17 came first and were lost)
 
 
 class CarData:
@@ -274,7 +284,12 @@ class TrafficWorld:
             self.manager.reset(peer)
         s.joined = True
         s.joined_at = time.monotonic()
-        self.manager.join(peer)
+        p = self.manager.join(peer)
+        for model, loaded in s.early.items():
+            (self.manager.model_loaded if loaded else self.manager.model_unloaded)(peer, model)
+        s.early.clear()
+        # The report came first (a world switch, or the burst that repeats the join after a fast travel): nothing more to wait for.
+        s.report_at = s.joined_at if p.models else None
         self._batch = []
         for model in self.models:
             self.push(peer, C_LOAD_CAR_MODEL, s14=model)
@@ -283,7 +298,8 @@ class TrafficWorld:
         batch, self._batch = self._batch, None
         self.send(peer, batch)
         s.join_until = time.monotonic() + JOIN_WAIT_S
-        self.log(f"traffic: join {peer.addr[1]}: {len(self.models)} models, limit {TRAFFIC_LIMIT}; InitialJoinComplete once they are loaded")
+        self.log(f"traffic: join {peer.addr[1]}: {len(self.models)} models, limit {TRAFFIC_LIMIT}; InitialJoinComplete after its model report"
+                 + (f" ({len(p.models)} models reported before the join)" if p.models else ""))
 
     def leave(self, peer):
         if self.state.pop(peer, None) is not None:
@@ -310,6 +326,11 @@ class TrafficWorld:
         if s.rx <= 60 or s.rx % 100 == 0:
             self.log(f"traffic: {peer.addr[1]} -> {name} a={a} s14={signed14(s14)} u5={u5} b={b} flag={flag} seq={seq} "
                      f"(held {len(self.manager.players[peer].held) if peer in self.manager.players else 0})")
+        if self.enabled and not s.joined and kind in (S_CAR_MODEL_LOADED, S_CAR_MODEL_UNLOADED) and not self.flooding(peer, s):
+            s.early.pop(signed14(s14), None)
+            if len(s.early) < 64:
+                s.early[signed14(s14)] = kind == S_CAR_MODEL_LOADED
+            return
         if not self.enabled or not s.joined or self.flooding(peer, s):
             return
         m, now = self.manager, time.monotonic() * 1000.0
@@ -337,6 +358,8 @@ class TrafficWorld:
                 self.log(f"traffic: car {a} handed to {peer.addr[1]} (RequestOwnership)")
         elif kind == S_CAR_MODEL_LOADED:
             m.model_loaded(peer, signed14(s14))
+            if s.report_at is None:
+                s.report_at = time.monotonic()
             s.burst_at = time.monotonic()
             s.burst_n += 1
         elif kind == S_CAR_MODEL_UNLOADED:
@@ -403,24 +426,40 @@ class TrafficWorld:
                     m.withdraw_one(peer, vid)
                     self.push(peer, C_SPAWN_CANCELED, a=vid)
         waiting = [(peer, s) for peer, s in self.state.items() if s.join_until is not None]
-        done = [(peer, s) for peer, s in waiting if now >= s.join_until or self.models_in(peer)]
+        done = [(peer, s) for peer, s in waiting if now >= s.join_until or self.models_in(peer, s, now)]
         m.tick(now * 1000.0)                     # adds the cars around a client that is done, before its InitialJoinComplete
         for peer, s in done:
             p = m.players.get(peer)
-            reported = len(p.models) if p else 0
-            if reported or not now >= s.join_until:
-                self.log(f"traffic: {peer.addr[1]} InitialJoinComplete {now - s.joined_at:.1f} s after the join, {reported}/{len(self.models)} "
-                         f"models loaded, {len(p.held) if p else 0} cars sent" + ("" if self.models_in(peer) else " (gave up waiting)"))
+            reported = sorted(set(p.models) & set(self.models)) if p else []
+            ready = self.models_in(peer, s, now)
+            if reported or not ready:            # a client on local traffic reports nothing: no line for it
+                self.log(f"traffic: {peer.addr[1]} InitialJoinComplete {now - s.joined_at:.1f} s after the join, {len(reported)}/{len(self.models)} "
+                         f"models with cars on the client, {len(p.held) if p else 0} cars sent"
+                         + ("" if ready else " (gave up waiting: " + ("no position" if p and p.pos is None else "no model report") + ")"))
+                LOG.debug(f"{peer.addr[1]} reported models: {' '.join(map(str, reported)) or 'none'}"
+                          + (f"; also unannounced {' '.join(map(str, sorted(set(p.models) - set(self.models))))}" if p and set(p.models) - set(self.models) else ""))
             s.join_until = None
             self.push(peer, C_INITIAL_JOIN_COMPLETE)
         if now >= self.next_summary:
             self.next_summary = now + SUMMARY_S
             self.log_summary()
 
-    def models_in(self, peer):
-        """The client reported every announced model loaded (CarModelLoaded) and its position is known, so the tick can send it cars."""
+    def models_in(self, peer, s=None, now=None):
+        """The client's model report is in and its position is known, so the tick can send it the cars it can show. The report is the
+        go-online burst (ReportCarModelLoaded 0x726230, one frame): REPORT_SETTLE_S after its first message, or NO_REPORT_S after the join
+        when the client has no traffic cars to report. It never lists every announced model (see REPORT_SETTLE_S), so do not wait for that."""
         p = self.manager.players.get(peer)
-        return p is not None and p.pos is not None and all(model in p.models for model in self.models)
+        if p is None or p.pos is None:
+            return False
+        if all(model in p.models for model in self.models):
+            return True
+        s = s or self.state.get(peer)
+        now = time.monotonic() if now is None else now
+        if s is None:
+            return False
+        if s.report_at is not None:
+            return now - s.report_at >= REPORT_SETTLE_S
+        return now - s.joined_at >= NO_REPORT_S
 
     def log_summary(self):
         """Who holds and owns what, and what went out since the last line: the evidence for "both players see the same traffic"."""
