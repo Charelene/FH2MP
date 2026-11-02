@@ -355,7 +355,10 @@ class CrashReports:
         try:
             with open(self._index_path(), encoding="utf-8") as f:
                 return json.load(f)
-        except (OSError, ValueError, TypeError):
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError, TypeError) as e:
+            self.log(f"  crash report index {self._index_path()} unreadable ({type(e).__name__}: {e}); treated as empty, so a crash that has an open issue gets a new one")
             return {}
 
     def publish(self, rid, r, line):
@@ -381,8 +384,8 @@ class CrashReports:
                         meta = json.load(f)
                     meta["issue"] = number
                     self._write_meta(rid, meta)
-                except (OSError, ValueError):
-                    pass
+                except (OSError, ValueError) as e:
+                    self.log(f"  crash report {rid}: issue #{number} exists but report.json was not updated with it: {type(e).__name__}: {e}")
             self.log(f"  crash report {rid}: issue #{number}")
             return number
         except (urllib.error.URLError, OSError, ValueError, KeyError) as e:

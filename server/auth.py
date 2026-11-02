@@ -33,6 +33,7 @@ import threading
 import time
 import unicodedata
 
+import diag
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -47,6 +48,8 @@ TAG_COOLDOWN = 7 * 86400.0
 POW_BASE_BITS = 18
 POW_MAX_BITS = 24
 SIGN_PREFIX = b"FH2MP-AUTH-v1\0"
+LOG = diag.get("auth")
+_RATE = diag.RateLimit()
 
 # The tables are migration 6 in db.py (accounts, auth_sessions, auth_nonces, auth_events, invites).
 
@@ -58,10 +61,22 @@ def udp_ticket_key(token):
     return hmac.new(token.encode(), b"fh2mp udp ticket v1", hashlib.sha256).hexdigest() if token else ""
 
 
+def ban_message(reason, until):
+    """What a banned player is told (launcher sign-in error, game Message Center): the end date for a temporary ban, then the reason."""
+    when = f"until {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(until))}" if until else "permanently"
+    return f"This account is banned {when}." + (f" Reason: {reason}" if reason else "")
+
+
+def ban_active(banned_at, until, now):
+    """A ban applies while banned_at is set and, for a temporary one, until `until`; nothing needs to clear it afterwards."""
+    return bool(banned_at) and (until is None or now < until)
+
+
 class AuthError(Exception):
-    def __init__(self, status, code, message=""):
+    def __init__(self, status, code, message="", xuid=None, detail=""):
         super().__init__(message or code)
         self.status, self.code, self.message = status, code, message or code
+        self.xuid, self.detail = xuid, detail          # for the log only (who it was, the compared values): never sent to the client
 
 
 class Account:
@@ -79,11 +94,11 @@ def b64u(b):
 
 def unb64u(s):
     if not isinstance(s, str) or len(s) > 4096:
-        raise AuthError(400, "bad_request", "malformed field")
+        raise AuthError(400, "bad_request", "malformed field", detail=f"a field is {type(s).__name__}" + (f" of {len(s)} characters, limit 4096" if isinstance(s, str) else ", not text"))
     try:
         return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
-    except (ValueError, TypeError):
-        raise AuthError(400, "bad_request", "malformed field")
+    except (ValueError, TypeError) as e:
+        raise AuthError(400, "bad_request", "malformed field", detail=f"a field is not base64 ({e})")
 
 
 def sign_message(realm, purpose, challenge_raw, *fields):
@@ -138,9 +153,11 @@ def validate_gamertag(tag, extra_blocked=(), extra_words=()):
     if len(key) < 2:
         raise AuthError(400, "bad_gamertag", "too short once spaces and symbols are ignored")
     words = {fold_tag(w) for w in re.split(r"[ ._-]+", tag)}
-    if (any(bad in key for bad in _BLOCKED_SUBSTR + tuple(extra_blocked)) or words & set(extra_words)
-            or re.fullmatch(r"player[ ._-]*\d*", tag.lower())):
-        raise AuthError(400, "bad_gamertag", "that name is not allowed")
+    fragment = next((bad for bad in _BLOCKED_SUBSTR + tuple(extra_blocked) if bad in key), None)
+    if fragment is not None or words & set(extra_words) or re.fullmatch(r"player[ ._-]*\d*", tag.lower()):
+        why = (f"contains the blocked fragment {fragment!r}" if fragment is not None else
+               f"is the blocked word {sorted(words & set(extra_words))}" if words & set(extra_words) else "looks like a default Player N name")
+        raise AuthError(400, "bad_gamertag", "that name is not allowed", detail=f"{tag!r} (folded {key!r}) {why}")      # the player is not told which rule
     return tag
 
 
@@ -199,6 +216,7 @@ class AuthService:
         self.blocked_words = ()
         self._cache = {}                 # token hash -> dict
         self._cache_lock = threading.Lock()
+        self._ban_cache = {}             # xuid -> (checked, message or None), for requests that carry no token
         self._secret = self._load_secret()
         self.scale = float(os.environ.get("FH2MP_RATE_SCALE", "1"))      # load tests on the dev stack raise every limit (never on prod)
         self.per_ip_daily = int(os.environ.get("FH2MP_REG_PER_IP_DAY", "5")) * max(1, int(self.scale))
@@ -235,7 +253,7 @@ class AuthService:
     def challenge(self, ip):
         """A stateless, MAC-protected challenge: timestamp | random | pow bits | mac. -> (challenge string, pow bits, ttl)."""
         if not self.hit(("chal", norm_ip(ip)), 60, 60):
-            raise AuthError(429, "rate_limited", "too many requests, wait a minute")
+            raise AuthError(429, "rate_limited", "too many requests, wait a minute", detail="challenge requests: over 60 per minute from this address")
         bits = self.pow_bits()
         body = struct.pack(">dB", self.clock(), bits) + secrets.token_bytes(16)
         raw = body + self._mac(body)
@@ -245,19 +263,20 @@ class AuthService:
         """Checks the MAC and age, then burns the challenge (single use). -> (raw bytes, pow bits)."""
         raw = unb64u(chal)
         if len(raw) != 8 + 1 + 16 + 16:
-            raise AuthError(400, "bad_challenge")
+            raise AuthError(400, "bad_challenge", detail=f"challenge is {len(raw)} bytes, expected 41")
         body, mac = raw[:-16], raw[-16:]
         if not hmac.compare_digest(mac, self._mac(body)):
-            raise AuthError(400, "bad_challenge")
+            raise AuthError(400, "bad_challenge", detail=f"challenge MAC does not verify for realm {self.env!r} (made by another realm, or altered)")
         ts, bits = struct.unpack(">dB", body[:9])
         now = self.clock()
         if not (now - CHALLENGE_TTL <= ts <= now + 5):
-            raise AuthError(400, "challenge_expired", "the challenge is too old, ask for a new one")
+            raise AuthError(400, "challenge_expired", "the challenge is too old, ask for a new one",
+                            detail=f"challenge is {now - ts:.0f} s old, allowed 0 to {CHALLENGE_TTL:.0f} s (negative = the client's clock is ahead)")
         with self.db.tx() as c:
             c.execute("DELETE FROM auth_nonces WHERE expires < ?", (now,))
             if c.execute("INSERT INTO auth_nonces (nonce, expires) VALUES (?, ?) ON CONFLICT DO NOTHING",
                          (body[9:25], ts + CHALLENGE_TTL)).rowcount != 1:
-                raise AuthError(400, "challenge_used", "that challenge was already used")
+                raise AuthError(400, "challenge_used", "that challenge was already used", detail="its nonce is already burnt (a repeated request, or a replay)")
         return raw, bits
 
     def _verify(self, pubkey, signature, message):
@@ -274,47 +293,53 @@ class AuthService:
                           (self.clock(), kind, norm_ip(ip), xuid, detail[:200]))
                 if secrets.randbelow(200) == 0:
                     c.execute("DELETE FROM auth_events WHERE at < ?", (self.clock() - 90 * 86400,))
-        except Exception:  # noqa: BLE001 - auditing must never break a login
-            pass
+        except Exception as e:  # noqa: BLE001 - auditing must never break a login
+            ok, skipped = _RATE.allow("audit-write", 300)
+            if ok:
+                LOG.exc(f"audit event {kind!r} not written, the sign-in carries on" + (f" ({skipped} more failed since the last line)" if skipped else ""), e, level="WARN")
 
     # ---- registration
     def register(self, ip, challenge, pubkey_b64, gamertag, pow_counter, sig_b64, invite=""):
         ip = norm_ip(ip)
         if self.registration == "closed":
-            raise AuthError(403, "registration_closed", "new accounts are not being accepted right now")
+            raise AuthError(403, "registration_closed", "new accounts are not being accepted right now", detail="FH2MP_REGISTRATION / the panel setting is 'closed'")
         pubkey, sig = unb64u(pubkey_b64), unb64u(sig_b64)
         if len(pubkey) != 32 or len(sig) != 64 or not isinstance(pow_counter, int) or pow_counter < 0:
-            raise AuthError(400, "bad_request", "malformed field")
+            raise AuthError(400, "bad_request", "malformed field",
+                            detail=f"pubkey {len(pubkey)} bytes (want 32), signature {len(sig)} bytes (want 64), pow {type(pow_counter).__name__} {pow_counter if isinstance(pow_counter, int) else ''}")
         if not self.hit(("reg", ip), 10, 3600):
-            raise AuthError(429, "rate_limited", "too many attempts from this address")
+            raise AuthError(429, "rate_limited", "too many attempts from this address", detail="registrations: over 10 per hour from this address")
         tag = validate_gamertag(gamertag, self.blocked, self.blocked_words)
         raw, bits = self._open_challenge(challenge)
         if not pow_ok(raw, pubkey, pow_counter, bits):
-            raise AuthError(400, "bad_pow", "proof of work does not meet the target")
+            raise AuthError(400, "bad_pow", "proof of work does not meet the target", detail=f"counter {pow_counter} does not give {bits} zero bits")
         if not self._verify(pubkey, sig, sign_message(self.env, "register", raw, pubkey, tag.encode())):
             self._event("register_badsig", ip)
-            raise AuthError(401, "bad_signature")
+            raise AuthError(401, "bad_signature", detail=f"registration signature does not verify for realm {self.env!r}")
         now = self.clock()
-        if self.db.one("SELECT COUNT(*) FROM accounts WHERE created_ip=? AND created > ?", (ip, now - 86400))[0] >= self.per_ip_daily:
-            raise AuthError(429, "rate_limited", "too many accounts were created from this address today")
-        if self.db.one("SELECT COUNT(*) FROM accounts WHERE created > ?", (now - 3600,))[0] >= self.global_hourly:
-            raise AuthError(503, "busy", "a lot of accounts are being created, try again later")
+        made = self.db.one("SELECT COUNT(*) FROM accounts WHERE created_ip=? AND created > ?", (ip, now - 86400))[0]
+        if made >= self.per_ip_daily:
+            raise AuthError(429, "rate_limited", "too many accounts were created from this address today", detail=f"{made} accounts in 24 h from this address, limit {self.per_ip_daily}")
+        made = self.db.one("SELECT COUNT(*) FROM accounts WHERE created > ?", (now - 3600,))[0]
+        if made >= self.global_hourly:
+            raise AuthError(503, "busy", "a lot of accounts are being created, try again later", detail=f"{made} accounts in the last hour, limit {self.global_hourly}")
         key = fold_tag(tag)
         with self.db.tx() as c:
             if self.registration == "invite":
                 code = hashlib.sha256((invite or "").strip().upper().encode()).digest()
                 if c.execute("UPDATE invites SET uses_left=uses_left-1 WHERE code_hash=? AND uses_left>0", (code,)).rowcount != 1:
-                    raise AuthError(403, "invite_required", "a valid invite code is needed to register")
+                    raise AuthError(403, "invite_required", "a valid invite code is needed to register",
+                                    detail="registration is invite-only and the code " + ("was not sent" if not (invite or "").strip() else "is unknown or used up"))
             if c.execute("SELECT 1 FROM accounts WHERE pubkey=?", (pubkey,)).fetchone():
-                raise AuthError(409, "key_exists", "this key already has an account: sign in instead")
+                raise AuthError(409, "key_exists", "this key already has an account: sign in instead", detail="the public key is registered already")
             if c.execute("SELECT 1 FROM accounts WHERE gamertag_key=?", (key,)).fetchone():
-                raise AuthError(409, "gamertag_taken", "that gamertag is taken")
+                raise AuthError(409, "gamertag_taken", "that gamertag is taken", detail=f"{tag!r} folds to {key!r}, which an account has")
             for _ in range(20):
                 xuid = XUID_BASE | (secrets.randbits(32) | 0x10000)
                 if not c.execute("SELECT 1 FROM accounts WHERE xuid=? UNION ALL SELECT 1 FROM players WHERE xuid=?", (xuid, xuid)).fetchone():
                     break
             else:
-                raise AuthError(503, "busy", "could not allocate an id")
+                raise AuthError(503, "busy", "could not allocate an id", detail="20 random xuids were all taken")
             c.execute("INSERT INTO accounts (xuid, pubkey, gamertag, gamertag_key, created, created_ip) VALUES (?,?,?,?,?,?)",
                       (xuid, pubkey, tag, key, now, ip))
             c.execute("INSERT INTO players (xuid, gamertag, career_level, first_seen, last_seen) VALUES (?,?,0,?,?) "
@@ -328,19 +353,21 @@ class AuthService:
         ip = norm_ip(ip)
         pubkey, sig = unb64u(pubkey_b64), unb64u(sig_b64)
         if len(pubkey) != 32 or len(sig) != 64:
-            raise AuthError(400, "bad_request", "malformed field")
-        if not self.hit(("login", ip), 30, 60) or not self.hit(("login-key", pubkey), 12, 60):
-            raise AuthError(429, "rate_limited", "too many sign-in attempts")
+            raise AuthError(400, "bad_request", "malformed field", detail=f"pubkey {len(pubkey)} bytes (want 32), signature {len(sig)} bytes (want 64)")
+        by_ip = self.hit(("login", ip), 30, 60)
+        if not by_ip or not self.hit(("login-key", pubkey), 12, 60):
+            raise AuthError(429, "rate_limited", "too many sign-in attempts",
+                            detail="sign-ins: over 30 per minute from this address" if not by_ip else "sign-ins: over 12 per minute for this key")
         raw, _bits = self._open_challenge(challenge)
         if not self._verify(pubkey, sig, sign_message(self.env, "login", raw, pubkey)):
             self._event("login_badsig", ip)
-            raise AuthError(401, "bad_signature")
-        row = self.db.one("SELECT xuid, gamertag, banned_at, ban_reason FROM accounts WHERE pubkey=?", (pubkey,))
+            raise AuthError(401, "bad_signature", detail=f"sign-in signature does not verify for realm {self.env!r} (a launcher of another realm, or a different key)")
+        row = self.db.one("SELECT xuid, gamertag, banned_at, ban_until, ban_reason FROM accounts WHERE pubkey=?", (pubkey,))
         if row is None:
-            raise AuthError(404, "unknown_account", "no account for this key: sign up first")
-        if row["banned_at"]:
+            raise AuthError(404, "unknown_account", "no account for this key: sign up first", detail=f"no account has this public key in realm {self.env!r}")
+        if ban_active(row["banned_at"], row["ban_until"], self.clock()):
             self._event("login_banned", ip, row["xuid"])
-            raise AuthError(403, "banned", row["ban_reason"] or "this account is banned")
+            raise AuthError(403, "banned", ban_message(row["ban_reason"], row["ban_until"]), xuid=row["xuid"])
         token = "fh2." + b64u(secrets.token_bytes(32))
         now = self.clock()
         with self.db.tx() as c:
@@ -365,27 +392,31 @@ class AuthService:
     def authenticate(self, token, ip):
         """-> Account for a live token used from the address that logged in; AuthError otherwise."""
         if not token or not token.startswith("fh2.") or len(token) > 80:
-            raise AuthError(401, "invalid_token")
+            raise AuthError(401, "invalid_token", detail="not a session token: " + ("empty" if not token else f"{len(token)} characters, " + ("no fh2. prefix" if not token.startswith("fh2.") else "longer than 80")))
         h, now, ip = self._hash(token), self.clock(), norm_ip(ip)
         with self._cache_lock:
             ent = self._cache.get(h)
         if ent is None or now - ent["checked"] > CACHE_SECONDS:
-            r = self.db.one("SELECT s.xuid, s.ip, s.expires, s.hard_expires, s.last_used, a.gamertag, a.banned_at, a.ban_reason "
+            r = self.db.one("SELECT s.xuid, s.ip, s.expires, s.hard_expires, s.last_used, a.gamertag, a.banned_at, a.ban_until, a.ban_reason "
                             "FROM auth_sessions s JOIN accounts a ON a.xuid = s.xuid WHERE s.token_hash=? AND s.revoked=0", (h,))
             if r is None:
                 with self._cache_lock:
                     self._cache.pop(h, None)
-                raise AuthError(401, "invalid_token")
+                raise AuthError(401, "invalid_token", detail="no live session for this token (signed out, replaced by a newer sign-in, revoked or kicked, or issued by another realm)")
             ent = {"xuid": r["xuid"], "ip": r["ip"], "expires": r["expires"], "hard": r["hard_expires"], "tag": r["gamertag"],
-                   "banned": r["banned_at"], "reason": r["ban_reason"], "written": r["last_used"], "checked": now}
+                   "banned": r["banned_at"], "until": r["ban_until"], "reason": r["ban_reason"], "written": r["last_used"], "checked": now}
             with self._cache_lock:
                 self._cache[h] = ent
-        if ent["banned"]:
-            raise AuthError(403, "banned", ent["reason"] or "this account is banned")
+        if ban_active(ent["banned"], ent["until"], now):
+            raise AuthError(403, "banned", ban_message(ent["reason"], ent["until"]), xuid=ent["xuid"])
         if now > ent["expires"] or now > ent["hard"]:
-            raise AuthError(401, "token_expired", "the session expired: sign in again from the launcher")
+            raise AuthError(401, "token_expired", "the session expired: sign in again from the launcher", xuid=ent["xuid"],
+                            detail=(f"idle limit passed {now - ent['expires']:.0f} s ago" if now > ent["expires"] else "")
+                            + (" and " if now > ent["expires"] and now > ent["hard"] else "")
+                            + (f"72 h hard limit passed {now - ent['hard']:.0f} s ago" if now > ent["hard"] else ""))
         if self.token_ip == "exact" and ip and ent["ip"] != ip:
-            raise AuthError(401, "ip_changed", "your address changed: start the game from the launcher again")
+            raise AuthError(401, "ip_changed", "your address changed: start the game from the launcher again", xuid=ent["xuid"],
+                            detail="the request comes from another address than the sign-in (FH2MP_TOKEN_IP=exact)")
         if now - ent["written"] > TOUCH_EVERY:
             ent["written"], ent["expires"] = now, min(now + SESSION_IDLE, ent["hard"])
             with self.db.tx() as c:
@@ -400,7 +431,7 @@ class AuthService:
 
     # ---- account management
     def account(self, xuid):
-        r = self.db.one("SELECT xuid, pubkey, gamertag, created, last_login, tag_changed, banned_at, ban_reason FROM accounts WHERE xuid=?", (xuid,))
+        r = self.db.one("SELECT xuid, pubkey, gamertag, created, last_login, tag_changed, banned_at, ban_until, ban_reason FROM accounts WHERE xuid=?", (xuid,))
         return r
 
     def rename(self, xuid, new_tag, force=False):
@@ -410,12 +441,13 @@ class AuthService:
         with self.db.tx() as c:
             r = c.execute("SELECT tag_changed, gamertag_key FROM accounts WHERE xuid=?", (xuid,)).fetchone()
             if r is None:
-                raise AuthError(404, "unknown_account")
+                raise AuthError(404, "unknown_account", xuid=xuid, detail="rename of an xuid without an account")
             if not force and r["tag_changed"] and now - r["tag_changed"] < TAG_COOLDOWN:
                 days = (TAG_COOLDOWN - (now - r["tag_changed"])) / 86400
-                raise AuthError(429, "rename_cooldown", f"you can change your gamertag again in {days:.1f} days")
+                raise AuthError(429, "rename_cooldown", f"you can change your gamertag again in {days:.1f} days", xuid=xuid,
+                                detail=f"last change {(now - r['tag_changed']) / 86400:.1f} days ago, cooldown {TAG_COOLDOWN / 86400:.0f} days")
             if key != r["gamertag_key"] and c.execute("SELECT 1 FROM accounts WHERE gamertag_key=?", (key,)).fetchone():
-                raise AuthError(409, "gamertag_taken", "that gamertag is taken")
+                raise AuthError(409, "gamertag_taken", "that gamertag is taken", xuid=xuid, detail=f"{tag!r} folds to {key!r}, which another account has")
             c.execute("UPDATE accounts SET gamertag=?, gamertag_key=?, tag_changed=? WHERE xuid=?", (tag, key, now, xuid))
             c.execute("UPDATE players SET gamertag=? WHERE xuid=?", (tag, xuid))
         with self._cache_lock:
@@ -429,18 +461,19 @@ class AuthService:
 
     def tag_available(self, ip, tag):
         if not self.hit(("tagcheck", norm_ip(ip)), 40, 60):
-            raise AuthError(429, "rate_limited", "slow down")
+            raise AuthError(429, "rate_limited", "slow down", detail="gamertag checks: over 40 per minute from this address")
         tag = validate_gamertag(tag, self.blocked, self.blocked_words)
         return not self.db.one("SELECT 1 FROM accounts WHERE gamertag_key=?", (fold_tag(tag),))
 
-    def set_banned(self, xuid, reason=None):
-        """reason None = unban."""
+    def set_banned(self, xuid, reason=None, until=None):
+        """reason None = unban. `until` (epoch seconds) makes the ban temporary; without it the ban is permanent."""
+        if until is not None and until <= self.clock():
+            raise AuthError(400, "bad_request", "a ban must end in the future", xuid=xuid, detail=f"ban end {until:.0f} is {self.clock() - until:.0f} s in the past")
         with self.db.tx() as c:
-            n = c.execute("UPDATE accounts SET banned_at=?, ban_reason=? WHERE xuid=?",
-                          (None if reason is None else self.clock(), reason or "", xuid)).rowcount
-            if reason is not None:
-                c.execute("DELETE FROM auth_sessions WHERE xuid=?", (xuid,))
+            n = c.execute("UPDATE accounts SET banned_at=?, ban_until=?, ban_reason=? WHERE xuid=?",
+                          (None if reason is None else self.clock(), None if reason is None else until, reason or "", xuid)).rowcount
         with self._cache_lock:
+            self._ban_cache.pop(xuid, None)
             for h, ent in list(self._cache.items()):
                 if ent["xuid"] == xuid:
                     del self._cache[h]
@@ -450,6 +483,22 @@ class AuthService:
         if reason is not None and self.on_revoke:
             self.on_revoke(xuid)
         return n > 0
+
+    def ban_text(self, xuid):
+        """The ban message while the account is banned, else None. For requests identified by X-UserId alone (no token), which must be
+        refused for a banned account like any other: nothing a banned player sends is accepted."""
+        now = self.clock()
+        with self._cache_lock:
+            hit = self._ban_cache.get(xuid)
+        if hit is None or now - hit[0] > CACHE_SECONDS:
+            r = self.db.one("SELECT banned_at, ban_until, ban_reason FROM accounts WHERE xuid=?", (xuid,))
+            text = ban_message(r["ban_reason"], r["ban_until"]) if r and ban_active(r["banned_at"], r["ban_until"], now) else None
+            hit = (now, text)
+            with self._cache_lock:
+                if len(self._ban_cache) > 20000:
+                    self._ban_cache.clear()
+                self._ban_cache[xuid] = hit
+        return hit[1]
 
     def revoke(self, xuid):
         with self.db.tx() as c:

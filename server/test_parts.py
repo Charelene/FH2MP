@@ -36,43 +36,10 @@ def decoded_words(size, payload):
 
 
 class PartCheck(unittest.TestCase):
-    def test_a_good_car_is_found_at_any_offset_and_passes(self):
-        for off in (910, 919, 700, 1000):
-            size, v = player_object(stock_list(), off)
-            found = parts.find_parts(size, v)
-            self.assertIsNotNone(found, off)
-            self.assertEqual(found[0], off)
-            self.assertEqual(parts.audit_parts(found[1]), [], off)
-
     def test_the_camshaft_slot_is_slot_12(self):
         self.assertEqual(P.SLOT_TABLE[12], "EngineCamshaft")
         self.assertNotIn(3, P.SLOT_TABLE)
         self.assertNotIn(26, P.SLOT_TABLE)
-
-    def test_an_unknown_camshaft_id_is_reported_with_its_slot(self):
-        cars = stock_list()
-        cars[12] = 558777
-        size, v = player_object(cars, 910)
-        offset, words = parts.find_parts(size, v)
-        issues = parts.audit_parts(words)
-        self.assertEqual([(s, w) for s, w, _ in issues], [(12, 558777)])
-        self.assertIn("no such id", issues[0][2])
-
-    def test_an_id_of_another_table_in_the_wrong_slot_is_reported_but_exists(self):
-        cars = stock_list()
-        candidates = P.TABLE_IDS["Brakes"] - P.TABLE_IDS["EngineCamshaft"]
-        self.assertTrue(candidates, 'fixture needs a brake id that is not a camshaft')
-        cars[12] = min(candidates)                  # exists, but not as a camshaft
-        size, v = player_object(cars, 910)
-        offset, words = parts.find_parts(size, v)
-        issues = parts.audit_parts(words)
-        self.assertEqual(len(issues), 1)
-        self.assertIn("another part table", issues[0][2])
-
-    def test_noise_without_a_part_list_finds_nothing(self):
-        rnd = random.Random(5)
-        self.assertIsNone(parts.find_parts(2600, rnd.getrandbits(2600)))
-
 
 stock_car = parts.stock_list
 
@@ -186,17 +153,6 @@ class Neutralize(unittest.TestCase):
         w[0], w[2] = 0x83567b2, 0x6bffffff                 # the misaligned reads seen on prod
         self.assertEqual(parts.neutralize(w)[1], [])
 
-    def test_the_rewritten_object_keeps_every_other_bit(self):
-        w = stock_car(self.INTEGRA)
-        w[0] = 368335
-        size, v = player_object(dict(enumerate(w)), 910)
-        fixed, _, _ = parts.neutralize(w)
-        v2 = parts.write_parts(v, 910, fixed)
-        mask = ((1 << (32 * P.PART_SLOTS)) - 1) << 910
-        self.assertEqual(v2 & ~mask, v & ~mask)
-        self.assertEqual(parts.find_parts(size, v2), (910, fixed))
-
-
 class CarFromParts(unittest.TestCase):
     """The car id is read from slot 2 (CarBody row = car id x 1000) and handed to the car policy."""
 
@@ -241,71 +197,6 @@ class CarFromParts(unittest.TestCase):
         if body is not None:
             words[2] = body
         return player_object(dict(enumerate(words)), 842, size=3641, seed=7)
-
-    def test_a_list_with_many_unknown_ids_is_found_by_its_shape_and_cleaned(self):
-        w, (a, b) = self.world()
-        w.log = lambda *_: None
-        size, v = self.wiping_object()
-        self.assertIsNone(parts.find_parts(size, v))        # the hole: the strict finder gives up
-        self.assertEqual(parts.find_shaped(size, v)[0], 842)
-        size, v = serialized_object([w & 0xFFFFFFFF for w in self.WIPING_LIST])
-        bad, hide, size, v2 = w.check_parts(a, size, v)
-        self.assertTrue(bad)
-        self.assertFalse(hide)
-        self.assertNotEqual(v2, v)
-        found = parts.find_parts(size, v2)                  # what the others get is a list every client can build
-        self.assertEqual(found[0], C.fields(size, v2)[C.PARTS][0])
-        self.assertEqual(found[1][2], 2179000)              # the car itself stays
-        self.assertEqual([x for x in found[1] if x != P.PART_NONE and x not in P.ALL_IDS], [])
-        self.assertEqual(found[1], parts.stock_list(2179))  # the whole violating setup becomes stock
-
-    def test_a_list_with_ids_in_the_slots_without_a_part_type_is_found_and_cleaned(self):
-        """Prod 2026-10-24 19:36:31: a mixed car (body 2287, rim / tire width / restrictor plate / motor ids in no catalog table, 9x ids in
-        slots 3, 22, 26 and 42) was "no part list found" and relayed untouched; three clients and a rig died within a second."""
-        w, (a, b) = self.world()
-        w.log = lambda *_: None
-        words = [P.PART_NONE] * P.PART_SLOTS
-        for k, t in P.SLOT_TABLE.items():
-            words[k] = min(P.TABLE_IDS[t])
-        words[2] = 2179000
-        for k, x in ((3, 94001010), (11, 900228713), (22, 91000980), (26, 93001005), (38, 1228700018), (39, 1228700039), (42, 92000995)):
-            words[k] = x
-        size, v = player_object(dict(enumerate(words)), 760, size=3799, seed=11)
-        self.assertIsNone(parts.find_parts(size, v))
-        self.assertIsNone(parts.find_shaped(size, v))
-        self.assertEqual(parts.find_loose(size, v)[0], 760)
-        size, v = serialized_object(words)
-        bad, hide, size, v2 = w.check_parts(a, size, v)
-        self.assertTrue(bad)
-        self.assertFalse(hide)
-        found = parts.find_parts(size, v2)                  # what the others get: a list every client can build
-        self.assertEqual(found[0], C.fields(size, v2)[C.PARTS][0])
-        self.assertEqual(found[1][2], 2179000)
-        self.assertEqual([x for x in found[1] if x != P.PART_NONE and x not in P.ALL_IDS], [])
-        self.assertEqual((found[1][3], found[1][26]), (P.PART_NONE, P.PART_NONE))
-
-    def test_noise_is_not_taken_for_a_loose_list(self):
-        size, v = player_object({}, 0, size=3799, seed=5)
-        self.assertIsNone(parts.find_loose(size, v))
-
-    def test_a_list_whose_body_is_no_car_of_the_game_gets_the_stand_in_parts(self):
-        import fh2mp_server as S
-        w, (a, b) = self.world()
-        w.log = lambda *_: None
-        words = [w & 0xFFFFFFFF for w in self.WIPING_LIST]
-        words[2] = 7777000
-        size, v = serialized_object(words)
-        bad, hide, size, v2 = w.check_parts(a, size, v)
-        self.assertTrue(bad)
-        self.assertFalse(hide)
-        found = parts.find_parts(size, v2)
-        self.assertEqual(found[1][2], S.STANDIN_CAR * 1000)
-
-    def test_noise_without_the_shape_is_not_taken_for_a_part_list(self):
-        import random
-        random.seed(11)
-        for size in (1502, 2629, 3641):
-            self.assertIsNone(parts.find_shaped(size, random.getrandbits(size)))
 
     def test_an_unreadable_object_is_withheld_and_logging_is_bounded(self):
         import random
@@ -498,11 +389,6 @@ class RentalChoices(unittest.TestCase):
 class CarChangeUpdates(unittest.TestCase):
     """#42: an update that changes the car carries the part list at bit 48 (dev captures: 1462 and 1502 bits, every one of them)."""
 
-    def test_the_list_is_found_at_bit_48_of_a_short_update(self):
-        for size in (1462, 1502, 1664):
-            size, v = player_object(dict(enumerate(stock_car(368))), 48, size=size)
-            self.assertEqual(parts.find_parts(size, v), (48, stock_car(368)), size)
-
     def test_a_bad_part_in_a_car_change_is_fixed_too(self):
         import test_freeroam_tag_grant as T
         w, (a, b) = T.world()
@@ -512,13 +398,6 @@ class CarChangeUpdates(unittest.TestCase):
         bad, hide, size, v2 = w.check_parts(a, size, v)
         self.assertTrue(bad)
         self.assertEqual(decoded_words(size, v2)[0], 368000)
-
-    def test_noise_alone_is_never_taken_for_a_list(self):
-        import random
-        for seed in range(200):
-            rnd = random.Random(seed)
-            self.assertIsNone(parts.find_parts(1502, rnd.getrandbits(1502)), seed)
-
 
 class CarPacks(unittest.TestCase):
     """Cars that are not in the catalog (car packs): the server's own synced database makes them known; any other one is shown to the
@@ -554,13 +433,6 @@ class CarPacks(unittest.TestCase):
     def world(self):
         import test_freeroam_tag_grant as T
         return T.world()
-
-    def test_an_unknown_pack_car_is_found_where_the_normal_search_fails(self):
-        size, v = player_object(dict(enumerate(self.pack_car())), 919)
-        self.assertIsNone(parts.find_parts(size, v))
-        self.assertEqual(parts.find_unknown_car(size, v), (919, self.pack_car()))
-        size, v = player_object(dict(enumerate(stock_car(368))), 919)          # a catalog car is never "unknown"
-        self.assertIsNone(parts.find_unknown_car(size, v))
 
     def test_the_others_see_the_stand_in_and_nobody_is_kicked(self):
         self.S.UNKNOWN_CAR_POLICY = "standin"

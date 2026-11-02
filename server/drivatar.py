@@ -7,6 +7,7 @@
 * Builds a Drivatar for a player profile from a shipped one used as a template.
 """
 import json
+import math
 import os
 import random
 import struct
@@ -16,7 +17,25 @@ import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db  # noqa: E402
+import diag  # noqa: E402
 import xls_schema as S  # noqa: E402
+try:
+    from car_policy import KNOWN_CARS  # noqa: E402     # tools/make_car_policy.py
+except ImportError:
+    KNOWN_CARS = frozenset()
+
+LOG = diag.get("drivatar")
+_RATE = diag.RateLimit()
+
+# GetDrivatarsForCache passes 120 as count and capacity (0xa22ee0); a longer reply fails to read (0xee5450) and the client keeps no cache at all, so it
+# never reached DownloadCache.bin (0 of 20 rigs have one). A good reply is saved (0xa30310) and feeds SelectFromSkillMap 0xa2eff0, what a player races offline.
+# The file persists on the client, so each skill keeps a floor of shipped records: a thin or wrong reply cannot leave a skill empty there.
+CACHE_CAPACITY = 120
+CACHE_SHIPPED_PER_SKILL = 12
+SKILLS = range(5)
+CACHE_PLAYERS = os.environ.get("FH2MP_DRIVATAR_CACHE_PLAYERS", "1") != "0"    # 0 serves shipped records only, which replaces the client's saved file
+CARS = os.environ.get("FH2MP_DRIVATAR_CARS", "0") == "1"                      # real cars, tunes and liveries on player Drivatars
+MAX_INFO_VALUE = 1e6         # the client does not check these floats after download (o3 1.4)
 
 NATIVE = {0: "<B", 1: "<H", 2: "<h", 3: "<i", 4: "<I", 5: "<q", 6: "<Q", 0x13: "<Q", 7: "<f", 0x11: "<?"}
 REC_SIZE = 0x2650
@@ -102,6 +121,17 @@ def shipped_from_cache(sc, path):
     for i, t in enumerate(out):
         t["GamerTag"] = generated_tag(i)
     return out
+
+
+def sane_info(value):
+    """Every number in an uploaded Drivatar is finite and in range."""
+    if isinstance(value, dict):
+        return all(sane_info(v) for v in value.values())
+    if isinstance(value, list):
+        return all(sane_info(v) for v in value)
+    if isinstance(value, float):
+        return math.isfinite(value) and abs(value) <= MAX_INFO_VALUE
+    return True
 
 
 class DrivatarStore:
@@ -234,14 +264,21 @@ class DrivatarStore:
             return rec
 
     def save_upload(self, xuid, gamertag, info, curves, segments):
+        if not (sane_info(info) and sane_info(curves) and sane_info(segments)):
+            bad = [name for name, v in (("info", info), ("curves", curves), ("segments", segments)) if not sane_info(v)]
+            LOG.warn(f"Drivatar upload refused: {', '.join(bad)} hold a value that is not finite or beyond +-{MAX_INFO_VALUE:g}, xuid={xuid:#x}")
+            return False
         with self.db.tx() as c:
             rec = self._for_player(c, xuid, gamertag)
             if rec is None or rec.get("_locked"):
+                LOG.info("Drivatar upload not stored: " + ("no shipped template to build a record from" if rec is None else "the stored Drivatar is locked by the operator")
+                         + f" xuid={xuid:#x}")
                 return
             rec["UserInfo"] = info
             rec["Curves"] = curves
             rec["Segments"] = segments
             self._put(c, rec)
+        return True
 
     def set_wristband(self, xuid, wristband):
         """The car-value bucket of the car the player drives now (kept on their stored Drivatar)."""
@@ -279,7 +316,9 @@ class DrivatarStore:
             args.append(skill)
         rows = self.db.query(f"SELECT record, locked FROM drivatars WHERE {' AND '.join(where)} ORDER BY seq LIMIT ?",
                              args + [max(0, limit)])
-        players = [self._spread_wristband(self._rec(r)) for r in rows]
+        recs = list(map(self._rec, rows))
+        players = [self._spread_wristband(rec) for rec in recs if sane_info(rec.get("UserInfo"))]
+        self._note_skipped(len(recs) - len(players), "pool")
         tpl = [t for t in self.templates if skill is None or t["UserSkillLevel"] == skill]
         tpl = [t for t in tpl if t.get("Xuid") not in skip]
         if near_wristband is not None:
@@ -287,6 +326,61 @@ class DrivatarStore:
         room = max(0, limit - len(players))
         window = tpl if near_wristband is None else tpl[:max(room * 4, 40)]   # nearest car values, but not always the same ones
         chosen = random.sample(window, min(room, len(window)))
-        out = (players + chosen)[:limit]
+        out = self.with_cars((players + chosen)[:limit])
         random.shuffle(out)
+        return out
+
+    def for_cache(self, limit, exclude_xuid=0):
+        """The global cache: never more than the client holds, a floor of shipped records per skill, then recent players spread across the skills,
+        then more shipped ones."""
+        limit = min(limit, CACHE_CAPACITY)
+        shipped = []
+        for skill in SKILLS:
+            of_skill = [t for t in self.templates if t["UserSkillLevel"] == skill]
+            shipped += random.sample(of_skill, min(CACHE_SHIPPED_PER_SKILL, len(of_skill)))
+        shipped = shipped[:limit]
+        room = limit - len(shipped)
+        players = []
+        if CACHE_PLAYERS and room:
+            rows = self.db.query("SELECT record, locked FROM drivatars WHERE xuid <> ? ORDER BY updated DESC LIMIT ?", (exclude_xuid, room * 4))
+            recs = [rec for rec in map(self._rec, rows) if rec.get("GamerTag") and sane_info(rec.get("UserInfo"))]
+            self._note_skipped(len(rows) - len(recs), "cache")
+            per_skill = [[r for r in recs if r["UserSkillLevel"] == skill] for skill in SKILLS]
+            while len(players) < room and any(per_skill):
+                for of_skill in per_skill:
+                    if of_skill and len(players) < room:
+                        players.append(self._spread_wristband(of_skill.pop(0)))
+        used = {t.get("Xuid") for t in shipped}
+        rest = [t for t in self.templates if t.get("Xuid") not in used]
+        fill = random.sample(rest, min(limit - len(shipped) - len(players), len(rest)))
+        return self.with_cars(shipped + players + fill)
+
+    @staticmethod
+    def _note_skipped(n, where):
+        """Stored Drivatars left out of a reply because their numbers fail sane_info (or they have no name): the client reads them without checking."""
+        if n > 0:
+            ok, skipped = _RATE.allow(("skipped", where), 600.0)
+            if ok:
+                LOG.warn(f"{n} stored Drivatar(s) left out of the {where} reply (no name, or a value not finite or beyond +-{MAX_INFO_VALUE:g})"
+                         + (f"; {skipped} replies like it since the last line" if skipped else ""))
+
+    def with_cars(self, recs):
+        """A player's Drivatar in that player's own latest car, with their own tune and livery for it. The client checks the car against the bucket and,
+        if it does not fit, swaps it and clears both ids (ValidateRecordCars 0xa30630), so a misfit costs nothing; a shipped record has no owner and is left alone."""
+        bots = {t.get("Xuid") for t in self.templates}
+        mine = [r for r in recs if r.get("Xuid") not in bots]
+        if not CARS or not mine:
+            return recs
+        xuids = sorted({r["Xuid"] for r in mine})
+        cars = {r["xuid"]: r["car"] for r in self.db.query(
+            "SELECT DISTINCT ON (xuid) xuid, car FROM score_submissions WHERE xuid = ANY(?::bigint[]) AND car > 0 ORDER BY xuid, submitted DESC", (xuids,))}
+        content = {(r["creator"], r["car_id"], r["kind"]): r["id"] for r in self.db.query(
+            "SELECT DISTINCT ON (creator, car_id, kind) creator, car_id, kind, id FROM ugc_versioned WHERE creator = ANY(?::bigint[]) "
+            "AND kind IN ('livery', 'tune') AND refs > 0 ORDER BY creator, car_id, kind, created DESC", (xuids,))}
+        out = []
+        for r in recs:
+            car = cars.get(r.get("Xuid"))
+            if car is not None and car in KNOWN_CARS:
+                r = dict(r, CarId=car, TuneId=content.get((r["Xuid"], car, "tune"), -1), LiveryId=content.get((r["Xuid"], car, "livery"), -1))
+            out.append(r)
         return out

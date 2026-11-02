@@ -1,0 +1,7 @@
+Prepare 1.1.4 Free Roam, traffic and online-setup fixes
+
+Share traffic between players, show event progress and completion from the
+real race state, hold early joiners' objects until the handshake ends, and
+retry a stuck online setup in the shim instead of restarting the game.
+
+Add HonkHonk horns and bump the minimum launcher and shim to 1.1.4.

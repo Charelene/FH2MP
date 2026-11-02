@@ -194,12 +194,15 @@ static DWORD WINAPI lighting_worker(void *unused)
     int (WSAAPI *option)(SOCKET,int,int,const char *,int);
     int (WSAAPI *close_socket)(SOCKET);
     u_long nb=1; int v6only=0;
+    ULONGLONG polls=0; unsigned rejected=0; int silent_told=0, socket_told=0;
     (void)unused;
-    if(!ws) return 0;
+    if(!ws) {log_begin();log_raw("lighting: sync is off, ws2_32.dll could not be loaded (error ");log_dec(GetLastError());log_raw(")\n");return 0;}
     make_socket=(void *)GetProcAddress(ws,"socket"); nonblocking=(void *)GetProcAddress(ws,"ioctlsocket");
     receive=(void *)GetProcAddress(ws,"recvfrom"); option=(void *)GetProcAddress(ws,"setsockopt");
     close_socket=(void *)GetProcAddress(ws,"closesocket");
-    if(!make_socket || !nonblocking || !receive || !option || !close_socket) return 0;
+    if(!make_socket || !nonblocking || !receive || !option || !close_socket) {
+        log_begin();log_raw("lighting: sync is off, ws2_32.dll lacks socket, ioctlsocket, recvfrom, setsockopt or closesocket\n");return 0;
+    }
     while(g_light_enabled) {
         unsigned char address[28],epoch[16],packet[LIGHT_LIMIT],car,flags;
         int length, i, n, drained; ULONGLONG sampled,predicted,current_generation,now=GetTickCount64();
@@ -212,13 +215,21 @@ static DWORD WINAPI lighting_worker(void *unused)
         if(generation!=current_generation) {
             if(s!=INVALID_SOCKET) close_socket(s);
             s=INVALID_SOCKET; received=0; generation=current_generation;
+            polls=0; rejected=0; silent_told=0;
         }
         if(!length || !sampled || !predicted || now-sampled>1000 || now-predicted>1000 || !g_ticket_ready || !g_r_wsasendto) {Sleep(100);continue;}
         if(s==INVALID_SOCKET) {
             s=make_socket(*(const unsigned short *)address,SOCK_DGRAM,IPPROTO_UDP);
-            if(s==INVALID_SOCKET) {Sleep(500);continue;}
+            if(s==INVALID_SOCKET) {
+                if(!socket_told) {socket_told=1;log_begin();log_raw("lighting: could not open the poll socket, error ");log_dec(GetLastError());log_raw(", retrying every 0.5 s\n");}
+                Sleep(500);continue;
+            }
             if(*(const unsigned short *)address==AF_INET6) option(s,IPPROTO_IPV6,IPV6_V6ONLY,(const char *)&v6only,sizeof v6only);
-            if(nonblocking(s,FIONBIO,&nb)) {close_socket(s);s=INVALID_SOCKET;Sleep(500);continue;}
+            if(nonblocking(s,FIONBIO,&nb)) {
+                if(!socket_told) {socket_told=1;log_begin();log_raw("lighting: could not make the poll socket non-blocking, error ");log_dec(GetLastError());log_raw(", retrying every 0.5 s\n");}
+                close_socket(s);s=INVALID_SOCKET;Sleep(500);continue;
+            }
+            socket_told=0;
         }
         /* Drain replies from previous polls; accept delayed replies in sequence
          * order instead of requiring a round trip shorter than the poll period. */
@@ -232,13 +243,25 @@ static DWORD WINAPI lighting_worker(void *unused)
                     received=light_u64(packet+28);
                 }
                 ReleaseSRWLockExclusive(&g_light_lock);
-                if(first && received) {log_begin();log_raw("lighting: authenticated world snapshot received\n");}
-            }
+                if(first && received) {log_begin();log_raw("lighting: authenticated world snapshot received after ");log_dec(polls);log_raw(" polls\n");}
+            } else rejected++;
         }
         light_request(packet,g_ticket_key,g_xuid,++seq,epoch,car,flags);
         {
             WSABUF b; DWORD sent=0; b.len=LIGHT_REQUEST; b.buf=(char *)packet;
             g_r_wsasendto(s,&b,1,&sent,0,address,length,NULL,NULL);
+        }
+        if(++polls%100==0) {
+            /* every 10 s: said once when the server never answered, and when replies arrived but were refused (bad MAC, old sequence, bad layout) */
+            if(!received && !silent_told) {
+                silent_told=1;
+                log_begin();log_raw("lighting: no snapshot reply to ");log_dec((unsigned long)polls);
+                log_raw(" polls in 10 s, the server does not answer lighting polls (server without lighting, or UDP replies blocked); other players' lights stay as the game has them\n");
+            }
+            if(rejected) {
+                log_begin();log_raw("lighting: ");log_dec(rejected);log_raw(" reply datagram(s) refused in the last 10 s (not a valid, authentic, in-sequence snapshot for this session)\n");
+                rejected=0;
+            }
         }
         Sleep(100);
     }
@@ -255,16 +278,29 @@ static int patch_lighting(void)
         {0xf7bcc0,{0x48,0x8b,0xc4,0x55,0x56,0x57,0x41,0x54}},
     };
     g_light_image=find_fh2_image(); if(!g_light_image || !g_ticket_ready) return 0;
-    for(i=0;i<sizeof checks/sizeof checks[0];i++)
-        if(!mem_equal(g_light_image+checks[i].rva,checks[i].bytes,8)) {log_begin();log_raw("lighting: unexpected native bytes, disabled\n");return 0;}
+    for(i=0;i<sizeof checks/sizeof checks[0];i++) {
+        static const char *const names[]={"the local prediction sender","the remote prediction receiver","the light material publisher","the headlight animator"};
+        unsigned k;
+        for(k=0;k<8 && g_light_image[checks[i].rva+k]==checks[i].bytes[k];k++) {}
+        if(k<8) {
+            log_begin();log_raw("lighting: unexpected bytes in ");log_raw(names[i]);log_raw(" at game+0x");log_hex(checks[i].rva+k,8);
+            log_raw(" (first difference at +");log_dec(k);log_raw(" of 8): expected ");log_hex(checks[i].bytes[k],2);
+            log_raw(", found ");log_hex(g_light_image[checks[i].rva+k],2);log_raw("; not enabled\n");
+            return 0;
+        }
+    }
     if(!plat_hook("lighting: local prediction sample",g_light_image+0x1808170,(void *)lighting_send,(void **)&g_light_send_original) ||
        !plat_hook("lighting: remote prediction identity",g_light_image+0x9c7300,(void *)lighting_receive,(void **)&g_light_receive_original) ||
        !plat_hook("lighting: light material publication",g_light_image+0xf5c900,(void *)lighting_publish,(void **)&g_light_publish_original) ||
        !plat_hook("lighting: headlight animation parameter",g_light_image+0xf7bcc0,(void *)lighting_animation,(void **)&g_light_animation_original)) return 0;
     InterlockedExchange(&g_light_enabled,1);
     thread=CreateThread(NULL,0,lighting_worker,NULL,0,NULL);
-    if(!thread) {InterlockedExchange(&g_light_enabled,0);return 0;}
+    if(!thread) {
+        DWORD err=GetLastError();
+        InterlockedExchange(&g_light_enabled,0);
+        log_begin();log_raw("lighting: not enabled, the poll thread could not be created, error ");log_dec(err);log_raw(" (the four hooks stay in place but do nothing)\n");
+        return 0;
+    }
     CloseHandle(thread);
-    log_begin();log_raw("lighting: authenticated visual sync enabled (native physics unchanged)\n");
     return 1;
 }

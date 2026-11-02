@@ -16,7 +16,10 @@ import json
 import random
 import time
 
+import diag
 import rentals
+
+LOG = diag.get("rivals")
 
 CLASS_LETTERS = ("D", "C", "B", "A", "S1", "S2")
 ERAS = ((None, 1969, "Classics"), (1970, 1989, "Retro Icons"), (1990, 1999, "90s Heroes"), (2000, 2009, "2000s Icons"),
@@ -55,6 +58,7 @@ def conditions(tod, weather_adj):
     return f"{'an' if weather_adj[0] in 'aeiou' else 'a'} {weather_adj} {word}"
 ID_BASE = 1000
 EPOCH = (2026, 1)
+SERIAL_CACHE_SECONDS = 30   # GetTimeTrials and every board page ask; another process may re-roll, which then shows within this time
 
 
 # CarRestrictions attribute -> (v_cars column, SQL operator). Names follow the exe's option table [inferred].
@@ -104,8 +108,9 @@ class RivalCatalog:
         if getattr(self, "_rentals", None) is None:
             try:
                 self._rentals = {r[0] for r in self.cars.db.execute("SELECT CarId FROM RentalCars")}
-            except Exception:  # noqa: BLE001 - a catalog without the table: no rental check
+            except Exception as e:  # noqa: BLE001 - a catalog without the table: no rental check
                 self._rentals = set()
+                LOG.warn(f"RentalCars could not be read from the catalog, so events are generated without a rental check and may offer nobody a car: {diag.where(e)}")
         return self._rentals
 
     def usable_themes(self):
@@ -117,6 +122,9 @@ class RivalCatalog:
             rent = self.rentals()
             if rent:
                 ok = [t for t in themes if rentals.enough({r[0] for r in self.cars_for(t["attrs"])}, rent)]
+                if not ok:
+                    LOG.warn(f"no theme has {rentals.RENTAL_MIN} rentals in the catalog's {len(rent)} RentalCars rows: all {len(themes)} themes stay in use "
+                             "and some events will offer a player without a fitting car nothing to drive")
                 themes = ok or themes
             self._usable = themes
         return self._usable
@@ -183,11 +191,17 @@ class RivalCatalog:
         """(month index since 2026-01, re-roll counter of that month)."""
         d = now or datetime.date.today()
         month = (d.year - EPOCH[0]) * 12 + d.month - EPOCH[1]
+        cached = self.__dict__.get("_serial")
+        clock = time.monotonic()
+        if now is None and cached and cached[0] == month and clock - cached[2] < SERIAL_CACHE_SECONDS:
+            return month, cached[1]
         stored = self.database.one("SELECT value FROM meta WHERE key='rival_reroll'") if self.database else None
         n = 0
         if stored:
             m, _, c = stored["value"].partition(":")
             n = int(c) if int(m) == month else 0
+        if now is None:
+            self._serial = (month, min(n, 9), clock)
         return month, min(n, 9)
 
     def rotate(self):
@@ -197,7 +211,7 @@ class RivalCatalog:
             with self.database.tx() as c:
                 c.execute("INSERT INTO meta (key, value) VALUES ('rival_reroll', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                           (f"{month}:{min(n + 1, 9)}",))
-        self._cache = None
+        self._cache = self._serial = None
         return self.events()
 
     def _row(self, r):

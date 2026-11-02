@@ -258,10 +258,45 @@ class SessionTests(AuthCase):
         t = self.login()
         self.svc.authenticate(t, "203.0.113.5")
         self.svc.set_banned(self.acct.xuid, "cheating")
-        self.assertEqual(self.code(self.svc.authenticate, t, "203.0.113.5"), "invalid_token")
+        self.assertEqual(self.code(self.svc.authenticate, t, "203.0.113.5"), "banned")            # the session stays so the game can be told why
         self.assertEqual(self.code(self.svc.login, **self.d.login_args(self.svc)), "banned")
         self.svc.set_banned(self.acct.xuid, None)
         self.login()
+
+    def test_temporary_ban_lapses_by_itself(self):
+        t = self.login()
+        self.svc.authenticate(t, "203.0.113.5")
+        self.svc.set_banned(self.acct.xuid, "cheating", until=self.clock.t + 7 * 86400)
+        self.assertEqual(self.code(self.svc.login, **self.d.login_args(self.svc)), "banned")
+        self.clock.t += 7 * 86400 - 1
+        self.assertEqual(self.code(self.svc.login, **self.d.login_args(self.svc)), "banned")
+        self.clock.t += 2
+        t = self.login()                                                        # no unban call needed
+        self.assertEqual(self.svc.authenticate(t, "203.0.113.5").xuid, self.acct.xuid)
+
+    def test_the_ban_message_has_the_end_date_and_the_reason(self):
+        self.svc.set_banned(self.acct.xuid, "cheating", until=1_800_086_400)
+        with self.assertRaises(auth.AuthError) as cm:
+            self.svc.login(**self.d.login_args(self.svc))
+        self.assertEqual(cm.exception.message, "This account is banned until 2027-01-16 08:00 UTC. Reason: cheating")
+        self.svc.set_banned(self.acct.xuid, "cheating")
+        with self.assertRaises(auth.AuthError) as cm:
+            self.svc.login(**self.d.login_args(self.svc))
+        self.assertEqual(cm.exception.message, "This account is banned permanently. Reason: cheating")
+
+    def test_a_banned_xuid_is_refused_without_a_token_until_the_ban_ends(self):
+        self.assertIsNone(self.svc.ban_text(self.acct.xuid))
+        self.svc.set_banned(self.acct.xuid, "cheating", until=self.clock.t + 3600)
+        self.assertIn("banned until", self.svc.ban_text(self.acct.xuid))
+        self.clock.t += 3601
+        self.assertIsNone(self.svc.ban_text(self.acct.xuid))                # lapsed (the cached answer ages out at once too)
+        self.svc.set_banned(self.acct.xuid, "cheating")
+        self.assertIn("permanently", self.svc.ban_text(self.acct.xuid))
+        self.svc.set_banned(self.acct.xuid, None)
+        self.assertIsNone(self.svc.ban_text(self.acct.xuid))                # an unban shows at once
+
+    def test_ban_must_end_in_the_future(self):
+        self.assertEqual(self.code(self.svc.set_banned, self.acct.xuid, "x", self.clock.t - 1), "bad_request")
 
     def test_logout(self):
         t = self.login()
@@ -546,7 +581,7 @@ class HttpTests(unittest.TestCase):
     def test_admin_is_not_reachable_through_the_proxy(self):
         self.assertEqual(self.req("GET", "/api/players")[0], 200)
         self.assertEqual(self.req("GET", "/api/players", {"X-Real-IP": "198.51.100.77"})[0], 403)
-        self.assertEqual(self.req("GET", "/admin/list", {"X-Forwarded-For": "198.51.100.77"})[0], 403)
+        self.assertEqual(self.req("GET", "/admin/rivals", {"X-Forwarded-For": "198.51.100.77"})[0], 403)
 
     def test_status_over_http(self):
         st, body = self.req("GET", "/v1/status")

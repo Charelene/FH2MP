@@ -210,6 +210,9 @@ class SaveTests(unittest.TestCase):
         lc.repair_tls_helper = mock.Mock()
         lc.ensure_extra_options = mock.Mock()
         lc.extra_state = mock.Mock(return_value=(True, "", ""))
+        lc.ensure_honk = mock.Mock()
+        lc.honk_state = mock.Mock(return_value=(True, ""))
+        lc.ensure_controls = mock.Mock()
         lc.ensure_game = mock.Mock()
         lc.sign_in = mock.Mock(return_value={"xuid": 123})
         with mock.patch.object(core.shim, "enable"), mock.patch.object(core.azimuth, "has_game_configured", return_value=True), \

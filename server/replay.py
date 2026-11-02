@@ -13,8 +13,8 @@ SEQ_MOD = 0xFF
 
 # router -> (variable id bits, {variable id: value bits}) of the variables whose updates are safe to supersede: state, not events.
 # Router 1 = the player object (LobbyPlayer + PlayerChoices): 12 Ready, 16 InitialCarLoading, 19 PlayerStatus, 27 XP (float), 28, 32 HasInitialCarBeenChosen,
-# 41 a 64-bit id that flips between xuids. Seen as single-variable updates in the dev captures (size = id bits + value bits).
-SINGLE_VARS = {1: (8, {12: 1, 16: 1, 19: 4, 27: 32, 28: 32, 32: 1, 41: 64})}
+# 41 a 64-bit id that flips between xuids, 5 PlayerData.IsLeader (the server's leader flag, written on and off). Seen as single-variable updates in the dev captures (size = id bits + value bits).
+SINGLE_VARS = {1: (8, {5: 1, 12: 1, 16: 1, 19: 4, 27: 32, 28: 32, 32: 1, 41: 64})}
 
 
 def single_var(router, size, payload):

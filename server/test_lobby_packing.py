@@ -10,6 +10,49 @@ import fh2mp_server as S  # noqa: E402
 import xbl  # noqa: E402
 
 
+GUID = "11111111-2222-3333-4444-555555555555"
+
+
+class LobbyDocument(unittest.TestCase):
+    """The first ticket session seeds the lobby every later joiner parses (0x183bb50), so only checked keys may pass."""
+    def test_a_normal_ticket_session_keeps_what_the_game_reads(self):
+        custom = xbl._lobby_custom({"hopperId": 7, "EnableFullArbitration": True,
+                                    "gameServerPlatform": {"gameVariantId": GUID, "gsiSetId": GUID, "location": "east"}}, {})
+        self.assertEqual(custom, {"hopperId": 7, "EnableFullArbitration": True,
+                                  "gameServerPlatform": {"gameVariantId": GUID, "gsiSetId": GUID, "location": "east",
+                                                         "maxAllowedPlayers": xbl.LOBBY_CAPACITY}})
+
+    def test_hostile_values_become_the_defaults(self):
+        for bad in (None, 5, "x", [], {"gameServerPlatform": "x"}, {"hopperId": "1", "EnableFullArbitration": 1, "extra": {"a": 1},
+                    "gameServerPlatform": {"gameVariantId": 5, "gsiSetId": "' OR", "location": {"a": 1}, "maxAllowedPlayers": 999, "x": 1}}):
+            custom = xbl._lobby_custom(bad, {"hopperId": 3})
+            self.assertEqual(set(custom), {"hopperId", "gameServerPlatform"}, bad)
+            self.assertEqual(custom["hopperId"], 3)
+            self.assertEqual(set(custom["gameServerPlatform"]), {"gameVariantId", "gsiSetId", "maxAllowedPlayers"}, bad)
+            self.assertEqual(custom["gameServerPlatform"]["maxAllowedPlayers"], xbl.LOBBY_CAPACITY)
+
+    def test_the_gsi_set_falls_back_to_the_ticket_attributes(self):
+        self.assertEqual(xbl._lobby_custom(None, {"gsiSetId": GUID})["gameServerPlatform"]["gsiSetId"], GUID)
+
+    def test_a_hostile_seed_does_not_reach_the_lobby(self):
+        xbl._SESSIONS.clear()
+        xbl._SESSIONS[("s", "t", "n")] = {"constants": {"custom": {"gameServerPlatform": {"gsiSetId": 5}, "x": 1}}}
+        name = xbl._new_lobby("s", {}, {"scid": "s", "templateName": "t", "name": "n"})
+        rec = xbl._SESSIONS[("s", xbl.TARGET_TEMPLATE.lower(), name.lower())]
+        self.assertNotIn("x", rec["constants"]["custom"])
+        self.assertTrue(xbl._GUID.fullmatch(rec["constants"]["custom"]["gameServerPlatform"]["gsiSetId"]))
+        xbl._SESSIONS.clear()
+
+
+class TicketsDoNotQueue(unittest.TestCase):
+    def test_the_lobby_lock_is_free_while_the_game_server_is_asked(self):
+        orig, held = xbl.hub_populations, []
+        xbl.hub_populations = lambda: held.append(xbl._LOBBY_LOCK.locked()) or {}
+        self.addCleanup(setattr, xbl, "hub_populations", orig)
+        xbl._lobby_for("s", "h", {}, None, "1000")
+        self.assertEqual(held, [False])
+
+
 class Packing(unittest.TestCase):
     def setUp(self):
         xbl._SESSIONS.clear()
@@ -97,6 +140,80 @@ class Packing(unittest.TestCase):
         again = xbl._lobby_for("s", "h", {}, None, "1001")
         self.assertEqual(sum(1 for r in xbl._RESERVED.values() if "1001" in r), 1)
         self.assertEqual(again, a)
+
+
+class NeverBackIntoTheLobbyBeingLeft(unittest.TestCase):
+    """A search started inside a lobby, or right after leaving one, is never matched back into it (dev 2026-11-01: "Unable to join
+    session" at 22:31:03, a 111 s stall at 21:34:40), while a player whose game dropped still goes back to its friends."""
+    def setUp(self):
+        xbl._SESSIONS.clear()
+        xbl._LOBBIES.clear()
+        xbl._RESERVED.clear()
+        xbl._LEFT.clear()
+        self.present = {}
+        self.orig = xbl.hub_populations
+        xbl.hub_populations = lambda: {n: ["%x" % x for x in xs] for n, xs in self.present.items()}
+        self.addCleanup(setattr, xbl, "hub_populations", self.orig)
+        self.addCleanup(xbl._LEFT.clear)
+
+    def match(self, xuid, connect=True):
+        name = xbl._lobby_for("s", "h", {}, None, str(xuid))
+        if connect:
+            for xs in self.present.values():
+                xs.discard(xuid)
+            self.present.setdefault(name, set()).add(xuid)
+        return name
+
+    def leave(self, xuid, name):
+        path = "/serviceconfigs/s/sessionTemplates/%s/sessions/%s" % (xbl.TARGET_TEMPLATE, name)
+        status, _doc = xbl.put_session(path, b'{"members": {"me": null}}', xuid=str(xuid))
+        self.assertEqual(status, 200)
+
+    def join_mpsd(self, xuid, name):
+        path = "/serviceconfigs/s/sessionTemplates/%s/sessions/%s" % (xbl.TARGET_TEMPLATE, name)
+        body = b'{"members": {"me": {"properties": {"system": {"active": true}}}}}'
+        self.assertEqual(xbl.put_session(path, body, xuid=str(xuid))[0], 200)
+
+    def test_a_search_from_inside_a_lobby_gets_another_one(self):
+        a = self.match(1001)
+        self.assertEqual(self.match(1002), a)                   # the second player joins the first
+        self.join_mpsd(1002, a)
+        again = xbl._lobby_for("s", "h", {}, None, "1002")      # 1002 searches again while still connected to a
+        self.assertNotEqual(again, a)
+        self.assertNotIn("1002", xbl._SESSIONS[("s", "defaulttemplate", a.lower())]["members"], "its seat in a is released at once")
+
+    def test_a_search_right_after_leaving_gets_another_one(self):
+        a = self.match(1001)
+        self.match(1002)
+        self.join_mpsd(1002, a)
+        self.leave(1002, a)
+        self.present[a].discard(1002)                           # its connection is gone too: only the MPSD leave tells
+        self.assertNotEqual(xbl._lobby_for("s", "h", {}, None, "1002"), a)
+        self.assertEqual(xbl._lobby_for("s", "h", {}, None, "1003"), a, "other players still fill it")
+
+    def test_the_rule_runs_out(self):
+        a = self.match(1001)
+        self.match(1002)
+        self.join_mpsd(1002, a)
+        self.leave(1002, a)
+        self.present[a].discard(1002)
+        lobby, t = xbl._LEFT["1002"]
+        xbl._LEFT["1002"] = (lobby, t - xbl.LEFT_AVOID_SECONDS - 1)
+        self.assertEqual(xbl._lobby_for("s", "h", {}, None, "1002"), a)
+        self.assertNotIn("1002", xbl._LEFT)
+
+    def test_a_dropped_player_goes_back_to_its_friends(self):
+        a = self.match(1001)
+        self.match(1002)
+        self.join_mpsd(1002, a)                                 # stays an MPSD member: the game crashed, no leave was written
+        self.present[a].discard(1002)
+        self.assertEqual(xbl._lobby_for("s", "h", {}, None, "1002"), a)
+
+    def test_leaving_a_qos_ticket_session_is_not_leaving_a_lobby(self):
+        path = "/serviceconfigs/s/sessionTemplates/defaultTemplate_qos/sessions/%s" % GUID
+        self.assertEqual(xbl.put_session(path, b'{"members": {"me": {}}}', xuid="1002")[0], 200)
+        self.assertEqual(xbl.put_session(path, b'{"members": {"me": null}}', xuid="1002")[0], 200)
+        self.assertNotIn("1002", xbl._LEFT)
 
 
 class HubReport(unittest.TestCase):

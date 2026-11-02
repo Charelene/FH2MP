@@ -17,6 +17,7 @@ Usage: python3 -I server/fh2mp_lsp.py [port]
        the server itself never reads game files. Also: FH2MP_LSP_BIND (listen address, default 127.0.0.1), FH2MP_PUBLIC_HOST /
        FH2MP_GAME_PORT (the game server address handed to clients).
 """
+import itertools
 import json
 import math
 import os
@@ -24,7 +25,6 @@ import re
 import struct
 import sys
 import time
-import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -36,7 +36,6 @@ import xp_audit  # noqa: E402
 import rivals  # noqa: E402
 import ugc  # noqa: E402
 import pngtool  # noqa: E402
-import xls_schema as S  # noqa: E402
 import cardb  # noqa: E402
 import db  # noqa: E402
 import notifstore  # noqa: E402
@@ -44,14 +43,19 @@ import clubs  # noqa: E402
 import social  # noqa: E402
 import xbl  # noqa: E402
 import auth  # noqa: E402
+import diag  # noqa: E402
 import gamedb_sync  # noqa: E402
 import home  # noqa: E402
 import crash_reports  # noqa: E402
 import launcher_api  # noqa: E402
 import ops_api  # noqa: E402
 import site_stats  # noqa: E402
+try:
+    import parts as parts_check  # noqa: E402     # part ids of the game data (the same catalog the game server checks lobby cars with)
+except ImportError:
+    parts_check = None
 
-SEQ = 0
+_SEQ = itertools.count(1)   # request numbers: next() is atomic, a plain `SEQ += 1` handed two threads the same number
 SC = None
 STATE = {}
 CTX = threading.local()   # per-request: xuid (from the session token; X-UserId only for legacy clients), authed, tag
@@ -66,21 +70,78 @@ SOCIAL = None             # social.SocialStore
 AUTH = None               # auth.AuthService (accountless identity, server/auth.py)
 LAUNCHER = None           # launcher_api.Ctx
 OPS = ops_api.OpsConfig() # operator API access (token + allowed addresses), see ops_api.py; replaced from the environment in setup_auth
-# The client shows a club's level as clubXP / 100 + 1 (578 for 57713 XP, seen in game), and the club XP is what its members earned since they
-# joined: a one-member club of a level-41 player reads 480. FH2MP_CLUB_XP_DIVISOR scales the XP sent (12 puts a solo club near its member's level).
-CLUB_XP_DIVISOR = max(1, int(os.environ.get("FH2MP_CLUB_XP_DIVISOR", "1")))
+# The pause menu reads the club XP as clubXP * 10000 (c18640) and shows level = min(9999, XP / 1,000,000 + 1) (c16a70, the club
+# leaderboards use the same function on the score), so clubXP is the XP in units of 10000: 45,558,854 XP is clubXP 4555, level 46, as on the board.
+# Sent raw, any large club reads 9999. FH2MP_CLUB_XP_DIVISOR overrides the unit.
+CLUB_XP_DIVISOR = max(1, int(os.environ.get("FH2MP_CLUB_XP_DIVISOR", "10000")))
 LEVELS = {}               # xuid -> currentCareerLevel as sent at Logon (career XP, NOT display level)
 TAGS = {}                 # xuid -> gamertag, learned at Logon
 
 
-def log(msg):
+VERBOSITY = diag.Verbosity()     # FH2MP_LOG_LEVEL / FH2MP_LOG_SUB
+RATE = diag.RateLimit()
+
+
+def log(msg, level="INFO", sub=None):
     """One log line. A line the handler of a request writes below its "#N POST ..." line (indented two spaces) carries that request's number
     too: the server handles requests in parallel threads, so before this "-> error result" and "no such livery" lines could not be
-    matched to the player whose request they answered (prod 2026-10-29)."""
+    matched to the player whose request they answered (prod 2026-10-29). INFO carries no level word (xp_audit and others parse these
+    lines); WARN / ERROR / DEBUG start with theirs. See diag.py."""
+    if not VERBOSITY.enabled(level, sub):
+        return
     seq = getattr(CTX, "seq", None)
     if seq and msg.startswith("  ") and not msg.startswith("  #"):
         msg = f"  #{seq}{msg[1:]}"
-    print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
+    print(f"{time.strftime('%H:%M:%S')} {'' if level == 'INFO' else level + ' '}{diag.scrub(msg)}", flush=True)
+
+
+def warn(msg, sub=None):
+    log(msg, "WARN", sub)
+
+
+def _module_sink(level, sub, msg):
+    """Lines of modules with a diag.get() logger. Written while a request is being served they get its number, like the LSP's own indented lines."""
+    if getattr(CTX, "seq", None) and not msg.startswith("  "):
+        msg = "  " + msg
+    log(msg, level, sub)
+
+
+diag.set_sink(_module_sink)          # modules with a diag.get() logger write to this log
+
+
+def log_exc(msg, exc, level="ERROR"):
+    """A caught exception: what was being done, then type, message and innermost frame; the stack follows at ERROR."""
+    log(f"{msg}: {diag.where(exc)}", level)
+    if level == "ERROR":
+        for row in diag.stack(exc).splitlines():
+            log("  " + row, "ERROR")
+
+
+def log_every(key, interval, msg, level="WARN", sub=None):
+    """A repeating condition: one line per `interval` seconds per key, saying how many it stood in for."""
+    ok, skipped = RATE.allow(key, interval)
+    if ok:
+        log(msg + (f" (and {skipped} more in the last {interval:.0f} s)" if skipped else ""), level, sub)
+
+
+def call_name(headers):
+    """`Notifications.RetrieveForUser`, or the host for an Xbox Live call: what a request is for, from its headers."""
+    cls = (headers.get("X-ClassName", "") or "").split(",")[0].strip().rsplit(".", 1)[-1]
+    method = headers.get("X-Method", "") or ""
+    return f"{cls}.{method}" if cls and method else (method or headers.get("X-FH2MP-Host", "") or "?")
+
+
+def _shim():
+    """The shim version of the request being served, for log lines."""
+    return getattr(CTX, "shim", "") or "(none)"
+
+
+def claimed_xuid(headers):
+    """The X-UserId a request claims (not verified: the number of a tokenless request), 0 when absent or unreadable."""
+    try:
+        return int(headers.get("X-UserId", "0"), 0)
+    except ValueError:
+        return 0
 
 
 def candidates(cls, method, suffix):
@@ -120,7 +181,9 @@ def logon(req):
     LEVELS[lg["xuid"]] = lg["currentCareerLevel"]
     with DB.tx() as c:
         db.touch_player(c, lg["xuid"], lg["gamerTag"], level=lg["currentCareerLevel"])
-    log(f"  Logon xuid={lg['xuid']:#x} tag={lg['gamerTag']!r} lcid={lg['LCID']}")
+    log(f"  Logon xuid={lg['xuid']:#x} tag={lg['gamerTag']!r} lcid={lg['LCID']} " + diag.kv(
+        shim=getattr(CTX, "shim", "") or "(none)", signed_in=bool(getattr(CTX, "authed", False)), own_cars=bool(getattr(CTX, "own_cars", False)) or None,
+        career_xp=lg["currentCareerLevel"]))
     r = xls.default_struct(SC, SC.sub(SC.call_struct("ForzaUserLogon_Results")[0]))
     r.update({
         "isProfileValid": True,
@@ -149,6 +212,8 @@ def logon(req):
 # ---------------------------------------------------------------- notifications (Message Center)
 
 POLL_SECONDS = 5
+POLL_IDLE_SECONDS = 20       # 72 players at 5 s were 14 queries a second for a list that rarely changes
+POLL_BUSY_WINDOW = 60        # back to POLL_SECONDS for this long after any notification changes
 # The hosts through which a client finds or joins other people (matchmaking, session documents, the game servers it is sent to).
 MULTIPLAYER_HOSTS = ("momatch.xboxlive.com", "sessiondirectory.xboxlive.com", "gameserverds.xboxlive.com", "gameserverms.xboxlive.com")
 MSG_TYPE = 0x200    # notificationType carrying MessageNotificationParameters (to be confirmed in game)
@@ -165,7 +230,7 @@ NOTIF_STRUCTS = {
     0x600: "BannedNotificationParameters", 0x601: "UnbannedNotificationParameters",
     0x602: "MessageNotificationParameters",
     0x8000: "UserBadgeGrantedNotificationParameters", 0x8001: "SetCreditsNotificationParameters",
-    0x8301: "SharedCarNotificationParameters", 0x8302: "CurationPayoutNotificationParameters",
+    0x8302: "CurationPayoutNotificationParameters",
     0x8303: "DrivatarPayoutNotificationParameters", 0x8401: "MessageNotificationParameters",
     0x8402: "TimeTrialRecommendNotificationParameters", 0x8403: "TimeTrialTimeBeatenNotificationParameters",
     0x8500: "GiftReceiveMoneyNotificationParameters", 0x8501: "GiftReceiveItemNotificationParameters",
@@ -249,10 +314,39 @@ def _visible():
     return NOTIF.visible(getattr(CTX, "xuid", 0))
 
 
+NOTIF_MAX_RESULTS, NOTIF_MAX_BLOCK = 0x200, 0xc800     # what the client asks for (0xf0c3f0)
+
+
+_NOTIF_REPLIES = {}          # (xuid, limit, room) -> (NOTIF.generation, reply): rebuilt only after something changed
+_NOTIF_CHANGE = [None, 0.0]  # the generation last seen, and when it changed
+NOTIF_REPLIES_MAX = 4096
+
+
 def notif_retrieve(req):
-    results, block = [], bytearray()
-    vis = _visible()
-    for n in vis:
+    limit = (req or {}).get("maxResults") or NOTIF_MAX_RESULTS
+    room = (req or {}).get("cbParameterBlockSize") or NOTIF_MAX_BLOCK
+    key, generation = (getattr(CTX, "xuid", 0), limit, room), (NOTIF, NOTIF.generation)
+    now = time.monotonic()
+    if generation != _NOTIF_CHANGE[0]:
+        _NOTIF_CHANGE[:] = generation, now
+    poll = POLL_SECONDS if now - _NOTIF_CHANGE[1] < POLL_BUSY_WINDOW else POLL_IDLE_SECONDS
+    cached = _NOTIF_REPLIES.get(key)
+    if cached is not None and cached[0] == generation:
+        return dict(cached[1], nextRetrieveSeconds=poll)
+    reply = _notif_reply(limit, room)
+    if len(_NOTIF_REPLIES) >= NOTIF_REPLIES_MAX:
+        _NOTIF_REPLIES.clear()
+    _NOTIF_REPLIES[key] = generation, reply
+    return dict(reply, nextRetrieveSeconds=poll)
+
+
+def _notif_reply(limit, room):
+    """Newest first up to the client's limits, in id order: broadcasts never expire and club notices are never cleared."""
+    results, blocks = [], []
+    vis = []
+    for n in reversed(_visible()):
+        if len(vis) >= limit:
+            break
         fields = notif_fields(n["type"])
         val = xls.default_struct(SC, fields)
         if "Message" in val:
@@ -263,13 +357,21 @@ def notif_retrieve(req):
             val["OfferId"] = n["sra"]
         val.update(n.get("params", {}))
         pb = xls.encode(SC, fields, val)
+        if len(pb) > room:
+            log_every(("notif-room", getattr(CTX, "xuid", 0)), 600, f"  notifications cut: {len(vis)} delivered (newest first), the next one (type {n['type']:#x}, {len(pb)} bytes) does not fit "
+                      f"the {room} bytes left in the client's parameter block; it and the older ones are not delivered", "WARN")
+            break
+        room -= len(pb)
+        vis.append(n)
+        blocks.append(pb)
         results.append({"id": n["id"], "xuidRecipient": n.get("xuid", 0), "notificationType": n["type"],
                         "hasThumbnail": False, "isRead": n["read"], "deleteAction": 0,
                         "expirationDate": filetime(time.time() + 86400 * 365), "sentDate": n["sent"],
                         "cbParameters": len(pb)})
-        block += pb
-    return {"results": results, "parameterBlock": bytes(block), "nextRetrieveSeconds": POLL_SECONDS,
-            "reconcileActiveNotifications": True, "activeNotificationIds": [n["id"] for n in vis]}
+    vis.reverse()
+    results.reverse()
+    return {"results": results, "parameterBlock": b"".join(reversed(blocks)), "reconcileActiveNotifications": True,
+            "activeNotificationIds": [n["id"] for n in vis]}
 
 
 OUTDATED_NOTICE_ID = 0x7FFFFF00      # never stored: only out-of-date clients see it
@@ -280,32 +382,44 @@ def outdated_notice(need):
     """The Message Center reply for a client below minShim, in place of the HTTP 426 its game cannot show: prod 2026-10-28, ~33k refused
     requests a day from shims 1.0.0-rc4 to 1.1.1, and those players saw only "network error". Shown on the Community News page
     (type 0x200, confirmed visible 2026-10-16); whether the game also raises a pop-up for it is unverified."""
-    ntype = 0x200
+    return single_notice(OUTDATED_NOTICE_ID, 0x200,
+                         f"FH2MP is out of date, so online play is off. Close the game, open the FH2MP launcher and press Play: "
+                         f"it updates FH2MP to {need}. Starting azimuth.exe directly skips the update.")
+
+
+BAN_NOTICE_ID = 0x7FFFFF01
+_BAN_NOTICE_SENT = filetime()
+
+
+def ban_notice(message):
+    """The Message Center reply for a banned player's poll: the one message in the Messages tab (type 0x602) with the end date and
+    reason. The session survives a ban for exactly this: every other call is refused with 403 "banned". Not seen in game yet."""
+    return single_notice(BAN_NOTICE_ID, 0x602, message, _BAN_NOTICE_SENT)
+
+
+def single_notice(nid, ntype, text, sent=None):
+    """A Notifications.RetrieveForUser reply holding one notice that is never stored, framed for the wire."""
     fields = notif_fields(ntype)
     val = xls.default_struct(SC, fields)
-    val["Message"] = (f"FH2MP is out of date, so online play is off. Close the game, open the FH2MP launcher and press Play: "
-                      f"it updates FH2MP to {need}. Starting azimuth.exe directly skips the update.")
+    val["Message"] = text
     pb = xls.encode(SC, fields, val)
-    result = {"results": [{"id": OUTDATED_NOTICE_ID, "xuidRecipient": 0, "notificationType": ntype, "hasThumbnail": False,
+    result = {"results": [{"id": nid, "xuidRecipient": 0, "notificationType": ntype, "hasThumbnail": False,
                            "isRead": False, "deleteAction": 0, "expirationDate": filetime(time.time() + 86400),
-                           "sentDate": _OUTDATED_SENT, "cbParameters": len(pb)}],
+                           "sentDate": _OUTDATED_SENT if sent is None else sent, "cbParameters": len(pb)}],
               "parameterBlock": pb, "nextRetrieveSeconds": 60, "reconcileActiveNotifications": True,
-              "activeNotificationIds": [OUTDATED_NOTICE_ID]}
+              "activeNotificationIds": [nid]}
     _name, rfields = find_struct("Xls.WebServices.Notifications, Xls.WebServices", "RetrieveForUser", "_Results")
     return frame(xls.encode(SC, rfields, result))
-
-
-def outdated_logon():
-    """Logon for a client below minShim: the schema's empty result and nothing else. Its first call is Logon, and a refused Logon made the game
-    retry it with growing pauses and never poll the Message Center (prod 2026-10-29: refusals back off 2, 3, 4, 9, 16 s, then every 2 minutes).
-    Nothing is registered: no session, no UDP ticket, no profile; every other call it makes is still refused."""
-    _name, rfields = find_struct("Forza.WebServices.User, Forza.WebServices", "Logon", "_Results")
-    return frame(xls.encode(SC, rfields, xls.default_struct(SC, rfields)))
 
 
 def notif_mark_read(req):
     NOTIF.mark_read(getattr(CTX, "xuid", 0), req["notificationId"])
     return None
+
+
+def notif_new_session(req):
+    # The default result says "poll again in 0 s", a tight loop (0xf0c4b0). Logon normally supplies these, this call is the client's fallback.
+    return {"nonce": 1, "nextRetrieveSeconds": POLL_SECONDS}
 
 
 def notif_clear(req):
@@ -315,6 +429,61 @@ def notif_clear(req):
 
 # ---------------------------------------------------------------- drivatars
 
+class AuthShare:
+    """Requests with and without a session token, one log line an hour: the number that decides FH2MP_AUTH=required."""
+
+    def __init__(self, period=3600, clock=time.monotonic, sink=None):
+        self.period, self.clock, self.sink = period, clock, sink
+        self.lock = threading.Lock()
+        self.start = clock()
+        self.counts, self.players = [0, 0], [set(), set()]
+
+    def note(self, xuid, authed):
+        line = None
+        with self.lock:
+            now = self.clock()
+            if now - self.start >= self.period:
+                line = (f"auth share: last hour {self.counts[1]} requests with a token from {len(self.players[1])} players, "
+                        f"{self.counts[0]} without from {len(self.players[0])}")
+                self.start, self.counts, self.players = now, [0, 0], [set(), set()]
+            self.counts[bool(authed)] += 1
+            self.players[bool(authed)].add(xuid)
+        if line:
+            (self.sink or log)(line)
+
+
+AUTH_SHARE = AuthShare()
+SOCIAL_HOSTS = ("profile.xboxlive.com", "social.xboxlive.com", "peoplehub.xboxlive.com", "userpresence.xboxlive.com")
+
+
+class PollShare:
+    """The Message Center and friends polls (a request every 5-60 s from every player) are counted, not listed: one line per period with how many
+    requests came from how many players. Their request lines are DEBUG (FH2MP_LOG_SUB=poll=DEBUG lists them)."""
+
+    def __init__(self, period=600, clock=time.monotonic, sink=None):
+        self.period, self.clock, self.sink = period, clock, sink
+        self.lock = threading.Lock()
+        self.start = clock()
+        self.counts, self.players = {}, {}
+
+    def note(self, call, xuid):
+        line = None
+        with self.lock:
+            now = self.clock()
+            if now - self.start >= self.period:
+                if self.counts:
+                    line = (f"polls: last {now - self.start:.0f} s: "
+                            + ", ".join(f"{c} {n} requests from {len(self.players[c])} players" for c, n in sorted(self.counts.items())))
+                self.start, self.counts, self.players = now, {}, {}
+            self.counts[call] = self.counts.get(call, 0) + 1
+            self.players.setdefault(call, set()).add(xuid)
+        if line:
+            (self.sink or log)(line)
+
+
+POLLS = PollShare()
+
+
 def _me():
     xuid = getattr(CTX, "xuid", 0)
     return xuid, TAGS.get(xuid, "")
@@ -322,7 +491,9 @@ def _me():
 
 def drv_save(req):
     xuid, tag = _me()
-    DRV.save_upload(xuid, tag, req["info"], req["curveTypes"], req["segmentInformation"])
+    if DRV.save_upload(xuid, tag, req["info"], req["curveTypes"], req["segmentInformation"]) is False:
+        log(f"  refused a Drivatar upload from {xuid:#x}: a value is not finite or out of range")
+        return None
     log(f"  stored Drivatar upload from {xuid:#x} ({len(req['segmentInformation'])} segments, "
         f"{len(req['curveTypes'])} curves)")
     return None
@@ -332,11 +503,8 @@ def drv_for_cache(req):
     xuid, tag = _me()
     DRV.for_player(xuid, tag)          # makes sure the requesting player has one (profile-based if needed)
     n = req["numberOfDrivatars"]
-    # The client replaces its built-in set with whatever we return here, so send the whole shipped
-    # set plus the players' own Drivatars, never a short or empty list.
-    nplayers = DRV.count()
-    recs = DRV.pool(max(n, len(DRV.templates) + nplayers))
-    log(f"  ForCache numberOfDrivatars={n}: serving {len(recs)} ({nplayers} player + shipped)")
+    recs = DRV.for_cache(n, exclude_xuid=xuid)
+    log(f"  ForCache numberOfDrivatars={n}: serving {len(recs)}")
     return {"drivatarInfos": recs}
 
 
@@ -361,12 +529,15 @@ def drv_for_race(req):
 
 # ---------------------------------------------------------------- scoreboards (Rivals / leaderboards)
 
-def _score_row(sc_row, rowdict):
-    """Fill a ScoreboardRow (wire dict) from a scoreboard.py row."""
+def _score_row(sc_row, rowdict, club_infos=None):
+    """Fill a ScoreboardRow (wire dict) from a scoreboard.py row; club_infos = CLUBS.member_infos() of the page (looked up alone when None)."""
     user = rowdict["user"]
     lvl = db.clean_level(LEVELS.get(sc_row["xuid"], 0))
+    if club_infos is None:
+        club_infos = CLUBS.member_infos([sc_row["xuid"]]) if CLUBS else {}
+    club_id, club_tag, role = club_infos.get(sc_row["xuid"], (0, "", 0))
     user.update({"qwXuid": sc_row["xuid"], "wzGamerTag": (sc_row["tag"] or TAGS.get(sc_row["xuid"], ""))[:15],
-                 "currentCareerLevel": lvl})
+                 "currentCareerLevel": lvl, "clubId": club_id, "clubTag": club_tag[:9], "roleInClub": clubs.wire_role(role)})
     rowdict.update({
         "position": sc_row["position"], "rank": sc_row["position"], "score": scoreboard.dbl_to_u64(sc_row["score"]),
         "submittedTime": scoreboard.iso(sc_row["t"]), "carId": sc_row["car"], "carClassId": min(sc_row["cls"], TOP_CLASS),
@@ -380,8 +551,23 @@ def _own_cars():
     return getattr(CTX, "own_cars", False)
 
 
+SLOW_REQUEST_S = float(os.environ.get("FH2MP_LSP_SLOW_S", "2"))     # a request that runs this long is reported
+SCORE_LIMIT = (120, 60)           # SubmitScore per account per second window: the busiest player sends a few a minute, counters included
+GHOST_LIMITS = ((10, 60), (300, 86400))   # UploadFile: the busiest day of 17,330 runs was 64
+GHOST_UPLOAD = ("Forza.WebServices.Scoreboard", "UploadFile")
+
+
+def _within(name, limits):
+    xuid = getattr(CTX, "xuid", 0)
+    return AUTH is None or all(AUTH.hit((name, xuid, window), limit, window) for limit, window in limits)
+
+
 def sb_submit_score(req):
     xuid, tag = _me()
+    if not _within("score", (SCORE_LIMIT,)):
+        log_every(("score-limit", xuid), 60, f"  SubmitScore user={xuid:#x}: over the rate limit, ignored "
+                  f"(more than {SCORE_LIMIT[0]} per {SCORE_LIMIT[1]} s for this account)", "WARN")
+        return None
     if _own_cars():
         log(f"  SubmitScore board=({req['data']['scoreboardType']},{req['type']}): not stored, the player runs its own car database")
         return None
@@ -399,10 +585,12 @@ def sb_submit_score(req):
         return None
     log(f"  SubmitScore board=({d['scoreboardType']},{req['type']}) track={d['trackId']} car={d['carId']} "
         f"score={s['score']:.3f} clean={d['isClean']} -> ghost upload for score {s['score_id'].hex()[:8]}")
-    try:
-        notify_beaten(xuid, tag, req["type"], d, s)
-    except Exception as ex:          # a notification problem must never fail the score submission
-        log(f"  notify_beaten failed: {ex!r}")
+    if SB.ghost_policy != "enforce" or d["scoreboardType"] not in scoreboard.GHOST_BOARDS:
+        try:
+            notify_beaten(xuid, tag, req["type"], d, s)
+        except Exception as ex:          # a notification problem must never fail the score submission
+            log_exc(f"  notify_beaten failed after the score was stored (board {d['scoreboardType']}, event {d['gameScoreboardId']}); "
+                    f"the submission stands, the rivals were not told", ex, "WARN")
     return {"scoreId": s["score_id"], "uploadFiles": True}
 
 
@@ -447,6 +635,11 @@ def sb_notify_rival(req):
     log(f"  NotifyRival event={req['rivalEventId']} rival={req['rivalXuid']:#x} score={'%.3f' % sub['score'] if sub else '?'}")
     if sub is None or e is None or not req["rivalXuid"] or req["rivalXuid"] == xuid or SB.fake_name(req["rivalXuid"]):
         return None
+    if sub["xuid"] != xuid or sub["gsid"] != e["id"] or not SB.is_visible(sub["id"]):
+        return None                  # only your own, public run on that event
+    theirs = SB.best_of(req["rivalXuid"], sub["sb"], sub["st"], -1, e["id"])
+    if theirs is None or not SB.better(sub["st"], sub["score"], theirs["score"]):
+        return None
     send_beaten(req["rivalXuid"], xuid, tag or sub["tag"], e, sub["car"], sub["cls"], sub["st"], sub["score"])
     return None
 
@@ -473,14 +666,23 @@ def announce_rotation():
 
 
 def sb_upload_file(req):
-    sid = SB.attach_ghost(req["scoreId"], req["data"])
-    log(f"  UploadFile scoreId={bytes(req['scoreId']).hex()[:8]} {len(req['data'])} bytes -> ghost #{sid}")
+    xuid, tag = _me()
+    sid, public = SB.attach_ghost(req["scoreId"], req["data"], xuid)
+    log(f"  UploadFile scoreId={bytes(req['scoreId']).hex()[:8]} {len(req['data'])} bytes -> " + (f"ghost #{sid}" if sid is not None else "refused (the scores: line above says why), nothing stored")
+        + f" user={xuid:#x}")
+    if public and SB.ghost_policy == "enforce":
+        sub = SB.by_score_id(req["scoreId"])
+        try:
+            notify_beaten(xuid, tag, sub["st"], {"scoreboardType": sub["sb"], "gameScoreboardId": sub["gsid"], "carId": sub["car"], "carClassId": sub["cls"]}, sub)
+        except Exception as ex:          # a notification problem must never fail the upload
+            log_exc(f"  notify_beaten failed after the ghost was stored (score #{sub['id'] if sub else '?'}); the upload stands, the rivals were not told", ex, "WARN")
     return None
 
 
 def sb_download_file(req):
-    data = SB.ghost(req["id"]) if req["id"] > 0 else None
-    log(f"  DownloadFile id={req['id']} maxSize={req['maxSize']}: {len(data) if data else 'no ghost'}")
+    data = SB.public_ghost(req["id"]) if req["id"] > 0 else None
+    log(f"  DownloadFile id={req['id']} maxSize={req['maxSize']}: {len(data) if data else 'no ghost'}"
+        + (" (over maxSize, an empty file is sent)" if data and len(data) > req["maxSize"] else ""))
     if data is None or len(data) > req["maxSize"]:
         return {"data": b""}
     return {"data": data}
@@ -501,7 +703,9 @@ def sb_submit_xp(req):
 
 def sb_best(req):
     xuid, _ = _me()
-    b = SB.best_of(xuid, req["scoreboardType"], req["scoreType"], req["trackId"], req["gameScoreboardId"])
+    # gameScoreboardId is -1 on the class boards: the best across all classes would hide every slower run in another class (0xa3e880)
+    pivot = req["carClassId"] if req["scoreboardType"] in scoreboard.CLASS_PIVOT_BOARDS else req["gameScoreboardId"]
+    b = SB.best_of(xuid, req["scoreboardType"], req["scoreType"], req["trackId"], pivot)
     log(f"  GetBestScore board=({req['scoreboardType']},{req['scoreType']}) gsid={req['gameScoreboardId']} "
         f"track={req['trackId']} car={req['carId']}: "
         f"{'%.3f' % b['score'] if b else 'none'}")
@@ -579,9 +783,10 @@ def sb_rows(req, results="ForzaWebServicesScoreboardGetRowsAnthem_Results"):
         mine = dict(mine, position=1) if mine is not None else None
     res = xls.default_struct(SC, SC.call_struct(results))
     tmpl = res["userRow"]
-    res["rows"] = [_score_row(r, json.loads(json.dumps(tmpl))) for r in page]
+    infos = CLUBS.member_infos([r["xuid"] for r in page] + ([mine["xuid"]] if mine is not None else [])) if CLUBS else {}
+    res["rows"] = [_score_row(r, json.loads(json.dumps(tmpl)), infos) for r in page]
     if mine is not None:
-        res["userRow"] = _score_row(mine, res["userRow"])
+        res["userRow"] = _score_row(mine, res["userRow"], infos)
     # `available` (GetRows) / `totalRowCount` (GetRowsAnthem) = size of the whole board. Left at 0 the
     # leaderboard page shows "RESULTS UNAVAILABLE" even with valid rows [inferred from the schema; verify in game].
     total = 1 if req["view"] == FRIENDS_VIEW and mine is not None else (0 if req["view"] == FRIENDS_VIEW else nreal + nfake)
@@ -797,18 +1002,29 @@ def _stamp(t):
     return scoreboard.iso(t)
 
 
-KEYWORDS = ("Racing", "Rally", "Drift", "Retro", "Classic", "Anime", "Sponsored", "Clean", "Camo", "Flames",
-            "Stripes", "Cartoon", "Movie", "Game", "Sports", "Original", "Tribute", "Police", "Tuner", "Art")
-TUNE_KEYWORDS = ("Road Racing", "Street", "Drift", "Drag", "Rally", "Off-Road", "Grip", "Top Speed", "Balanced", "Stable",
-                 "Loose", "Wet Weather", "Beginner", "Expert", "Stock Plus", "Clean Racing")
-KEYWORDS_BY_FILE_TYPE = {0: TUNE_KEYWORDS}      # the client asks per file type (0..4): 0 = tune and 2 = livery [both confirmed from Create calls];
-                                                # 1, 3 and 4 (other content kinds, vinyl groups among them) keep the generic list for now
+# Keyword lists as Forza Horizon 4 has them: per file type two pickers (bucket 0 and bucket 1), a file carries one keyword of each (KeywordOne /
+# KeywordTwo). The client's file types (its search switch, FUN_140e3bd10): 0 tune, 1 vinyl group, 2 design (livery), 3 replay, 4 photo. A keyword's id is
+# its position in the two lists together, starting at 1 (db.py _KEYWORD_REMAP maps the ids of the lists before these).
+KEYWORD_LISTS = {
+    0: (("Top Speed", "Off the Line", "Grip", "Drift", "Drag", "Circuit", "All Around"),
+        ("Best for Speed", "Good for Speed", "Average", "Best for Handling", "Good for Handling", "Beginner", "Novice", "Expert",
+         "Good All Around", "Close-Ratio Gearbox", "Wide-Ratio Gearbox")),
+    1: (("Logo", "Racing", "Replica", "Real World", "Cartoon", "Funny", "Abstract", "Fantasy", "Sci-Fi", "Anime"),
+        ("Realistic", "Manufacturer", "Original", "Team", "Character", "Scary", "Humorous", "Big", "Small", "Narrow", "Wide")),
+    2: (("Racing", "Replica", "Real World", "Cartoon", "Funny", "Abstract", "Fantasy", "Sci-Fi", "Photo"),
+        ("Realistic", "Original", "Team", "Classic", "Throwback", "Scene", "Character", "Scary", "Humorous", "Drift")),
+    3: (("Racing", "Rally", "Drift", "Retro", "Classic", "Anime", "Sponsored", "Clean", "Camo", "Flames"),      # replays: FH4 has none
+        ("Stripes", "Cartoon", "Movie", "Game", "Sports", "Original", "Tribute", "Police", "Tuner", "Art")),
+    4: (("Racing", "Scenery", "Group", "Action", "Humorous"), ("Filtered", "B&W", "Stylized", "Untouched")),
+}
+KEYWORDS = KEYWORD_LISTS[3][0] + KEYWORD_LISTS[3][1]          # a file type the client has not been seen to ask for
 FILE_KIND = {}          # the client's file type number -> kind, learned from Create calls
 
 
 def ugc_keywords(req):
-    words = KEYWORDS_BY_FILE_TYPE.get(req["fileType"], KEYWORDS)
-    return {"keywords": [{"Keyword": k, "KeywordId": i + 1, "Bucket": 0 if i < 10 else 1} for i, k in enumerate(words)][:req["maxKeywordResults"]]}
+    first, second = KEYWORD_LISTS.get(req["fileType"], (KEYWORDS, ()))
+    rows = [{"Keyword": k, "KeywordId": i + 1, "Bucket": 0 if i < len(first) else 1} for i, k in enumerate(first + second)]
+    return {"keywords": rows[:req["maxKeywordResults"]]}
 
 
 def _ordinal(f):
@@ -819,7 +1035,7 @@ def _ordinal(f):
 
 def _light(f, tmpl):
     r = _clone(tmpl)
-    r.update({"Id": f["id"], "PopularityRating": min(f["likes"], 5), "Creator": _owner(tmpl["Creator"], f["owner"]),
+    r.update({"Id": f["id"], "PopularityRating": ugc.popularity(f), "Creator": _owner(tmpl["Creator"], f["owner"]),
               "IsCreatorFollowed": False, "SubmissionTime": _stamp(f["created"]), "Ordinal": _ordinal(f), "MethodObtained": 0})
     return r
 
@@ -830,7 +1046,7 @@ def _heavy(f, tmpl):
               "SubmissionTime": _stamp(f["created"]), "Owner": _owner(tmpl["Owner"], f["owner"]),
               "PayloadSize": f["payload_size"], "PreviewPayload": bytes(f["preview"] or b"")[:409600], "Ordinal": _ordinal(f),
               "IsUnderReview": False, "VersionedContentId": f["versioned_id"] or 0,
-              "PopularityRating": min(f["likes"], 5), "IsCreatorFollowed": False})
+              "PopularityRating": ugc.popularity(f), "IsCreatorFollowed": False})
     return r
 
 
@@ -838,7 +1054,8 @@ def content_upload(req):
     xuid, _ = _me()
     data = bytes(req["uploadData"])
     try:
-        got = UGC.blob_write(UGC.content_blob(req["contentId"]), req["payloadOffset"], data, owner=xuid)
+        got = UGC.blob_write(UGC.content_blob(req["contentId"]), req["payloadOffset"], data, owner=xuid,
+                             finish=ugc.photo_1080p if UGC.is_photo(req["contentId"]) else None)
     except ugc.LimitError as e:
         raise XlsError(str(e))
     log(f"  Content.UploadContent id={req['contentId']} @{req['payloadOffset']} +{len(data)} of {req['payloadTotalSize']}: "
@@ -857,29 +1074,19 @@ def content_download(req):
     return {"isLastBuffer": last, "downloadData": chunk, "totalSize": total}
 
 
-def large_file_create(req):
-    xuid, _ = _me()
-    try:
-        bid = UGC.blob_create(xuid, req["userFileName"], req["payloadSize"])
-    except ugc.LimitError as e:
-        raise XlsError(str(e))
-    log(f"  LargeFileUpload.Create name={req['userFileName']!r} size={req['payloadSize']} -> content id {bid}")
-    return {"contentFileId": bid}
-
-
 def profile_update_livery(body):
     """OnlineProfile.UpdateLivery: the real upload of a design (layout in ugc.parse_livery_upload). It is kept under (owner, name) until
     CreateVersionedLivery names it."""
     xuid, _ = _me()
     up = ugc.parse_livery_upload(body)
     if up is None:
-        log(f"  UpdateLivery: unparsable body ({len(body)}B)")
+        log(f"  UpdateLivery: unparsable body ({len(body)}B), user={xuid:#x}; nothing kept, the share that follows will find no upload", "WARN")
         return b""
     try:
         bid = UGC.blob_create(xuid, up["name"], len(body))
         UGC.blob_write(bid, 0, body, owner=xuid)
     except ugc.LimitError as e:
-        log(f"  UpdateLivery refused: {e}")
+        log(f"  UpdateLivery refused: {e} (user={xuid:#x}, {len(body)}B)", "WARN")
         return b""
     log(f"  UpdateLivery {up['name']!r} car={up['car_id']} layers={up['layers']} container={len(up['container'])}B "
         f"({len(body)}B on the wire) -> kept as blob #{bid}")
@@ -914,7 +1121,7 @@ def livery_thumbs(preview):
             big = pngtool.downscale(preview, *BIG_THUMB)
         return big, pngtool.downscale(preview, *SMALL_THUMB)
     except (ValueError, struct.error, Exception) as e:      # noqa: BLE001 - never fail a share over a thumbnail
-        log(f"  thumbnail generation failed: {e!r}")
+        log(f"  thumbnail generation failed, no thumbnail stored: {diag.where(e)}", "WARN")
         return b"", b""
 
 
@@ -934,22 +1141,57 @@ def cv_create_livery(req):
     return {"versionedLiveryId": vid}
 
 
+def profile_update_layergroup(body):
+    """OnlineProfile.UpdateLiveryGroup: the upload of a vinyl group, the same request as UpdateLivery without the car (read from the client's
+    caller, FUN_140f07ce0): u32 name length + name, u16 layer count, u8 flag, u64 creator xuid, u32 blob length + the blob, which the
+    client later reads back through the same compression stream as a design's. It is kept under (owner, name) until CreateVersionedLayerGroup
+    names it."""
+    xuid, _ = _me()
+    up = ugc.parse_layergroup_upload(body)
+    if up is None:
+        log(f"  UpdateLiveryGroup: unparsable body ({len(body)}B), user={xuid:#x}; nothing kept, the share that follows will find no upload", "WARN")
+        return b""
+    try:
+        bid = UGC.blob_create(xuid, up["name"], len(body))
+        UGC.blob_write(bid, 0, body, owner=xuid)
+    except ugc.LimitError as e:
+        log(f"  UpdateLiveryGroup refused: {e} (user={xuid:#x}, {len(body)}B)", "WARN")
+        return b""
+    log(f"  UpdateLiveryGroup {up['name']!r} layers={up['layers']} payload={len(up['payload'])}B -> kept as blob #{bid}")
+    return b""
+
+
 def cv_create_layergroup(req):
     xuid, _ = _me()
     vid = UGC.versioned_create("layergroup", xuid, req["name"], None, bytes(req["thumbnail"]))
-    log(f"  CreateVersionedLayerGroup {req['name']!r} thumb={len(req['thumbnail'])}B -> versioned {vid}")
+    note = "no matching UpdateLiveryGroup upload"
+    blob = UGC.blob_by_name(xuid, req["name"]) if req["name"] else None
+    up = ugc.parse_layergroup_upload(blob[1]) if blob else None
+    if up:
+        UGC.versioned_set_data(vid, up["payload"])
+        UGC.versioned_set_layers(vid, up["layers"], xuid)
+        note = f"data {len(up['payload'])}B, {up['layers']} layers"
+    log(f"  CreateVersionedLayerGroup {req['name']!r} thumb={len(req['thumbnail'])}B -> versioned {vid} ({note})")
     return {"versionedLayerGroupId": vid}
 
 
-def cv_create_tune(req):
-    xuid, _ = _me()
-    vid = UGC.versioned_create("tune", xuid, req["name"], req["carId"])
-    log(f"  CreateVersionedTune {req['name']!r} car={req['carId']} -> versioned {vid}")
-    return {"versionedTuneId": vid}
+def store_layergroup_create(req):
+    """StorefrontLayerGroup.Create: lists a vinyl group (title, keywords, preview); its data is the versioned item's."""
+    d = req["layerGroupDescription"]["base"]
+    fid = _create_file("layergroup", req["fileHeader"], d["VersionedLayerGroupId"], None, req["fileName"], req["previewData"])
+    return {"contentFileId": fid}
+
+
+def store_search_layergroups(req):
+    return _search_files("layergroup", "ForzaStorefrontSearchLayerGroupFiles_Results", "SearchLayerGroupFiles", req)
 
 
 def cv_create_tune_structs(req):
     xuid, _ = _me()
+    bad = _unbuildable_tune_parts(req["carId"], req["installedParts"])
+    if bad:
+        log(f"  CreateVersionedTuneFromStructs car={req['carId']} refused: {len(bad)} part(s) the game cannot build, first {bad[:4]} (slot, id, why)", "WARN")
+        raise XlsError("this tune has parts the game cannot build")
     vid = UGC.versioned_create("tune", xuid, "", req["carId"], parts=req["installedParts"], tuning=req["tuning"])
     log(f"  CreateVersionedTuneFromStructs car={req['carId']} -> versioned {vid}")
     return {"versionedTuneId": vid}
@@ -999,9 +1241,17 @@ def design_has_layers(stored_layers, data):
         return False
     try:
         container = ugc.livery_chunk(ugc.strip_livery_prefix(bytes(data)))
-    except Exception:           # noqa: BLE001 - anything unreadable counts as "has layers": hiding it is the safe side
+    except Exception as e:      # noqa: BLE001 - anything unreadable counts as "has layers": hiding it is the safe side
+        log(f"  livery container unreadable, treated as layered: {diag.where(e)} ({len(data)} bytes)", "DEBUG", "ugc")
         return True
     return container is None or len(container) > LIVERY_GATE_BYTES
+
+
+def _count_download(vid, xuid):
+    """A player fetched the full data of a shared item: one download of its listing, once per player (the creator's own fetches do not count)."""
+    fid = UGC.file_of_versioned(vid)
+    if fid is not None and UGC.record_action(fid, xuid, "download", "downloads"):
+        log(f"  download of file #{fid} counted for {xuid}")
 
 
 def cv_get_livery(req):
@@ -1014,7 +1264,8 @@ def cv_get_livery(req):
         # A car wearing a layered design makes the game build a 1024x1024 11-mip texture that Azimuth cannot place; clients without the shim
         # fallback stop (prod 2026-10-20: every wipe lines up with all the other clients fetching a layered design, e.g. 581 with 26 layers).
         # They get the answer designs with layers=-1 always got (an error): the car shows without the design, nothing crashes.
-        log(f"  RetrieveVersionedLivery {v['id']}: withheld from a client without the texture fix (shim {getattr(CTX, 'shim', '') or 'unknown'})")
+        log(f"  RetrieveVersionedLivery {v['id']}: withheld from a client without the texture fix (shim {getattr(CTX, 'shim', '') or 'unknown'}, "
+            f"stored layers {v['layers']}, creator {v['creator']:#x}, user {xuid:#x})")
         raise XlsError(f"livery {v['id']} is not available to this client")
     res = xls.default_struct(SC, SC.call_struct("ForzaContentVersioningRetrieveVersionedLiveryById_Results"))
     d = res["versionedLiveryData"]
@@ -1035,6 +1286,8 @@ def cv_get_livery(req):
         # 2026-10-20: the owner removed the livery and the crashes stopped). Serve a plain thumbnail of the right size instead of nothing.
         d["liveryThumbnail"], d["liveryThumbnailSmall"] = _placeholder_thumbs()
     log(f"  RetrieveVersionedLivery {v['id']}: {len(d['data'])}B data, {d['numberOfLayers']} layers, thumb {len(d['liveryThumbnail'])}B")
+    if not req["returnThumbnail"]:          # the storefront's download asks for the data alone; a car seen in a lobby asks with its thumbnail
+        _count_download(v["id"], xuid)
     return res
 
 
@@ -1045,7 +1298,45 @@ def cv_get_layergroup(req):
     res = xls.default_struct(SC, SC.call_struct("ForzaContentVersioningRetrieveVersionedLayerGroupById_Results"))
     res["versionedLayerGroupData"].update({"name": v["name"], "numberOfLayers": _layer_count(v["layers"]), "creatorXuid": v["creator"],
                                            "data": bytes(v["data"] or b""), "thumbnailData": bytes(v["thumb"] or b"")})
+    log(f"  RetrieveVersionedLayerGroup {v['id']}: {len(v['data'] or b'')}B data, {_layer_count(v['layers'])} layers")
+    _count_download(v["id"], _me()[0])
     return res
+
+
+def _unbuildable_tune_parts(car_id, installed):
+    """[(slot, id, why)] of the tune's part ids the game data does not have or that belong to another car; [] when the list is fine, the car
+    is one the catalog does not know (car packs) or the list has no part array."""
+    words = installed.get("m_CarParts") if isinstance(installed, dict) else None
+    if parts_check is None or not car_id or not isinstance(words, list) or len(words) != parts_check.P.PART_SLOTS:
+        return []
+    try:
+        if parts_check.stock_list(car_id) is None:
+            return []
+        return parts_check.integrity_errors([int(w) & 0xFFFFFFFF for w in words])
+    except (TypeError, ValueError, KeyError) as e:
+        log_every(("tune-check", car_id), 600, f"  tune part check could not run for car {car_id}, the tune is accepted unchecked: {diag.where(e)}", "WARN")
+        return []
+
+
+def _buildable_tune_parts(car_id, installed, tune_id):
+    """The tune's installed parts, repaired when the game could not build the car from them. Opening a tune makes the client simulate the
+    car for its stats (CarPerformance_SimulateAndComputeRatings -> CCarDynamics::BuildICEFromSetup); an engine slot without a catalog row
+    leaves the torque curve empty and that loop reads past its buffer (2026-10-31: tune 5447 with 90002000 in the engine slots crashed a
+    client that opened a listing). The part list becomes what the lobby check would make of it, or the car's stock parts when that still
+    cannot be built. Cars the catalog does not know (car packs) and well-formed lists are served as stored."""
+    if not _unbuildable_tune_parts(car_id, installed):
+        return installed
+    try:
+        stock = parts_check.stock_list(car_id)
+        raw = [int(w) & 0xFFFFFFFF for w in installed["m_CarParts"]]
+        fixed, _, left = parts_check.neutralize(raw)
+        if left or parts_check.integrity_errors(fixed):
+            fixed = stock
+    except (TypeError, ValueError, KeyError) as e:
+        log(f"  tune {tune_id} of car {car_id} has parts the game cannot build and the repair failed ({diag.where(e)}): served as stored", "WARN")
+        return installed
+    log(f"  tune {tune_id} of car {car_id} has parts the game cannot build; served repaired")
+    return dict(installed, m_CarParts=[w - (1 << 32) if w >= 1 << 31 else w for w in fixed])
 
 
 def cv_get_tune(req):
@@ -1056,9 +1347,10 @@ def cv_get_tune(req):
     d = res["versionedTuneData"]
     d.update({"CarId": v["car_id"] or 0, "CreatorName": TAGS.get(v["creator"]) or _tag_from_db(v["creator"]), "CreatorXuid": v["creator"]})
     if v["parts"]:
-        d["InstalledParts"] = json.loads(v["parts"])
+        d["InstalledParts"] = _buildable_tune_parts(v["car_id"], json.loads(v["parts"]), req["versionedTuneId"])
     if v["tuning"]:
         d["Tuning"] = json.loads(v["tuning"])
+    _count_download(v["id"], _me()[0])
     return res
 
 
@@ -1074,7 +1366,7 @@ def _create_file(kind, header, versioned_id, car_id, file_name, preview, meta=No
     blob = UGC.blob_by_name(xuid, file_name) if file_name else None
     v = UGC.versioned_get(versioned_id) if versioned_id else None
     if v is not None and v["creator"] != xuid:
-        log(f"  {kind} share refused: versioned item {versioned_id} belongs to {v['creator']}, not to {xuid}")
+        log(f"  {kind} share refused: versioned item {versioned_id} belongs to {v['creator']:#x}, not to {xuid:#x}", "WARN")
         raise XlsError(f"versioned item {versioned_id} is not yours")
     car_id = car_id or (v["car_id"] if v else None)         # a tune's listing carries make/model/class only; its car is on the versioned item
     if kind == "livery" and v is not None:
@@ -1088,6 +1380,11 @@ def _create_file(kind, header, versioned_id, car_id, file_name, preview, meta=No
         if r:
             m = {"make_id": r["make_id"], "model_id": r["model_id"], "class_id": r["class_id"]}
     m.update(meta or {})
+    if kind == "layergroup" and v is not None and blob and not v["data"]:       # normally attached when CreateVersionedLayerGroup ran
+        up = ugc.parse_layergroup_upload(blob[1])
+        if up:
+            UGC.versioned_set_data(versioned_id, up["payload"], creator=xuid)
+            UGC.versioned_set_layers(versioned_id, up["layers"], xuid)
     FILE_KIND[header["Type"]] = kind
     if kind == "livery" and v is not None and bytes(preview)[:4] == b"\x89PNG":
         big, small = livery_thumbs(bytes(preview))
@@ -1199,8 +1496,6 @@ def store_heavy(req):
     ids = req["fileIds"][:max(0, req["fileCount"])] if req["fileCount"] else req["fileIds"]
     files = UGC.files(ids)
     tmpl = _elem_template("ForzaStorefrontGetFileHeavyWeightData_Results", "fileData")
-    for f in files:
-        UGC.bump(f["id"], "downloads")
     log(f"  GetFileHeavyWeightData {list(ids)}: {len(files)} found")
     return {"fileData": [_heavy(f, tmpl) for f in files]}
 
@@ -1213,7 +1508,7 @@ def store_my_files(req):
     for f in files:
         r = _clone(tmpl)
         r.update({"Id": f["id"], "Title": f["title"], "Description": f["description"], "SubmissionTime": _stamp(f["created"]),
-                  "IsUnderReview": False, "VersionedContentId": f["versioned_id"] or 0, "PopularityRating": min(f["likes"], 5),
+                  "IsUnderReview": False, "VersionedContentId": f["versioned_id"] or 0, "PopularityRating": ugc.popularity(f),
                   "Ordinal": _ordinal(f),
                   "DownloadCount": f["downloads"], "LikeCount": f["likes"], "UseCount": f["uses"]})
         out.append(r)
@@ -1233,33 +1528,24 @@ def store_if_shared(req):
 
 
 def _bump_handler(column, field="fileId"):
+    """IncrementViews / IncrementUsage (a counter per call) and IncrementLikes (one like per player and file; the game remembers a like in the
+    profile, so a repeat only comes from a reinstalled or second profile). The client sends them as fire-and-forget calls."""
     def h(req):
-        UGC.bump(req[field], column)
+        fid = req[field]
+        if column == "likes":
+            xuid, _ = _me()
+            counted = UGC.record_action(fid, xuid, "like", "likes")
+            log(f"  IncrementLikes file #{fid} by {xuid}: {'counted' if counted else 'not counted (repeat, own file or unknown file)'}")
+        else:
+            UGC.bump(fid, column)
+            log(f"  Increment{column.capitalize()} file #{fid}")
         return None
     return h
-
-
-def store_batch_views(req):
-    for i in req["fileIds"][:max(0, req["fileCount"])]:
-        UGC.bump(i, "views")
-    return None
 
 
 def store_remove(req):
     xuid, _ = _me()
     log(f"  RemoveFile #{req['fileId']}: {'removed' if UGC.remove(req['fileId'], xuid) else 'not yours / unknown'}")
-    return None
-
-
-def store_retitle(req):
-    xuid, _ = _me()
-    UGC.retitle(req["fileId"], xuid, title=req["newTitle"])
-    return None
-
-
-def store_redescribe(req):
-    xuid, _ = _me()
-    UGC.retitle(req["fileId"], xuid, description=req["newDescription"])
     return None
 
 
@@ -1290,18 +1576,6 @@ def store_curated(req):
     return {"curatedContent": [_light(f, tmpl) for f in files]}
 
 
-def store_curated_data(req):
-    f = UGC.file_get(req["contentId"])
-    if f is None:
-        raise XlsError(f"no such content {req['contentId']}")
-    v = UGC.versioned_get(f["versioned_id"]) if f["versioned_id"] else None
-    res = xls.default_struct(SC, SC.call_struct("ForzaStorefrontGetCuratedContentData_Results"))
-    res["contentData"].update({"Id": f["id"], "PreviewPayload": bytes(f["preview"] or b"")[:409600],
-                               "Payload": bytes((v or {}).get("data") or b"")[:1048576]})
-    log(f"  GetCuratedContentData #{f['id']}: payload {len(res['contentData']['Payload'])}B, preview {len(res['contentData']['PreviewPayload'])}B")
-    return res
-
-
 def store_noop(req):
     return None
 
@@ -1314,7 +1588,7 @@ def _club_errors(fn):
         try:
             return fn(req)
         except clubs.ClubError as e:
-            log(f"  club: {e.text} (error code {e.code:#x})")
+            log(f"  club: {e.text} (error code {e.code:#x}) call={fn.__name__} user={getattr(CTX, 'xuid', 0):#x}")
             raise XlsError(e.text, e.code)
     wrapped.__name__ = fn.__name__
     return wrapped
@@ -1367,18 +1641,6 @@ def club_details(req):
     return res
 
 
-@_club_errors
-def club_full_info(req):
-    club = CLUBS.club(req["clubId"])
-    if not club:
-        raise clubs.ClubError("club not found", clubs.CODES["not_found"])
-    res = xls.default_struct(SC, SC.call_struct("ForzaCarClubGetClubFullInfo_Results"))
-    res["clubDetails"] = _club_struct(res["clubDetails"], club)
-    leader_tmpl = _elem_template("ForzaCarClubGetClubFullInfo_Results", "leaders")
-    res["leaders"] = [_owner(leader_tmpl, x) for x in CLUBS.leaders(club["id"], max(1, req["maxLeaders"]))]
-    return res
-
-
 def club_keywords(req):
     return {"keywords": clubs.keyword_list()[:max(1, req["maxKeywordResults"])]}
 
@@ -1416,11 +1678,6 @@ def club_search_tag(req):
     res = xls.default_struct(SC, SC.call_struct("ForzaCarClubSearchForClubByTag_Results"))
     res["clubDetails"] = _club_struct(res["clubDetails"], club)
     return res
-
-
-def club_status(req):
-    club_id, _, _ = CLUBS.member_info(req["xuid"])
-    return {"clubStatus": {"acceptsClubInvites": CLUBS.accepts_invites(req["xuid"]), "clubId": club_id}}
 
 
 def club_members(req):
@@ -1495,13 +1752,6 @@ def club_request_join(req):
     return _after_request(club, xuid, approved)
 
 
-@_club_errors
-def club_request_join_name(req):
-    xuid, _ = _me()
-    club, approved = CLUBS.request_join(xuid, tag=req["clubTag"])
-    return _after_request(club, xuid, approved)
-
-
 def _after_request(club, xuid, approved):
     if approved:
         _joined(club, xuid)
@@ -1526,22 +1776,17 @@ def _invite(club, iid, sponsor, invitee):
     log(f"  club invite #{iid} [{club['tag']}] {sponsor:#x} -> {invitee:#x} (notification {n['id']})")
 
 
+def launcher_club_invite(sponsor, invitee):
+    """The launcher's club chat invite: the same rules and the same Message Center notice as the game's own invite."""
+    club, iid = CLUBS.invite(sponsor, invitee)
+    _invite(club, iid, sponsor, invitee)
+
+
 @_club_errors
 def club_invite(req):
     xuid, _ = _me()
     club, iid = CLUBS.invite(xuid, req["userToInvite"])
     _invite(club, iid, xuid, req["userToInvite"])
-    return None
-
-
-@_club_errors
-def club_invite_name(req):
-    xuid, _ = _me()
-    r = DB.one("SELECT xuid FROM players WHERE lower(gamertag)=lower(?)", (req["usernameToInvite"],))
-    if not r:
-        raise clubs.ClubError("no such player", clubs.CODES["not_found"])
-    club, iid = CLUBS.invite(xuid, r["xuid"])
-    _invite(club, iid, xuid, r["xuid"])
     return None
 
 
@@ -1606,16 +1851,6 @@ def club_leave(req):
 
 
 @_club_errors
-def club_recommend_removal(req):
-    xuid, _ = _me()
-    club = CLUBS.recommend_removal(xuid, req["userToRemove"])
-    _notify_leaders(club, 0x702, {"recommendingRemovalXuid": xuid, "recommendingRemovalGamertag": _tag(xuid),
-                                  "recommendedForRemovalXuid": req["userToRemove"],
-                                  "recommendedForRemovalGamertag": _tag(req["userToRemove"]), "clubId": club["id"]})
-    return None
-
-
-@_club_errors
 def club_post_notice(req):
     xuid, _ = _me()
     club, role = CLUBS.membership(xuid)
@@ -1636,38 +1871,6 @@ def club_delete_notice(req):
     return None
 
 
-def club_history(req):
-    el = _elem_template("ClubGetClubHistory_Results", "userClubHistory")
-    out = []
-    for r in CLUBS.history(req["userXuid"], req["maxEntries"]):
-        h = _clone(el)
-        h.update({"clubName": r["club_name"][:49], "date": _stamp(r["created"]), "user": _owner(el["user"], req["userXuid"]),
-                  "role": clubs.wire_role(r["role"]), "action": r["action"]})
-        out.append(h)
-    return {"userClubHistory": out}
-
-
-def club_users_to_invite(req):
-    el = _elem_template("ClubGetUsersToInvite_Results", "candidatesForInvite")
-    out = []
-    for r in CLUBS.users_to_invite(getattr(CTX, "xuid", 0), req["maxResults"]):
-        c = _clone(el)
-        c.update({"user": _owner(el["user"], r["xuid"]), "acceptsClubInvites": bool(r["accepts"]), "hasEverLoggedIn": True, "clubName": ""})
-        out.append(c)
-    return {"candidatesForInvite": out}
-
-
-def club_users_to_join(req):
-    el = _elem_template("ClubGetUsersToJoin_Results", "usersInClubs")
-    out = []
-    for r in CLUBS.users_to_join(getattr(CTX, "xuid", 0), req["maxResults"]):
-        c = _clone(el)
-        c.update({"user": _owner(el["user"], r["xuid"]), "clubMemberCount": r["members"], "clubName": r["name"][:49],
-                  "clubIsOpenForMembership": r["privacy"] == clubs.PRIVACY_OPEN})
-        out.append(c)
-    return {"usersInClubs": out}
-
-
 def club_accept_invites_pref(req):
     xuid, _ = _me()
     CLUBS.set_accepts_invites(xuid, req["acceptingClubInvites"])
@@ -1675,19 +1878,20 @@ def club_accept_invites_pref(req):
 
 
 def club_ladder(req):
-    """Scoreboard.GetLadderRows (Club Overview > View Club Ladder): the club's MEMBERS ranked by the XP they earned in it, the caller's
-    own row and the reward tiers. (The club-vs-club board is GetRows with isClubBoard.)"""
+    """Scoreboard.GetLadderRows (Club Overview > View Club Ladder): the club's MEMBERS ranked by the XP they earned this week, the caller's
+    own row and the reward tiers (Tier 1 = the highest threshold: the client fills the tier tabs by walking the list in order). (The club-vs-club board is GetRows with isClubBoard.)"""
     res = xls.default_struct(SC, SC.call_struct("ForzaWebServicesScoreboardGetLadderRows_Results"))
     row_t = _elem_template("ForzaWebServicesScoreboardGetLadderRows_Results", "rows")
     tier_t = _elem_template("ForzaWebServicesScoreboardGetLadderRows_Results", "ladderTiers")
     xuid, _ = _me()
     ladder = CLUBS.member_ladder(req["clubId"])
-    club_xp = sum(xp for _, xp in ladder)
+    top = clubs.ClubStore.TIERS[0][0]
+    top_count = sum(1 for _, xp in ladder if xp >= top)           # the "Tier 1" count the client shows: members in the top tier
 
     def row(rank, member, xp):
         r = _clone(row_t)
         r.update({"rank": rank, "user": _owner(row_t["user"], member), "score": scoreboard.dbl_to_u64(xp),
-                  "topTierCount": sum(1 for th, _ in clubs.ClubStore.TIERS if club_xp >= th)})
+                  "topTierCount": top_count})
         return r
     start = max(1, req["startAt"])
     res["rows"] = [row(i + 1, m, xp) for i, (m, xp) in enumerate(ladder)][start - 1:start - 1 + max(1, req["maxResults"])]
@@ -1698,7 +1902,7 @@ def club_ladder(req):
         res["userRow"] = row(*mine)
     res["available"] = len(ladder)
     log(f"  GetLadderRows club={req['clubId']} start={req['startAt']} max={req['maxResults']}: {len(res['rows'])} of {len(ladder)} members, "
-        f"club XP {club_xp:.0f}, you={'#%d' % mine[0] if mine else '-'}")
+        f"{top_count} in Tier 1, you={'#%d' % mine[0] if mine else '-'}")
     return res
 
 
@@ -1718,107 +1922,6 @@ def _car_info(car_id):
     return DB.one("SELECT c.makeid, c.familymodelid, c.familybodyid, c.cartypeid, c.regionid, c.countryid, c.familyspecialid, "
                   "c.engineplacementid, c.contentid, c.year, v.make, v.name FROM game.data_car c JOIN game.v_cars v ON v.id = c.id WHERE c.id=?",
                   (car_id,))
-
-
-def _shared_notify(club, action, car, xuid, targets):
-    info = _car_info(car["model_id"])
-    params = {"sharedCarAction": action, "playerXuid": xuid, "playerGamertag": _tag(xuid), "MakeName": (info["make"] if info else "")[:61],
-              "ModelName": (info["name"] if info else "")[:161], "perfIndex": json.loads(car["car"]).get("perfIndex", 0.0),
-              "Year": info["year"] if info else 0}
-    for t in targets:
-        if t != xuid:
-            _club_notify(t, 0x8301, params)
-
-
-@_club_errors
-def shared_upload_textures(req):
-    xuid, _ = _me()
-    tid = CLUBS.textures_create(xuid, req["liveryTexture"], req["LiveryThumbnail"])
-    log(f"  SharedCar.UploadCarTextures -> #{tid} (livery {len(req['liveryTexture'])}B, thumbnail {len(req['LiveryThumbnail'])}B)")
-    return {"texturesId": tid}
-
-
-@_club_errors
-def shared_create(req):
-    xuid, _ = _me()
-    d = dict(req["completeCarData"])
-    guid, profile, model_id = d.pop("gameCarId"), d.pop("ProfileId"), d["modelId"]
-    cid, version, club = CLUBS.share_car(xuid, guid, profile, model_id, d, req["texturesId"], req["liveryDetails"], req["tuning"],
-                                         req["overWriteExisting"])
-    car = CLUBS.shared_car(cid)
-    _shared_notify(club, 0, car, xuid, [r["xuid"] for r in CLUBS.members(club["id"], 1000)] if version == 1 else [])
-    log(f"  SharedCar.Create car {model_id} by {xuid:#x} -> shared car #{cid} v{version} in [{club['tag']}] "
-        f"(overwrite={req['overWriteExisting']}, livery {len(req['liveryDetails'])}B, tuning {len(req['tuning'])}B)")
-    return {"carId": cid}
-
-
-def shared_club_cars(req):
-    xuid, _ = _me()
-    el = _elem_template("ForzaSharedCarGetClubCars_Results", "carData")
-    out = []
-    for r in CLUBS.club_cars(xuid, req["maxResults"]):
-        car = json.loads(r["car"])
-        info = _car_info(r["model_id"])
-        c = _clone(el)
-        c.update({"owner": _owner(el["owner"], r["owner"]), "sharedDate": _stamp(r["shared"]), "lastUsedDate": _stamp(r["last_used"]),
-                  "sharedCarId": r["id"], "modelId": r["model_id"], "raceCount": r["race_count"], "version": r["version"],
-                  "performanceIndex": car.get("perfIndex", 0.0), "simulationPeakPower": car.get("simPeakPower", 0.0),
-                  "simulationPeakTorque": car.get("simPeakTorque", 0.0), "curbWeight": car.get("curbWeight", 0.0),
-                  "weightDistribution": car.get("weightDistribution", 0.0), "isStock": car.get("isStock", False)})
-        for k in ("classId", "driveTypeId", "engineConfigId", "cylinderId", "aspirationTypeId", "displacementId", "speedRating",
-                  "accelerationRating", "launchRating", "brakingRating", "handlingRating"):
-            c[k] = car.get(k, c[k])
-        if info:
-            c.update({"year": info["year"], "makeId": info["makeid"], "modelFamilyId": info["familymodelid"], "bodyFamilyId": info["familybodyid"],
-                      "carTypeId": info["cartypeid"], "regionId": info["regionid"], "countryId": info["countryid"],
-                      "familySpecialId": info["familyspecialid"], "enginePlacementId": info["engineplacementid"],
-                      "contentId": info["contentid"], "makeName": info["make"][:61], "modelName": info["name"][:161]})
-        out.append(c)
-    log(f"  SharedCar.GetClubCars by {xuid:#x}: {len(out)} cars")
-    return {"carData": out}
-
-
-def shared_details(req):
-    el = _elem_template("ForzaSharedCarGetCarDetails_Results", "carData")
-    out = []
-    for cid in req["carIds"][:max(0, req["carCount"])]:
-        r = CLUBS.shared_car(cid)
-        if not r:
-            continue
-        car = json.loads(r["car"])
-        c = _clone(el)
-        c.update({"sharedCarId": cid, "thumbnail": CLUBS.textures(r["textures_id"])[1][:230400],
-                  "manufacturerColorIndex": car.get("manufacturerColorIndex", 0), "carColorRGB": car.get("carColorRGB", 0),
-                  "isMetallic": car.get("isMetallic", False), "specialColorIndex": car.get("specialColorIndex", 0)})
-        out.append(c)
-    return {"carData": out}
-
-
-def shared_download(req):
-    r = CLUBS.shared_car(req["carId"])
-    if not r:
-        raise XlsError(f"no such shared car {req['carId']}")
-    log(f"  SharedCar.Download #{req['carId']} v{r['version']} (asked v{req['version']}): livery {len(r['livery'])}B, tuning {len(r['tuning'])}B")
-    return {"liveryDetails": r["livery"][:req["maxLiveryLength"] or None], "tuningDetails": r["tuning"][:req["maxTuningLength"] or None]}
-
-
-@_club_errors
-def shared_remove(req):
-    xuid, _ = _me()
-    log(f"  SharedCar.Remove #{req['carId']} by {xuid:#x}: {'removed' if CLUBS.remove_car(xuid, req['carId']) else 'unknown car'}")
-    return None
-
-
-def shared_race(req):
-    xuid, _ = _me()
-    r = CLUBS.shared_car(req["carId"])
-    if r:
-        CLUBS.count_race(req["carId"])
-        if r["owner"] != xuid:
-            club, _ = CLUBS.membership(r["owner"])
-            if club:
-                _shared_notify(club, 1, r, xuid, [r["owner"]])           # someone raced the owner's shared car [action 1 = used: guess]
-    return None
 
 
 def _also_xls_club():
@@ -1858,18 +1961,18 @@ def xbl_social(host, command, path, body, headers):
         if command == "POST" and segs == ["users", "batch", "profile", "settings"]:
             j = json.loads(body or b"{}")
             ids = [int(x) for x in j.get("userIds", [])]
-            log(f"  profile settings for {len(ids)} user(s): {','.join(str(i)[-5:] for i in ids)}")
+            log(f"  profile settings for {len(ids)} user(s): {','.join(str(i)[-5:] for i in ids)}", "DEBUG", "social")
             return 200, {"profileUsers": users(ids, j.get("settings", []))}
         if command == "GET" and len(segs) == 4 and segs[0] == "users" and segs[2:] == ["profile", "settings"]:
             return 200, {"profileUsers": users([_xuid_of(segs[1], headers)], settings)}
         if command == "GET" and len(segs) == 6 and segs[0] == "users" and segs[2:4] == ["profile", "settings"] and segs[4] == "people":
             me = _xuid_of(segs[1], headers)
-            log(f"  profile settings of the social group {segs[5]!r} of {me:#x}: {len(SOCIAL.friends(me))} friends")
+            log(f"  profile settings of the social group {segs[5]!r} of {me:#x}: {len(SOCIAL.friends(me))} friends", "DEBUG", "social")
             return 200, {"profileUsers": users(SOCIAL.friends(me), settings)}
     elif host == "social.xboxlive.com" and command == "GET" and len(segs) == 3 and segs[0] == "users":
         me = _xuid_of(segs[1], headers)
         if segs[2] == "people":
-            log(f"  social people of {me:#x}: {len(SOCIAL.friends(me))}")
+            log(f"  social people of {me:#x}: {len(SOCIAL.friends(me))}", "DEBUG", "social")
             return 200, social.people(SOCIAL, me)
         if segs[2] == "summary":
             return 200, social.summary(SOCIAL, me)
@@ -1881,12 +1984,12 @@ def xbl_social(host, command, path, body, headers):
             out.append({"xuid": str(f), "isFavorite": False, "isFollowingCaller": True, "isFollowedByCaller": True, "displayName": prof["GameDisplayName"],
                         "realName": "", "displayPicRaw": _pic_url(f, prof["_pic_version"]), "gamertag": prof["Gamertag"],
                         "gamerScore": prof["Gamerscore"], "presenceState": "Online" if social.online(f) else "Offline"})
-        log(f"  peoplehub people of {me:#x}: {len(out)}")
+        log(f"  peoplehub people of {me:#x}: {len(out)}", "DEBUG", "social")
         return 200, {"people": out}
     elif host == "userpresence.xboxlive.com":
         if command == "POST" and segs == ["users", "batch"]:
             ids = [int(x) for x in json.loads(body or b"{}").get("users", [])]
-            log(f"  presence of {len(ids)} user(s)")
+            log(f"  presence of {len(ids)} user(s)", "DEBUG", "social")
             return 200, [social.presence(x) for x in ids]
         if command == "GET" and len(segs) == 3 and segs[0] == "users" and segs[2] == "presence":
             return 200, social.presence(_xuid_of(segs[1], headers))
@@ -1939,33 +2042,30 @@ def social_api(method, path, body):
                 SOCIAL.set_profile(xuid, d.get("displayName"), d.get("gamerscore"), d.get("tier"))
                 return 200, {"updated": xuid}, None
     except (ValueError, KeyError, TypeError) as e:
+        log(f"  admin api refused 400: {method} {'/'.join(parts[:2])}/... : {diag.where(e)}", "WARN")
         return 400, {"error": str(e)}, None
     return None
 
 
 RAW_HANDLERS = {}        # (class, method) -> fn(body) for calls the exe has no descriptor for; returns the response payload bytes
 RAW_HANDLERS[("Forza.WebServices.OnlineProfile", "UpdateLivery")] = lambda body: profile_update_livery(body)
+RAW_HANDLERS[("Forza.WebServices.OnlineProfile", "UpdateLiveryGroup")] = lambda body: profile_update_layergroup(body)
 
 
 HANDLERS = {
     ("Xls.WebServices.Content", "UploadContent"): ("", content_upload),
     ("Xls.WebServices.Content", "DownloadContent"): ("", content_download),
-    ("Forza.WebServices.LargeFileUpload", "Create"): ("", large_file_create),
     ("Forza.WebServices.ContentVersioning", "CreateVersionedLivery"): ("", cv_create_livery),
     ("Forza.WebServices.ContentVersioning", "CreateVersionedLayerGroup"): ("", cv_create_layergroup),
-    ("Forza.WebServices.ContentVersioning", "CreateVersionedTune"): ("", cv_create_tune),
     ("Forza.WebServices.ContentVersioning", "CreateVersionedTuneFromStructs"): ("", cv_create_tune_structs),
     ("Forza.WebServices.ContentVersioning", "RetrieveVersionedLiveryById"): ("", cv_get_livery),
     ("Forza.WebServices.ContentVersioning", "RetrieveVersionedLayerGroupById"): ("", cv_get_layergroup),
     ("Forza.WebServices.ContentVersioning", "RetrieveVersionedTuneById"): ("", cv_get_tune),
-    ("Forza.WebServices.ContentVersioning", "AddReferenceToVersionedLivery"): ("", _cv_ref("versionedLiveryId", 1)),
     ("Forza.WebServices.ContentVersioning", "RemoveReferenceToVersionedLivery"): ("", _cv_ref("versionedLiveryId", -1)),
-    ("Forza.WebServices.ContentVersioning", "AddReferenceToVersionedLayerGroup"): ("", _cv_ref("versionedLayerGroupId", 1)),
-    ("Forza.WebServices.ContentVersioning", "RemoveReferenceToVersionedLayerGroup"): ("", _cv_ref("versionedLayerGroupId", -1)),
-    ("Forza.WebServices.ContentVersioning", "AddReferenceToVersionedTune"): ("", _cv_ref("versionedTuneId", 1)),
-    ("Forza.WebServices.ContentVersioning", "RemoveReferenceToVersionedTune"): ("", _cv_ref("versionedTuneId", -1)),
     ("Forza.WebServices.StorefrontLivery", "Create"): ("", store_livery_create),
     ("Forza.WebServices.StorefrontTuning", "Create"): ("", store_tuning_create),
+    ("Forza.WebServices.StorefrontLayerGroup", "Create"): ("", store_layergroup_create),
+    ("Forza.WebServices.Storefront", "SearchLayerGroupFiles"): ("", store_search_layergroups),
     ("Forza.WebServices.Storefront", "SearchLiveryFiles"): ("", store_search_liveries),
     ("Forza.WebServices.Storefront", "SearchTuningFiles"): ("", store_search_tunes),
     ("Forza.WebServices.StorefrontPhoto", "Create"): ("", store_photo_create),
@@ -1975,23 +2075,17 @@ HANDLERS = {
     ("Forza.WebServices.Storefront", "GetFileHeavyWeightData"): ("", store_heavy),
     ("Forza.WebServices.Storefront", "GetMyFileList"): ("", store_my_files),
     ("Forza.WebServices.Storefront", "GetFileDataIfShared"): ("", store_if_shared),
-    ("Forza.WebServices.Storefront", "SynchronizeSharedFiles"): ("", store_noop),
     ("Forza.WebServices.Storefront", "IncrementLikes"): ("", _bump_handler("likes")),
     ("Forza.WebServices.Storefront", "IncrementUsage"): ("", _bump_handler("uses")),
     ("Forza.WebServices.Storefront", "IncrementViews"): ("", _bump_handler("views")),
-    ("Forza.WebServices.Storefront", "BatchIncrementViews"): ("", store_batch_views),
     ("Forza.WebServices.Storefront", "RemoveFile"): ("", store_remove),
-    ("Forza.WebServices.Storefront", "ChangeFileTitle"): ("", store_retitle),
-    ("Forza.WebServices.Storefront", "ChangeFileDescription"): ("", store_redescribe),
     ("Forza.WebServices.Storefront", "GetFileKeywords"): ("", ugc_keywords),
     ("Forza.WebServices.Storefront", "GetFeaturedLiveriesForRandomCars"): ("", store_featured_liveries),
     ("Forza.WebServices.Storefront", "GetLiveriesForDrivatar"): ("", store_drivatar_liveries),
     ("Forza.WebServices.Storefront", "GetCuratedContent"): ("", store_curated),
-    ("Forza.WebServices.Storefront", "GetCuratedContentData"): ("", store_curated_data),
     ("Forza.WebServices.Storefront", "ReportContent"): ("", store_noop),
     ("Forza.WebServices.Storefront", "ToggleFollowedCreator"): ("", store_noop),
     ("Forza.WebServices.CarClub", "GetClubDetails"): ("", club_details),
-    ("Forza.WebServices.CarClub", "GetClubFullInfo"): ("", club_full_info),
     ("Forza.WebServices.CarClub", "GetClubKeywords"): ("", club_keywords),
     ("Forza.WebServices.CarClub", "GetFriendsClubs"): ("", club_friends),
     ("Forza.WebServices.CarClub", "GetRecommendedClubs"): ("", club_recommended),
@@ -2001,31 +2095,17 @@ HANDLERS = {
     ("Forza.WebServices.Club", "CreateClub"): ("", club_create),
     ("Forza.WebServices.Club", "ChangeClubDetails"): ("", club_change_details),
     ("Forza.WebServices.Club", "GetClubMembers"): ("", club_members),
-    ("Forza.WebServices.Club", "GetClubStatus"): ("", club_status),
     ("Forza.WebServices.Club", "ChangeMemberRole"): ("", club_change_role),
     ("Forza.WebServices.Club", "InviteToClub"): ("", club_invite),
-    ("Forza.WebServices.Club", "InviteToClubByName"): ("", club_invite_name),
     ("Forza.WebServices.Club", "AcceptClubInvite"): ("", club_accept_invite),
     ("Forza.WebServices.Club", "RequestJoiningClub"): ("", club_request_join),
-    ("Forza.WebServices.Club", "RequestJoiningClubByName"): ("", club_request_join_name),
     ("Forza.WebServices.Club", "ApproveRequestToJoin"): ("", club_approve),
     ("Forza.WebServices.Club", "RemoveFromClub"): ("", club_remove),
     ("Forza.WebServices.Club", "LeaveClub"): ("", club_leave),
-    ("Forza.WebServices.Club", "RecommendMemberForRemoval"): ("", club_recommend_removal),
     ("Forza.WebServices.Club", "CreateNoticeBoardNotification"): ("", club_post_notice),
     ("Forza.WebServices.Club", "DeleteNoticeBoardNotification"): ("", club_delete_notice),
-    ("Forza.WebServices.Club", "GetClubHistory"): ("", club_history),
-    ("Forza.WebServices.Club", "GetUsersToInvite"): ("", club_users_to_invite),
-    ("Forza.WebServices.Club", "GetUsersToJoin"): ("", club_users_to_join),
     ("Forza.WebServices.User", "AcceptClubInvites"): ("", club_accept_invites_pref),
     ("Xls.WebServices.User", "AcceptClubInvites"): ("", club_accept_invites_pref),
-    ("Forza.WebServices.SharedCar", "GetClubCars"): ("", shared_club_cars),
-    ("Forza.WebServices.SharedCar", "UploadCarTextures"): ("", shared_upload_textures),
-    ("Forza.WebServices.SharedCar", "Create"): ("", shared_create),
-    ("Forza.WebServices.SharedCar", "GetCarDetails"): ("", shared_details),
-    ("Forza.WebServices.SharedCar", "DownloadSharedCar"): ("", shared_download),
-    ("Forza.WebServices.SharedCar", "RemoveSharedCar"): ("", shared_remove),
-    ("Forza.WebServices.SharedCar", "IncrementRaceCount"): ("", shared_race),
     ("Forza.WebServices.Scoreboard", "GetLadderRows"): ("", club_ladder),
     ("Xls.WebServices.User", "GetUserData"): ("", user_get_user_data),
     ("Forza.WebServices.User", "GetUserData"): ("", user_get_user_data),
@@ -2051,6 +2131,7 @@ HANDLERS = {
     ("Xls.WebServices.Notifications", "RetrieveForUser"): ("", notif_retrieve),
     ("Xls.WebServices.Notifications", "MarkRead"): ("", notif_mark_read),
     ("Xls.WebServices.Notifications", "Clear"): ("", notif_clear),
+    ("Xls.WebServices.Notifications", "StartNewSession"): ("", notif_new_session),
 }
 
 
@@ -2059,6 +2140,12 @@ HANDLERS = {
 # data they fail, so the client keeps using what it ships with.
 FAIL_UNTIL_IMPLEMENTED = {
     ("Forza.WebServices.Drivatar", "GetDrivatarInformationForTrack"),
+    # Sending a car deletes it locally; an error makes the game put it back (0xa25d40), a default OK loses it for good.
+    ("Forza.WebServices.Gifting", "SendCarGift"),
+    ("Forza.WebServices.Auction", "UploadAuctionTextures"),
+    ("Forza.WebServices.GiftLivery", "Create"),
+    ("Forza.WebServices.GiftTuning", "Create"),
+    ("Forza.WebServices.GiftLayerGroup", "Create"),
 }
 
 
@@ -2067,37 +2154,42 @@ _also_xls_club()
 
 def handle_xls(cls, method, body):
     key = (cls.split(",")[0].strip(), method)
+    call = f"{key[0].rsplit('.', 1)[-1]}.{method}"
     if key in RAW_HANDLERS:
         return frame(RAW_HANDLERS[key](body) or b"")
     if key in FAIL_UNTIL_IMPLEMENTED and key not in HANDLERS:
-        log("  not implemented -> error result (client keeps its local data)")
+        log(f"  not implemented -> error result (client keeps its local data) call={call}")
         return frame(result=2, error=0x0001, text=b"fh2mp: not implemented")
     pname, pfields = find_struct(cls, method, "_Parameters")
     req = None
-    if pfields is not None and body:
+    limited = key == GHOST_UPLOAD and not _within("ghost", GHOST_LIMITS)       # before the decode: the body is what is expensive
+    if limited:
+        log(f"  UploadFile over the rate limit, ignored (user={getattr(CTX, 'xuid', 0):#x}, {len(body)} bytes; limits "
+            f"{' and '.join(f'{n} per {w} s' for n, w in GHOST_LIMITS)})", "WARN")
+    elif pfields is not None and body and key in HANDLERS:
         try:
             req, rem = xls.decode(SC, pfields, body)
             if rem:
-                log(f"  warning: {rem} unread request bytes")
+                log(f"  warning: {rem} unread request bytes (call={call}, body {len(body)} bytes, schema {pname})", "WARN")
         except Exception as e:  # noqa: BLE001
-            log(f"  request decode failed: {e}")
-    elif pfields is not None:
-        log(f"  request schema {pname} (empty body)")
+            log(f"  request decode failed: {diag.where(e)} (call={call}, body {len(body)} bytes, schema {pname}); the handler gets no request", "WARN")
+    elif pfields is not None and not body:
+        log(f"  request schema {pname} (empty body)", "DEBUG", "xls")
     rname, rfields = find_struct(cls, method, "_Results")
     if rfields is None and key not in HANDLERS:
-        log(f"  no schema for {cls} {method}; answering OK with empty body")
+        log_every(("no-schema", key), 600, f"  no schema for {cls} {method}; answering OK with empty body (a call this server does not know)", "WARN")
         return frame()
     try:
-        result = HANDLERS[key][1](req) if key in HANDLERS else None
+        result = HANDLERS[key][1](req) if key in HANDLERS and not limited else None
     except XlsError as e:
-        log(f"  -> error result: {e.text}")
+        log(f"  -> error result: {e.text} (error {e.code:#x}, call={call})")
         return frame(result=2, error=e.code, text=e.text.encode())
     if result is None:
         if rfields is None:
             return frame()
         result = xls.default_struct(SC, rfields)
         if key not in HANDLERS:
-            log(f"  default {rname}")
+            log_every(("default-result", key), 600, f"  default {rname} (no handler for {call}: answered with an all-default result)")
     return frame(xls.encode(SC, rfields, result))
 
 
@@ -2276,6 +2368,22 @@ def verify_strings(body):
     return {"verifyStringResult": [{"resultCode": 0, "offendingString": ""} for _ in strings]}
 
 
+def _log_auth_refusal(headers, e, sent):
+    """A session token that does not check out: who (when the token's account is known), which call, why, with the compared values. One line per
+    code, player and call every 5 minutes: a client with a dead token repeats its polls every few seconds, and a refused request gets no request
+    line, so each call it lost is named once (dev 2026-11-01: a launcher sign-in ended a running game's session and the calls it then lost were
+    not in the log). Calls the server has no handler for share one line. The token itself is never written."""
+    shim = getattr(CTX, "shim", "") or "(none)"
+    who = f"{e.xuid:#x}" if e.xuid else None
+    claimed = claimed_xuid(headers)
+    cls = (headers.get("X-ClassName", "") or "").split(",")[0].strip()
+    known = (cls, headers.get("X-Method", "") or "") in HANDLERS or (cls, headers.get("X-Method", "") or "") in RAW_HANDLERS
+    log_every(("auth-refused", e.code, e.xuid or shim, call_name(headers) if known else "other"), 300,
+              f"  refused: {e.status} {e.code} on {call_name(headers)} ({sent}) "
+              + diag.kv(xuid=who, claims=None if who or not claimed else f"{claimed:#x} (unverified)", shim=shim, detail=e.detail or None)
+              + (f" {e.message}" if e.code == "banned" else ""), "WARN")
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = float(os.environ.get("FH2MP_LSP_READ_TIMEOUT", "30"))   # a client that sends nothing for this long (slow body, idle
@@ -2333,7 +2441,8 @@ class Handler(BaseHTTPRequestHandler):
         _OLD_REMOVED[acct.xuid] = now
         if len(_OLD_REMOVED) > 20000:
             _OLD_REMOVED.clear()
-        log(f"  old shim {CTX.shim or '(none)'!r}: removing {acct.gamertag!r} {acct.xuid:#x} from the game")
+        log(f"  old shim {_shim()!r}: removing {acct.gamertag!r} {acct.xuid:#x} from the game (minShim {LAUNCHER.config.get()['minShim']}, "
+            f"call={call_name(self.headers)})")
         on_revoke(acct.xuid)
 
     def _gamedb_ok(self, acct):
@@ -2349,6 +2458,8 @@ class Handler(BaseHTTPRequestHandler):
         m = LAUNCHER.gamedb.manifest()
         if m is None:
             if LAUNCHER.gamedb.path:
+                log_every("gamedb-unavailable", 60, f"  refused: 503 gamedb_unavailable: the server's car database {LAUNCHER.gamedb.path!r} cannot be read, so every "
+                          f"signed-in request is refused until it can (xuid {acct.xuid:#x}, call={call_name(self.headers)})", "ERROR")
                 self._reply_json(503, {"error": "gamedb_unavailable", "message": "The server's car database is unavailable. Please try again later."})
                 return False
             return True
@@ -2356,12 +2467,13 @@ class Handler(BaseHTTPRequestHandler):
             _OWN_CARS.pop(acct.xuid, None)
             return True
         CTX.own_cars = True
+        CTX.gamedb = (have.strip().lower()[:16], m["sha256"][:16])          # for the lines that refuse this request later
         if acct.xuid not in _OWN_CARS:
             if len(_OWN_CARS) > 20000:
                 _OWN_CARS.clear()
             _OWN_CARS[acct.xuid] = time.monotonic()
             log(f"  car database {have.strip()[:16]!r} is not the server's {m['sha256'][:16]}: {acct.gamertag!r} {acct.xuid:#x} keeps the "
-                f"services but is out of play with other people")
+                f"services but is out of play with other people (shim {_shim()}" + ("; the client sent no hash" if not have.strip() else "") + ")")
             on_revoke(acct.xuid)            # a game in progress had the server's database: it must not carry on with another one
         return True
 
@@ -2369,10 +2481,14 @@ class Handler(BaseHTTPRequestHandler):
         value = self.headers.get("X-FH2MP-Tools", "")
         tokens = value.split(",") if len(value) <= 80 else []
         if not tokens or tokens[0] != "v1":
+            log_every(("tools-426", acct.xuid), 300, f"  refused: 426 tool_check_required: xuid={acct.xuid:#x} sent X-FH2MP-Tools "
+                      + (f"{len(value)} characters (limit 80)" if len(value) > 80 else f"{value!r}" if value else "nothing") + f", expected 'v1,...' (shim {_shim()})", "WARN")
             self._reply_json(426, {"error": "tool_check_required", "message": "Update FH2MP and restart the game from the launcher."})
             return False
         tools = tuple(sorted(set(tokens[1:])))
         if not set(tools) <= {"redline", "nitrosystem"}:
+            log_every(("tools-400", acct.xuid), 300, f"  refused: 400 bad_tool_report: xuid={acct.xuid:#x} reported unknown tool(s) "
+                      f"{sorted(set(tools) - {'redline', 'nitrosystem'})}, known are redline and nitrosystem (shim {_shim()})", "WARN")
             self._reply_json(400, {"error": "bad_tool_report"})
             return False
         if not tools:
@@ -2383,12 +2499,15 @@ class Handler(BaseHTTPRequestHandler):
             return True
         result = xbl.quarantine_tools(acct.xuid, tools)
         if result is None:
+            log_every(("tools-503", acct.xuid), 60, f"  refused: 503 pool_unavailable: xuid={acct.xuid:#x} reports {','.join(tools)} but the game server did not "
+                      f"answer the quarantine query, so the player cannot be placed in a pool", "ERROR")
             self._reply_json(503, {"error": "pool_unavailable", "message": "Matchmaking is unavailable. Please try again later."})
             return False
         if len(_TOOLS_ANNOUNCED) >= 10000:
             _TOOLS_ANNOUNCED.clear()
         _TOOLS_ANNOUNCED[acct.xuid] = (tools, now)
         if result == "rejoin":
+            log(f"  tools: xuid={acct.xuid:#x} reports {','.join(tools)}: moved to the restricted pool, dropped from matchmaking until the game restarts")
             xbl.drop_player(acct.xuid)
             self._reply_json(409, {"error": "pool_changed", "message": "Restart the game from the launcher to join the restricted matchmaking pool."})
             return False
@@ -2400,15 +2519,15 @@ class Handler(BaseHTTPRequestHandler):
         CTX.shim = self.headers.get("X-FH2MP-Shim", "")          # the client's shim version ("1.0.0-rc2"); empty for clients that do not send it
         need = LAUNCHER.config.get()["minShim"] if LAUNCHER is not None else "0.0.0"
         if not launcher_api.version_at_least(CTX.shim, need):
-            log(f"  refused: shim {CTX.shim or '(none)'!r} is older than {need}")
+            log_every(("old-shim", CTX.shim), 60, f"  refused: shim {CTX.shim or '(none)'!r} is older than {need} (426, call={call_name(self.headers)})", "INFO")
             self._remove_old_client()
             cls, method = self.headers.get("X-ClassName", ""), self.headers.get("X-Method", "")
             if SC is not None and cls.startswith("Xls.WebServices.Notifications") and method == "RetrieveForUser":
                 self._reply_json(200, outdated_notice(need), "bin/xtsw")      # the game shows this, unlike the 426 below
                 return False
-            if SC is not None and cls.startswith("Forza.WebServices.User") and method == "Logon":
-                self._reply_json(200, outdated_logon(), "bin/xtsw")           # so that it reaches the Message Center at all
-                return False
+            # Logon is refused like the rest. An empty Logon result was tried (prod 2026-10-30 05:07) so that the game would reach the Message
+            # Center: every shim 1.1.2 that sent a crash report afterwards (12 of 12, 05:14-15:29) died 10-30 s after starting at game+0x9c898f,
+            # a null CGameplayLog in CGameplayLogManager's event handler.
             self._reply_json(426, {"error": "shim_too_old", "message": f"FH2MP is out of date. Update the launcher and press Play (needs {need})."})
             return False
         token = self.headers.get("X-FH2MP-Token", "")
@@ -2417,9 +2536,16 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     acct = AUTH.authenticate(token, self.client_ip())
                 except auth.AuthError as e:
+                    if e.code == "banned" and SC is not None and self.headers.get("X-ClassName", "").startswith("Xls.WebServices.Notifications") \
+                            and self.headers.get("X-Method", "") == "RetrieveForUser":
+                        _log_auth_refusal(self.headers, e, "answered 200 with the ban notice")
+                        self._reply_json(200, ban_notice(e.message), "bin/xtsw")      # the game shows this, unlike the 403 below
+                        return False
+                    _log_auth_refusal(self.headers, e, f"answered {e.status}")
                     self._reply_json(e.status, {"error": e.code, "message": e.message})
                     return False
                 CTX.xuid, CTX.tag, CTX.authed = acct.xuid, acct.gamertag, True
+                AUTH_SHARE.note(acct.xuid, True)
                 if os.environ.get("FH2MP_RESTRICTED_TOOLS") == "quarantine" and not Handler._restricted_tools_ok(self, acct):
                     return False
                 if not self._gamedb_ok(acct):
@@ -2428,32 +2554,75 @@ class Handler(BaseHTTPRequestHandler):
                     announce_auth(acct.xuid, self.client_ip(), token)      # the game server only admits the server's car database
                 return True
             if AUTH.mode == "required":
+                log_every(("no-token", claimed_xuid(self.headers), CTX.shim), 300, f"  refused: 401 login_required: no X-FH2MP-Token on {call_name(self.headers)} "
+                          f"(FH2MP_AUTH=required; shim {CTX.shim or '(none)'}, claims user {claimed_xuid(self.headers):#x}, unverified): the game was not started from the launcher", "WARN")
                 self._reply_json(401, {"error": "login_required", "message": "start the game from the FH2MP launcher"})
                 return False
         try:
             CTX.xuid = int(self.headers.get("X-UserId", "0"), 0)
         except ValueError:
             CTX.xuid = 0
+        banned = None
+        via = ""
+        if AUTH is not None:                          # both ways a tokenless request names its sender (X-UserId, the XSAPI token)
+            for how, who in (("X-UserId", CTX.xuid), ("XSAPI token", int(xbl_xuid(self.headers) or 0))):
+                if not banned and who:
+                    banned = AUTH.ban_text(who)
+                    via = f"{how} {who:#x}" if banned else via
+        if banned:                                    # no token needed to be refused: nothing a banned player sends is accepted
+            log_every(("banned-tokenless", via), 300, f"  refused: 403 banned (no token, named by {via}) on {call_name(self.headers)}: {banned}", "WARN")
+            if SC is not None and self.headers.get("X-ClassName", "").startswith("Xls.WebServices.Notifications") \
+                    and self.headers.get("X-Method", "") == "RetrieveForUser":
+                self._reply_json(200, ban_notice(banned), "bin/xtsw")
+            else:
+                self._reply_json(403, {"error": "banned", "message": banned})
+            return False
+        AUTH_SHARE.note(CTX.xuid, False)
         return True
 
+    def _entry(self):
+        """Runs _handle. Anything that escapes is logged here, with the request's number and how long it ran, and re-raised so the
+        connection ends as before; a request that takes 2 s or more is reported (the LSP normally answers in milliseconds)."""
+        started = time.monotonic()
+        try:
+            return self._handle()
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError) as e:
+            log_every(("client-gone", type(e).__name__), 300, f"  client went away or stalled before the exchange finished ({type(e).__name__}) after "
+                      f"{time.monotonic() - started:.1f} s: {self.command} {self.path.split('?')[0][:80]} {call_name(self.headers)}", "INFO")
+            e._fh2mp_logged = True
+            raise
+        except Exception as e:  # noqa: BLE001
+            log_exc(f"  unhandled error in {self.command} {self.path.split('?')[0][:80]} {call_name(self.headers)} after {time.monotonic() - started:.1f} s; "
+                    f"the connection is closed without a reply", e)
+            e._fh2mp_logged = True
+            raise
+        finally:
+            took = time.monotonic() - started
+            if took >= SLOW_REQUEST_S:
+                log_every(("slow", call_name(self.headers)), 60, f"  slow request: {self.command} {self.path.split('?')[0][:80]} {call_name(self.headers)} took {took:.1f} s", "WARN")
+
     def _handle(self):
-        global SEQ
-        SEQ += 1
-        CTX.seq = SEQ                  # log() numbers the indented lines of this request with it
+        seq = CTX.seq = next(_SEQ)     # log() numbers the indented lines of this request with it
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             self.close_connection = True
+            log_every("bad-length", 300, f"  refused: 400 bad_length: Content-Length {self.headers.get('Content-Length', '')[:20]!r} is not a number "
+                      f"({getattr(self, 'command', '?')} {self.path.split('?')[0][:80]})", "WARN")
             return self._reply_json(400, {"error": "bad_length"})
         limit = launcher_api.body_limit(self.path) if self.path.startswith("/v1/") else ugc.MAX_REQUEST_BODY
         if n > limit or (self.path.startswith("/ops/") and n > 65536) or n < 0:
             self.close_connection = True
+            log_every(("too-large", self.path.split("?")[0][:40]), 300, f"  refused: 413 too_large: {getattr(self, 'command', '?')} {self.path.split('?')[0][:80]} announces {n} bytes, "
+                      f"limit {min(limit, 65536) if self.path.startswith('/ops/') else limit}", "WARN")
             return self._reply_json(413, {"error": "too_large"})
         body = self.rfile.read(n) if n else b""
         proxied = "X-Real-IP" in self.headers or "X-Forwarded-For" in self.headers
         if self.path.startswith("/ops/"):
             return self._ops(body, proxied)
         if self.path.startswith(("/admin/", "/api/")) and (self.client_address[0] not in ("127.0.0.1", "::1") or proxied):
+            log_every(("local-only", self.path.split("?")[0][:20]), 300, f"  refused: 403 on {self.path.split('?')[0][:80]}: operator and game-server endpoints answer "
+                      f"loopback only, never through the proxy (came through the proxy: {proxied})", "WARN")
             self.send_response(403)                       # operator and game-server endpoints are loopback only (and never through the proxy)
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -2472,9 +2641,15 @@ class Handler(BaseHTTPRequestHandler):
         if not self._identify():
             return
         social.touch(CTX.xuid or int(xbl_xuid(self.headers) or 0))
-        log(f"#{SEQ} {self.command} {host}{self.path} {cls} {method} body={len(body)} user={CTX.xuid:#x}")
+        if (method == "RetrieveForUser" and cls.startswith("Xls.WebServices.Notifications")) or host in SOCIAL_HOSTS:
+            POLLS.note(call_name(self.headers) if method else host, CTX.xuid)       # polls are counted, not listed (see PollShare)
+            log(f"#{seq} {self.command} {host}{self.path} {cls} {method} body={len(body)} user={CTX.xuid:#x}", "DEBUG", "poll")
+        else:
+            log(f"#{seq} {self.command} {host}{self.path} {cls} {method} body={len(body)} user={CTX.xuid:#x}")
         if CTX.own_cars and host in MULTIPLAYER_HOSTS:
-            log("  multiplayer refused: this player's car database is not the server's")
+            mine, theirs = getattr(CTX, "gamedb", ("?", "?"))
+            log_every(("mp-refused", CTX.xuid), 120, "  multiplayer refused: this player's car database is not the server's " + diag.kv(
+                xuid=f"{CTX.xuid:#x}", host=host, client_db=mine or "(none sent)", server_db=theirs, shim=getattr(CTX, "shim", "") or "(none)"), "INFO")
             return self._reply_json(409, {"error": "gamedb_mismatch", "message": "Playing with other people needs the server's car database. "
                                           "Press Play in the FH2MP launcher without keeping your own car packs."})
         out = b""
@@ -2482,8 +2657,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 out = handle_xls(cls, method, body)
             except Exception as e:  # noqa: BLE001
-                import traceback
-                traceback.print_exc()
+                log_exc(f"  {call_name(self.headers)} failed in its handler (user={CTX.xuid:#x}, body {len(body)} bytes), answered with an error result", e)
                 msg = f"fh2mp: {e}".encode()
                 out = frame(result=2, error=0x1, text=msg)
         ctype = "bin/xtsw"
@@ -2491,17 +2665,20 @@ class Handler(BaseHTTPRequestHandler):
         extra = []
         if host == "gameserverds.xboxlive.com" and self.path.endswith("/variants"):
             out, ctype = gsds_variants(), "application/json"
-            log(f"  GSDS variants -> {out.decode()}")
+            log(f"  GSDS variants -> {len(json.loads(out)['gsiSets'])} sets Release_{GSI_VERSION}.*, max {MAX_LOBBY_PLAYERS} players")
+            log(f"  GSDS variants body: {out.decode()}", "DEBUG", "gsds")
         elif host == "gameserverds.xboxlive.com" and "qosservers" in self.path:
             out, ctype = gsds_qos_servers(), "application/json"
-            log(f"  GSDS qos -> {out.decode()}")
+            log(f"  GSDS qos -> {len(json.loads(out)['qosServers'])} server(s)")
+            log(f"  GSDS qos body: {out.decode()}", "DEBUG", "gsds")
         elif host == "gameserverms.xboxlive.com" and self.path.rstrip("/").endswith("/clusters"):
             out, ctype = gsms_cluster(), "application/json"
             log(f"  GSMS cluster -> {out.decode()}")
         elif host == "client-strings.xboxlive.com" and self.path.rstrip("/").endswith("/system/strings/validate"):
             try:
                 verified = verify_strings(body)
-            except ValueError:
+            except ValueError as e:
+                log(f"  refused: 400 invalid_strings on strings/validate: {e} (body {len(body)} bytes, user={CTX.xuid:#x})", "WARN")
                 return self._reply_json(400, {"error": "invalid_strings"})
             out = json.dumps(verified).encode()
             ctype = "application/json"
@@ -2514,13 +2691,14 @@ class Handler(BaseHTTPRequestHandler):
             # The game polls GetAchievementsForTitleIdAsync every frame it is set; a 200 with no usable list makes the
             # embedded XSAPI complete with a NULL result and the game dereferences it (docs/matchmaking.md). Fail it.
             out, ctype, status = b'{"code":0,"description":"achievements unavailable"}', "application/json", 404
-            log("  achievements -> 404")
+            log_every(("achievements", CTX.xuid), 300, "  achievements -> 404 (on purpose: any 200 makes the game dereference a null result)", "INFO")
         elif host == "sessiondirectory.xboxlive.com" and xbl.parse_path(self.path) is not None:
             # MPSD session document (PUT create/update, GET read, DELETE); see server/xbl.py
             caller = xbl_xuid(self.headers)
             if caller is None and AUTH is not None and AUTH.mode == "required" and self.command != "GET":
                 st, doc = 401, None                     # session writes need a signed-in caller
                 out, status = b"{}", 401
+                log_every(("mpsd-401", CTX.xuid), 300, f"  MPSD {self.command} refused 401: no signed-in caller (FH2MP_AUTH=required, user {CTX.xuid:#x})", "WARN")
             elif self.command == "DELETE":
                 st, doc = xbl.delete_session(self.path, caller), None
                 out, status = b"", st
@@ -2539,11 +2717,16 @@ class Handler(BaseHTTPRequestHandler):
                 who = " members=" + ",".join(
                     f"{m['constants']['system']['xuid'][-5:]}{'+' if m['properties']['system'].get('active') else '-'}"
                     for m in doc.get("members", {}).values())
-            log(f"  MPSD {self.command} session -> {status} ({len(out)} bytes, {xbl.count()} session(s)){who}")
+            line = f"  MPSD {self.command} session -> {status} ({len(out)} bytes, {xbl.count()} session(s)){who}"
+            if self.command == "GET" and _unchanged(("mpsd", caller, self.path.split("?")[0]), (status, hash(out))):
+                log(line, "DEBUG", "poll")              # the same answer as this player's last poll of this session
+            else:
+                log(line)
         elif host == "momatch.xboxlive.com" and xbl.parse_momatch(self.path) is not None:
             caller = xbl_xuid(self.headers)
             if caller is None and AUTH is not None and AUTH.mode == "required":
                 status, doc = 401, None                 # matchmaking needs a signed-in caller
+                log_every(("momatch-401", CTX.xuid), 300, f"  MOMATCH {self.command} refused 401: no signed-in caller (FH2MP_AUTH=required, user {CTX.xuid:#x})", "WARN")
             elif self.command == "DELETE":
                 status, doc = xbl.delete_ticket(self.path, caller), None
             elif self.command == "POST":
@@ -2552,14 +2735,23 @@ class Handler(BaseHTTPRequestHandler):
                 status, doc = xbl.get_ticket(self.path, caller)
             out = json.dumps(doc).encode() if doc is not None else b""
             ctype = "application/json"
-            log(f"  MOMATCH {self.command} -> {status} {out.decode()[:300]}")
+            line = f"  MOMATCH {self.command} -> {status} {out.decode()[:300]}"
+            if self.command == "GET" and status < 400 and _unchanged(("momatch", caller, self.path.split("?")[0]), (status, hash(out))):
+                log(line, "DEBUG", "poll")              # the ticket is polled every 5 s: only a changed answer is news
+            elif self.command == "GET" and status == 404:
+                log(line + " (no such ticket: expired, swept, or never made)", "WARN")
+            else:
+                log(line)
         elif host == "sessiondirectory.xboxlive.com" and self.command == "GET" and "/sessions" in self.path:
             # MPSD session query (MultiplayerService.GetSessionsAsync). Any 200 answer (empty body or {"results":[]}) makes
             # the embedded XSAPI complete the async with a NULL result and the game dereferences it (crash at
             # game+0x41fd28, docs/matchmaking.md). An HTTP error leaves the async in the Error state, which the game's
             # poll loop (FUN_140415030) skips, as when Azimuth's offline stub failed the request.
             out, ctype, status = b'{"code":0,"description":"no sessions"}', "application/json", 404
-            log("  MPSD sessions -> 404")
+            log_every(("mpsd-sessions", CTX.xuid), 300, "  MPSD sessions -> 404 (on purpose: any 200 makes the game dereference a null result)", "INFO")
+        elif not (host.endswith("forzamotorsport.net") and cls):
+            log_every(("unhandled-host", host, self.command), 3600, f"  unhandled request {self.command} {host}{self.path.split('?')[0][:60]}: answered 200 with an empty body "
+                      f"(user {CTX.xuid:#x}, body {len(body)} bytes)", "INFO")
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         for k, v in extra:
@@ -2578,7 +2770,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(png or b"")
         if png:
-            log(f"  gamerpic {m.group(1)[-5:]} served ({len(png)}B)")
+            log(f"  gamerpic {m.group(1)[-5:]} served ({len(png)}B)", "DEBUG", "social")
 
     def _api(self, body):
         r = social_api(self.command, self.path, body)
@@ -2594,6 +2786,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             status, obj = api(self.command, self.path, body)
         except ApiError as e:
+            log(f"  admin api refused {e.status}: {self.command} {self.path.split('?')[0][:60]}: {e.msg}", "WARN")
             status, obj = e.status, {"error": e.msg}
         b = json.dumps(obj, indent=1).encode()
         self.send_response(status)
@@ -2603,7 +2796,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b)
 
     def _admin(self, body=b""):
-        """GET /admin/send?text=...[&type=512][&sra=...]  |  /admin/list  |  /admin/clear  |
+        """GET /admin/send?text=...[&type=512][&sra=...]  |
         POST /admin/result  {"mode", "detail"}  (an online event result from the game server, site_stats.add_result)  |
         /admin/drivatar?tag=NAME[&xuid=0x..][&skill=0..4][&wristband=N]  (add a player)  |
         /admin/drivatar?xuid=0x..&set=sideswipeMean=0.8,blockingMean=0.9[&lock=1]  (hand-tune)"""
@@ -2614,6 +2807,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 rid = site_stats.add_result(sys.modules[__name__], body)
             except ValueError as e:
+                log(f"  refused: 400 bad_request on /admin/result: {e} (body {len(body)} bytes); the game server's event result is not stored", "WARN")
                 return self._reply_json(400, {"error": "bad_request", "message": str(e)})
             return self._reply_json(201, {"id": rid})
         if u.path == "/admin/gamemode":
@@ -2647,11 +2841,10 @@ class Handler(BaseHTTPRequestHandler):
             evs = RIV.rotate() if u.path == "/admin/rotate" else RIV.events()
             announce_rotation()
             out = "".join(f"#{e['id']} track {e['track']} {e['kind']} {e['attrs']} :: {e['name']}\n" for e in evs)
-        elif u.path == "/admin/clear":
-            NOTIF.delete_all()
-            out = "cleared\n"
         else:
-            out = "".join(f"#{n['id']} type={n['type']:#x} read={n['read']} {n['message']!r}\n" for n in NOTIF.all())
+            log(f"  refused: 404 on {self.command} {u.path[:60]}: not an admin endpoint", "WARN")
+            self.send_error(404)
+            return
         b = out.encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
@@ -2659,7 +2852,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
-    do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = _handle
+    do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = _entry
 
 
 def setup(dsn=None):
@@ -2681,6 +2874,9 @@ def setup(dsn=None):
     fixed = UGC.repair_liveries()
     if fixed:
         log(f"user content: repaired {fixed} livery row(s) stored with the old upload prefix")
+    fixed = UGC.repair_photos()
+    if fixed:
+        log(f"user content: converted {fixed} photo(s) to 1920x1080")
     b0, b1 = UGC.recompress()
     log(f"user content: {UGC.count()} files, {UGC.stored_bytes()} bytes stored" + (f" (recompressed {b0} -> {b1})" if b0 else ""))
     log(f"{NOTIF.count()} notifications")
@@ -2728,6 +2924,18 @@ def announce_auth(xuid, ip, token=""):
     if len(_AUTH_ANNOUNCED) > 20000:
         _AUTH_ANNOUNCED.clear()
     xbl.announce_auth(xuid, ip, tkey)
+
+
+_LAST_POLL = {}
+
+
+def _unchanged(key, sig):
+    """True when a poll got the same answer as the same player's last poll of the same resource: a repeat is not news."""
+    old = _LAST_POLL.get(key)
+    if len(_LAST_POLL) > 5000:
+        _LAST_POLL.clear()
+    _LAST_POLL[key] = sig
+    return old == sig
 
 
 _OLD_REMOVED = {}
@@ -2789,10 +2997,13 @@ def setup_auth():
         game_public["tcp"] = int(os.environ["FH2MP_GAME_TCP_PORT"])         # the game server's experimental TCP carrier (FH2MP_TUNNEL_PORT)
     if os.environ.get("FH2MP_GAME_PROBE") == "1":
         game_public["probe"] = 1       # the game server answers UDP reachability probes (probe.py): launchers may then switch to TCP by themselves
+    if os.environ.get("FH2MP_NET_TRAFFIC") == "1":
+        game_public["traffic"] = 1     # launchers start the game with FH2MP_NET_TRAFFIC=1: the shim keeps the game's networked traffic (traffic.py serves it)
     LAUNCHER = launcher_api.Ctx(
         AUTH, SOCIAL, launcher_api.LauncherConfig(), online_count, log=log, on_login=on_login, on_logout=on_logout,
         lsp_public={"url": os.environ.get("FH2MP_LSP_URL", f"http://{host}:{os.environ.get('FH2MP_LSP_PUBLIC_PORT', '5080')}")},
         game_public=game_public, gamedb=gamedb_sync.GameDb(), crashes=crash_reports.CrashReports.from_env(log),
+        club_invite=launcher_club_invite,
         boards=lambda kind, n: (home.build(sys.modules[__name__]) if kind == "home"
                                 else (ops_api.challenges if kind == "challenges" else ops_api.leaderboards)(sys.modules[__name__], n)))
     global OPS
@@ -2824,6 +3035,17 @@ class BoundedHTTPServer(ThreadingHTTPServer):
             super().process_request_thread(request, client_address)
         finally:
             self.slots.release()
+
+    def handle_error(self, request, client_address):
+        """An exception that left a handler. Those from _handle are logged there (with the request's number); the default would print them
+        again to stderr. What is left is a failure outside a request: a malformed request line, a connection that broke while reading it."""
+        exc = sys.exc_info()[1]
+        if exc is None or getattr(exc, "_fh2mp_logged", False):
+            return
+        if isinstance(exc, (ConnectionError, TimeoutError)):
+            log_every(("conn-error", type(exc).__name__), 300, f"connection ended outside a request: {type(exc).__name__}: {exc}", "INFO")
+            return
+        log_exc("unhandled error before a request was read", exc)
 
 
 def main():

@@ -40,6 +40,8 @@ class MemoryDb:
                     sql = statement
                     sql = re.sub(r'BIGINT GENERATED (?:BY DEFAULT|ALWAYS) AS IDENTITY PRIMARY KEY', 'INTEGER PRIMARY KEY AUTOINCREMENT', sql)
                     self.conn.execute(sql)
+                elif re.match(r'ALTER TABLE accounts ADD COLUMN', statement, re.I):
+                    self.conn.execute(statement)
 
     def query(self, sql, args=()):
         return self.conn.execute(sql, args).fetchall()
@@ -195,6 +197,50 @@ class SocialTests(unittest.TestCase):
         with self.assertRaises(auth.AuthError): self.s.messages(2, 'club')
         with self.assertRaises(auth.AuthError): self.s.send(2, 'club', 'after leaving')
 
+    def test_messages_older_than_a_week_are_hidden_and_pruned(self):
+        self.friends()
+        old, new = time.time() - 8 * 86400, time.time() - 6 * 86400
+        with self.db.tx() as c:
+            for body, at in (('old', old), ('new', new)):
+                c.execute("INSERT INTO launcher_messages(sender,channel,body,created) VALUES (1,'dm:1:2',?,?)", (body, at))
+        self.assertEqual([m['body'] for m in self.s.messages(1, '2')['messages']], ['new'])
+        community._PRUNE['at'] = 0
+        self.assertEqual(self.s.prune_messages(), 1)
+        self.assertEqual(self.s.prune_messages(), 0)          # at most once an hour
+        self.assertEqual(self.db.one('SELECT COUNT(*) FROM launcher_messages')[0], 1)
+
+    def test_club_invite_suggestions_are_recent_friends_without_a_club(self):
+        for i, tag in ((4, 'FourthOne'), (5, 'FifthOne')):
+            with self.db.tx() as c:
+                c.execute('INSERT INTO accounts(xuid,pubkey,gamertag,gamertag_key,created) VALUES (?,?,?,?,0)', (i, bytes([i])*32, tag, auth.fold_tag(tag)))
+                c.execute('INSERT INTO players(xuid,gamertag,first_seen,last_seen) VALUES (?,?,0,0)', (i, tag))
+        with self.db.tx() as c:
+            for other, at in ((2, 10), (3, 30), (4, 20), (5, 40)):
+                c.execute('INSERT INTO friendships(a,b,created) VALUES (1,?,?)', (other, at))
+            c.execute("INSERT INTO clubs(id,tag,name,created) VALUES (1,'TEST','Test Club',0)")
+            c.execute('INSERT INTO club_members(xuid,club_id,joined,status_changed) VALUES (5,1,0,0)')
+        self.assertEqual([p['xuid'] for p in self.s.club_suggestions(1)['players']], [3, 4, 2])
+        self.assertEqual(len(self.s.club_suggestions(1, 2)['players']), 2)
+        self.assertEqual(self.route('GET', '/club/suggestions')[1]['players'][0]['xuid'], 3)
+
+    def test_club_invite_resolves_any_player_and_maps_club_rules(self):
+        calls = []
+        self.ctx.club_invite = lambda sponsor, invitee: calls.append((sponsor, invitee))
+        status, body, _ = self.route('POST', '/club/invite', {'player': 'thirddriver'})
+        self.assertEqual((status, calls, body['gamertag']), (200, [(1, 3)], 'ThirdDriver'))
+        for value in ('DriverOne', 'nobody'):
+            self.assertIn(self.route('POST', '/club/invite', {'player': value})[0], (400, 404))
+        import clubs
+
+        def refuse(sponsor, invitee):
+            raise clubs.ClubError('insufficient privileges', clubs.CODES['no_privilege'])
+        self.ctx.club_invite = refuse
+        status, body, _ = self.route('POST', '/club/invite', {'player': 'DriverTwo'})
+        self.assertEqual(status, 409)
+        self.assertIn('co-leaders', json.dumps(body))
+        self.ctx.club_invite = None
+        self.assertEqual(self.route('POST', '/club/invite', {'player': 'DriverTwo'})[0], 503)
+
     def test_launcher_presence_does_not_claim_game_presence(self):
         self.route('GET')
         self.assertEqual(self.s.profile(1)['state'], 'online')
@@ -214,6 +260,30 @@ class SocialTests(unittest.TestCase):
     def test_rate_limited_mutations(self):
         self.ctx.auth.hit = lambda *args: False
         self.assertEqual(self.route('POST', '/friends', {'player': '2'})[0], 429)
+
+
+class SnapshotCost(SocialTests):
+    def test_a_larger_friends_list_asks_no_more_queries(self):
+        def queries(n):
+            with self.db.tx() as c:
+                for i in range(10, 10 + n):
+                    c.execute('INSERT INTO accounts(xuid,pubkey,gamertag,gamertag_key,created) VALUES (?,?,?,?,0) ON CONFLICT DO NOTHING',
+                              (i, bytes([i]) * 32, 'P%d' % i, 'p%d' % i))
+                    c.execute('INSERT INTO friendships(a,b,created) VALUES (1,?,0) ON CONFLICT DO NOTHING', (i,))
+            count = []
+            real_query, real_one = self.db.query, self.db.one
+            with patch.object(self.db, 'query', lambda *a: count.append(a) or real_query(*a)), patch.object(self.db, 'one', lambda *a: count.append(a) or real_one(*a)):
+                self.s.channels(1)
+                self.s.profiles(self.social.friends(1))
+            return len(count)
+        few = queries(2)
+        self.assertLessEqual(queries(30), few + 2 * 30)         # channel() still checks each friendship; the rest does not grow
+
+    def test_the_hub_is_asked_once_for_a_moment(self):
+        with patch.object(community.time, 'monotonic', lambda: 100.0):
+            self.s.hub_lobbies()
+            self.s.hub_lobbies()
+        self.assertEqual(xbl.hub_lobbies.call_count, 1)
 
 
 class ReservationTests(unittest.TestCase):

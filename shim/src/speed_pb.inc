@@ -29,6 +29,8 @@ static unsigned g_speed_pb_next;
 static SRWLOCK g_speed_pb_lock = SRWLOCK_INIT;
 static DWORD g_speed_pb_tls = TLS_OUT_OF_INDEXES;
 static volatile LONG g_speed_pb_active;
+/* Set (to the TLS error + 1) when the feature switched itself off at run time; the monitor thread logs it. */
+static volatile LONG g_speed_pb_fault;
 typedef struct { void *request; float previous; } speed_pb_scope;
 
 static int speed_pb_finite_nonnegative(float value)
@@ -162,9 +164,13 @@ static void speed_pb_compare(void *comparison, speed_pb_ref *request)
     found = speed_pb_previous(comparison, speed, &scope.previous);
     if (!TlsSetValue(g_speed_pb_tls, found ? &scope : NULL)) {
         /* Disable the getter override too: an outer scope may still be set. */
+        InterlockedExchange(&g_speed_pb_fault, (LONG)GetLastError() + 1);
         InterlockedExchange(&g_speed_pb_active, 0);
         return g_speed_pb_compare(comparison, request);
     }
     g_speed_pb_compare(comparison, request);
-    if (!TlsSetValue(g_speed_pb_tls, outer)) InterlockedExchange(&g_speed_pb_active, 0);
+    if (!TlsSetValue(g_speed_pb_tls, outer)) {
+        InterlockedExchange(&g_speed_pb_fault, (LONG)GetLastError() + 1);
+        InterlockedExchange(&g_speed_pb_active, 0);
+    }
 }
