@@ -274,7 +274,7 @@ static int line_has(const char *l, int n, const char *pat)
 static int line_wanted(const char *l, int n)
 {
     static const char *const keep[] = {"attached", "session:", "identity:", "late:", "not patched", "NOT ", "unexpected", "fail", "error", "could not",
-                                       "refus", "crash", "xsbody", "xstoken", "mmtimeout", "mmtoast", "online-setup", "bindfix", "gamedb:", "timelock:", "rivalsleave", "bucketcars", "matchpoll", "sample", "carprobe", "probe:", "lighting:", "grid:",
+                                       "refus", "crash", "xsbody", "xstoken", "mmtimeout", "mmtoast", "online-setup", "bindfix", "gamedb:", "timelock:", "rivalsleave", "bucketcars", "matchpoll", "sample", "carprobe", "probe:", "lighting:", "honk:", "grid:",
                                        "xhr:", "winsock:", "placement:", "netstrings:", "torqueload:", "nulltorque", "speedpb:", "cinematics:",
                                        "festivalgrid:", "invitetype:", "ticket:", "tools:", "offline:", "rebound", "redirect:", "serverport:", "secureip:", "hook:", 0};
     int i;
@@ -2376,6 +2376,7 @@ static int patch_online_meet(void)
 #include "net_string_guard.inc"
 #include "grid_trace.inc"
 #include "torque_load_guard.inc"
+#include "online_setup.inc"
 
 static int patch_torque_load(void)
 {
@@ -3217,6 +3218,7 @@ static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *
 }
 
 #include "lighting_sync.inc"
+#include "honk_sync.inc"
 
 /*
  * #64: a Monthly Rival started from the pause menu inside an online session loaded for ever. The menu's launch (RivalsModule
@@ -3632,7 +3634,10 @@ static DWORD WINAPI option_monitor(LPVOID unused)
 
         lstrcpyW(rp, g_dir);
         lstrcatW(rp, L"\\fh2mp-restart.txt");
-        DeleteFileW(rp);                     /* a leftover of an earlier run is not this run's */
+        DeleteFileW(rp);                     /* a leftover of an earlier run (older shims) is not this run's */
+        lstrcpyW(rp, g_dir);
+        lstrcatW(rp, L"\\fh2mp-online-setup.txt");
+        DeleteFileW(rp);
     }
     have_want = arg_value_ascii(L"NetSessionDirectIpFreeRoam=", want, sizeof want);
     have_want_rt = arg_value_ascii(L"NetSessionDirectIpRoadTrip=", want_rt, sizeof want_rt);
@@ -3680,40 +3685,59 @@ static DWORD WINAPI option_monitor(LPVOID unused)
             }
         }
         {
-            static int restart_written;
-            DWORD first = g_lsp_first_tick;
+            /* Online-setup watchdog: diagnosis plus the in-process retry of online_setup.inc (fix 3). It never restarts the game. */
+            static int phase;            /* 0 watching, 1 retried (waiting for the request), 2 settled */
+            static int retries;
+            static DWORD retried_at;
+            DWORD first = g_lsp_first_tick, now = GetTickCount();
 
-            if (!restart_written && first && !g_gsds_seen && GetTickCount() - first > 20000 && !GetEnvironmentVariableW(L"FH2MP_OFFLINE", NULL, 0)) {
-                wchar_t rp[MAX_PATH];
-                HANDLE rf;
-                DWORD got, werr;
-                static const char why[] = "online setup skipped: no game-server directory request 20 s after the first server request\r\n";
-
-                restart_written = 1;
-                lstrcpyW(rp, g_dir);
-                lstrcatW(rp, L"\\fh2mp-restart.txt");
-                rf = CreateFileW(rp, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-                werr = rf == INVALID_HANDLE_VALUE ? GetLastError() : 0;
-                if (rf != INVALID_HANDLE_VALUE) {
-                    WriteFile(rf, why, (DWORD)sizeof why - 1, &got, NULL);
-                    CloseHandle(rf);
-                }
+            if (phase == 1 && g_gsds_seen) {
+                phase = 2;
                 log_begin();
-                log_raw("online-setup: the game never started its online setup (the cloud configuration failed before any request): the first request to the server was ");
-                log_dec(GetTickCount() - first);
-                log_raw(" ms ago (at tick ");
-                log_dec(first);
-                log_raw(") and no game-server directory request (gameserverds.xboxlive.com) has been made since; XSAPI token requests ");
+                log_raw("online-setup: recovered, the cloud configuration sent its request ");
+                log_dec(now - retried_at);
+                log_raw(" ms after retry ");
+                log_dec((unsigned long)retries);
+                log_raw(" (no restart needed)\n");
+            }
+            if (phase < 2 && first && !g_gsds_seen && !GetEnvironmentVariableW(L"FH2MP_OFFLINE", NULL, 0) &&
+                ((phase == 0 && now - first > 20000) || (phase == 1 && now - retried_at > 15000))) {
+                int state = cloud_config_state(NULL);
+                int may_retry = retries < 3 && state == 1 && !GetEnvironmentVariableW(L"FH2MP_NO_CCRETRY", NULL, 0);
+
+                log_begin();
+                log_raw(phase == 0 ? "online-setup: the game never started its online setup (no game-server directory request): the first request to the server was "
+                                   : "online-setup: still no game-server directory request after the retry; the first request to the server was ");
+                log_dec(now - first);
+                log_raw(" ms ago; XSAPI token requests ");
                 log_dec((unsigned long)g_xs_calls);
                 log_raw(", LSP requests ");
                 log_dec((unsigned long)g_xhr_seq);
-                log_raw("; the launcher is asked to restart the game");
-                if (werr) {
-                    log_raw(", but fh2mp-restart.txt could not be written (error ");
-                    log_dec(werr);
-                    log_raw("), so it will not");
+                online_setup_log_state();
+                if (may_retry && cloud_config_retry_now()) {
+                    retries++;
+                    retried_at = now;
+                    phase = 1;
+                    log_raw("; the cloud configuration is set to the game's own retry state (4, retry now), retry ");
+                    log_dec((unsigned long)retries);
+                    log_raw("\n");
+                } else {
+                    wchar_t rp[MAX_PATH];
+                    HANDLE rf;
+                    DWORD got;
+                    static const char why[] = "online setup did not start in this game run: no game-server directory request (cloud configuration), see fh2mp.log\r\n";
+
+                    phase = 2;
+                    lstrcpyW(rp, g_dir);
+                    lstrcatW(rp, L"\\fh2mp-online-setup.txt");
+                    rf = CreateFileW(rp, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                    if (rf != INVALID_HANDLE_VALUE) {
+                        WriteFile(rf, why, (DWORD)sizeof why - 1, &got, NULL);
+                        CloseHandle(rf);
+                    }
+                    log_raw(state != 1 ? "; not a state this shim can retry, the launcher shows a note (the game is not restarted)\n"
+                                       : "; retries used up or switched off, the launcher shows a note (the game is not restarted)\n");
                 }
-                log_raw("\n");
             }
         }
         {
@@ -5399,6 +5423,7 @@ static DWORD WINAPI late_init(LPVOID unused)
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_SPEEDPB", env, 8) == 0) patch_speed_pb();
             if (GetEnvironmentVariableW(L"FH2MP_NO_LIGHTING", env, 8) == 0) patch_lighting();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_HONK", env, 8) == 0) patch_honk();
         }
         {
             wchar_t env[8];
@@ -5499,6 +5524,19 @@ static DWORD WINAPI late_init(LPVOID unused)
                 patch_mm_timeouts();
             }
         }
+        {
+            wchar_t qt_env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_QOSTIMEOUT", qt_env, 8) == 0) {
+                patch_qos_timeout();
+            }
+        }
+        {
+            wchar_t sf_env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_SIGNINFIX", sf_env, 8) == 0) {
+                patch_signin_event();
+            }
+        }
+        patch_webgate_watch();
         {
             wchar_t cp_env[8];
             if (GetEnvironmentVariableW(L"FH2MP_CARPROBE", cp_env, 8) != 0) {
