@@ -26,7 +26,7 @@ DEFAULTS = {
     "tcp_auto": True,               # switch to TCP for this start when the server's UDP probe gets no answer (the server must advertise probes)
     "crash_report_ask": True,       # offer to send a report when the game crashed
     "crash_handled": 0.0,           # crashes recorded before this time (epoch) were already offered; 0 = not set up yet
-    "controls_swapped": False,      # Extra Options' headlight and roof toggles were moved from the right stick (honk) to the left stick, once
+    "controls_swapped": False,      # Extra Options' headlight and roof toggles were moved from the right stick (honk) to the left stick, once; reset when a game's shim could not move the horn (fh2mp-controls.txt)
     "extra_options": True,          # put FH2 Extra Options (GPL-3.0, RokkuDayo) next to the shim when the player has no copy
     # developer options (the dev launcher's panel; harmless elsewhere)
     "pin_shim": False,              # never replace the installed shim automatically (local / debug builds)
