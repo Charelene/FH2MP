@@ -72,10 +72,10 @@ in both modes. Turn the setting off to play online again. The Play menu also off
 another computer. Keep that code private.
 
 **Updates.** The launcher checks the signed release manifest and updates itself and the shim. Every release is signed; nothing unsigned is
-installed. The server refuses launchers and shims older than the minimum it announces (1.1.3 after this release is deployed), so an old install shows
+installed. The server refuses launchers and shims older than the minimum it announces (1.1.4 after this release is deployed), so an old install shows
 "update required" and has to update before it can play.
 
-Version 1.1.3 uses Azimuth 1.0.4, FH2 Extra Options 0.4.4 and FH2 Mod Platform 2.8.0. Setup installs the supported combination and preserves your existing settings and saves. The launcher downloads them from FH2MP's server (the authors' releases are the fallback) and checks every file against its pinned hash.
+Version 1.1.4 uses Azimuth 1.0.4, FH2 Extra Options 0.4.4 and FH2 Mod Platform 2.8.0. Setup installs the supported combination and preserves your existing settings and saves. The launcher downloads them from FH2MP's server (the authors' releases are the fallback) and checks every file against its pinned hash.
 
 **Linux.** Azimuth runs under Wine/Proton. The launcher picks the newest Proton it finds in the usual Steam folders and starts the game with
 `WINEDLLOVERRIDES="winmm,dwrite,d3dcompiler_47=n,b"`, so Wine loads FH2 Extra Options (`winmm.dll`) and the FH2 Mod Platform (`DWrite.dll` and `d3dcompiler_47.dll`)

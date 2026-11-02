@@ -208,7 +208,11 @@ class TcpFallbackTests(unittest.TestCase):
         import importlib.util
         spec = importlib.util.spec_from_file_location("server_probe", os.path.join(sys_path, "probe.py"))
         probe = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(probe)
+        sys.path.insert(0, sys_path)                # probe.py imports the server's diag module
+        try:
+            spec.loader.exec_module(probe)
+        finally:
+            sys.path.remove(sys_path)
         self.assertEqual(tunnel.PROBE_MAGIC, probe.MAGIC)
         srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         srv.bind(("127.0.0.1", 0))
