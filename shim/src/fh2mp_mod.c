@@ -1238,7 +1238,7 @@ static int patch_traffic_module_offline(void)
     rel32 = (int)(tgt - (fn + 5));
     jmp[0] = 0xE9;
     mem_copy(jmp + 1, &rel32, 4);
-    return plat_patch("traffic: SyncTrafficModule go-online -> go-offline", fn, on_sig, jmp, 5);
+    return plat_patch("traffic: SyncTrafficModule go-online switch", fn, on_sig, jmp, 5);
 }
 
 /*
@@ -1733,12 +1733,12 @@ static int patch_mm_timeouts(void)
     }
     if (memcmp(img + FH2_MMTIMEOUT_A_RVA, a_new, sizeof a_new) == 0 ||
         (code_is("mmtimeout", "the match request tick (first-state limit)", img, FH2_MMTIMEOUT_A_RVA, a_old, sizeof a_old) &&
-         plat_patch("mmtimeout: first-state limit of the match request 10 s -> 3 s", img + FH2_MMTIMEOUT_A_RVA + 1, a_old + 1, a_new + 1, 4))) {
+         plat_patch("mmtimeout: match request, first-state limit", img + FH2_MMTIMEOUT_A_RVA + 1, a_old + 1, a_new + 1, 4))) {
         done++;
     }
     if (memcmp(img + FH2_MMTIMEOUT_B_RVA, b_new, sizeof b_new) == 0 ||
         (code_is("mmtimeout", "the match request tick (second-state limit)", img, FH2_MMTIMEOUT_B_RVA, b_old, sizeof b_old) &&
-         plat_patch("mmtimeout: second-state limit of the match request 30 s -> 3 s", img + FH2_MMTIMEOUT_B_RVA + 1, b_old + 1, b_new + 1, 4))) {
+         plat_patch("mmtimeout: match request, second-state limit", img + FH2_MMTIMEOUT_B_RVA + 1, b_old + 1, b_new + 1, 4))) {
         done++;
     }
     return done == 2;
