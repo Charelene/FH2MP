@@ -1,0 +1,13 @@
+#!/bin/sh
+# Refuses to push any commit whose message credits an AI assistant.
+zero=0000000000000000000000000000000000000000
+while read -r _ local_sha _ remote_sha; do
+    [ "$local_sha" = "$zero" ] && continue
+    if [ "$remote_sha" = "$zero" ]; then range="$local_sha --not --remotes"; else range="$remote_sha..$local_sha"; fi
+    bad=$(git log -i -E --grep='co-authored-by:.*(claude|anthropic)|generated (with|by).*claude|noreply@anthropic\.com' --format='%h %s' $range)
+    if [ -n "$bad" ]; then
+        echo "pre-push: refused, these commits credit Claude/Anthropic:" >&2
+        echo "$bad" >&2
+        exit 1
+    fi
+done
