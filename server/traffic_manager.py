@@ -5,6 +5,8 @@ when pushed out or when that player culls it; the car lives on for the others. T
 Addresses are build 1.0.0.64. Read in the exe except where marked [I]: the exe only holds the in-process offline server, so its network sends are vtable slots
 and the handover below is inferred from OnRequestOwnership, which does Drop and Take itself."""
 
+import os
+
 import diag
 
 LOG = diag.get("traffic")
@@ -22,10 +24,12 @@ MAX_CARS = 216               # the loops in 0x1957e00 and 0x19580c0 stop at 0xd8
 HARD_CAP = 18                # AssignVehicleToPlayer 0x1955080
 BASE_CAPACITY = 10           # helper_1956690: 10 + car models in use - cars held
 EVICT_MARGIN = 100.0         # squared metres a new car must beat the farthest held one by (0x1957e00)
-OWNER_BONUS = 10             # Rebalance 0x1955210: score = distance, -10 for the owner ...
+# Rebalance 0x1955210: score = distance, -10 for the owner in FH2's own code; FH4's balancer (0x413bfb0) gives 20, so a rival must be more than 20 m
+# closer than the owner and a car changes hands less often ...
+OWNER_BONUS = int(os.environ.get("FH2MP_TRAFFIC_OWNER_BONUS", "20"))
 RECENT_MS = 10000.0          # ... and up to -100 more for a change in the last 10 s
 RECENT_FACTOR = 0.01
-CHANGE_GAP_MS = 2000.0       # IsVehicleOwnershipStale 0x1955e10, CanChangeOwner 0x1955d40
+CHANGE_GAP_MS = float(os.environ.get("FH2MP_TRAFFIC_HOLD_MS", "2000"))   # IsVehicleOwnershipStale 0x1955e10, CanChangeOwner 0x1955d40
 ROUND_BUDGET, CHANGE_COST = 10, 5    # Rebalance hands each player at most 2 cars a round
 DEFAULT_RADIUS = 250         # Densities spawn-out; the client sends its own with most messages (helper_71ef00)
 
@@ -87,6 +91,7 @@ class TrafficManager:
         self.requests = {}           # universe -> [[key, count], ...] in arrival order (queue +0x8)
         self.placing = {}            # vid -> key: spawned, no position yet (queue +0x38), blocks spawns nearby
         self.refusal = ""            # why the last spawned() / request_ownership() said no, for the caller's log line
+        self.resent = False          # the last request_ownership() was from the owner and was answered with TakeOwnership again
 
     def join(self, key):
         return self.players.setdefault(key, Player(key))
@@ -193,8 +198,17 @@ class TrafficManager:
         """OnRequestOwnership 0x1956a20, except that the retail flag check is gone: the shim requests a car on every collision, and that
         is the only thing that sends this."""
         p, car = self.players[key], self.cars.get(vid)
-        if car is None or car.owner == key or vid not in p.held:
-            self.refusal = "no such car" if car is None else "the player owns it already" if car.owner == key else "the player does not hold it"
+        self.resent = False
+        if car is not None and car.owner == key:
+            # The server has this player as the owner and the client asked, which it only does for a car it does not simulate. A Denied would take
+            # the car from its own owner: the client's OnOwnershipRequestDenied clears the car's local authority (0x7123a0), so the next collision asks
+            # again, about every 2 s. Say again that the car is its own.
+            self.refusal = "the player owns it already, TakeOwnership sent again"
+            self.resent = True
+            self.out.take(key, vid)
+            return False
+        if car is None or vid not in p.held:
+            self.refusal = "no such car" if car is None else "the player does not hold it"
             self.out.denied(key, vid)
             return False
         if now - car.changed <= CHANGE_GAP_MS:
@@ -248,6 +262,7 @@ class TrafficManager:
         """Rebalance 0x1955210: cars with 2+ holders go to the best placed one (lowest score [I]), at most 2 per player per round."""
         by_key = {p.key: p for p in players}
         scores = []
+        owner_score = {}
         for car in cars:
             if len(car.holders) < 2 or now - car.changed <= CHANGE_GAP_MS:
                 continue
@@ -262,6 +277,8 @@ class TrafficManager:
                     if age < RECENT_MS:
                         score -= int((RECENT_MS - age) * RECENT_FACTOR)
                 scores.append((score, car.vid, key))
+                if car.owner == key:
+                    owner_score[car.vid] = score
         # Score, then car; never the player: keys are Peer objects, and two holders of one car at the same score made tick() raise TypeError
         # every round on dev (2026-11-01), so no spawn was granted while it lasted. Retail's sort (0x1953d40) leaves such ties in any order.
         scores.sort(key=lambda entry: entry[:2])
@@ -278,7 +295,7 @@ class TrafficManager:
                     if car.owner != key:
                         if not by_key[key].settled():
                             continue
-                        self._hand_over(car, key, now)
+                        self._hand_over(car, key, now, f"rebalance: score {entry[0]} against the owner's {owner_score.get(vid, '-')}")
                     done.add(vid)
                     budget[key] -= CHANGE_COST
             scores = rest
@@ -372,7 +389,9 @@ class TrafficManager:
                 return q.key
         return None
 
-    def _hand_over(self, car, key, now):
+    def _hand_over(self, car, key, now, why="requested by the new owner"):
+        LOG.debug(f"car {car.vid} owner {_name(car.owner)} -> {_name(key)} after {now - car.changed:.0f} ms ({why}), "
+                  f"{len(car.holders)} holders, owner bonus {OWNER_BONUS} m, hold {CHANGE_GAP_MS:.0f} ms")
         if car.owner is not None:
             self.out.drop(car.owner, car.vid)
         car.owner, car.changed = key, now

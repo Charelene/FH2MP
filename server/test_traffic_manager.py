@@ -2,6 +2,7 @@
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import traffic  # noqa: E402
@@ -365,6 +366,33 @@ class Ownership(unittest.TestCase):
         m.set_position("b", (5000.0, 0.0, 0.0))
         vid = spawn(m, "a")
         self.assertFalse(m.request_ownership("b", vid, 9000.0))
+        self.assertIn(("denied", "b", vid), out.log)
+        self.assertFalse(m.resent)
+
+    def test_a_request_from_the_owner_is_answered_with_a_take_not_a_denial(self):
+        """The client's OnOwnershipRequestDenied clears the car's local authority (0x7123a0), so a Denied to the owner takes its own car away
+        and the next collision asks again."""
+        m, out, vid = self.two_holders()
+        out.log.clear()
+        self.assertFalse(m.request_ownership("a", vid, 20000.0))
+        self.assertEqual(out.log, [("take", "a", vid)])
+        self.assertTrue(m.resent)
+        self.assertEqual(m.cars[vid].owner, "a")
+        self.assertTrue(m.request_ownership("b", vid, 40000.0))      # the next request is judged afresh
+        self.assertFalse(m.resent)
+
+    def test_the_owner_bonus_decides_a_rival_18_metres_closer(self):
+        """FH4's balancer gives the owner 20 (0x413bfb0), FH2's own code 10: with 20 the owner keeps a car a rival is 18 m closer to."""
+        for bonus, owner in ((20, "a"), (10, "b")):
+            with mock.patch.object(T, "OWNER_BONUS", bonus):
+                m, out, vid = self.two_holders()
+                m.set_position("a", (130.0, 0.0, 0.0))     # 30 m from the car
+                m.set_position("b", (112.0, 0.0, 0.0))     # 12 m
+                m.tick(20000.0)
+                self.assertEqual(m.cars[vid].owner, owner, f"bonus {bonus}")
+
+    def test_the_owner_bonus_default_is_fh4s(self):
+        self.assertEqual(T.OWNER_BONUS, int(os.environ.get("FH2MP_TRAFFIC_OWNER_BONUS", "20")))
 
 
 class Leaving(unittest.TestCase):
@@ -444,6 +472,19 @@ class Wire(unittest.TestCase):
         w.on_update(b, traffic.MSG_SERVER_ROUTE_PROGRESS, r)
         self.assertEqual(r.values, [])
         self.assertEqual(sent[-1][0], c)      # nothing new since the join
+
+    def test_a_request_for_a_car_the_server_gave_it_is_answered_with_a_take(self):
+        """through the entry point the game server calls: the client's request for its own car must not become OwnershipRequestDenied"""
+        w, (a, b, c), sent = self.world()
+        w.on_message(a, traffic.S_REQUEST_TRAFFIC, 1, 250, 0, 0, 0, 0)
+        w.manager._grant(0)
+        vid = next(iter(w.manager.reserved))
+        w.on_message(a, traffic.S_TRAFFIC_SPAWNED, vid, MODEL, 0, 0, 0, 0)
+        takes = w.counters.get("TakeOwnership", 0)
+        w.on_message(a, traffic.S_REQUEST_OWNERSHIP, vid, 0, 0, 0, 0, 0)
+        self.assertEqual(w.counters["TakeOwnership"], takes + 1)
+        self.assertNotIn("OwnershipRequestDenied", w.counters)
+        self.assertEqual(w.manager.cars[vid].owner, a)
 
     def test_the_radius_comes_from_the_kinds_that_carry_it(self):
         w, (a, b, c), sent = self.world()
