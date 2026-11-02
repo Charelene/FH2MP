@@ -2750,7 +2750,11 @@ class Server:
     def tag_collision(self, peer, k1, k2, old_a, new_a, old_b, new_b) -> None:
         ev = self.event
         tag = ev.get("tag") if ev else None
-        if not tag or not tag.get("assigned") or ev.get("over"):
+        if not tag or not tag.get("assigned"):
+            return
+        if ev.get("over"):
+            self.log_every(("tag-over", id(ev)), 60.0, f"tag: collision from owner {peer.owner_id} ignored: the server ended the event "
+                           f"(time limit {tag.get('seconds', tag['mode']['seconds']):g} s or all infected) but this client still plays it", "INFO")
             return
 
         def car(key):
@@ -3135,10 +3139,19 @@ class Server:
                 if getattr(q, "team_id", 0):
                     self.set_player_team(q, 0)
         if mode in TAG_MODES:
+            seconds = TAG_MODES[mode]["seconds"]
+            if not self.roadtrip and self.game_options:       # Free Roam: the leader sets the time limit in the event options
+                try:
+                    chosen = gameopts.max_time(*self.game_options)
+                except ValueError:
+                    chosen = None
+                if chosen is not None:
+                    seconds = chosen
             self.event["tag"] = {"mode": TAG_MODES[mode], "buckets": {}, "assigned": False, "assign_at": None, "repeats": [],
-                                 "guessed": guessed}
+                                 "guessed": guessed, "seconds": seconds}
             self.event["numlaps"] = None
-            self.log(f"tag: event {self.rt_race() if self.roadtrip else '(free roam)'} is {TAG_MODES[mode]['name']}")
+            self.log(f"tag: event {self.rt_race() if self.roadtrip else '(free roam)'} is {TAG_MODES[mode]['name']}, "
+                     f"time limit {seconds:g} s" + ("" if seconds != TAG_MODES[mode]["seconds"] else " (the mode's default)"))
         for q in people:
             # Readiness reported for the PREVIOUS event is still stored (a client only resets HasLoadedCarsForAllParticipants / HasGrid /
             # RenderReady when it starts loading again). Without this the grid started as soon as the first client had loaded, before a
@@ -3374,7 +3387,7 @@ class Server:
             go_at = time.monotonic() + RACE_COUNTDOWN_MS / 1000.0
             if not ev["tag"].get("assigned") and ev["tag"].get("assign_at") is None:
                 ev["tag"]["assign_at"] = go_at            # no grid assignment was scheduled: the crown / first infection at "GO"
-            ev["tag"]["end_at"] = go_at + ev["tag"]["mode"]["seconds"]
+            ev["tag"]["end_at"] = go_at + ev["tag"].get("seconds", ev["tag"]["mode"]["seconds"])
             ev["tag"]["go_at"] = go_at
             ev["tag"]["repeats"] = [time.monotonic() + x for x in (0.5, 2.0)]     # the buckets again at GO
         go = (self.now_ms() + RACE_COUNTDOWN_MS) & 0xFFFFFFFF

@@ -8,6 +8,8 @@ game's constructors and checked on the logs: every Road Trip team event of the d
 [428][2][429]; random bits match it about once in four million offsets (a 22-bit signature).
 """
 
+import struct
+
 NUM_TEAMS_ID = 428
 TEAM_SCORING_ID = 429
 ID_BITS = 10
@@ -146,6 +148,19 @@ def _lap_fields(size, payload):
         pos += width
         previous = vid
     return pos, None, pos if end_offset is None else end_offset, end_type
+
+
+MAX_TIME_ID = 420       # EndConditionOptions.MaxTime / Time (float seconds; 0x9918b0 writes it at +0x60 for Time and AllPlayersInBucket)
+MAX_TIME_LIMIT = 86400.0
+
+
+def max_time(size, payload):
+    """The event time limit in seconds the leader set (King: Time, Infection: MaxTime), or None when it is absent or not a usable number."""
+    entry = fields(size, payload).get(MAX_TIME_ID)
+    if entry is None or entry[0] != 32:
+        return None
+    seconds = struct.unpack("<f", entry[1].to_bytes(4, "little"))[0]
+    return seconds if 0.0 < seconds <= MAX_TIME_LIMIT else None
 
 
 def lap_field(size, payload):

@@ -146,6 +146,28 @@ class TagModeFromGameOptions(unittest.TestCase):
         self.assertTrue(tag["guessed"])
         self.assertIsNone(w.event["numlaps"])
 
+    def test_the_time_limit_is_what_the_leader_set(self):
+        import struct
+        self.assertEqual(gameopts.max_time(*options("FR_KING")), 240.0)       # captured: the preset's 240 s
+        for seconds, expected in ((600.0, 600.0), (0.0, 240.0), (float("nan"), 240.0), (1e9, 240.0)):
+            w, (a, b) = world()
+            values = gameopts.fields(*options("FR_KING"))
+            values[420] = (32, int.from_bytes(struct.pack("<f", seconds), "little"))
+            w.game_options = gameopts.encode_fields(values)
+            w.start_event(a)
+            self.assertEqual(w.event["tag"]["seconds"], expected, seconds)
+        w, (a, b) = world()
+        values = gameopts.fields(*options("FR_KING"))
+        values[420] = (32, int.from_bytes(struct.pack("<f", 600.0), "little"))
+        w.game_options = gameopts.encode_fields(values)
+        w.start_event(a)
+        for q in (a, b):
+            q.console_vars[S.CONSOLE_VAR_HAS_LOADED_CARS] = 1
+        w.maybe_begin_race()
+        w.go_race()
+        tag = w.event["tag"]
+        self.assertAlmostEqual(tag["end_at"] - tag["go_at"], 600.0, places=1)    # was fixed at 240 s: hits after that were ignored in silence
+
     def test_free_roam_circuit_race_gets_no_tag_state(self):
         for name in ("FR_CIRCUIT", "FR_SPRINT"):
             w, (a, b) = world()
