@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import diag  # noqa: E402
 import auth  # noqa: E402
 import launcher_api  # noqa: E402
 import pngtool  # noqa: E402
@@ -212,6 +213,19 @@ class SessionTests(AuthCase):
         t2 = self.login()
         self.assertEqual(self.code(self.svc.authenticate, t1, "203.0.113.5"), "invalid_token")
         self.assertEqual(self.svc.authenticate(t2, "203.0.113.5").xuid, self.acct.xuid)
+
+    def test_a_sign_in_that_replaces_a_session_in_use_says_so(self):
+        got = []
+        old = diag._sink
+        diag.set_sink(lambda level, sub, msg: got.append((level, msg)))
+        self.addCleanup(diag.set_sink, old)
+        self.login()
+        self.assertEqual(got, [])                              # nothing was replaced
+        self.login()
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0][0], "WARN")
+        self.assertIn("auth.session_replaced", got[0][1])
+        self.assertIn(f"xuid={self.acct.xuid:#x} replaced=1", got[0][1])
 
     def test_token_is_bound_to_the_address(self):
         t = self.login()

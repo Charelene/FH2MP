@@ -92,7 +92,11 @@ def log(msg, level="INFO", sub=None):
     seq = getattr(CTX, "seq", None)
     if seq and msg.startswith("  ") and not msg.startswith("  #"):
         msg = f"  #{seq}{msg[1:]}"
-    print(f"{time.strftime('%H:%M:%S')} {'' if level == 'INFO' else level + ' '}{diag.scrub(msg)}", flush=True)
+    run = getattr(CTX, "run", "")
+    if run and level in ("WARN", "ERROR") and " run=" not in msg:
+        msg += f" run={run}"                  # a refusal or failure names its game without a search for the "#N POST" line
+    line = f"{time.strftime('%H:%M:%S')} {'' if level == 'INFO' else level + ' '}{diag.scrub(msg)}"
+    diag.write_line(lambda text: print(text, flush=True), line)
 
 
 def warn(msg, sub=None):
@@ -122,6 +126,21 @@ def log_every(key, interval, msg, level="WARN", sub=None):
     ok, skipped = RATE.allow(key, interval)
     if ok:
         log(msg + (f" (and {skipped} more in the last {interval:.0f} s)" if skipped else ""), level, sub)
+
+
+_RUNS = {}                     # run id -> xuid, the runs already introduced to the log and the game server
+
+
+def note_run(run, xuid):
+    """First signed-in request of a game: one line that ties its run id to the player, and the same for the game server, whose lines cannot see the header."""
+    base = run.split(".")[0]
+    if not base or not xuid or _RUNS.get(base) == xuid:
+        return
+    if len(_RUNS) >= 20000:
+        _RUNS.clear()
+    _RUNS[base] = xuid
+    log(f"  run.seen {diag.kv(run=base, xuid=f'{xuid:#x}', shim=getattr(CTX, 'shim', '') or None)}")
+    xbl.announce_run(xuid, base)
 
 
 def call_name(headers):
@@ -2603,6 +2622,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle(self):
         seq = CTX.seq = next(_SEQ)     # log() numbers the indented lines of this request with it
+        CTX.run = diag.run_id(self.headers.get("X-FH2MP-Run", ""))
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -2641,11 +2661,13 @@ class Handler(BaseHTTPRequestHandler):
         if not self._identify():
             return
         social.touch(CTX.xuid or int(xbl_xuid(self.headers) or 0))
+        if CTX.run and CTX.authed:              # only a signed-in caller can put a run id on a player's lines
+            note_run(CTX.run, CTX.xuid)
         if (method == "RetrieveForUser" and cls.startswith("Xls.WebServices.Notifications")) or host in SOCIAL_HOSTS:
             POLLS.note(call_name(self.headers) if method else host, CTX.xuid)       # polls are counted, not listed (see PollShare)
-            log(f"#{seq} {self.command} {host}{self.path} {cls} {method} body={len(body)} user={CTX.xuid:#x}", "DEBUG", "poll")
+            log(f"#{seq} {self.command} {host}{self.path} {cls} {method} body={len(body)} user={CTX.xuid:#x}{' run=' + CTX.run if CTX.run else ''}", "DEBUG", "poll")
         else:
-            log(f"#{seq} {self.command} {host}{self.path} {cls} {method} body={len(body)} user={CTX.xuid:#x}")
+            log(f"#{seq} {self.command} {host}{self.path} {cls} {method} body={len(body)} user={CTX.xuid:#x}{' run=' + CTX.run if CTX.run else ''}")
         if CTX.own_cars and host in MULTIPLAYER_HOSTS:
             mine, theirs = getattr(CTX, "gamedb", ("?", "?"))
             log_every(("mp-refused", CTX.xuid), 120, "  multiplayer refused: this player's car database is not the server's " + diag.kv(

@@ -2,11 +2,17 @@
 
 The free-text server.log needs a day of grep to answer "how many sessions ended how, and why did events fail?" (prod 2026-10-29: 600 MB, no
 dates on the lines). These lines carry the answer directly, and `summarize` is what tools/prod_report.py prints. Fields are short and carry
-no addresses, tokens or names: an xuid is the only identifier. Writing never raises into the game server."""
+no addresses, tokens or names: an xuid is the only identifier. Writing never raises into the game server; a file that cannot be opened or written is
+said in the log, because the report built from this file would otherwise just look like a quiet day."""
 import collections
 import json
 import threading
 import time
+
+import diag
+
+LOG = diag.get("events")
+RATE = diag.RateLimit()
 
 
 class EventLog:
@@ -17,8 +23,9 @@ class EventLog:
         if path:
             try:
                 self.file = open(path, "a", buffering=1)
-            except OSError:
+            except OSError as e:
                 self.file = None
+                LOG.error(f"events.open_failed {diag.kv(path=path, error=f'{type(e).__name__}: {e}', effect='no events.jsonl records this run')}")
 
     def emit(self, kind, **fields):
         if self.file is None:
@@ -27,8 +34,10 @@ class EventLog:
         with self.lock:
             try:
                 self.file.write(line + "\n")
-            except (OSError, ValueError):
-                pass
+            except (OSError, ValueError) as e:
+                ok, skipped = RATE.allow("write", 60.0)
+                if ok:
+                    LOG.error(f"events.write_failed {diag.kv(path=self.path, kind=kind, lost=skipped + 1, error=f'{type(e).__name__}: {e}')}")
 
 
 def read(lines, since=None):

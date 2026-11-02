@@ -5,16 +5,22 @@ many parsers of existing lines (xp_audit, site_stats, tools/) keep working; WARN
 matter are written `key=value` (kv()), which is both readable and greppable.
 
 Levels:  ERROR  an operation genuinely failed.   WARN  unexpected or degraded, worth a look.   INFO  lifecycle and state changes.
-         DEBUG  detail, off by default.
+         DEBUG  detail, off by default.   TRACE  per-packet detail, for one subsystem at a time ("packet=TRACE").
 Verbosity: FH2MP_LOG_LEVEL=INFO|DEBUG|WARN|ERROR (default INFO); FH2MP_LOG_SUB="grid=DEBUG,reliable=DEBUG" raises one subsystem only.
+
+Correlation: every Play of the launcher makes a run id (8 hex digits). The launcher sends it on its API calls and writes it in the session file; the shim
+puts it in fh2mp.log and sends `<run>.<xhr number>` as X-FH2MP-Run; the LSP writes it on request and failure lines and tells the game server ("run <xuid>
+<run>"), which writes it on join, removal and events.jsonl lines. `grep <run>` over launcher.log, fh2mp.log, lsp.log, server.log and events.jsonl follows one
+game start. New lines use a stable event name followed by key=value fields (`run.seen run=... xuid=...`).
 """
 import os
 import re
+import sys
 import threading
 import time
 import traceback
 
-LEVELS = {"DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
+LEVELS = {"TRACE": 5, "DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
 
 
 def _parse_subs(text):
@@ -66,6 +72,33 @@ def scrub(text):
     return _SECRETS.sub("<redacted>", text)
 
 
+_RUN = re.compile(r"[0-9a-f]{8}(?:\.[0-9]{1,10})?")
+
+
+def run_id(text):
+    """The run id a client sent (`ab12cd34` or `ab12cd34.57`, the second part being the shim's request number), "" for anything else: it comes from a
+    header and goes into log lines."""
+    return text if text and _RUN.fullmatch(text) else ""
+
+
+_LOST = RateLimit()
+
+
+def write_line(write, line):
+    """Writes a log line. A full disk or a closed pipe must not turn a log line into a failed request or a dead game server: the loss goes to stderr, at most
+    once a minute with the number of lines lost."""
+    try:
+        write(line)
+    except (OSError, ValueError) as e:
+        ok, skipped = _LOST.allow("lost", 60.0)
+        if ok:
+            try:
+                sys.stderr.write(f"log.write_failed {kv(error=f'{type(e).__name__}: {e}', lost=skipped + 1)}\n")
+                sys.stderr.flush()
+            except (OSError, ValueError):
+                pass
+
+
 def kv(**fields):
     """`a=1 b='two words'`, in the order given; None fields are left out."""
     parts = []
@@ -109,6 +142,9 @@ class Logger:
             _sink(level, self.sub, msg)
         elif VERBOSITY_DEFAULT.enabled(level, self.sub):
             print(f"{time.strftime('%H:%M:%S')} {'' if level == 'INFO' else level + ' '}{scrub(msg)}", flush=True)
+
+    def trace(self, msg):
+        self._emit("TRACE", f"{self.sub}: {msg}")
 
     def debug(self, msg):
         self._emit("DEBUG", f"{self.sub}: {msg}")

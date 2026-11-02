@@ -436,5 +436,43 @@ class ModuleLinesCarryTheRequestNumber(unittest.TestCase):
         self.assertEqual(lsp_lines(lambda: diag.get("auth").warn("x")), ["WARN auth: x"])
 
 
+class RunIds(unittest.TestCase):
+    """A run id ties a request to its game: on failure lines, and once per run for the log and the game server."""
+
+    def setUp(self):
+        self.before = {k: getattr(L.CTX, k, None) for k in ("seq", "run", "shim")}
+        self.addCleanup(lambda: [setattr(L.CTX, k, v) for k, v in self.before.items()])
+        L._RUNS.clear()
+        L.CTX.seq, L.CTX.shim = 7, "1.1.5"
+
+    def test_failure_lines_name_the_run_and_ordinary_lines_do_not_grow(self):
+        L.CTX.run = "ab12cd34.57"
+        got = lsp_lines(lambda: (L.log("  a refusal", "WARN"), L.log("  an answer")))
+        self.assertEqual(got[0], "WARN   #7 a refusal run=ab12cd34.57")
+        self.assertEqual(got[1], "  #7 an answer")
+
+    def test_the_first_request_of_a_run_introduces_it_once(self):
+        sent = []
+        real, L.xbl.announce_run = L.xbl.announce_run, lambda x, r: sent.append((x, r))
+        self.addCleanup(setattr, L.xbl, "announce_run", real)
+        L.CTX.run = ""
+        got = lsp_lines(lambda: [L.note_run(f"ab12cd34.{n}", 0x90) for n in range(3)])
+        self.assertEqual(sent, [(0x90, "ab12cd34")])
+        self.assertEqual(len(got), 1)
+        self.assertIn("run.seen run=ab12cd34 xuid=0x90 shim=1.1.5", got[0])
+
+    def test_the_announcement_is_a_real_control_datagram(self):
+        import socket
+        so = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        so.bind(("127.0.0.1", 0))
+        so.settimeout(2)
+        self.addCleanup(so.close)
+        old = os.environ.get("FH2MP_SERVER_CONTROL")
+        os.environ["FH2MP_SERVER_CONTROL"] = "127.0.0.1:%d" % so.getsockname()[1]
+        self.addCleanup(lambda: os.environ.__setitem__("FH2MP_SERVER_CONTROL", old) if old else os.environ.pop("FH2MP_SERVER_CONTROL", None))
+        L.xbl.announce_run(0x9000000000001, "ab12cd34")
+        self.assertEqual(so.recv(100), b"run 9000000000001 ab12cd34")
+
+
 if __name__ == "__main__":
     unittest.main()

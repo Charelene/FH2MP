@@ -400,6 +400,11 @@ def announce_player(xuid, lobby):
                f"could not tell the game server that xuid={xuid} was matched into lobby {str(lobby)[:8]}, the player will not be placed there: {diag.where(e)}")
 
 
+def announce_run(xuid, run):
+    """The run id of the game this player started (diag.py): the game server writes it on its lines about them."""
+    _control("run %x %s" % (int(xuid), run))
+
+
 def _control(text):
     """One text datagram to the game server's control port (loopback)."""
     import socket

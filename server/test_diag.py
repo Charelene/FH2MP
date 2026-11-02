@@ -1,4 +1,5 @@
 """Log levels, per-subsystem verbosity, rate limiting, exception text and secret scrubbing (diag.py) as the game server and the LSP use them."""
+import contextlib
 import io
 import os
 import sys
@@ -89,6 +90,31 @@ class ModuleLoggers(unittest.TestCase):
 class Helpers(unittest.TestCase):
     def test_kv_quotes_only_what_needs_it(self):
         self.assertEqual(diag.kv(owner=3, why="no packets", gone=None, empty=""), "owner=3 why='no packets' empty=''")
+
+
+class RunIdsAndTrace(unittest.TestCase):
+    def test_a_run_id_is_8_hex_digits_with_an_optional_request_number(self):
+        for good in ("ab12cd34", "ab12cd34.57", "00000000.4294967295"):
+            self.assertEqual(diag.run_id(good), good)
+        for bad in ("", "AB12CD34", "ab12cd3", "ab12cd345", "ab12cd34.", "ab12cd34.5 x", "ab12cd34\nfake line", "ab12cd34.12345678901"):
+            self.assertEqual(diag.run_id(bad), "")
+
+    def test_trace_is_off_at_every_ordinary_level_and_on_for_one_subsystem(self):
+        self.assertFalse(diag.Verbosity("DEBUG", "").enabled("TRACE", "packet"))
+        on = diag.Verbosity("INFO", "packet=TRACE")
+        self.assertTrue(on.enabled("TRACE", "packet"))
+        self.assertFalse(on.enabled("TRACE", "grid"))
+
+    def test_a_failing_log_write_costs_a_note_on_stderr_not_the_caller(self):
+        def full(_text):
+            raise OSError(28, "No space left on device")
+        diag._LOST.state.clear()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            for _ in range(5):
+                diag.write_line(full, "x")      # must not raise
+        self.assertEqual(err.getvalue().count("log.write_failed"), 1)
+        self.assertIn("No space left", err.getvalue())
 
 
 if __name__ == "__main__":

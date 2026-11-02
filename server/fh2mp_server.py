@@ -39,18 +39,22 @@ import player_setup  # noqa: E402
 import reliable  # noqa: E402
 import replay  # noqa: E402
 import tunnel as tunnel_mod  # noqa: E402
+STARTUP_PROBLEMS = []        # checks that came up without their data; Hub says so once its log is open. A deploy that lost a file looks like a quiet server otherwise.
 try:
     from car_policy import BLOCKED_CARS, KNOWN_CARS, TOP_SPEED_KMH  # noqa: E402     # tools/make_car_policy.py
-except ImportError:
+except ImportError as e:
     BLOCKED_CARS, KNOWN_CARS, TOP_SPEED_KMH = {}, frozenset(), {}
+    STARTUP_PROBLEMS.append(f"car_policy ({e}): no blocked cars, no known-car list, no stock top speeds")
 try:
     from car_policy import CAR_CHOICES, RENTAL_CARS  # noqa: E402
-except ImportError:
+except ImportError as e:
     CAR_CHOICES, RENTAL_CARS = {}, frozenset()
+    STARTUP_PROBLEMS.append(f"car_policy choices ({e}): no car choices, no rental list")
 try:
     import parts as parts_check  # noqa: E402     # part ids of the game data: tools/make_part_ids.py -> part_ids.py
-except ImportError:
+except ImportError as e:
     parts_check = None
+    STARTUP_PROBLEMS.append(f"parts ({e}): lobby cars get no part check")
 
 
 def _dlc_cars():
@@ -59,7 +63,10 @@ def _dlc_cars():
     try:
         with open(path) as f:
             return frozenset(int(x) for line in f for x in line.split("#")[0].split() if x.lstrip("-").isdigit())
-    except OSError:
+    except FileNotFoundError:
+        return frozenset()
+    except OSError as e:
+        STARTUP_PROBLEMS.append(f"DLC car list {path} ({type(e).__name__}: {e}): DLC cars count as unknown")
         return frozenset()
 
 
@@ -414,6 +421,7 @@ RELAY_HISTORY_CAP = 8000       # stored messages per object, replayed to late jo
 _log_day = None                # day of the year of the last log line (see Server.log)
 VERBOSITY = diag.Verbosity()   # FH2MP_LOG_LEVEL / FH2MP_LOG_SUB
 RATE = diag.RateLimit()        # Server.log_every
+TRACE_PACKETS = VERBOSITY.enabled("TRACE", "packet")     # FH2MP_LOG_SUB=packet=TRACE: one line per received datagram; checked once per datagram when off
 # Outgoing messages are queued per client and sent together: one datagram per client every few ms instead of one per relayed car update.
 # On prod (2026-10-21, 72 players) half the server's time went into sendto (~12k datagrams/s), the receive queue overflowed and races rubberbanded.
 RELAY_FLUSH_SECONDS = float(os.environ.get("FH2MP_RELAY_FLUSH_MS", "10")) / 1000.0   # longest a relayed message waits for company
@@ -1783,7 +1791,9 @@ class Server:
         """
         try:
             values = player_setup.fields(size, payload)
-        except ValueError:
+        except ValueError as exc:
+            self.log_every(("setup-parse", "choices", peer.owner_id), 60.0, f"player.setup_unreadable {diag.kv(what='car choices', owner=peer.owner_id, xuid=f'{peer.xuid:#x}', bits=size, error=exc)}: "
+                           "relayed as it came, the class and PI seen for this write stay the old ones")
             return payload
         if 81 not in values and 82 not in values:
             return payload
@@ -1932,7 +1942,16 @@ class Server:
         """A line in events.jsonl (event_log.py); the world is named by its log tag ("freeroam:35703ec8")."""
         if self.events is not None:
             world = self.tag.strip(" []")
+            run = self.run_of(fields.get("xuid"))
+            if run:
+                fields["run"] = run
             self.events.emit(kind, world=world, world_kind=world.split(":")[0] or "idle", **fields)
+
+    def run_of(self, xuid) -> str:
+        """The run id of the game a player connected with (diag.py), "" when the LSP has not announced one. `xuid` as a number or as "0x..."."""
+        if self.hub is None or not xuid:
+            return ""
+        return self.hub.runs.get(int(xuid, 16) if isinstance(xuid, str) else xuid, "")
 
     def note(self, kind: str, owner: int, detail: str) -> None:
         self.recent.append((time.monotonic(), kind, owner, detail))
@@ -1975,9 +1994,9 @@ class Server:
             _log_day = now.tm_yday
             line = f"{time.strftime('%H:%M:%S', now)} date {time.strftime('%Y-%m-%d %Z', now)}\n" + line
         if self.log_file:
-            self.log_file.write(line + "\n")
+            diag.write_line(self.log_file.write, line + "\n")
         else:
-            print(line, flush=True)
+            diag.write_line(lambda text: print(text, flush=True), line)
 
     def _put(self, msg: str, level: str, sub: str | None) -> None:
         sink = self.__dict__.get("log")       # a plain one-argument callable put in place of log() (the tests do): it is given the text only
@@ -1994,6 +2013,9 @@ class Server:
 
     def debug(self, sub: str, msg: str) -> None:
         self._put(msg, "DEBUG", sub)
+
+    def trace(self, sub: str, msg: str) -> None:
+        self._put(msg, "TRACE", sub)
 
     def exc(self, msg: str, exc: BaseException, level: str = "ERROR") -> None:
         """An exception that was caught: what was being done, then type, message and the innermost frame; the stack goes below it at ERROR."""
@@ -2535,7 +2557,9 @@ class Server:
         stored history carry the cleared value, and the owner is told the same (a server update of its own object) so its own list loses the crown too."""
         try:
             field = player_setup.fields(size, payload).get(PLAYER_VAR_FLAGS)
-        except ValueError:
+        except ValueError as exc:
+            self.log_every(("setup-parse", "vip", peer.owner_id), 60.0, f"player.setup_unreadable {diag.kv(what='flags', owner=peer.owner_id, xuid=f'{peer.xuid:#x}', bits=size, error=exc)}: "
+                           "relayed as it came, a VIP bit in it stays set")
             return size, payload
         if field is None or not field[2] & PLAYER_FLAG_VIP:
             return size, payload
@@ -2862,7 +2886,8 @@ class Server:
             return
         try:
             rule = gameopts.car_rule(self.game_options)
-        except ValueError:
+        except ValueError as exc:
+            self.log_every("ready-rule", 60.0, f"event.rule_unreadable {diag.kv(owner=peer.owner_id, error=exc)}: the refused Ready stays refused after this car change")
             return
         if not gameopts.accepts_car(rule, peer.choices):
             return
@@ -3397,7 +3422,7 @@ class Server:
         mono = time.monotonic()
         ev0 = self.event
         state = ("not connected yet" if not was_connected else "in the event" if ev0 and peer in ev0["people"] else "free roam" if not self.roadtrip else "road trip")
-        line = (f"{peer.addr[1]} removed ({why}); owner {peer.owner_id} had {len(peer.objs)} objects; xuid {peer.xuid:#x}, "
+        line = (f"{peer.addr[1]} removed ({why}); owner {peer.owner_id} had {len(peer.objs)} objects; xuid {peer.xuid:#x}{' run=' + self.run_of(peer.xuid) if self.run_of(peer.xuid) else ''}, "
                 f"{'connected %.0f s' % (mono - peer.connected_at) if was_connected and peer.connected_at else 'handshake open %.1f s' % (mono - peer.opened_at) if peer.opened_at else 'never connected'}, "
                 f"last packet {mono - peer.last_rx:.1f} s ago, {state}, entered={peer.entered}"
                 + (f", kick pending: {peer.kick_reason}" if peer.kick_reason else "")
@@ -3508,6 +3533,8 @@ class Server:
         # Nothing is remembered about an address until its datagram parses and starts with an OpenConnection that passes the
         # identity check: junk, empty and stale packets get at most a CloseConnection.
         self.rx = (None, len(data), [])
+        if TRACE_PACKETS:
+            self.trace("packet", f"packet.rx {diag.kv(port=addr[1], bytes=len(data), first=data[:24].hex())}")
         peer = self.peers.get(addr)
         r = BitReader(data)
         try:
@@ -3547,6 +3574,8 @@ class Server:
                 mtype = r.bits(7)
                 self.mt_seen[mtype] = self.mt_seen.get(mtype, 0) + 1
             except ValueError:
+                self.log_every(("short-count", addr), 60.0, f"packet.short {diag.kv(port=addr[1], owner=peer.owner_id, announced=hdr['count'], read=len(types), bytes=len(data), last_types=types[-6:])}: "
+                               "the header announces more messages than the datagram holds, the rest is skipped")
                 break
             types.append(mtype)
             # Nearly every message is a prediction, so it goes first: this chain was the largest single cost in the prod profile.
@@ -3670,7 +3699,8 @@ class Server:
                     peer.connected = True
                     peer.connected_at = time.monotonic()
                     peer.owner_id = owner
-                    self.log(f"{addr[1]} *** CONNECTED *** (relay owner id {peer.owner_id}; xuid {peer.xuid:#x}, lobby type {peer.lobby_type}, "
+                    run = self.run_of(peer.xuid)
+                    self.log(f"{addr[1]} *** CONNECTED *** (relay owner id {peer.owner_id}; xuid {peer.xuid:#x}{' run=' + run if run else ''}, lobby type {peer.lobby_type}, "
                              f"handshake {(peer.connected_at - peer.opened_at) * 1000:.0f} ms, {len(self.others_connected(peer))} other player(s) here)")
                     self.note("join", peer.owner_id, f"xuid {peer.xuid:#x} lobby type {peer.lobby_type}")
                     if peer.objs:
@@ -4612,6 +4642,7 @@ class Hub:
         self.events = event_log.EventLog(os.path.join(os.path.dirname(os.path.abspath(logpath)), "events.jsonl")) if logpath else None
         self.default_type = LOBBY_TYPE_CAR_MEET if carmeet else LOBBY_TYPE_ROAD_TRIP if roadtrip else 2
         self.assign = {}      # xuid -> lobby name
+        self.runs = {}        # xuid -> run id of the player's latest game ("run <xuid hex> <run>" from the LSP), for log lines only
         # Signed-in players, announced by the LSP over the control port ("auth <xuid hex> <ip>"): xuid -> (ip, valid until). With
         # FH2MP_UDP_AUTH=required an OpenConnection is only accepted from the address its xuid signed in from (the xuid in the packet is
         # otherwise just a claim); "off" keeps the old open behaviour for local rigs.
@@ -4658,6 +4689,8 @@ class Hub:
                       + (f", tunnel tcp/{self.tunnel.port}" if self.tunnel else ""))
         if self.udp_auth == "off":
             self.idle.log("WARNING: FH2MP_UDP_AUTH=off: any OpenConnection is taken at its word (set ticket, or required, on a public server)")
+        for problem in STARTUP_PROBLEMS:
+            self.idle.error(f"startup.data_missing {problem}")
         if ctl_error:
             self.idle.error(f"control port udp/{ctl_error[0]} on 127.0.0.1 not bound ({type(ctl_error[1]).__name__}: {ctl_error[1]}): the account service cannot "
                             f"send assign/auth/revoke/logout/pop to this server, so lobby placement, sign-in checks and kicks do not work")
@@ -4694,7 +4727,7 @@ class Hub:
 
     def ctl_text(self, text: str, reply_to=None) -> None:
         """One control message: "assign <xuid hex> <lobby name>", "auth <xuid hex> <ip> [ticket key hex]", "logout <xuid hex> <key hex>",
-        "revoke" / "allow" / "unflag <xuid hex>", "pop", "lobbies", "positions"."""
+        "revoke" / "allow" / "unflag <xuid hex>", "run <xuid hex> <run id>", "pop", "lobbies", "positions"."""
         parts = text.split()
         if len(parts) == 1 and parts[0] == "pop":
             try:
@@ -4773,6 +4806,13 @@ class Hub:
                     self.log(f"control: {parts[1]} allowed again (revoke lifted)")
             except ValueError as exc:
                 self.ctl_ignored(parts, f"allow message unreadable ({exc})")
+        elif len(parts) == 3 and parts[0] == "run":
+            try:
+                if len(self.runs) >= 20000:
+                    self.runs.clear()
+                self.runs[int(parts[1], 16)] = diag.run_id(parts[2])
+            except ValueError as exc:
+                self.ctl_ignored(parts, f"run message unreadable ({exc})")
         elif len(parts) == 3 and parts[0] == "assign":
             try:
                 self.assign[int(parts[1], 16)] = parts[2]

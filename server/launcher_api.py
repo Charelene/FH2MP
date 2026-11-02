@@ -301,7 +301,8 @@ def _route(ctx, method, path, headers, body, ip):
         _require_launcher(ctx, str(d.get("client", "")))
         token, acct, ttl = a.login(ip, str(d.get("challenge", "")), str(d.get("pubkey", "")), str(d.get("sig", "")), str(d.get("client", "")))
         ctx.on_login(acct.xuid, ip, token)
-        ctx.log((f"  v1 login {acct.xuid:#x} {acct.gamertag!r} " + diag.kv(client=str(d.get("client", ""))[:80] or None)).rstrip())
+        ctx.log((f"  v1 login {acct.xuid:#x} {acct.gamertag!r} " + diag.kv(client=str(d.get("client", ""))[:80] or None,
+                                                                          run=diag.run_id(headers.get("X-FH2MP-Run", "")) or None)).rstrip())
         return 200, {"token": token, "idleSeconds": int(ttl), "account": _account_json(acct), "lsp": ctx.lsp_public,
                      "game": ctx.game_public}, ok
     if p == "/v1/gamertags/check" and method == "GET":

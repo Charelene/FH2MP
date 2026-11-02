@@ -291,5 +291,59 @@ class Control(Fresh):
 
 import unittest.mock  # noqa: E402
 
+class Correlation(Fresh):
+    """The run id reaches the game server over the control port and is on every line that ends or starts a player's connection."""
+
+    def test_a_run_announced_by_the_lsp_is_on_the_join_the_removal_and_the_event(self):
+        hub = hub_with_log()
+        got = []
+        hub.events = type("E", (), {"emit": lambda _s, kind, **f: got.append((kind, f))})()
+        hub.idle.events = hub.events
+        xuid, addr = 0x9000000000011, ("10.5.0.11", 4000)
+        hub.ctl_text("run %x ab12cd34" % xuid)
+        hub.handle(T.open_packet(xuid), addr)
+        w = hub.route[addr]
+        w.events = hub.events
+        peer = w.peers[addr]
+        w.handle(S.build_packet([lambda m: (m.bits(S.MSG_OPEN_CONNECTION_RESPONSE, 7), m.bits(0, 2), m.bits(S.RESPONSE_ACK, 3), m.bits(w.server_counter, 32), m.bits(0, 32))]), addr)
+        self.assertTrue(peer.connected)
+        w.drop_peer(peer, "test")
+        text = "\n".join(hub_lines(hub))
+        self.assertIn(f"xuid {xuid:#x} run=ab12cd34, lobby type", text)
+        self.assertRegex(text, r"removed \(test\).*run=ab12cd34")
+        ends = [f for kind, f in got if kind == "session_end"]
+        self.assertEqual(ends[0]["run"], "ab12cd34")
+
+    def test_a_run_id_that_is_not_one_stores_nothing_usable(self):
+        hub = hub_with_log()
+        hub.ctl_text("run 1 not-a-run")
+        hub.ctl_text("run zz ab12cd34")
+        self.assertEqual(hub.runs.get(1), "")
+        self.assertEqual(len(hub.runs), 1)
+        self.assertTrue(any("run message unreadable" in x for x in hub_lines(hub)))
+
+
+class FailuresThatLookedLikeNothing(Fresh):
+    def test_a_full_disk_does_not_stop_a_world(self):
+        w, _peers = logged_world()
+
+        class Full:
+            def write(self, _text):
+                raise OSError(28, "No space left on device")
+        w.log_file = Full()
+        with contextlib.redirect_stderr(io.StringIO()):
+            w.log("anything")           # must not raise: this runs inside the receive loop's exception handler too
+
+    def test_a_check_that_came_up_without_its_data_is_an_error_at_start(self):
+        S.STARTUP_PROBLEMS.append("parts (test): lobby cars get no part check")
+        self.addCleanup(S.STARTUP_PROBLEMS.pop)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            T.make_hub()
+        self.assertRegex(out.getvalue(), r"ERROR .*startup.data_missing parts \(test\)")
+
+    def test_trace_of_received_datagrams_is_off_unless_asked_for(self):
+        self.assertFalse(S.TRACE_PACKETS)
+
+
 if __name__ == "__main__":
     unittest.main()

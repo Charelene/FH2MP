@@ -7,6 +7,7 @@ import unittest
 
 os.environ.setdefault("FH2MP_CONTROL_PORT", "0")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import diag  # noqa: E402
 import event_log  # noqa: E402
 import fh2mp_server as S  # noqa: E402
 
@@ -100,6 +101,37 @@ class Visibility(unittest.TestCase):
             got = list(event_log.read(open(w.events.path)))
         self.assertEqual([e["kind"] for e in got], ["no_car_model"])
         self.assertEqual(got[0]["owner"], a.owner_id)
+
+
+class FailuresAreSaid(unittest.TestCase):
+    def capture(self):
+        got = []
+        old = diag._sink
+        diag.set_sink(lambda level, sub, msg: got.append((level, msg)))
+        self.addCleanup(diag.set_sink, old)
+        return got
+
+    def test_a_file_that_cannot_be_opened_is_an_error_in_the_log(self):
+        got = self.capture()
+        event_log.EventLog("/proc/definitely/not/writable/events.jsonl")
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0][0], "ERROR")
+        self.assertIn("events.open_failed", got[0][1])
+
+    def test_lost_events_are_counted_not_logged_one_by_one(self):
+        got = self.capture()
+        event_log.RATE.state.clear()
+
+        class Full:
+            def write(self, _text):
+                raise OSError(28, "No space left on device")
+        log = event_log.EventLog(None)
+        log.file, log.path = Full(), "events.jsonl"
+        for _ in range(4):
+            log.emit("session_end", xuid="0x1")     # must not raise
+        self.assertEqual(len(got), 1)
+        self.assertIn("events.write_failed", got[0][1])
+        self.assertIn("kind=session_end", got[0][1])
 
 
 if __name__ == "__main__":
