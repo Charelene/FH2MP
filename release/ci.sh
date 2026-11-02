@@ -68,6 +68,7 @@ lane_server() {
     run "shim inflate" shim/test_inflate.sh
     run "shim gamedb keep" shim/test_gamedb_keep.sh
     run "shim session age" shim/test_session_age.sh
+    run "shim health" shim/test_health.sh
     run "shim eo timelock" shim/test_eo_timelock.sh
     run "shim online setup" shim/test_online_setup.sh
 }
@@ -115,7 +116,7 @@ lane_shim() {
     logs=$(dirname "$tpl")
     declare -A pids
     t0=$(date +%s)
-    for t in gamedb_files game_image title_scope xhr_config torque_scale net_strings torque_load speed_pb restricted_tools lighting honk; do
+    for t in gamedb_files game_image title_scope xhr_config health_thread session_log torque_scale net_strings torque_load speed_pb restricted_tools lighting honk; do
         "shim/test_$t.sh" > "$logs/$t.log" 2>&1 &
         pids[$t]=$!
     done

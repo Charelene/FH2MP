@@ -58,6 +58,9 @@ static struct {
 static co_create_fn g_real_cocreate;
 #include "xhr_config.inc"
 static volatile LONG g_xhr_seq;
+static void run_request_text(char *out, const char *run, unsigned long seq);      /* health.inc */
+
+#include "xhr_stats.inc"
 
 static const GUID XHR_CLSID_FREETHREADED = {0x88d96a09, 0xf192, 0x11d4, {0xa6, 0x5f, 0x00, 0x40, 0x96, 0x32, 0x51, 0xe5}};
 static const GUID XHR_IID_IUNKNOWN = {0x00000000, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
@@ -655,6 +658,7 @@ static DWORD WINAPI xhr_thread(LPVOID param)
     HRESULT hr = S_OK;
     const char *stage = "winhttp load";
     DWORD t0 = GetTickCount();
+    int slot = xhr_stat_begin(), cls = XHR_CLASS_OTHER;
 
     /* split "scheme://host[:port]/path" */
     orig_host[0] = 0;
@@ -669,6 +673,9 @@ static DWORD WINAPI xhr_thread(LPVOID param)
         }
         orig_host[k] = 0;
         path = h[k] ? h + k : L"/";
+        if (k >= 19 && lstrcmpiW(orig_host + k - 19, L"forzamotorsport.net") == 0) {
+            cls = XHR_CLASS_XLS;
+        }
     }
     if (!xhr_wh_init()) {
         hr = HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
@@ -769,6 +776,17 @@ static DWORD WINAPI xhr_thread(LPVOID param)
         xhr_add_header(req, hdrline, x->seq);
     }
     xhr_add_header(req, L"X-FH2MP-Shim: " FH2MP_WSTR(FH2MP_SHIM_VERSION), x->seq);
+    if (g_run[0]) { /* the same id in the launcher's and the server's logs (health.inc run_request_text) */
+        char text[20];
+        run_request_text(text, g_run, x->seq);
+        lstrcpyW(hdrline, L"X-FH2MP-Run: ");
+        k = lstrlenW(hdrline);
+        for (i = 0; text[i]; i++) {
+            hdrline[k + i] = (WCHAR)text[i];
+        }
+        hdrline[k + i] = 0;
+        xhr_add_header(req, hdrline, x->seq);
+    }
     restricted_tools_header(hdrline);
     xhr_add_header(req, hdrline, x->seq);
     if (g_gamedb_path[0]) { /* the car database the game runs with (gamedb_hash); the server refuses a different one */
@@ -951,6 +969,7 @@ fail:
         xhr_signal_error(x, hr);
     }
 done:
+    xhr_stat_end(slot, cls, hr == S_OK && status >= 200 && status <= 299);
     xhr_free(data);
     if (req) {
         g_wh.close(req);

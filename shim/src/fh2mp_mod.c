@@ -225,6 +225,8 @@ static unsigned char *alloc_near(unsigned char *anchor)
 
 /* Session token of the player signed in through the launcher (see session_load); sent to the stand-in services as X-FH2MP-Token. */
 static char g_token[96];
+/* The id of this game start in every log (launcher, shim, server; server/diag.py), from the session file; made here when a session has none. */
+static char g_run[9];
 static HANDLE g_log = INVALID_HANDLE_VALUE;
 static wchar_t g_args[MAX_ARGS][MAX_ARG_CHARS];
 static wchar_t *g_argv[MAX_ARGS + 1];
@@ -277,6 +279,8 @@ static void log_unlock(void)
 #ifndef FH2MP_DEBUG_BUILD
 static char g_line[1024];
 static int g_ll;
+/* FH2MP_LOG_KEEP: more of the release log without a debug build. "all", or words like the ones below, separated by commas ("xhr#,arg["). */
+static char g_log_keep[128];
 
 static int line_has(const char *l, int n, const char *pat)
 {
@@ -296,14 +300,35 @@ static int line_wanted(const char *l, int n)
     static const char *const keep[] = {"attached", "session:", "identity:", "late:", "not patched", "NOT ", "unexpected", "fail", "error", "could not",
                                        "refus", "crash", "xsbody", "xstoken", "mmtimeout", "mmtoast", "online-setup", "bindfix", "gamedb:", "timelock:", "rivalsleave", "bucketcars", "matchpoll", "sample", "carprobe", "probe:", "lighting:", "honk:", "grid:",
                                        "xhr:", "winsock:", "placement:", "netstrings:", "torqueload:", "nulltorque", "speedpb:", "cinematics:",
-                                       "festivalgrid:", "invitetype:", "ticket:", "tools:", "offline:", "rebound", "redirect:", "serverport:", "secureip:", "hook:", 0};
+                                       "festivalgrid:", "invitetype:", "ticket:", "tools:", "offline:", "rebound", "redirect:", "serverport:", "secureip:", "hook:", "health:", 0};
     int i;
+    const char *word;
     for (i = 0; keep[i]; i++) {
         if (line_has(l, n, keep[i])) {
             return 1;
         }
     }
+    for (word = g_log_keep; *word; word += lstrlenA(word) + 1) {
+        if ((word[0] == 'a' && word[1] == 'l' && word[2] == 'l' && !word[3]) || line_has(l, n, word)) {
+            return 1;
+        }
+    }
     return 0;
+}
+
+static void log_keep_load(void)
+{
+    DWORD i, n = GetEnvironmentVariableA("FH2MP_LOG_KEEP", g_log_keep, sizeof g_log_keep - 1);
+
+    if (n >= sizeof g_log_keep - 1) {
+        n = 0;
+    }
+    g_log_keep[n] = g_log_keep[n + 1] = 0;
+    for (i = 0; i < n; i++) {
+        if (g_log_keep[i] == ',') {
+            g_log_keep[i] = 0;
+        }
+    }
 }
 #endif
 
@@ -3449,6 +3474,7 @@ static void gamedb_hash(char out[65])
 
 #include "restricted_tools.inc"
 #include "xhr2.inc"
+#include "health.inc"
 #ifdef FH2MP_DEBUG_BUILD
 #include "dbg.inc"
 #endif
@@ -5708,6 +5734,8 @@ static int session_load(void)
                         g_token[n] = eq[n];
                     }
                     g_token[n] = 0;
+                } else if (lstrcmpA(line, "run") == 0 && run_id_ok(eq)) {
+                    lstrcpynA(g_run, eq, sizeof g_run);
                 } else if (lstrcmpA(line, "gamedb") == 0 && eq[0]) {
                     WCHAR rel[MAX_PATH];
                     int absolute = eq[0] == '\\' || (eq[0] && eq[1] == ':');
@@ -5738,8 +5766,17 @@ static int session_load(void)
         CloseHandle(f);
     }
     udp_ticket_key();
+    if (!g_run[0]) {
+        DWORD v = GetTickCount() ^ (GetCurrentProcessId() << 16);
+        for (i = 0; i < 8; i++) {
+            g_run[i] = "0123456789abcdef"[(v >> (28 - 4 * i)) & 0xf];
+        }
+        g_run[8] = 0;
+    }
     log_begin();
-    log_raw("session: ");
+    log_raw("session: run=");
+    log_raw(g_run);
+    log_raw(", ");
     log_raw(g_token[0] ? "token present" : "no token");
     log_raw(g_gamedb_path[0] ? ", car database set" : "");
     log_raw(have_xuid ? ", xuid from the launcher" : "");
@@ -5963,11 +6000,20 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
     }
     g_log = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                         OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+#ifndef FH2MP_DEBUG_BUILD
+    log_keep_load();
+#endif
     log_begin();
     log_raw("--- fh2mp shim " FH2MP_SHIM_VERSION " attached (FH2 Mod Platform ");
     log_raw(api->platform_version);
     log_raw("), tid=");
     log_dec(GetCurrentThreadId());
+    {   /* the stamps of this log are GetTickCount: this pairs one with the clock the launcher's and the server's logs use */
+        char utc[32];
+        grid_utc(utc);
+        log_raw(", ");
+        log_raw(utc);
+    }
     log_raw("\n");
 
     /* Solo play keeps the same XboxUserId/save, without session loading, network hooks or worker threads. */
@@ -6029,6 +6075,9 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
         t = g_gamedb_src[0] ? CreateThread(NULL, 0, gamedb_thread, NULL, 0, NULL) : NULL;
         if (t) {
             CloseHandle(t);
+        }
+        if (g_token[0]) {
+            health_start();
         }
     }
     return 0;
