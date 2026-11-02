@@ -287,26 +287,30 @@ def write_identity(folder, xuid):
     paths.atomic_write(os.path.join(bin_dir(folder), "fh2mp-identity.txt"), f"{xuid & 0xFFFFFFFF:08x}\n".encode(), 0o644)
 
 
-RESTART_FILE = "fh2mp-restart.txt"       # written by the shim when the game never started its online setup (shim/src/xhr2.inc)
+ONLINE_NOTE_FILE = "fh2mp-online-setup.txt"   # written by the shim when this game run never started its online setup (shim/src/online_setup.inc)
+OLD_RESTART_FILE = "fh2mp-restart.txt"        # the same note from shims before 2026-11-01 (they asked for a restart; nothing restarts now)
 
 
-def take_restart_request(folder):
-    """The shim's note that this game start skipped its online setup, removed on reading -> its text, or '' when there is none."""
-    path = os.path.join(bin_dir(folder), RESTART_FILE)
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            text = f.read().strip() or "restart requested"
-    except OSError:
-        return ""
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
+def take_online_setup_note(folder):
+    """The shim's note that this game run never started its online setup, removed on reading -> its text, or '' when there is none.
+    Diagnosis only: the launcher shows it and never restarts the game."""
+    text = ""
+    for name in (ONLINE_NOTE_FILE, OLD_RESTART_FILE):
+        path = os.path.join(bin_dir(folder), name)
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                text = text or f.read().strip() or "online setup did not start"
+        except OSError:
+            continue
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
     return text
 
 
-def restart_requested(folder):
-    return os.path.isfile(os.path.join(bin_dir(folder), RESTART_FILE))
+def online_setup_note_present(folder):
+    return os.path.isfile(os.path.join(bin_dir(folder), ONLINE_NOTE_FILE))
 
 
 def clear_session(folder):
@@ -501,7 +505,7 @@ def install_extra(folder, files):
                 did.append(f"installed {name}")
         if extra_options_supported(folder):            # it was in fh2extra (rc5 layout), or only its settings file is missing
             if EXTRA_INI in files and not os.path.exists(os.path.join(folder, EXTRA_INI)):
-                paths.atomic_write(os.path.join(folder, EXTRA_INI), files[EXTRA_INI], 0o644)
+                paths.atomic_write(os.path.join(folder, EXTRA_INI), swap_stick_bindings_bytes(files[EXTRA_INI])[0], 0o644)
                 did.append("restored the FH2 Extra Options settings file")
             return did
         old = _extra_dll(folder)
@@ -515,7 +519,113 @@ def install_extra(folder, files):
             did.append(f"kept your previous winmm.dll as {EXTRA_OPTIONS_DIR}\\winmm.dll.unsupported-{n}")
         paths.atomic_write(os.path.join(folder, EXTRA_OPTIONS_DLL), dll, 0o755)
         if EXTRA_INI in files and not os.path.exists(os.path.join(folder, EXTRA_INI)):
-            paths.atomic_write(os.path.join(folder, EXTRA_INI), files[EXTRA_INI], 0o644)
+            paths.atomic_write(os.path.join(folder, EXTRA_INI), swap_stick_bindings_bytes(files[EXTRA_INI])[0], 0o644)
     except OSError as e:
         raise ShimError(f"could not install FH2 Extra Options: {e.strerror or e}. Is the game still running?") from None
     return did + [f"installed FH2 Extra Options {extra_options_version(folder)} (RokkuDayo, GPL-3.0) from its GitHub release"]
+
+
+# ---- Controls: HonkHonk honks on the right stick (R3, as in the Forza games), so Extra Options' toggles move to the left stick.
+
+STICK_KEYS = ("HeadlightsXbox", "RoofXbox")
+_STICK_RE = re.compile(rb"^(" + b"|".join(k.encode() for k in STICK_KEYS) + rb")([ \t]*=[ \t]*)RightStick([ \t]*\r?)$", re.I | re.M)
+
+
+def swap_stick_bindings_bytes(data):
+    """The Extra Options settings file `data` with the headlight and roof toggles on LeftStick wherever they are still the default RightStick
+    (any letter case); every other byte, line ending and comment stays. -> (bytes, number of keys changed)."""
+    return _STICK_RE.subn(rb"\1\2LeftStick\3", data)
+
+
+def swap_stick_bindings(folder):
+    """swap_stick_bindings_bytes() on the FH2_ExtraOptions.ini in `folder`, written back only when something changed.
+    -> (ini found, list of things done)."""
+    path = os.path.join(folder, EXTRA_INI)
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except FileNotFoundError:
+        return False, []
+    except OSError as e:
+        raise ShimError(f"could not read the FH2 Extra Options settings: {e.strerror or e}") from None
+    new, n = swap_stick_bindings_bytes(data)
+    if not n:
+        return True, []
+    try:
+        shutil.copy2(path, path + ".before-fh2mp-controls")
+        paths.atomic_write(path, new, 0o644)
+    except OSError as e:
+        raise ShimError(f"could not update the FH2 Extra Options settings: {e.strerror or e}. Is the game still running?") from None
+    return True, [f"moved the Extra Options headlight/roof buttons to the left stick ({n} setting(s)); the right stick is the horn"]
+
+
+# ---- HonkHonk (suderek22): fh2-mods\HonkHonk.dll, its bank folder and settings, loaded by the platform next to the shim.
+
+HONK_DLL = "fh2-mods/HonkHonk.dll"
+HONK_INI = "fh2-mods/HonkHonk.ini"
+HONK_BANK = "fh2-mods/HonkHonk/HZ2_SFX_HonkHonk.bank"
+
+
+def honk_version():
+    return UPSTREAM["honkHonk"]["version"]
+
+
+def _honk_path(folder, rel):
+    return os.path.join(folder, *rel.split("/"))
+
+
+def honk_complete(folder):
+    """The pinned HonkHonk DLL and horn bank are in place (the settings file is the player's and only has to exist)."""
+    pin = UPSTREAM["honkHonk"]
+    if not os.path.isfile(_honk_path(folder, HONK_INI)):
+        return False
+    try:
+        for rel, digest in pin["fileSha256"].items():
+            with open(_honk_path(folder, rel), "rb") as f:
+                if hashlib.sha256(f.read()).hexdigest() != digest:
+                    return False
+    except OSError:
+        return False
+    return True
+
+
+def honk_installed(folder):
+    """-> (installed, version): the pinned version when the DLL is the pinned build, "unknown" for another HonkHonk.dll, ("", "") when missing."""
+    path = _honk_path(folder, HONK_DLL)
+    try:
+        with open(path, "rb") as f:
+            same = hashlib.sha256(f.read()).hexdigest() == UPSTREAM["honkHonk"]["dllSha256"]
+    except OSError:
+        return False, ""
+    return True, honk_version() if same else "unknown"
+
+
+def install_honk(folder, files):
+    """Installs HonkHonk from its release (`files` = upstream.fetch("honkHonk")). The DLL and the bank are always the pinned bytes (a different
+    file there is kept as <name>.before-fh2mp-setup); the player's HonkHonk.ini is kept. -> list of things done."""
+    pin = UPSTREAM["honkHonk"]
+    did = []
+    try:
+        for rel, data in files.items():
+            if rel not in pin["files"].values():
+                continue
+            target = _honk_path(folder, rel)
+            if rel == HONK_INI:
+                if os.path.exists(target):
+                    continue
+            elif os.path.exists(target):
+                with open(target, "rb") as f:
+                    if f.read() == data:
+                        continue
+                saved = target + ".before-fh2mp-setup"
+                n = 1
+                while os.path.lexists(saved):
+                    n += 1
+                    saved = f"{target}.before-fh2mp-setup-{n}"
+                shutil.copy2(target, saved)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            paths.atomic_write(target, data, 0o755 if rel == HONK_DLL else 0o644, busy_ok=True)
+            did.append(f"installed {rel}")
+    except OSError as e:
+        raise ShimError(f"could not install HonkHonk: {e.strerror or e}. Is the game still running?") from None
+    return did + ([f"installed HonkHonk {honk_version()} (suderek22, GPL-3.0) from its GitHub release"] if did else [])

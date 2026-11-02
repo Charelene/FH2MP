@@ -208,5 +208,26 @@ def start(settings, folder, extra_args=(), skip_launcher=True, extra_env=None):
     return p
 
 
+def end_leftover_game(folder):
+    """Linux: ends azimuth.exe processes of this folder that outlived the launch's process group (Wine detaches them), so a restart
+    does not leave the old game running next to the new one. Matched by the Windows-style path in the command line."""
+    if os.name == "nt" or not folder or not os.path.isdir("/proc"):
+        return 0
+    want = ("z:" + os.path.abspath(os.path.expanduser(folder)).replace("/", "\\") + "\\azimuth.exe").lower()
+    n = 0
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit() or int(pid) == os.getpid():
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                args = f.read().decode("utf-8", "replace").split("\0")
+            if args and args[0].lower() == want:
+                os.kill(int(pid), 9)
+                n += 1
+        except OSError:
+            pass
+    return n
+
+
 def cleanup(folder):
     shim.clear_session(folder)

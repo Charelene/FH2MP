@@ -404,6 +404,16 @@ class WizardFlow(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.w.packages.install_shim()
 
+    def test_honkhonk_is_a_required_add_on_card_and_setup_reopens_for_it(self):
+        self.assertEqual(set(self.w.dep_get), {'platform', 'extra', 'honk'})
+        self.assertIn('honk', self.w._dep_ready)
+        self.assertGreaterEqual(setup.REVISION, 3)                    # installs set up before HonkHonk reopen the wizard
+        self.lc.settings['azimuth_dir'] = str(self.root)
+        self.w.packages.dependencies.update(platform={}, extra={})
+        with mock.patch.object(shim, 'platform_ok', return_value=True), mock.patch.object(shim, 'extra_options_complete', return_value=True):
+            with self.assertRaises(ValueError):                       # the other two downloaded, HonkHonk not
+                self.w.packages.install_dependencies()
+
     def test_existing_offline_install_still_gets_setup_migration(self):
         from fh2mp_launcher.ui.main_window import MainWindow
         self.lc.settings['offline_mode'] = True

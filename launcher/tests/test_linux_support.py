@@ -82,3 +82,20 @@ class LinuxSupport(unittest.TestCase):
                 linux_support.prepare({}, '/proton', str(self.prefix))
             run.assert_not_called()
         self.assertEqual(saved.read_text(), 'keep')
+
+
+@unittest.skipIf(os.name == 'nt', 'Linux process table')
+class LeftoverGame(unittest.TestCase):
+    def test_only_the_game_of_this_folder_is_ended(self):
+        import subprocess
+        import time
+        with tempfile.TemporaryDirectory() as d:
+            mine, other = Path(d) / 'rig1', Path(d) / 'rig2'
+            # Wine shows the game as argv[0] = Z:\<folder>\azimuth.exe
+            game = lambda folder: subprocess.Popen(['bash', '-c', 'exec -a "$0" sleep 60', 'Z:' + str(folder).replace('/', '\\') + '\\azimuth.exe'])
+            a, b = game(mine), game(other)
+            self.addCleanup(lambda: [p.kill() for p in (a, b)])
+            time.sleep(0.5)
+            self.assertEqual(launch.end_leftover_game(str(mine)), 1)
+            a.wait(timeout=5)
+            self.assertIsNone(b.poll())

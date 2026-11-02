@@ -1038,7 +1038,7 @@ class ExtraOptionsTests(unittest.TestCase):
 
     def test_only_one_extra_options_pin_is_supplied(self):
         from fh2mp_launcher.constants import UPSTREAM
-        self.assertEqual(set(UPSTREAM), {'platform', 'extraOptions'})
+        self.assertEqual(set(UPSTREAM), {'platform', 'extraOptions', 'honkHonk'})
         self.assertEqual(UPSTREAM['extraOptions']['version'], '0.4.4')
         with tempfile.TemporaryDirectory() as az:
             self.write(b'MZ-0.3.0-old', az, 'winmm.dll')
@@ -1486,7 +1486,7 @@ class DevModeTests(unittest.TestCase):
             lc.shim_state = lambda: ("ours", "1.0.0-rc3")
             rows = {r[0]: r for r in lc.status_lines()}
             self.assertEqual(list(rows), ["FH2MP launcher", "Azimuth", "FH2MP shim", "FH2 Mod Platform", "FH2 Extra Options",
-                                          "Session for the game", "Car database", "Connection", "Mode"])
+                                          "HonkHonk", "Session for the game", "Car database", "Connection", "Mode"])
             self.assertEqual(rows["FH2MP shim"][1:], ("1.0.0-rc3", version.__version__ + " (server needs 1.1.2)", False))   # outdated: marked
             self.assertEqual(rows["Azimuth"][3], False)                          # no azimuth.exe in the folder
             self.assertEqual(rows["FH2 Mod Platform"][1], "not installed")
@@ -1529,6 +1529,10 @@ class DevModeTests(unittest.TestCase):
         self.assertEqual(core.game_port_env({"host": "h", "port": 5100}), {"FH2MP_SERVER_PORT": "5100"})
         for bad in (None, {}, {"port": "5100"}, {"port": 80}, {"port": 65000}, {"port": True}, "5100"):
             self.assertEqual(core.game_port_env(bad), {}, bad)
+        self.assertEqual(core.game_port_env({"host": "h", "port": 5100, "traffic": 1}),
+                         {"FH2MP_SERVER_PORT": "5100", "FH2MP_NET_TRAFFIC": "1"})        # dev: networked traffic
+        for off in (0, True, "1", None):
+            self.assertNotIn("FH2MP_NET_TRAFFIC", core.game_port_env({"port": 5100, "traffic": off}), off)
         seen = {}
 
         class P:
@@ -1554,8 +1558,9 @@ class DevModeTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
-class AutoRestartOfASkippedOnlineSetup(unittest.TestCase):
-    """The shim writes fh2mp-restart.txt when a game start never began its online setup (it does not recover); the launcher starts it again."""
+class OnlineSetupNoteIsShownNeverRestarted(unittest.TestCase):
+    """The shim writes fh2mp-online-setup.txt when a game run never began its online setup; the launcher only reports it (user
+    decision 2026-11-01: no automatic restarts)."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1564,10 +1569,11 @@ class AutoRestartOfASkippedOnlineSetup(unittest.TestCase):
         os.makedirs(os.path.join(self.az, "data", "bin"))
         self.lc = core.Launcher(Settings(os.path.join(self.tmp.name, "settings.json")), load_identity=False)
         self.lc.settings["azimuth_dir"] = self.az
-        self.marker = os.path.join(self.az, "data", "bin", "fh2mp-restart.txt")
+        self.marker = os.path.join(self.az, "data", "bin", "fh2mp-online-setup.txt")
+        self.old_marker = os.path.join(self.az, "data", "bin", "fh2mp-restart.txt")
 
-    def note(self, text="online setup skipped"):
-        with open(self.marker, "w") as f:
+    def note(self, text="online setup skipped", path=None):
+        with open(path or self.marker, "w") as f:
             f.write(text)
 
     def running(self):
@@ -1575,45 +1581,39 @@ class AutoRestartOfASkippedOnlineSetup(unittest.TestCase):
         p.poll.return_value = None
         self.lc.process = p
 
-    def test_only_a_running_online_game_with_a_note_is_restarted(self):
-        self.assertFalse(self.lc.restart_requested())
+    def test_a_running_online_game_with_a_note_reports_it_once(self):
+        self.assertEqual(self.lc.online_setup_note(), "")
         self.running()
-        self.assertFalse(self.lc.restart_requested(), "no note, no restart")
+        self.assertEqual(self.lc.online_setup_note(), "", "no note, nothing to say")
         self.note()
-        self.assertTrue(self.lc.restart_requested())
+        self.assertEqual(self.lc.online_setup_note(), "online setup skipped")
+        self.assertFalse(os.path.exists(self.marker), "the note is read once")
+        self.assertEqual(self.lc.online_setup_note(), "")
+        self.note()
         self.lc.offline_run = True
-        self.assertFalse(self.lc.restart_requested(), "an offline run never has an online setup")
+        self.assertEqual(self.lc.online_setup_note(), "", "an offline run never has an online setup")
         self.lc.offline_run = False
         self.lc.process.poll.return_value = 0
-        self.assertFalse(self.lc.restart_requested(), "a game that has ended is not restarted")
+        self.assertEqual(self.lc.online_setup_note(), "", "a game that has ended is not reported")
 
-    def test_the_restart_reads_the_note_stops_the_game_and_plays_again_twice_at_most(self):
+    def test_nothing_restarts_the_game(self):
+        self.assertFalse(hasattr(self.lc, "restart_game"))
+        self.assertFalse(hasattr(self.lc, "restart_requested"))
         self.running()
-        self.lc.auto_restarts = 0
-        calls = []
-        with mock.patch.object(self.lc, "stop_game", side_effect=lambda: calls.append("stop")), \
-                mock.patch.object(self.lc, "play", side_effect=lambda **kw: calls.append(("play", kw)) or ("acct", [])), \
-                mock.patch("time.sleep"):
-            for n in (1, 2):
-                self.running()
-                self.note()
-                self.assertTrue(self.lc.restart_requested(), f"restart {n}")
-                self.lc.restart_game()
-                self.assertFalse(os.path.exists(self.marker), "the note is read once")
-            self.running()
-            self.note()
-            self.assertFalse(self.lc.restart_requested(), "two automatic restarts per Play, then the player decides")
-        self.assertEqual(calls, ["stop", ("play", {"_auto": True}), "stop", ("play", {"_auto": True})])
-        self.assertEqual(self.lc.auto_restarts, 2)
-
-    def test_pressing_play_clears_an_old_note_and_the_count(self):
         self.note()
-        self.lc.auto_restarts = 2
+        with mock.patch.object(self.lc, "stop_game") as stop, mock.patch.object(self.lc, "play") as play:
+            self.lc.online_setup_note()
+        stop.assert_not_called()
+        play.assert_not_called()
+
+    def test_pressing_play_clears_old_notes_of_both_names(self):
+        self.note()
+        self.note(path=self.old_marker)
         self.lc.settings["offline_mode"] = True
         with mock.patch.object(self.lc, "play_offline"):
             self.lc.play()
-        self.assertEqual(self.lc.auto_restarts, 0)
         self.assertFalse(os.path.exists(self.marker))
+        self.assertFalse(os.path.exists(self.old_marker))
 
 
 class MirroredDownloads(unittest.TestCase):
@@ -1638,7 +1638,7 @@ class MirroredDownloads(unittest.TestCase):
 
     def test_the_pins_name_the_mirror_first_and_the_same_hashes(self):
         from fh2mp_launcher.constants import AZIMUTH_ARCHIVE, MIRROR_BASE, UPSTREAM
-        for kind in ('platform', 'extraOptions'):
+        for kind in ('platform', 'extraOptions', 'honkHonk'):
             self.assertTrue(UPSTREAM[kind]['mirror'].startswith(MIRROR_BASE))
             self.assertEqual(UPSTREAM[kind]['mirror'].rsplit('/', 1)[1], UPSTREAM[kind]['url'].rsplit('/', 1)[1])
         self.assertTrue(AZIMUTH_ARCHIVE['url'].startswith(MIRROR_BASE))
@@ -1693,3 +1693,124 @@ class MirroredDownloads(unittest.TestCase):
             self.assertEqual(setup.Packages(lc).get_azimuth(), '/cache/azimuth.zip')
         self.assertEqual(seen['url'], AZIMUTH_ARCHIVE['url'])
         self.assertEqual((seen['entry']['sha256'], seen['entry']['size']), (AZIMUTH_ARCHIVE['sha256'], AZIMUTH_ARCHIVE['size']))
+
+
+class HonkHonkTests(unittest.TestCase):
+    """HonkHonk is a pinned required add-on; Extra Options' stick buttons move out of its way once."""
+    INI = (b"; Forza Horizon 2 Extra Options\r\n[Bindings]\r\n; Headlights require a single tap.\r\nHeadlightsXbox=RightStick\r\nHeadlightsKeyboard=F3\r\n"
+           b"RoofXbox = rightstick \r\nRoofKeyboard=F4\r\nSignalLeftXbox=DPadLeft\r\n")
+
+    def setUp(self):
+        from fh2mp_launcher.constants import UPSTREAM
+        self.dll, self.bank, self.ini = b"MZ-honk", b"FSB5-bank", b"[HonkHonk]\r\nSelectedHorn=0\r\n"
+        self.files = {"fh2-mods/HonkHonk.dll": self.dll, "fh2-mods/HonkHonk.ini": self.ini, "fh2-mods/HonkHonk/HZ2_SFX_HonkHonk.bank": self.bank}
+        pin = dict(UPSTREAM["honkHonk"], dllSha256=hashlib.sha256(self.dll).hexdigest(),
+                   fileSha256={"fh2-mods/HonkHonk.dll": hashlib.sha256(self.dll).hexdigest(),
+                               "fh2-mods/HonkHonk/HZ2_SFX_HonkHonk.bank": hashlib.sha256(self.bank).hexdigest()})
+        patch = mock.patch.dict(UPSTREAM, honkHonk=pin)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.az = self.tmp.name
+
+    def path(self, rel):
+        return os.path.join(self.az, *rel.split("/"))
+
+    def test_the_real_pin_names_the_release_and_its_layout(self):
+        from fh2mp_launcher.constants import UPSTREAM
+        pin = UPSTREAM["honkHonk"]
+        self.assertTrue(pin["url"].startswith("https://github.com/suderek22/FH2_HonkHonk/releases/download/v0.3.4/"))
+        self.assertEqual(set(pin["files"].values()), {shim.HONK_DLL, shim.HONK_INI, shim.HONK_BANK})
+        self.assertEqual(pin["fileSha256"][shim.HONK_DLL], pin["dllSha256"])
+
+    def test_extract_takes_the_pinned_zip_and_maps_it_into_the_azimuth_folder(self):
+        from fh2mp_launcher import upstream
+        data, pin = fake_release("honkHonk", {"HonkHonk_v0.3.4/fh2-mods/HonkHonk.dll": self.dll, "HonkHonk_v0.3.4/fh2-mods/HonkHonk.ini": self.ini,
+                                              "HonkHonk_v0.3.4/fh2-mods/HonkHonk/HZ2_SFX_HonkHonk.bank": self.bank, "HonkHonk_v0.3.4/README.md": b"r"},
+                                 "HonkHonk_v0.3.4/fh2-mods/HonkHonk.dll")
+        self.assertEqual(upstream.extract("honkHonk", data, pin), self.files)
+        with self.assertRaises(upstream.UpstreamError):
+            upstream.extract("honkHonk", data + b"x", pin)
+
+    def test_install_puts_the_pinned_files_in_place_and_keeps_the_players_settings(self):
+        self.assertFalse(shim.honk_complete(self.az))
+        shim.install_honk(self.az, self.files)
+        self.assertTrue(shim.honk_complete(self.az))
+        self.assertEqual(shim.honk_installed(self.az), (True, shim.honk_version()))
+        with open(self.path(shim.HONK_INI), "wb") as f:
+            f.write(b"[HonkHonk]\r\nSelectedHorn=7\r\n")
+        with open(self.path(shim.HONK_BANK), "wb") as f:
+            f.write(b"edited")
+        self.assertFalse(shim.honk_complete(self.az))
+        did = shim.install_honk(self.az, self.files)
+        self.assertTrue(shim.honk_complete(self.az))
+        with open(self.path(shim.HONK_INI)) as f:
+            self.assertIn("SelectedHorn=7", f.read())                                       # the choice survives a repair
+        with open(self.path(shim.HONK_BANK) + ".before-fh2mp-setup", "rb") as f:
+            self.assertEqual(f.read(), b"edited")                                           # a different bank is kept, not lost
+        self.assertTrue(did)
+        self.assertEqual(shim.install_honk(self.az, self.files), [])                       # nothing to do twice
+
+    def test_another_honkhonk_dll_is_reported_and_replaced(self):
+        os.makedirs(os.path.dirname(self.path(shim.HONK_DLL)))
+        with open(self.path(shim.HONK_DLL), "wb") as f:
+            f.write(b"MZ-other")
+        self.assertEqual(shim.honk_installed(self.az), (True, "unknown"))
+        shim.install_honk(self.az, self.files)
+        self.assertEqual(shim.honk_installed(self.az), (True, shim.honk_version()))
+
+    def test_sticks_are_swapped_only_where_they_are_still_the_default(self):
+        new, n = shim.swap_stick_bindings_bytes(self.INI)
+        self.assertEqual(n, 2)
+        self.assertEqual(new, self.INI.replace(b"HeadlightsXbox=RightStick", b"HeadlightsXbox=LeftStick").replace(b"rightstick ", b"LeftStick "))
+        custom = b"[Bindings]\r\nHeadlightsXbox=LB+RightStick\r\nRoofXbox=DPadDown\r\n"
+        self.assertEqual(shim.swap_stick_bindings_bytes(custom), (custom, 0))
+        lf = b"HeadlightsXbox=RightStick\nRoofXbox=RightStick\n"                          # LF files stay LF
+        self.assertEqual(shim.swap_stick_bindings_bytes(lf)[0], b"HeadlightsXbox=LeftStick\nRoofXbox=LeftStick\n")
+
+    def test_a_fresh_extra_options_install_writes_the_swapped_settings(self):
+        from fh2mp_launcher.constants import UPSTREAM
+        dll = b"MZ-eo"
+        pin = dict(UPSTREAM["extraOptions"], dllSha256=hashlib.sha256(dll).hexdigest(), files={}, fileSha256={})
+        saved = set(shim.SUPPORTED_EXTRA_SHA256)
+        shim.SUPPORTED_EXTRA_SHA256.add(hashlib.sha256(dll).hexdigest())
+        self.addCleanup(lambda: (shim.SUPPORTED_EXTRA_SHA256.clear(), shim.SUPPORTED_EXTRA_SHA256.update(saved)))
+        with mock.patch.dict(UPSTREAM, extraOptions=pin):
+            shim.install_extra(self.az, {"winmm.dll": dll, "FH2_ExtraOptions.ini": self.INI})
+        with open(os.path.join(self.az, "FH2_ExtraOptions.ini"), "rb") as f:
+            self.assertEqual(f.read(), shim.swap_stick_bindings_bytes(self.INI)[0])
+
+    def test_existing_settings_are_swapped_once_and_the_players_later_choice_stays(self):
+        from fh2mp_launcher import core
+        from fh2mp_launcher.settings import Settings
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, FH2MP_LAUNCHER_HOME=home):
+            lc = core.Launcher(Settings(os.path.join(home, "settings.json")), load_identity=False)
+            lc.settings["azimuth_dir"] = self.az
+            self.assertEqual(lc.ensure_controls(), [])                                      # no Extra Options settings yet: nothing decided
+            self.assertFalse(lc.settings["controls_swapped"])
+            ini = os.path.join(self.az, "FH2_ExtraOptions.ini")
+            with open(ini, "wb") as f:
+                f.write(self.INI)
+            self.assertTrue(lc.ensure_controls())
+            self.assertTrue(lc.settings["controls_swapped"])
+            self.assertTrue(os.path.exists(ini + ".before-fh2mp-controls"))
+            with open(ini, "wb") as f:
+                f.write(self.INI)                                                           # the player puts RightStick back
+            self.assertEqual(lc.ensure_controls(), [])
+            with open(ini, "rb") as f:
+                self.assertEqual(f.read(), self.INI)
+
+    def test_play_stops_with_a_clear_message_when_honkhonk_cannot_be_installed(self):
+        from fh2mp_launcher import core
+        from fh2mp_launcher.settings import Settings
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, FH2MP_LAUNCHER_HOME=home):
+            lc = core.Launcher(Settings(os.path.join(home, "settings.json")), load_identity=False)
+            lc.settings["azimuth_dir"] = self.az
+            self.assertEqual(lc.honk_state(), (False, ""))
+            with mock.patch.object(core.upstream, "fetch", side_effect=core.upstream.UpstreamError("offline")):
+                with self.assertRaises(core.updater.UpdateError):
+                    lc.ensure_honk()
+            with mock.patch.object(core.upstream, "fetch", return_value=self.files):
+                self.assertTrue(lc.ensure_honk())
+            self.assertEqual(lc.honk_state(), (True, shim.honk_version()))
