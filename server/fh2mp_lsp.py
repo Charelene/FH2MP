@@ -834,6 +834,15 @@ def event_cars(event_id):
     return RIV.cars_for(e["attrs"]) if e else None
 
 
+def event_car_ids(event_id):
+    """Car ids the event's restriction allows whatever their stock class: the event's class limit is checked against the run's PI, so only the
+    other attributes (make, model, year, drive type, country) decide whether a car is on the list."""
+    e = event_info(event_id)
+    if not e:
+        return None
+    return {c[0] for c in RIV.cars_for({k: v for k, v in e["attrs"].items() if k != "CarClassId"})}
+
+
 def _bounty_track(req):
     e = event_info(req["rivalEventId"])
     return e["track"] if e else req["trackId"]
@@ -2914,7 +2923,7 @@ def setup(dsn=None):
     log(f"drivatar store: {len(DRV.templates)} shipped templates, {DRV.count()} stored players")
     global SB
     SB = scoreboard.ScoreStore(DB, [t["GamerTag"] for t in DRV.templates] + DRV.gamertags(), cars=CARS.fake_pool(), route_length=CARS.route_length, event_info=event_info,
-                          event_cars=event_cars)
+                          event_cars=event_cars, event_car_ids=event_car_ids)
     log(f"scoreboards: {SB.count()} stored submissions")
     SOCIAL.bot_name = lambda x: SB.fake_name(x) or DRV.bot_name(x)          # the rivals' ids resolve to their racing-driver names, not Player#
     global RIV

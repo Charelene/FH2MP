@@ -68,12 +68,15 @@ WR_SPREAD = 0.12         # a made-up rival that would have beaten the record lan
 
 
 class ScoreStore:
-    def __init__(self, db, names, cars=None, route_length=None, event_info=None, event_cars=None, records=None):
+    def __init__(self, db, names, cars=None, route_length=None, event_info=None, event_cars=None, records=None, event_car_ids=None):
         self.db = db
         self.records = WORLD_RECORDS if records is None else records
         self.route_length = route_length or (lambda track: None)   # track id -> metres or None
         self.event_info = event_info or (lambda event: None)       # rival event id -> {"track","laps","cls"} or None
         self.event_cars = event_cars or (lambda event: None)       # rival event id -> [(car id, class, PI, top m/s)] the event allows
+        # rival event id -> set of car ids the event's make/model/year/drive restriction allows in ANY stock class: the class limit is about the
+        # car as the player built it (PI), so a Countach upgraded into S1 is legal on "Lamborghini cars only, S1 class" (prod 2026-11-02, Sonny's Urus)
+        self.event_car_ids = event_car_ids
         self.names = list(dict.fromkeys(n for n in names if n)) or ["Rival"]   # unique, order kept
         self.cars = sorted(cars or [], key=lambda c: c[2])   # (carId, class, pi, top m/s) from the game database, by PI
         self.ghost_policy = GHOST_POLICY
@@ -143,9 +146,9 @@ class ScoreStore:
         if length and score < length / MAX_ROUTE_SPEED:
             hard.append(f"{score:.3f} s is faster than {MAX_ROUTE_SPEED:g} m/s over the {length:.0f} m route")
         if r["sb"] == 3:
-            allowed = self.event_cars(r["gsid"])
-            if allowed and r["car"] not in {c[0] for c in allowed}:
-                flags.append(f"car {r['car']} is not on the event's list")
+            allowed = self.event_car_ids(r["gsid"]) if self.event_car_ids else {c[0] for c in self.event_cars(r["gsid"]) or ()}
+            if allowed and r["car"] not in allowed:
+                flags.append(f"car {r['car']} does not match the event's car restriction")
         before = self.db.one("SELECT MIN(score) FROM score_submissions WHERE xuid=? AND sb=? AND st=? AND track=? AND gsid=? AND car=? AND ABS(cpi - ?) < 0.002 AND id < ?",
                              (r["xuid"], r["sb"], r["st"], r["track"], r["gsid"], r["car"], cpi, r["id"]))[0]
         if before and score < before * BIG_IMPROVEMENT:

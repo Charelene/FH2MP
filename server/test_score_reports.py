@@ -180,6 +180,27 @@ class GhostFlag(unittest.TestCase):
             score_reports.report(self.lsp, self.sid, {'browser': identity(i), 'ip': identity(i)})
         self.assertEqual(self.row()['flaggedBy'], 'reports and ghost')
 
+class EventCarRestriction(unittest.TestCase):
+    """prod 2026-11-02: Sonny's 2012 Urus (stock class A, built into S1) was flagged "not on the event's list" on the Lamborghini Showdown, because the
+    list held only the four Lamborghinis whose STOCK class is S1. The class limit belongs to the run's PI; make, model and year decide the list."""
+    def setUp(self):
+        self.lsp = make_lsp()
+        self.addCleanup(self.lsp.DB.c.close)
+        # the restriction without its class: Lamborghinis 1322 and 1625 (1625 is stock class A); 7 is another make
+        self.lsp.SB.event_car_ids = lambda event: {1322, 1625}
+        self.lsp.SB.event_cars = lambda event: [(1322, 4, 0.81, 90.0)]           # the stock-class list, as before
+
+    def flags(self, car):
+        submit(self.lsp.SB, 1, 'Alice', 50 + car / 1000, event=2610, car=car)
+        row = self.lsp.DB.one('SELECT * FROM score_submissions ORDER BY id DESC')
+        return self.lsp.SB.plausibility(dict(row))[1]
+
+    def test_a_car_of_the_right_make_is_on_the_list_whatever_its_stock_class(self):
+        self.assertEqual(self.flags(1625), [])
+
+    def test_a_car_of_another_make_is_flagged_with_the_reason(self):
+        self.assertEqual(self.flags(7), ["car 7 does not match the event's car restriction"])
+
 
 if __name__ == '__main__':
     unittest.main()
