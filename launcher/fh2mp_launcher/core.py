@@ -853,9 +853,21 @@ class Launcher:
 
     def ensure_controls(self):
         """Extra Options' headlight and roof toggles leave the right stick (the horn) once; a binding the player chose is never touched, and
-        a player who sets RightStick again afterwards keeps it. -> list of things done."""
+        a player who sets RightStick again afterwards keeps it. When the last game says the shim could not put the horn on the right stick
+        (fh2mp-controls.txt), the toggles this launcher moved go back to the right stick, so horn and toggles never share the left stick; they
+        move again after a game that can move the horn. -> list of things done."""
         d = self.settings["azimuth_dir"]
-        if self.settings["controls_swapped"] or not d or not os.path.isdir(d):
+        if not d or not os.path.isdir(d):
+            return []
+        note = shim.read_controls_note(d)
+        if note and not note["movable"]:
+            if not self.settings["controls_swapped"]:
+                return []
+            _found, did = shim.restore_stick_bindings(d)
+            self.settings["controls_swapped"] = False
+            self.settings.save()
+            return [f"{line} ({note['why'] or 'the shim could not move it'})" for line in did]
+        if self.settings["controls_swapped"]:
             return []
         found, did = shim.swap_stick_bindings(d)
         if found:                                   # no Extra Options settings yet: install_extra writes them already swapped

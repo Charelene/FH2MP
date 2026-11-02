@@ -5423,7 +5423,8 @@ static DWORD WINAPI late_init(LPVOID unused)
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_SPEEDPB", env, 8) == 0) patch_speed_pb();
             if (GetEnvironmentVariableW(L"FH2MP_NO_LIGHTING", env, 8) == 0) patch_lighting();
-            if (GetEnvironmentVariableW(L"FH2MP_NO_HONK", env, 8) == 0) patch_honk();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_HONK", env, 8) == 0) patch_honk(g_exe_dir, g_dir);
+            else honk_switched_off(g_exe_dir, g_dir);
         }
         {
             wchar_t env[8];

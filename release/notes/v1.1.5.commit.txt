@@ -1,0 +1,5 @@
+Prepare 1.1.5 horn binding and traffic join fixes
+
+Move the horn to the right stick even when another mod hooks createSound,
+restore Extra Options' toggles when it cannot move, and complete the traffic
+join when the client has reported its models instead of after 15 s.

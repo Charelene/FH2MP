@@ -1805,6 +1805,67 @@ class HonkHonkTests(unittest.TestCase):
             with open(ini, "rb") as f:
                 self.assertEqual(f.read(), self.INI)
 
+    def write_note(self, text):
+        d = os.path.join(self.az, "data", "bin")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, shim.CONTROLS_NOTE_FILE), "w", newline="") as f:
+            f.write(text)
+
+    def test_the_shims_controls_note_is_read(self):
+        self.assertIsNone(shim.read_controls_note(self.az))
+        self.write_note("horn=RightStick\r\nmovable=1\r\nwhy=moved\r\n")
+        self.assertEqual(shim.read_controls_note(self.az), {"horn": "RightStick", "movable": True, "why": "moved"})
+        self.write_note("horn=LeftStick\r\nmovable=0\r\nwhy=unknown HonkHonk build\r\n")
+        self.assertEqual(shim.read_controls_note(self.az), {"horn": "LeftStick", "movable": False, "why": "unknown HonkHonk build"})
+        self.write_note("garbage")
+        self.assertIsNone(shim.read_controls_note(self.az))
+
+    def test_restore_puts_only_the_left_stick_toggles_back(self):
+        swapped = shim.swap_stick_bindings_bytes(self.INI)[0]
+        self.assertEqual(shim.restore_stick_bindings_bytes(swapped), (self.INI.replace(b"rightstick ", b"RightStick "), 2))
+        custom = b"[Bindings]\r\nHeadlightsXbox=LB+LeftStick\r\nRoofXbox=DPadDown\r\nAutodriveXbox=LeftStick\r\n"
+        self.assertEqual(shim.restore_stick_bindings_bytes(custom), (custom, 0))
+
+    def test_toggles_go_back_to_the_right_stick_when_the_horn_could_not_move(self):
+        """A player who already has the swapped settings (controls_swapped, .before-fh2mp-controls) and a game whose shim could not put the horn on
+        the right stick: headlights/roof return to RightStick with every other setting kept, and move again once a game can move the horn."""
+        from fh2mp_launcher import core
+        from fh2mp_launcher.settings import Settings
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, FH2MP_LAUNCHER_HOME=home):
+            lc = core.Launcher(Settings(os.path.join(home, "settings.json")), load_identity=False)
+            lc.settings["azimuth_dir"] = self.az
+            ini = os.path.join(self.az, "FH2_ExtraOptions.ini")
+            with open(ini, "wb") as f:
+                f.write(self.INI)
+            self.assertTrue(lc.ensure_controls())
+            self.assertTrue(lc.settings["controls_swapped"])
+            with open(ini, "rb") as f:
+                edited = f.read().replace(b"HeadlightsKeyboard=F3", b"HeadlightsKeyboard=F9")   # the player changes another setting afterwards
+            with open(ini, "wb") as f:
+                f.write(edited)
+            self.write_note("horn=RightStick\r\nmovable=1\r\nwhy=moved\r\n")
+            self.assertEqual(lc.ensure_controls(), [])                                      # the horn is on the right stick: nothing to do
+            self.write_note("horn=LeftStick\r\nmovable=0\r\nwhy=unknown HonkHonk build\r\n")
+            did = lc.ensure_controls()
+            self.assertTrue(did and "unknown HonkHonk build" in did[0])
+            self.assertFalse(lc.settings["controls_swapped"])
+            with open(ini, "rb") as f:
+                self.assertEqual(f.read(), shim.restore_stick_bindings_bytes(edited)[0])
+            with open(ini, "rb") as f:
+                text = f.read()
+            self.assertIn(b"HeadlightsXbox=RightStick", text)
+            self.assertIn(b"HeadlightsKeyboard=F9", text)
+            self.assertIn(b"SignalLeftXbox=DPadLeft", text)
+            self.assertTrue(os.path.exists(ini + ".before-fh2mp-restore"))
+            self.assertEqual(lc.ensure_controls(), [])                                      # the same note again: no swap back and forth
+            with open(ini, "rb") as f:
+                self.assertIn(b"HeadlightsXbox=RightStick", f.read())
+            self.write_note("horn=LeftStick\r\nmovable=1\r\nwhy=Extra Options uses the right stick\r\n")   # a later game could move it
+            self.assertTrue(lc.ensure_controls())
+            self.assertTrue(lc.settings["controls_swapped"])
+            with open(ini, "rb") as f:
+                self.assertIn(b"HeadlightsXbox=LeftStick", f.read())
+
     def test_play_stops_with_a_clear_message_when_honkhonk_cannot_be_installed(self):
         from fh2mp_launcher import core
         from fh2mp_launcher.settings import Settings

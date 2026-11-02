@@ -500,6 +500,114 @@ class Wire(unittest.TestCase):
         w.tick(w.state[d].join_until + 0.1)                                    # a client on local traffic never reports models
         self.assertIn((d, traffic.C_INITIAL_JOIN_COMPLETE), told)
 
+    # The dev joins of 2026-11-01 23:51: 17 models announced, the client reports the 8 its offline traffic has cars of, in one burst,
+    # and never the other 9 (0x729ca0 drains the model queue only while fewer than 8 models have cars). Every join waited JOIN_WAIT_S.
+    ANNOUNCED = [283, 286, 379, 414, 428, 631, 1047, 1082, 1089, 1127, 1257, 1358, 1363, 1364, 1383, 1393, 1674]
+    IN_USE = [286, 428, 1047, 1089, 1363, 1364, 1383, 1674]
+
+    def joining(self, clock):
+        """A world of 17 announced models with an owner driving a car of model 1047 next to the joiner's spot; returns the world, the
+        joiner and the list of (peer, kind) pushed."""
+        from unittest import mock
+        told, peers = [], [self.Peer(1)]
+        self.clock = clock
+        patch = mock.patch.object(traffic.time, "monotonic", lambda: self.clock[0])
+        patch.start()
+        self.addCleanup(patch.stop)
+        w = traffic.TrafficWorld(lambda p, ms, fast=False: None, lambda: peers, lambda t: None, models=list(self.ANNOUNCED))
+        push = w.push
+        w.push = lambda peer, kind, **f: (told.append((peer, kind)), push(peer, kind, **f))
+        a = peers[0]
+        w.join(a)
+        w.manager.set_universe(a, 0)
+        for model in self.IN_USE:
+            w.on_message(a, traffic.S_CAR_MODEL_LOADED, 0xFF, model, 31, 12, 0, 0)
+        w.manager.set_position(a, a.pos)
+        w.on_message(a, traffic.S_REQUEST_TRAFFIC, 1, 250, 0, 0, 0, 0)
+        w.manager._grant(0)
+        vid = next(iter(w.manager.reserved))
+        w.on_message(a, traffic.S_TRAFFIC_SPAWNED, vid, 1047, 0, 0, 0, 0)
+        one = traffic.struct.unpack("<I", traffic.struct.pack("<f", 5.0))[0]
+        w.on_update(a, traffic.MSG_SERVER_ROUTE_PROGRESS, self.Reader([vid] + [0] * 3 + [one, 0, 0]))
+        d = self.Peer(4)
+        peers.append(d)
+        return w, d, told
+
+    def tick_until(self, w, told, d, limit):
+        """Ticks every 0.1 s; the time InitialJoinComplete went to d, or None."""
+        while self.clock[0] < limit:
+            self.clock[0] = round(self.clock[0] + 0.1, 3)
+            w.tick(self.clock[0])
+            if (d, traffic.C_INITIAL_JOIN_COMPLETE) in told:
+                return self.clock[0]
+        return None
+
+    def test_eight_of_seventeen_models_is_a_complete_report(self):
+        clock = [1000.0]
+        w, d, told = self.joining(clock)
+        w.join(d)
+        clock[0] += 0.3
+        for model in self.IN_USE:                                               # the go-online burst, one frame
+            w.on_message(d, traffic.S_CAR_MODEL_LOADED, 0xFF, model, 31, 12, 0, 0)
+        at = self.tick_until(w, told, d, 1000.0 + traffic.JOIN_WAIT_S + 1)
+        self.assertIsNotNone(at)
+        self.assertLessEqual(at - 1000.0, 0.3 + traffic.REPORT_SETTLE_S + 0.2)  # not the 15 s limit
+        mine = [k for p, k in told if p is d]
+        self.assertIn(traffic.C_ADD_TRAFFIC, mine)                              # the car of a reported model went first
+        self.assertLess(mine.index(traffic.C_ADD_TRAFFIC), mine.index(traffic.C_INITIAL_JOIN_COMPLETE))
+        self.assertEqual(mine.count(traffic.C_INITIAL_JOIN_COMPLETE), 1)
+
+    def test_later_model_loads_do_not_hold_the_join(self):
+        """a client with 7 models in use loads the rest one by one after its burst (dev 22:47:10): those are new cars, not the report"""
+        clock = [1000.0]
+        w, d, told = self.joining(clock)
+        w.join(d)
+        for model in self.IN_USE[:7]:
+            w.on_message(d, traffic.S_CAR_MODEL_LOADED, 0xFF, model, 31, 12, 0, 0)
+        trickle = iter(m for m in self.ANNOUNCED if m not in self.IN_USE[:7])
+        while self.clock[0] < 1003.0 and (d, traffic.C_INITIAL_JOIN_COMPLETE) not in told:
+            clock[0] = round(clock[0] + 0.1, 3)
+            if round(clock[0] * 10) % 4 == 0:
+                w.on_message(d, traffic.S_CAR_MODEL_LOADED, 0xFF, next(trickle), 31, 255, 0, 0)
+            w.tick(clock[0])
+        self.assertIn((d, traffic.C_INITIAL_JOIN_COMPLETE), told)
+        self.assertLess(clock[0] - 1000.0, traffic.REPORT_SETTLE_S + 0.3)
+
+    def test_a_report_sent_before_the_join_counts(self):
+        """a client switching worlds goes online before its FinaliseSessionEntry (dev 23:09:53): the burst came before the join"""
+        clock = [1000.0]
+        w, d, told = self.joining(clock)
+        for model in self.IN_USE:
+            w.on_message(d, traffic.S_CAR_MODEL_LOADED, 0xFF, model, 31, 12, 0, 0)
+        w.on_message(d, traffic.S_CAR_MODEL_UNLOADED, 0xFF, 1674, 31, 12, 0, 0)
+        self.assertNotIn(d, w.manager.players)
+        clock[0] += 0.5
+        w.join(d)
+        self.assertEqual(set(w.manager.players[d].models), set(self.IN_USE) - {1674})
+        at = self.tick_until(w, told, d, 1000.0 + traffic.JOIN_WAIT_S + 1)
+        self.assertLessEqual(at - 1000.5, traffic.REPORT_SETTLE_S + 0.2)
+        mine = [k for p, k in told if p is d]
+        self.assertLess(mine.index(traffic.C_ADD_TRAFFIC), mine.index(traffic.C_INITIAL_JOIN_COMPLETE))
+
+    def test_a_client_with_no_traffic_cars_waits_only_briefly(self):
+        clock = [1000.0]
+        w, d, told = self.joining(clock)
+        w.join(d)
+        at = self.tick_until(w, told, d, 1000.0 + traffic.JOIN_WAIT_S + 1)
+        self.assertGreaterEqual(at - 1000.0, traffic.NO_REPORT_S)
+        self.assertLess(at - 1000.0, traffic.NO_REPORT_S + 0.3)
+        self.assertNotIn(traffic.C_ADD_TRAFFIC, [k for p, k in told if p is d])  # it reported no model: no car it could show
+
+    def test_without_a_position_the_join_waits_for_the_limit(self):
+        clock = [1000.0]
+        w, d, told = self.joining(clock)
+        d.pos = None
+        w.join(d)
+        for model in self.IN_USE:
+            w.on_message(d, traffic.S_CAR_MODEL_LOADED, 0xFF, model, 31, 12, 0, 0)
+        at = self.tick_until(w, told, d, 1000.0 + traffic.JOIN_WAIT_S + 1)
+        self.assertGreaterEqual(at - 1000.0, traffic.JOIN_WAIT_S)
+
     def test_a_flood_is_ignored(self):
         w, (a, b, c), sent = self.world()
         for _ in range(traffic.MAX_MESSAGES_PER_S + 50):
