@@ -1368,7 +1368,7 @@ static int patch_xsapi_body(void)
     }
     /* the platform puts the stub within rel32 reach of the call itself (it used to need a code cave near the module) */
     {
-        FH2Hook *h = g_api->hook_call(g_mod, "xsbody: XSAPI RestCall response store", site, (void *)xs_response_store_stub, &original);
+        FH2Hook *h = g_api->hook_call(g_mod, plat_tag("xsbody: XSAPI RestCall response store"), site, (void *)xs_response_store_stub, &original);
         if (!h) {
             plat_failed("xsbody: XSAPI RestCall response store", site, "refused (not a call rel32, or overlaps another hook)");
             return 2;

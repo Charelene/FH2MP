@@ -102,12 +102,32 @@ const char fh2mp_shim_marker[] __attribute__((used)) = "FH2MP-SHIM-VERSION:" FH2
 static const FH2ModApi *g_api;
 static FH2Mod *g_mod;
 
+/* The platform prints one line per change it makes, with the name we give it ("* FH2MP: patch game+0x80C10F (name)") and keeps the pointer.
+ * Our descriptive names are for the failure lines below; the platform gets only the part before the colon, as a stable interned string. */
+static const char *plat_tag(const char *name)
+{
+    static char tags[64][24];
+    static int used;
+    char tag[24];
+    int n = 0, i;
+    while (name[n] && name[n] != ':' && n < 23) {
+        tag[n] = name[n];
+        n++;
+    }
+    tag[n] = 0;
+    for (i = 0; i < used; ++i)
+        if (!lstrcmpA(tags[i], tag)) return tags[i];
+    if (used == 64) return "fh2mp";
+    lstrcpyA(tags[used], tag);
+    return tags[used++];
+}
+
 /* One line per change the platform did not make: which change, where, and at which step (the platform's own reason is in fh2-mods\platform.log). */
 static void plat_failed(const char *name, const void *at, const char *step);
 
 static int plat_patch(const char *name, void *at, const void *expect, const void *bytes, unsigned n)
 {
-    FH2Hook *h = g_api->patch_bytes(g_mod, name, at, expect, bytes, n);
+    FH2Hook *h = g_api->patch_bytes(g_mod, plat_tag(name), at, expect, bytes, n);
     if (!h) {
         plat_failed(name, at, "refused (overlaps another mod's change, or the bytes differ from the exe on disk)");
         return 0;
@@ -123,7 +143,7 @@ static int plat_patch(const char *name, void *at, const void *expect, const void
 static int plat_hook(const char *name, void *target, void *detour, void **original)
 {
     void *unused;
-    FH2Hook *h = g_api->hook_function(g_mod, name, target, detour, original ? original : &unused);
+    FH2Hook *h = g_api->hook_function(g_mod, plat_tag(name), target, detour, original ? original : &unused);
     if (!h) {
         plat_failed(name, target, "refused (overlaps another hook, or the code is not hookable)");
         return 0;
@@ -138,7 +158,7 @@ static int plat_hook(const char *name, void *target, void *detour, void **origin
 /* Points one `call rel32` at `detour`; `original` gets the function it called. */
 static int plat_hook_call(const char *name, void *site, void *detour, void **original)
 {
-    FH2Hook *h = g_api->hook_call(g_mod, name, site, detour, original);
+    FH2Hook *h = g_api->hook_call(g_mod, plat_tag(name), site, detour, original);
     if (!h) {
         plat_failed(name, site, "refused (not a call rel32, or overlaps another hook)");
         return 0;
@@ -1285,8 +1305,8 @@ static int patch_qos_assume_success(void)
     }
     {
         /* both or neither: half of it would skip the association and still report failure */
-        FH2Hook *ha = g_api->patch_bytes(g_mod, "qosok: skip the secure association", a + 3, want_jne + 3, nop2, 2);
-        FH2Hook *hb = ha ? g_api->patch_bytes(g_mod, "qosok: report success", b + 6, want_flag + 6, &one, 1) : NULL;
+        FH2Hook *ha = g_api->patch_bytes(g_mod, plat_tag("qosok: skip the secure association"), a + 3, want_jne + 3, nop2, 2);
+        FH2Hook *hb = ha ? g_api->patch_bytes(g_mod, plat_tag("qosok: report success"), b + 6, want_flag + 6, &one, 1) : NULL;
         if (!hb || !g_api->enable_hooks(g_mod, ha) || !g_api->enable_hooks(g_mod, hb)) {
             if (ha) {
                 g_api->disable_hooks(g_mod, ha);
@@ -2069,7 +2089,7 @@ static int patch_null_torque_curve(void)
         return 0;
     }
     mem_copy(stub, code, sizeof code);
-    h = g_api->hook_function(g_mod, "nulltorque: torque curve reader", site, stub, &original);
+    h = g_api->hook_function(g_mod, plat_tag("nulltorque: torque curve reader"), site, stub, &original);
     if (!h) {
         plat_failed("nulltorque: torque curve reader", site, "refused (overlaps another hook, or the code is not hookable)");
         return 0;
