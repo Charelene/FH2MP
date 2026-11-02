@@ -187,6 +187,51 @@ class TagModeFromGameOptions(unittest.TestCase):
         self.assertEqual(tag["mode"]["name"], "King")
         self.assertEqual(tag["buckets"], {a: 0, b: 1})
 
+    def _king(self):
+        w, (a, b) = world()
+        w.game_options = options("FR_KING")
+        w.start_event(a)
+        tag = w.event["tag"]
+        tag["assigned"] = True
+        tag["guessed"] = False
+        w.event["racing"] = True
+        sent = []
+        w.tag_send = lambda why, quiet=False: sent.append(why)
+        return w, a, b, tag, sent
+
+    def test_a_player_without_a_bucket_entry_can_take_the_crown(self):
+        w, a, b, tag, sent = self._king()
+        tag["buckets"] = {a: S.TAG_BUCKET_IT}                       # b had no car when the It car was drawn: tag_send told everybody it is not It
+        w.tag_collision(b, ("own", 0, 0), ("relay", 0, 1), 0, 1, 1, 0)       # b takes the crown from a
+        self.assertEqual(tag["buckets"], {a: 0, b: 1})
+        self.assertEqual(sent, ["collision"])
+
+    def test_a_stale_report_is_dropped_but_logged_and_a_repeated_one_is_not(self):
+        w, a, b, tag, sent = self._king()
+        tag["buckets"] = {a: S.TAG_BUCKET_IT, b: S.TAG_BUCKET_NOT_IT}
+        lines = []
+        w.log = lines.append
+        w.tag_collision(a, ("own", 0, 0), ("relay", 1, 2), 1, 0, 0, 1)
+        w.tag_collision(b, ("own", 0, 0), ("relay", 0, 1), 0, 1, 1, 0)       # the other client's report of the same hit
+        self.assertFalse([x for x in lines if "dropped" in x])
+        w.tag_collision(b, ("own", 0, 0), ("relay", 0, 1), 0, 1, 1, 0)
+        w.tag_collision(a, ("own", 0, 0), ("relay", 1, 2), 1, 1, 0, 1)       # a client that still thinks a is It
+        self.assertEqual(len([x for x in lines if "dropped" in x]), 1)
+        self.assertEqual(tag["buckets"], {a: 0, b: 1})
+
+    def test_buckets_are_sent_again_while_the_event_runs(self):
+        import time
+        w, a, b, tag, sent = self._king()
+        tag["buckets"] = {a: S.TAG_BUCKET_IT, b: S.TAG_BUCKET_NOT_IT}
+        tag["assign_at"] = 0
+        tag["repeats"] = []
+        now = time.monotonic()
+        tag["sent_at"] = now
+        w.tag_tick(now + S.TAG_RESYNC_S - 0.5)
+        self.assertEqual(sent, [])
+        w.tag_tick(now + S.TAG_RESYNC_S + 0.5)
+        self.assertEqual(sent, ["resync"])
+
     def test_road_trip_world_does_not_use_the_guess(self):
         w, (a, b) = world(roadtrip=True)
         w.game_options = options("FR_KING")

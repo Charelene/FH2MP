@@ -777,6 +777,7 @@ TAG_MODES = {RACE_MODE_KING: {"name": "King", "seconds": 240.0, "per_it": 6},
              RACE_MODE_INFECTION: {"name": "Infection", "seconds": 240.0, "per_it": 0}}
 TAG_KEYFRAME_MIN_SECONDS = 20.0               # score keyframes earlier than this after GO are not taken as "the event is over"
 TAG_GRID_ASSIGN_DELAY = 1.5                   # seconds after the starting grid is sent: the first It car is drawn while the grid screen is up
+TAG_RESYNC_S = 3.0                            # while an event runs the buckets are sent again this often: a client that lost every repeat would report from stale buckets for good
 TAG_ASSIGN_REPEATS = (0.0, 0.4, 1.2, 3.0)      # seconds after the first send: the datagrams are unreliable, so repeat them
 LSP_URL = os.environ.get("FH2MP_LSP", "http://127.0.0.1:5080")    # this stack's LSP (loopback /admin endpoints)
 
@@ -2664,15 +2665,17 @@ class Server:
         ev = self.event
         return [q for q in ev["people"] if q.connected and q.car_id is not None] if ev else []
 
-    def tag_send(self, why: str) -> None:
+    def tag_send(self, why: str, quiet: bool = False) -> None:
         """MsgTagBuckets to every participant: its own car by the plain key, the others by relay keys."""
         tag = self.event["tag"]
+        tag["sent_at"] = time.monotonic()
         people = self.tag_people()
         for q in people:
             entries = [("own" if p is q else "relay", p.car_id, p.owner_id, tag["buckets"].get(p, TAG_BUCKET_NOT_IT))
                        for p in people]
             self.send(q, [tag_buckets_message(entries)])
-        self.log(f"tag: buckets sent ({why}): " + " ".join(f"owner{p.owner_id}={tag['buckets'].get(p, 0)}" for p in people))
+        if not quiet:
+            self.log(f"tag: buckets sent ({why}): " + " ".join(f"owner{p.owner_id}={tag['buckets'].get(p, 0)}" for p in people))
 
     def tag_assign(self) -> None:
         """First It car(s): one per NumPlayersPerIt players (King), a single patient zero (Infection), drawn at random."""
@@ -2713,6 +2716,8 @@ class Server:
         elif tag["repeats"] and now >= tag["repeats"][0]:
             tag["repeats"].pop(0)
             self.tag_send("repeat")
+        elif now - tag.get("sent_at", now) >= TAG_RESYNC_S:
+            self.tag_send("resync", quiet=True)
         if tag["mode"]["name"] == "Infection" and people and len(its) == len(people) and len(people) > 1:
             self.end_race("everybody is infected")
         elif tag.get("end_at") is not None and now >= tag["end_at"]:        # end_at is set at "GO"; the It car is drawn earlier, on the grid
@@ -2733,11 +2738,19 @@ class Server:
             return None
         a, b = car(k1), car(k2)
         buckets = tag["buckets"]
-        if a is None or b is None or a is b or a not in buckets or b not in buckets:
-            self.log(f"tag: collision from {peer.addr[1]} names unknown cars {k1} {k2}")
+        here = ev["people"]
+        if a is None or b is None or a is b or a not in here or b not in here:
+            self.log_every(("tag-unknown", peer.owner_id), 10.0, f"tag: collision from {peer.addr[1]} names unknown cars {k1} {k2}", "INFO")
             return
-        if (buckets[a], buckets[b]) != (old_a, old_b):
-            return           # the other car's client reported the same hit first (or it is stale)
+        # a player who had no car yet when the It car was drawn is not in `buckets`, but tag_send told the clients it is not It
+        have_a, have_b = buckets.get(a, TAG_BUCKET_NOT_IT), buckets.get(b, TAG_BUCKET_NOT_IT)
+        if (have_a, have_b) != (old_a, old_b):
+            if (have_a, have_b) == (new_a, new_b):
+                return       # the other car's client reported the same hit first
+            self.log_every(("tag-stale", peer.owner_id), 5.0,
+                           f"tag: collision from owner {peer.owner_id} dropped: it reports owner {a.owner_id} {old_a}->{new_a}, owner {b.owner_id} {old_b}->{new_b}, "
+                           f"the server has {have_a} and {have_b} (this client missed an update, or two hits crossed)", "INFO")
+            return
         if (old_a == TAG_BUCKET_IT) == (old_b == TAG_BUCKET_IT) or max(new_a, new_b) > TAG_BUCKET_IT:
             self.log(f"tag: ignored collision {old_a}->{new_a} / {old_b}->{new_b}")
             return
