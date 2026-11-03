@@ -300,7 +300,7 @@ static int line_wanted(const char *l, int n)
     static const char *const keep[] = {"attached", "session:", "identity:", "late:", "not patched", "NOT ", "unexpected", "fail", "error", "could not",
                                        "refus", "crash", "xsbody", "xstoken", "mmtimeout", "mmtoast", "online-setup", "bindfix", "gamedb:", "timelock:", "rivalsleave", "bucketcars", "matchpoll", "sample", "carprobe", "probe:", "lighting:", "honk:", "grid:",
                                        "xhr:", "winsock:", "placement:", "netstrings:", "torqueload:", "nulltorque", "speedpb:", "cinematics:",
-                                       "festivalgrid:", "invitetype:", "ticket:", "tools:", "offline:", "rebound", "redirect:", "serverport:", "secureip:", "hook:", "health:", "diag:", "partyhud:", 0};
+                                       "festivalgrid:", "invitetype:", "ticket:", "tools:", "offline:", "rebound", "redirect:", "serverport:", "secureip:", "hook:", "health:", "diag:", "partyhud:", "carpool:", 0};
     int i;
     const char *word;
     for (i = 0; keep[i]; i++) {
@@ -2422,6 +2422,7 @@ static int patch_online_meet(void)
 #include "grid_trace.inc"
 #include "diag_trace.inc"
 #include "party_hud.inc"
+#include "car_pool.inc"
 #include "torque_load_guard.inc"
 #include "online_setup.inc"
 
@@ -5492,6 +5493,7 @@ static DWORD WINAPI late_init(LPVOID unused)
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_PARTYHUD", env, 8) == 0) patch_party_hud();
         }
+        patch_car_pool();
         {
             wchar_t it_env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_INVITETYPE", it_env, 8) == 0) {
