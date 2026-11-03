@@ -321,47 +321,32 @@ static void *car_pool_find(void *self, void *out, void *vehicle_ref, void *manag
 }
 
 /* Simulation::helper_fceee0 (game+0xfceee0, only called from FindOrQueue) returns the lowest stand-in id in [lo, hi] that no pending vehicle holds, 0xffff when
- * the range is full. Vehicle types 0, 1, 3 and 4 share 0..11. The Drivatar AI cars (RacingAI::AICar, types 0 and 1) index a table of 12 entries with their id
- * (FUN_140f2b2f0: id 27 wrote outside it and crashed the game, dev 2026-11-02), a network player's car (type 3) does not go through it as far as seen: its
- * range is raised, the others keep 0..11. g_car_pool_ids_hi is the top for type 3, 0 = unchanged. */
+ * the range is full, and a vehicle with 0xffff starts its load request invalid (state 12) and is never drawn. Vehicle types 0, 1, 3 and 4 share 0..11. An id
+ * past 11 is not an option: the AI simulation indexes arrays of 12 with it (dev 2026-11-02: game+0xf2b32d for the training table, then game+0xf445ec in the AI
+ * update loop even with no controller attached). With FH2MP_CAR_IDS=1 a network player's car (type 3) that finds the range full takes an id already in use
+ * (1..11 in turn): such cars are driven by the network and, with FH2MP_CAR_NOAICTL, have no controller to share. */
 #define CAR_POOL_IDS_RVA 0xfceee0
 #define CAR_POOL_IDS_PLAYER_TYPE 3
-#define CAR_POOL_AI_IDS_TOP 29       /* the game's AI cars (type 2) hold ids 12..29, so a player car past 11 needs an id above them */
+#define CAR_POOL_IDS_NONE 0xffff
 typedef unsigned short (*car_pool_ids_fn)(void *, unsigned short, unsigned short, void *);
 static car_pool_ids_fn g_car_pool_ids_orig;
-static unsigned g_car_pool_ids_hi;
+static int g_car_pool_share_ids;
+static unsigned g_car_pool_share_next;
 
 static unsigned short car_pool_ids(void *manager, unsigned short lo, unsigned short hi, void *extra)
 {
-    if (g_car_pool_ids_hi && g_car_pool_cur_type == CAR_POOL_IDS_PLAYER_TYPE && lo == 0 && hi == 0x0b) {
-        hi = (unsigned short)g_car_pool_ids_hi;
-    }
-    return g_car_pool_ids_orig(manager, lo, hi, extra);
-}
+    unsigned short id = g_car_pool_ids_orig(manager, lo, hi, extra);
 
-/* RacingAI::AsyncTraining::Manager (global at game+0x354f4c8, 0x300 bytes) keeps one entry per AI slot in a table of 12 (entry = 16 bytes at +0x38, a semaphore
- * follows at +0xf8). FUN_140f21870 (its only caller is RacingAI::AICar::helper_f41840) finds or creates the entry for a key and the lookup FUN_140f2b2f0
- * indexes the table with it; a car whose stand-in id was 27 or 30 read and wrote past the table (game+0xf2b32d, dev 2026-11-02). Every car that gets an AI
- * controller needs a key, network player cars among them. For a key of 12 or more the call is made with key % 12, the caller's key is put back afterwards: such
- * cars share a training entry, which only matters for a car that drives itself, and these are driven by the network. */
-#define CAR_POOL_TRAIN_RVA 0xf21870
-#define CAR_POOL_TRAIN_ENTRIES 12
-typedef void *(*car_pool_train_fn)(void *, void *, unsigned short *, void *);
-static car_pool_train_fn g_car_pool_train_orig;
-
-static void *car_pool_train(void *manager, void *out, unsigned short *key, void *extra)
-{
-    unsigned short original = key ? *key : 0;
-    void *result;
-
-    if (key && original >= CAR_POOL_TRAIN_ENTRIES) {
-        *key = (unsigned short)(original % CAR_POOL_TRAIN_ENTRIES);
+    if (id == CAR_POOL_IDS_NONE && g_car_pool_share_ids && g_car_pool_cur_type == CAR_POOL_IDS_PLAYER_TYPE && lo == 0 && hi == 0x0b) {
+        id = (unsigned short)(1 + g_car_pool_share_next++ % 11);
+        if (g_car_pool_share_next <= 5) {
+            log_begin();
+            log_raw("carpool: stand-in ids full, a player car shares id ");
+            log_dec(id);
+            log_raw(" (FH2MP_CAR_IDS)\n");
+        }
     }
-    result = g_car_pool_train_orig(manager, out, key, extra);
-    if (key) {
-        *key = original;
-    }
-    return result;
+    return id;
 }
 
 static void car_pool_install_find(unsigned char *img)
@@ -484,7 +469,6 @@ static int patch_car_pool(void)
     static const unsigned char nop4[] = {0x90, 0x90, 0x90, 0x90};
     static const unsigned char tick_head[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57};
     static const unsigned char find_head[] = {0x4C, 0x89, 0x4C, 0x24, 0x20, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x60};
-    static const unsigned char train_head[] = {0x4C, 0x89, 0x4C, 0x24, 0x20, 0x48, 0x89, 0x54, 0x24, 0x10, 0x55, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x40};
     static const unsigned char ids_head[] = {0x48, 0x8B, 0xC4, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x50, 0x48, 0xC7, 0x40, 0xC8, 0xFE, 0xFF, 0xFF, 0xFF, 0x48, 0x89, 0x58, 0x10};
     static const unsigned char aictl_head[] = {0x4C, 0x8B, 0xDC, 0x57, 0x48, 0x81, 0xEC, 0x50, 0x03, 0x00, 0x00, 0x48, 0xC7, 0x44, 0x24, 0x40, 0xFE, 0xFF, 0xFF, 0xFF};
     static const unsigned char max_setter[] = {0x44, 0x89, 0x82, 0xF0, 0x00, 0x00, 0x00, 0xC3, 0xCC, 0xCC, 0xCC};     /* mov [rdx+0xf0], r8d; ret; padding */
@@ -514,8 +498,7 @@ static int patch_car_pool(void)
         !code_is("carpool", "the net vehicle load request builder", img, CAR_POOL_FIND_RVA, find_head, sizeof find_head) ||
         !code_is("carpool", "the car cache's tick", img, CAR_POOL_TICK_RVA, tick_head, sizeof tick_head) ||
         (aictl && !code_is("carpool", "the AI controller attach", img, CAR_POOL_AICTL_RVA, aictl_head, sizeof aictl_head)) ||
-        (ids && (!code_is("carpool", "the stand-in id search", img, CAR_POOL_IDS_RVA, ids_head, sizeof ids_head) ||
-                 !code_is("carpool", "the AI training manager's request", img, CAR_POOL_TRAIN_RVA, train_head, sizeof train_head))) ||
+        (ids && !code_is("carpool", "the stand-in id search", img, CAR_POOL_IDS_RVA, ids_head, sizeof ids_head)) ||
         ((parts & CAR_POOL_PART_MAX) && !code_is("carpool", "the Drivatar maximum setter", img, CAR_POOL_DRIVATAR_MAX_SETTER_RVA, max_setter, sizeof max_setter)) ||
         ((parts & CAR_POOL_PART_MIN) && !code_is("carpool", "the Drivatar minimum setter", img, CAR_POOL_DRIVATAR_MIN_SETTER_RVA, min_setter, sizeof min_setter)) ||
         ((parts & CAR_POOL_PART_AI) && !code_is("carpool", "the festival AI module's connect", img, CAR_POOL_AIMODULE_RVA, ai_head, sizeof ai_head))) {
@@ -545,9 +528,8 @@ static int patch_car_pool(void)
         if (aictl) {
             plat_hook("carpool: no AI controller for remote cars", img + CAR_POOL_AICTL_RVA, (void *)car_pool_aictl, (void **)&g_car_pool_aictl_orig);
         }
-        if (ids && plat_hook("carpool: AI training entry of cars with a high id", img + CAR_POOL_TRAIN_RVA, (void *)car_pool_train, (void **)&g_car_pool_train_orig) &&
-            plat_hook("carpool: stand-in ids of player cars", img + CAR_POOL_IDS_RVA, (void *)car_pool_ids, (void **)&g_car_pool_ids_orig)) {
-            g_car_pool_ids_hi = (unsigned)want + CAR_POOL_AI_IDS_TOP;      /* experimental, FH2MP_CAR_IDS=1: past the AI ids 12..29 the game's own cars take */
+        if (ids && plat_hook("carpool: player cars share stand-in ids when they run out", img + CAR_POOL_IDS_RVA, (void *)car_pool_ids, (void **)&g_car_pool_ids_orig)) {
+            g_car_pool_share_ids = 1;
         }
         log_begin();
         log_raw("carpool: remote car slots 11 -> ");
@@ -559,7 +541,7 @@ static int patch_car_pool(void)
             log_raw(parts & CAR_POOL_PART_MIN ? "n" : "");
             log_raw(parts & CAR_POOL_PART_AI ? "a" : "");
         }
-        log_raw(g_car_pool_ids_hi ? ", player car stand-in ids raised (FH2MP_CAR_IDS)" : "");
+        log_raw(g_car_pool_share_ids ? ", player cars share stand-in ids (FH2MP_CAR_IDS)" : "");
         log_raw(" (FH2MP_CAR_SLOTS)\n");
     }
     return done == expected;
