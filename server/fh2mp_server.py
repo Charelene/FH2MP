@@ -27,6 +27,7 @@ import traceback
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import capacity
 import honk
 import lighting
 import diag
@@ -736,7 +737,9 @@ def transfer_ownership(router, obj_id, id_bits, seq):
 
 def starting_grid(entries):
     """entries: list of (kind, id, owner): kind 'local' = the receiver's own car (A=1,B=0),
-    'relay' = another client's car (A=0,B=1,owner follows the id)."""
+    'relay' = another client's car (A=0,B=1,owner follows the id). At most capacity.CLIENT_LIMIT entries: the client copies them into a buffer of 12."""
+    entries = list(entries)[:capacity.CLIENT_LIMIT]
+
     def write(w: BitWriter):
         w.bits(MSG_STARTING_GRID, 7)
         w.bits(0, LOBBY_EVENT_KEY_BITS)
@@ -2593,6 +2596,7 @@ class Server:
         used = {getattr(q, "private_universe", None) for q in self.peers.values() if q is not peer and q.connected}
         free = [u for u in range(PRIVATE_UNIVERSE_FIRST, PRIVATE_UNIVERSE_FIRST + PRIVATE_UNIVERSE_COUNT) if u not in used]
         if not free:
+            self.warn(f"{peer.addr[1]} no private universe left ({PRIVATE_UNIVERSE_COUNT} are in use): its car is not kept apart from an event's")
             return
         peer.private_universe = free[0]
 
@@ -3094,14 +3098,22 @@ class Server:
                 if q is not leader:
                     excluded[q] = "handshake not finished" if not q.connected else "never answered the invite with Ready"
                 continue
-            if self.eligible_for_event(q):
-                people.append(q)
-            else:
+            if not self.eligible_for_event(q):
                 excluded[q] = "car does not meet the event restrictions (see the 'not eligible' line above)"
                 self.set_console_bool(q, 4, 0, "car does not meet the event restrictions")
                 q.console_vars[4] = 0
                 self.set_console_bool(q, CONSOLE_VAR_PARTICIPATING_IN_RACE, 0, "ineligible car")
                 q.console_vars[CONSOLE_VAR_PARTICIPATING_IN_RACE] = 0
+            elif len(people) >= capacity.CLIENT_LIMIT:
+                # The starting grid message holds 12 keys (MsgStartingGrid::Receive 0x1824040 copies up to 15 into a buffer of 12) and
+                # MaxPlayers is 1..12: a Free Roam world may be bigger than an event.
+                excluded[q] = f"the event holds {capacity.CLIENT_LIMIT} players"
+                self.set_console_bool(q, 4, 0, "event full")
+                q.console_vars[4] = 0
+                self.set_console_bool(q, CONSOLE_VAR_PARTICIPATING_IN_RACE, 0, "event full")
+                q.console_vars[CONSOLE_VAR_PARTICIPATING_IN_RACE] = 0
+            else:
+                people.append(q)
         self.log(f"event start: {len(people)} participant(s): {[q.owner_id for q in people]}; leader owner {leader.owner_id}, "
                  f"{len(excluded)} of {len(self.peers) - 1} other client(s) excluded"
                  + (f", invite sent {time.monotonic() - self.race_requested_at:.0f} s ago" if self.race_requested_at and not self.roadtrip else ""))
@@ -4855,7 +4867,7 @@ class Hub:
             if not peers:
                 continue
             row = {"id": name or "default", "kind": "roadtrip" if kind == LOBBY_TYPE_ROAD_TRIP else "freeroam",
-                   "players": len(peers), "capacity": self.WORLD_CAPACITY,
+                   "players": len(peers), "capacity": capacity.for_type(kind),
                    "memberXuids": [f"{p.xuid:x}" for p in peers if p.xuid]}
             if kind == LOBBY_TYPE_ROAD_TRIP:
                 row.update(status=stages.get(world.rt_state, "Getting ready"), event=world.rt_idx + 1, events=4)
@@ -5059,11 +5071,11 @@ class Hub:
                 self.warn(f"{player_id:#x} world {target.tag.strip()} has no relay owner ids left ({len(target.owner_ids_taken())} of {RELAY_OWNER_LAST} taken or "
                           f"quarantined): sent to another world")
                 target = self.open_world_for(ltype, player_id, addr)
-            if target is not cur and self.world_load(target, addr) >= self.WORLD_CAPACITY:
-                # The HUD player list has exactly 12 slots (HudPartyMembersComponent ctor FUN_1407726c0); a 13th player makes every
-                # client in the world read past them and call through a CUserProfile (game+0x144661d, "exception at 0x9") [C].
+            if target is not cur and self.world_load(target, addr) >= capacity.for_type(ltype):
+                # Past 12 the HUD player list overruns on a client without the shim's party HUD patch (HudPartyMembersComponent keeps 12 rows,
+                # game+0x144661d, "exception at 0x9"): capacity.py says how many a world of this type holds [C].
                 self.log(f"{player_id:#x} assigned to full lobby {name or 'default'}: sent to another world "
-                         f"({self.world_load(target, addr)}/{self.WORLD_CAPACITY} players there)")
+                         f"({self.world_load(target, addr)}/{capacity.for_type(ltype)} players there)")
                 target = self.open_world_for(ltype, player_id, addr)
             if cur is not None and cur is not target:
                 old = cur.peers.get(addr)
@@ -5157,7 +5169,7 @@ class Hub:
         ent = self.authed.get(player_id)
         return ent is not None and ent[1] > time.monotonic() and ent[0] == ip
 
-    WORLD_CAPACITY = 12
+    WORLD_CAPACITY = capacity.free_roam()      # the Free Roam value when the server started; the checks ask capacity.for_type(lobby type)
 
     def world_load(self, w, addr=None) -> int:
         """Addresses routed to world `w` (connected or still connecting), not counting `addr`. One player holds one address at most
@@ -5201,7 +5213,7 @@ class Hub:
         best, best_n = None, 0
         for (ltype, _name), w in self.worlds.items():
             n = load.get(id(w), 0)
-            if (ltype == lobby_type and 0 < n < self.WORLD_CAPACITY and n > best_n and self.world_pool_fits(w, player_id)
+            if (ltype == lobby_type and 0 < n < capacity.for_type(lobby_type) and n > best_n and self.world_pool_fits(w, player_id)
                     and self.owner_room(w, addr)):
                 best, best_n = w, n
         if best is not None:

@@ -1,4 +1,4 @@
-"""A world never holds more than 12 players, whatever lobby matchmaking or an invite assigned: the HUD player list has 12 slots and a
+"""A world never holds more than its size (12 unless FH2MP_WORLD_CAPACITY says more, see test_capacity.py), whatever lobby matchmaking or an invite assigned: the HUD player list has 12 slots (the shim's party HUD patch makes more) and a
 13th player crashed every client in the world (prod 2026-10-22 15:34:45, all 12 clients of lobby 53629321 at game+0x144661d)."""
 import os
 import sys

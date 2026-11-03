@@ -8,6 +8,7 @@ import time
 import uuid
 
 import auth
+import capacity
 import diag
 import xbl
 
@@ -78,9 +79,10 @@ def reserve(xuid, lobby=None, kind=None):
                 raise auth.AuthError(409, "lobby_unavailable", "This lobby is unavailable for your player pool.", xuid=xuid,
                                      detail=f"lobby {str(lobby)[:8]}: pool does not fit (player flagged={int(xuid) in flagged})")
             already = str(xuid) in seats(lobby) or f"{int(xuid):x}" in pops.get(lobby, [])
-            if occupied >= min(xbl._max_players(rec, 12), 12) and not already:
+            room = capacity.for_kind(kind)
+            if occupied >= min(xbl._max_players(rec, room), room) and not already:
                 raise auth.AuthError(409, "lobby_full", "This lobby is full.", xuid=xuid,
-                                     detail=f"lobby {str(lobby)[:8]} holds {occupied} of {min(xbl._max_players(rec, 12), 12)}")
+                                     detail=f"lobby {str(lobby)[:8]} holds {occupied} of {min(xbl._max_players(rec, room), room)}")
         elif kind:
             lobby = str(uuid.uuid4())
         else:
@@ -110,7 +112,7 @@ def pick(xuid, key, attrs, ref, pops):
         raise auth.AuthError(503, "unavailable", "Cannot verify the reserved lobby right now.", xuid=xuid, detail="population query got no answer during matchmaking")
     name = h["id"]
     if h["key"] is None:
-        xbl._new_lobby(key[0], attrs, ref, name=name)
+        xbl._new_lobby(key[0], attrs, ref, name=name, hopper=key[1])
         xbl._LOBBIES.setdefault(key, []).append(name)
         LOG.info("reservation used: new world made for it " + diag.kv(xuid=xuid, lobby=str(name)[:8], kind=h["kind"]))
     else:
@@ -124,10 +126,11 @@ def pick(xuid, key, attrs, ref, pops):
                 xuid=xuid, lobby=str(name)[:8], why="the world's session is gone" if rec is None else "the world is not in this player's pool", flagged=int(xuid) in flags))
             return None
         # The held seat is already counted in occupancy.
-        if occupied > min(xbl._max_players(rec, 12), 12):
+        room = capacity.for_kind(h["kind"])
+        if occupied > min(xbl._max_players(rec, room), room):
             HOLDS.pop(str(xuid), None)
             LOG.warn("reservation dropped, the player is matched normally: " + diag.kv(
-                xuid=xuid, lobby=str(name)[:8], why="the world filled up since", occupied=occupied, max=min(xbl._max_players(rec, 12), 12)))
+                xuid=xuid, lobby=str(name)[:8], why="the world filled up since", occupied=occupied, max=min(xbl._max_players(rec, room), room)))
             return None
         LOG.info("reservation used: joins the held world " + diag.kv(xuid=xuid, lobby=str(name)[:8], kind=h["kind"], occupied=occupied))
     HOLDS.pop(str(xuid), None)

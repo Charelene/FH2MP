@@ -29,6 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import threading  # noqa: E402
+import capacity  # noqa: E402
 import xls  # noqa: E402
 import drivatar  # noqa: E402
 import scoreboard  # noqa: E402
@@ -2341,7 +2342,7 @@ def gsds_variants():
     }).encode()
 
 
-MAX_LOBBY_PLAYERS = 12   # engine ceiling seen so far (traffic server 12 slots); docs/matchmaking.md
+MAX_LOBBY_PLAYERS = capacity.free_roam()   # 12 unless FH2MP_WORLD_CAPACITY says more (capacity.py); docs/matchmaking.md
 
 
 def gsds_qos_servers():

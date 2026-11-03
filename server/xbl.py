@@ -18,6 +18,7 @@ import threading
 import time
 import uuid
 
+import capacity
 import diag
 
 SESSION_PATH = re.compile(
@@ -377,7 +378,7 @@ _LOBBIES = {}   # lobby_key -> [session name, ...]: every lobby of that hopper /
 _RESERVED = {}  # session name -> {xuid: time}: players matched into a lobby that the game server has not seen connect yet
 _LOBBY_LOCK = threading.Lock()
 _GUID = re.compile(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
-LOBBY_CAPACITY = 12
+LOBBY_CAPACITY = capacity.free_roam()      # the Free Roam value when the LSP started; a lobby's own size follows its hopper (capacity.for_hopper)
 _LEFT = {}      # xuid (decimal str) -> (session name lower, time): the game-mode session a player last left through MPSD (members.me = null)
 LEFT_AVOID_SECONDS = 120.0  # a search started in, or right after leaving, a lobby is never matched back into it (see _avoided)
 RESERVE_SECONDS = 30.0     # a matched player that has not connected after this long no longer holds a seat (the game connects within ~10 s)
@@ -660,7 +661,8 @@ def _lobby_for(scid, hopper, attrs, ref, xuid=None):
         preferred = launcher_lobbies.pick(xuid, key, attrs, ref, pops) if xuid else None
         if preferred and preferred.lower() in avoid:
             preferred = None
-        best, best_n = preferred, LOBBY_CAPACITY if preferred else -1
+        lobby_max = capacity.for_hopper(hopper)
+        best, best_n = preferred, lobby_max if preferred else -1
         flagged = flagged_set(pops)
         mine = int(xuid) in flagged if xuid and str(xuid).isdigit() else False
         full = pooled = avoided = 0
@@ -674,7 +676,7 @@ def _lobby_for(scid, hopper, attrs, ref, xuid=None):
                 avoided += 1
                 continue
             _prune(rec)
-            cap = min(_max_players(rec, LOBBY_CAPACITY), LOBBY_CAPACITY)
+            cap = min(_max_players(rec, lobby_max), lobby_max)
             n = lobby_occupancy(name, rec, pops)
             if flagged and not pool_fits(name, pops, flagged, mine):
                 pooled += 1
@@ -685,7 +687,7 @@ def _lobby_for(scid, hopper, attrs, ref, xuid=None):
         name = best
         created = name is None
         if created:
-            name = _new_lobby(scid, attrs, ref)
+            name = _new_lobby(scid, attrs, ref, hopper=hopper)
             names.append(name)
         rec = _SESSIONS.get((scid.lower(), TARGET_TEMPLATE.lower(), name.lower()))
         if rec is not None:
@@ -701,13 +703,13 @@ def _lobby_for(scid, hopper, attrs, ref, xuid=None):
                 res.pop(str(xuid), None)        # one seat per player: a new match replaces the one it made before
             _RESERVED.setdefault(name, {})[str(xuid)] = time.time()
         MATCH.info("ticket matched " + diag.kv(
-            xuid=xuid, lobby=name[:8], how="new lobby" if created else "held seat" if name == preferred else f"fullest with room ({best_n} of {LOBBY_CAPACITY})",
+            xuid=xuid, lobby=name[:8], how="new lobby" if created else "held seat" if name == preferred else f"fullest with room ({best_n} of {lobby_max})",
             hopper=hopper, location=attrs.get("Location"), gsi=str(attrs.get("gsiSetId", ""))[-3:] or None, lobbies=len(names), full=full or None,
             pool_skipped=pooled or None, left_or_inside_skipped=avoided or None, released=released or None, flagged_player=True if mine else None, occupancy_source="game server" if pops is not None else "MPSD members (game server silent)"))
     return name
 
 
-def _lobby_custom(ticket, attrs):
+def _lobby_custom(ticket, attrs, max_players=None):
     """constants.custom of a new lobby. Only what the game reads, each checked: one player's ticket session seeds the document every later
     joiner parses, and that parser throws on a bad key (0x183bb50). The lobby size is the server's."""
     def guid(v, default):
@@ -717,7 +719,7 @@ def _lobby_custom(ticket, attrs):
     gsp = gsp if isinstance(gsp, dict) else {}
     out = {"gameVariantId": guid(gsp.get("gameVariantId"), "00000000-0000-0000-0000-000000000001"),
            "gsiSetId": guid(gsp.get("gsiSetId"), guid(attrs.get("gsiSetId"), "00000000-0000-0000-0000-000000000102")),
-           "maxAllowedPlayers": LOBBY_CAPACITY}
+           "maxAllowedPlayers": max_players or LOBBY_CAPACITY}
     location = gsp.get("location")
     if isinstance(location, str) and len(location) <= 64 or type(location) is int:
         out["location"] = location
@@ -729,7 +731,7 @@ def _lobby_custom(ticket, attrs):
     return custom
 
 
-def _new_lobby(scid, attrs, ref, name=None):
+def _new_lobby(scid, attrs, ref, name=None, hopper=None):
     name = name or str(uuid.uuid4())
     # The game reads constants.custom.gameServerPlatform.{gameVariantId,gsiSetId[,location]} from the target session
     # (FUN_14183bb50) and throws on a missing key, so take them from the ticket session it wrote itself.
@@ -737,7 +739,7 @@ def _new_lobby(scid, attrs, ref, name=None):
     if ref:
         src = _SESSIONS.get((str(ref.get("scid", "")).lower(), str(ref.get("templateName", "")).lower(),
                              str(ref.get("name", "")).lower()))
-    custom = _lobby_custom(src["constants"].get("custom") if src else None, attrs)
+    custom = _lobby_custom(src["constants"].get("custom") if src else None, attrs, capacity.for_hopper(hopper) if hopper else None)
     body = {"constants": {"system": {"version": 1, "visibility": "open"}, "custom": custom},
             "properties": {"system": {"joinRestriction": "none", "readRestriction": "none"}, "custom": {}}}
     put_session("/serviceconfigs/%s/sessionTemplates/%s/sessions/%s" % (scid, TARGET_TEMPLATE, name),
