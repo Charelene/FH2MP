@@ -112,6 +112,7 @@ int main(void)
     /* the diagnostic hook: runs the game's tick, logs the group state once and again only when it changes */
     { static unsigned char slots[100 * 0x590];
       static unsigned char request[0x5d0], request2[0x5d0], request3[0x5d0];
+      static unsigned char handle1[0x40], handle2[0x40];
       unsigned char module[0x400], queue_obj[0x40];
       unsigned long long qptr = (unsigned long long)(ULONG_PTR)queue_obj;
       unsigned char *group = module + CAR_POOL_GROUP;
@@ -141,10 +142,12 @@ int main(void)
       car_pool_tick(module, NULL, NULL, NULL);
       assert(strstr(g_raw, "global load queue busy"));
       /* slot 0: car built, request assigned in state 1, not ready; slot 5: request in state 2 and ready; slot 9: a car being unloaded */
-      *(unsigned long long *)(slots + 0x560) = 0x1111;
+      *(unsigned long long *)(slots + 0x560) = (unsigned long long)(ULONG_PTR)handle1;
+      *(unsigned *)(handle1 + 0x20) = 3;                                  /* load state 3: not loaded */
       *(unsigned long long *)(slots + 0x558) = (unsigned long long)(ULONG_PTR)request;
       *(unsigned *)(request + 0x598) = 1;
-      *(unsigned long long *)(slots + 5 * 0x590 + 0x560) = 0x2222;
+      *(unsigned long long *)(slots + 5 * 0x590 + 0x560) = (unsigned long long)(ULONG_PTR)handle2;
+      *(unsigned *)(handle2 + 0x20) = 7;                                  /* load state 7: loaded */
       *(unsigned long long *)(slots + 5 * 0x590 + 0x558) = (unsigned long long)(ULONG_PTR)request2;
       *(unsigned *)(request2 + 0x598) = 2;
       request2[0x5a8] = 1;
@@ -154,7 +157,7 @@ int main(void)
       g_raw[0] = 0;
       g_car_pool_scan_at = 0;
       car_pool_tick(module, NULL, NULL, NULL);
-      assert(strstr(g_raw, "cars 2, assigned 3, unloading 1, request state 1 2, state 2 1, ready flag 1"));
+      assert(strstr(g_raw, "cars 2, assigned 3, unloading 1, request state 1 2, state 2 1, ready flag 1, car load states 3=1 7=1"));
       /* a slot vector that is not whole slots, or bigger than the scan buffer, is not scanned */
       *(unsigned long long *)(group + 0x68) = (unsigned long long)(ULONG_PTR)(slots + 74 * 0x590 - 1);
       g_raw[0] = 0;

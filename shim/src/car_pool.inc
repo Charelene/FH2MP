@@ -39,7 +39,8 @@ typedef unsigned long long (*car_pool_tick_fn)(void *, void *, void *, void *);
 static car_pool_tick_fn g_car_pool_tick_orig;
 #define CAR_POOL_SLOT 0x590
 #define CAR_POOL_SLOTS_MAX 96
-#define CAR_POOL_FIELDS 11
+#define CAR_POOL_HELD 22                 /* the scan's counts: 6 below, then the cars' load states 0..15 */
+#define CAR_POOL_FIELDS (5 + CAR_POOL_HELD)
 static unsigned g_car_pool_seen[CAR_POOL_FIELDS];
 static int g_car_pool_seen_any;
 static ULONGLONG g_car_pool_scan_at;
@@ -52,13 +53,20 @@ static void car_pool_scan(unsigned slots, unsigned *out)
 {
     unsigned i;
 
-    memset(out, 0, 6 * sizeof out[0]);
+    memset(out, 0, CAR_POOL_HELD * sizeof out[0]);
     for (i = 0; i < slots; i++) {
         const unsigned char *slot = g_car_pool_slots + (size_t)i * CAR_POOL_SLOT;
         unsigned long long car = *(const unsigned long long *)(slot + 0x560), request = *(const unsigned long long *)(slot + 0x558);
         unsigned char tail[0x11];
 
         out[0] += car != 0;
+        if (car) {
+            unsigned load;
+
+            if (read_game_memory((const void *)(ULONG_PTR)(car + 0x20), &load, sizeof load)) {
+                out[6 + (load < 15 ? load : 15)]++;      /* the car's load request: 7, 8 and 0xb are 'loaded' (helper_fd0750) */
+            }
+        }
         out[1] += request != 0;
         out[2] += *(const unsigned long long *)(slot + 0x568) != 0;
         if (request && read_game_memory((const void *)(ULONG_PTR)(request + 0x598), tail, sizeof tail)) {
@@ -75,14 +83,14 @@ static void car_pool_state_line(const unsigned char *group, const unsigned *queu
 {
     unsigned long long slots_b = *(const unsigned long long *)(group + 0x60), slots_e = *(const unsigned long long *)(group + 0x68);
     unsigned long long req_b = *(const unsigned long long *)(group + 0x78), req_e = *(const unsigned long long *)(group + 0x80);
-    unsigned now[CAR_POOL_FIELDS];
+    unsigned now[CAR_POOL_FIELDS], i;
 
     now[0] = (unsigned)((slots_e - slots_b) / CAR_POOL_SLOT);
     now[1] = *(const unsigned *)(group + 0x90);
     now[2] = *(const unsigned *)(group + 0x94);
     now[3] = (unsigned)((req_e - req_b) / 8);
     now[4] = have_queue ? (queue[3] == 0 && queue[0] == queue[1]) : 2;      /* queue[] is +8, +0xc, +0x10, +0x14: idle when +0x14 == 0 and +0xc == +8 */
-    memcpy(now + 5, held, 6 * sizeof now[0]);
+    memcpy(now + 5, held, CAR_POOL_HELD * sizeof now[0]);
     if (g_car_pool_seen_any && !memcmp(now, g_car_pool_seen, sizeof now)) {
         return;
     }
@@ -111,6 +119,15 @@ static void car_pool_state_line(const unsigned char *group, const unsigned *queu
         log_dec(now[9]);
         log_raw(", ready flag ");
         log_dec(now[10]);
+        log_raw(", car load states");
+        for (i = 0; i < 16; i++) {
+            if (now[11 + i]) {
+                log_raw(" ");
+                log_dec(i);
+                log_raw("=");
+                log_dec(now[11 + i]);
+            }
+        }
     }
     log_raw("\n");
 }
@@ -119,10 +136,12 @@ static unsigned long long car_pool_tick(void *self, void *a, void *b, void *c)
 {
     unsigned char *img = find_fh2_image();
     unsigned char group[0xa0];
-    unsigned queue[6] = {0, 0, 0, 0, 0, 0}, held[6] = {0, 0, 0, 0, 0, 0};
+    unsigned queue[6] = {0, 0, 0, 0, 0, 0}, held[CAR_POOL_HELD];
     unsigned long long qptr = 0;
     unsigned long long result = g_car_pool_tick_orig(self, a, b, c);
     int have_queue = 0, scanned = 0;
+
+    memset(held, 0, sizeof held);
 
     if (img && self && read_game_memory((unsigned char *)self + CAR_POOL_GROUP, group, sizeof group)) {
         unsigned long long begin = *(unsigned long long *)(group + 0x60), end = *(unsigned long long *)(group + 0x68);
