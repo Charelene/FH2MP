@@ -222,6 +222,71 @@ static unsigned long long car_pool_tick(void *self, void *a, void *b, void *c)
     return result;
 }
 
+/* Simulation::FindOrQueueCarLoadForNetVehicle (game+0xfd08b0) creates the load request of a net vehicle: its car id (info+0x234 of the pending vehicle,
+ * handle+0x110) decides whether the stand-in id pool is asked, and the request starts in state 1, or in state 12 (invalid) when no id came out. Logged
+ * once per call: the vehicle's id and type before, and the request's state and the vehicle's id after. 300 lines at most. */
+#define CAR_POOL_FIND_RVA 0xfd08b0
+typedef void *(*car_pool_find_fn)(void *, void *, void *, void *, void *, unsigned);
+static car_pool_find_fn g_car_pool_find_orig;
+static unsigned g_car_pool_find_lines;
+
+static int car_pool_vehicle_info(unsigned long long vehicle, int *id, int *type)
+{
+    unsigned char info[4], kind[4];
+
+    if (!vehicle || !read_game_memory((const void *)(ULONG_PTR)(vehicle + 0x110 + 0x234), info, sizeof info) ||
+        !read_game_memory((const void *)(ULONG_PTR)(vehicle + 0x110 + 0x488), kind, sizeof kind)) {
+        return 0;
+    }
+    *id = (short)(info[0] | (info[1] << 8));
+    *type = (int)(kind[0] | (kind[1] << 8) | (kind[2] << 16) | ((unsigned)kind[3] << 24));
+    return 1;
+}
+
+static void *car_pool_find(void *self, void *out, void *vehicle_ref, void *manager, void *extra, unsigned priority)
+{
+    unsigned long long vehicle = 0, request = 0;
+    int id_before = 0, type = 0, id_after = 0, type_after = 0, have_before = 0, have_after;
+    unsigned state = 99;
+    void *result;
+
+    if (g_car_pool_find_lines < 300 && vehicle_ref && read_game_memory(vehicle_ref, &vehicle, sizeof vehicle)) {
+        have_before = car_pool_vehicle_info(vehicle, &id_before, &type);
+    }
+    result = g_car_pool_find_orig(self, out, vehicle_ref, manager, extra, priority);
+    if (have_before && g_car_pool_find_lines < 300) {
+        g_car_pool_find_lines++;
+        if (out && read_game_memory(out, &request, sizeof request) && request) {
+            read_game_memory((const void *)(ULONG_PTR)(request + 0x20), &state, sizeof state);
+        }
+        have_after = car_pool_vehicle_info(vehicle, &id_after, &type_after);
+        log_begin();
+        log_raw("carpool: load request for vehicle id ");
+        log_dec((unsigned long)(unsigned short)id_before);
+        log_raw(" type ");
+        log_dec((unsigned long)type);
+        log_raw(" -> state ");
+        log_dec(state);
+        log_raw(", id then ");
+        if (have_after) {
+            log_dec((unsigned long)(unsigned short)id_after);
+        } else {
+            log_raw("unreadable");
+        }
+        log_raw("\n");
+    }
+    return result;
+}
+
+static void car_pool_install_find(unsigned char *img)
+{
+    static const unsigned char find_head[] = {0x4C, 0x89, 0x4C, 0x24, 0x20, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x60};
+
+    if (code_is("carpool", "the net vehicle load request builder", img, CAR_POOL_FIND_RVA, find_head, sizeof find_head)) {
+        plat_hook("carpool: load request log, passive", img + CAR_POOL_FIND_RVA, (void *)car_pool_find, (void **)&g_car_pool_find_orig);
+    }
+}
+
 static int patch_car_pool(void)
 {
     static const unsigned char head[] = {0x48, 0x8B, 0xC4, 0x57, 0x48, 0x83, 0xEC, 0x70, 0x48, 0xC7, 0x40, 0xB8, 0xFE, 0xFF, 0xFF, 0xFF};
@@ -242,6 +307,7 @@ static int patch_car_pool(void)
         if (GetEnvironmentVariableA("FH2MP_CAR_DIAG", diag, sizeof diag) && diag[0] == '1' &&
             code_is("carpool", "the car cache's tick", img, CAR_POOL_TICK_RVA, tick_head, sizeof tick_head)) {
             plat_hook("carpool: cache state, passive", img + CAR_POOL_TICK_RVA, (void *)car_pool_tick, (void **)&g_car_pool_tick_orig);
+            car_pool_install_find(img);
         }
         return 0;
     }
@@ -256,6 +322,7 @@ static int patch_car_pool(void)
     if (done == 2) {
         if (code_is("carpool", "the car cache's tick", img, CAR_POOL_TICK_RVA, tick_head, sizeof tick_head)) {
             plat_hook("carpool: cache state, passive", img + CAR_POOL_TICK_RVA, (void *)car_pool_tick, (void **)&g_car_pool_tick_orig);
+            car_pool_install_find(img);
         }
         log_begin();
         log_raw("carpool: remote car slots 11 -> ");
