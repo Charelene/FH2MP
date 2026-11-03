@@ -22,7 +22,7 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/lsp" "$tmp/server"
 for m in fh2mp_lsp db xls xls_schema cardb drivatar scoreboard score_reports ghost ghost_check xp_audit rival_records rivals ugc pngtool notifstore xbl clubs social community launcher_lobbies auth launcher_api ops_api site_stats home gamedb_sync rentals crash_reports diag capacity; do cp "server/$m.py" "$tmp/lsp/"; done
 cp ops/nginx/forza-api.conf ops/fh2mp-logrotate ops/fh2mp-dev-logrotate "$tmp/lsp/"
-cp server/fh2mp_server.py server/traffic.py server/traffic_manager.py server/car_policy.py server/parts.py server/player_setup.py server/part_ids.py server/part_tables.py server/gameopts.py server/replay.py server/reliable.py server/tunnel.py server/lighting.py server/honk.py server/probe.py server/event_log.py server/bucketlist.py server/diag.py server/capacity.py "$tmp/server/"
+cp server/fh2mp_server.py server/traffic.py server/traffic_manager.py server/car_policy.py server/parts.py server/player_setup.py server/part_ids.py server/part_tables.py server/gameopts.py server/replay.py server/reliable.py server/tunnel.py server/lighting.py server/honk.py server/probe.py server/event_log.py server/bucketlist.py server/diag.py server/capacity.py server/bots.py "$tmp/server/"
 ssh -i "$key" "$host" 'rm -rf /tmp/fh2mp-deploy && mkdir /tmp/fh2mp-deploy'
 scp -i "$key" -q -r "$tmp/lsp" "$tmp/server" "$host:/tmp/fh2mp-deploy/"
 ssh -i "$key" "$host" "set -e

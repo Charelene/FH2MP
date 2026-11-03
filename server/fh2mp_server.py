@@ -27,6 +27,7 @@ import traceback
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bots
 import capacity
 import honk
 import lighting
@@ -1320,6 +1321,8 @@ class Peer:
         self.car_prediction_stamp = None # newest forwarded prediction time, including synthetic rephasing updates
         self.car_prediction_refreshable = True
         self.clock_samples = []    # (rtt, stamp lag) in ms from our Pings, see Server.clock_sample (log only)
+        self.bot_source = None       # bots.py: the real player this bot copies (None for a connection)
+        self.bot_offset = (0.0, 0.0)
         self.private_universe = None # assigned at session entry; never shared with another connected player
         self.lobby_type = 0        # OpenConnection field a: Nerd::NetworkLobbyType the client joined (1 RoadTrip, 2 FreeRoam, 3 CarMeet)
         self.xuid = 0              # the client's Xbox user id (OpenConnection playerId)
@@ -1454,6 +1457,9 @@ class Server:
         self.wx_next = 0.0         # monotonic time of the next weather change
         self.weather_init()
         self.peers = {}
+        self.bots = []             # bots.py: test players with no socket; dev only
+        self.bot_serial = 0
+        self.bots_next = 0.0
         self.dirty = set()         # peers with queued messages (send -> flush)
         self.owner_quarantine = {}   # relay owner id -> monotonic time it may be handed out again (see RELAY_OWNER_LAST)
         self.pending_race = None   # (deadline, leader Peer)
@@ -2119,6 +2125,8 @@ class Server:
             q.outbox.append(msg)
             q.due = min(q.due, due)
             self.dirty.add(q)
+        if self.bots and not refresh and sender.bot_source is None:
+            bots.follow(self, sender, prediction)
 
     def refresh_car_phasing(self) -> None:
         """Rephase stationary cars too; do not wait for another prediction after a quit."""
@@ -2388,30 +2396,34 @@ class Server:
 
     def replay_to(self, newcomer: Peer, routers=None, skip=()) -> None:
         """Late joiner: announce everything the other clients already created (only `routers` when given, none of `skip`)."""
-        for q in self.peers.values():
+        for q in list(self.peers.values()) + self.bots:
             if q is newcomer or not q.connected or q.world != newcomer.world:
                 continue
-            batch, stored = [], 0
-            for (router, oid), hist in q.objs.items():
-                if router in skip or (routers is not None and router not in routers):
-                    continue
-                id_bits, type_bits = ROUTER_BITS[router]
-                entries = replay.renumber(replay.compact(router, hist, MSG_OBJECT_UPDATE))
-                stored += len(hist)
-                for (mtype, tid, seq, size, payload) in entries:
-                    batch.append(relay_object_message(mtype, router, oid, q.owner_id, tid, seq,
-                                                      id_bits, type_bits, size, payload))
-                # the joiner now expects message number len(entries); the server's next one is relay_next
-                shift = q.relay_next.get((router, oid), len(hist)) - len(entries)
-                if shift > 0:
-                    newcomer.seq_shift[(q.owner_id, router, oid)] = shift
-                else:
-                    newcomer.seq_shift.pop((q.owner_id, router, oid), None)
-            for i in range(0, len(batch), 4):
-                self.send(newcomer, batch[i:i + 4])
-            if batch:
-                self.log(f"{newcomer.addr[1]} <- replayed {len(batch)} object messages "
-                         f"of owner {q.owner_id} ({q.addr[1]})" + (f", {stored} stored" if stored != len(batch) else ""))
+            self.replay_from(newcomer, q, routers, skip)
+
+    def replay_from(self, newcomer: Peer, q: Peer, routers=None, skip=()) -> None:
+        """What q created, announced to newcomer."""
+        batch, stored = [], 0
+        for (router, oid), hist in q.objs.items():
+            if router in skip or (routers is not None and router not in routers):
+                continue
+            id_bits, type_bits = ROUTER_BITS[router]
+            entries = replay.renumber(replay.compact(router, hist, MSG_OBJECT_UPDATE))
+            stored += len(hist)
+            for (mtype, tid, seq, size, payload) in entries:
+                batch.append(relay_object_message(mtype, router, oid, q.owner_id, tid, seq,
+                                                  id_bits, type_bits, size, payload))
+            # the joiner now expects message number len(entries); the server's next one is relay_next
+            shift = q.relay_next.get((router, oid), len(hist)) - len(entries)
+            if shift > 0:
+                newcomer.seq_shift[(q.owner_id, router, oid)] = shift
+            else:
+                newcomer.seq_shift.pop((q.owner_id, router, oid), None)
+        for i in range(0, len(batch), 4):
+            self.send(newcomer, batch[i:i + 4])
+        if batch:
+            self.log(f"{newcomer.addr[1]} <- replayed {len(batch)} object messages "
+                     f"of owner {q.owner_id} ({q.addr[1]})" + (f", {stored} stored" if stored != len(batch) else ""))
 
     def early_introduction(self, peer: Peer, point: str):
         """`point` when FH2MP_INTRODUCE_AT asks for it here and this connected client is in Free Roam, else None."""
@@ -3414,7 +3426,7 @@ class Server:
         for owner, until in list(self.owner_quarantine.items()):
             if until <= now:
                 del self.owner_quarantine[owner]
-        return {p.owner_id for p in self.peers.values() if p.owner_id} | set(self.owner_quarantine)
+        return {p.owner_id for p in self.peers.values() if p.owner_id} | {b.owner_id for b in self.bots} | set(self.owner_quarantine)
 
     def free_owner(self):
         """The lowest relay owner id in 1..RELAY_OWNER_LAST nobody holds, or None."""
@@ -4546,6 +4558,8 @@ class Server:
     def tick(self) -> None:
         """Server-initiated traffic: the client times out after 10 s of silence."""
         now = time.monotonic()
+        if self.bots:
+            bots.maintain(self)
         if self.wipe_at and now >= self.wipe_at:
             self.report_wipe(now)
         self.kick_for_cars()
@@ -4764,6 +4778,11 @@ class Hub:
                 self.ctl.sendto(json.dumps(self.lobby_status()).encode(), reply_to)
             except OSError as exc:
                 self.ctl_reply_failed(parts[0], exc)
+        elif parts and parts[0] == "bots":
+            try:
+                self.ctl.sendto(bots.command(self, parts).encode(), reply_to)
+            except OSError as exc:
+                self.ctl_reply_failed(parts[0], exc)
         elif parts == ["positions"]:
             try:
                 self.ctl.sendto(json.dumps(self.map_status()).encode(), reply_to)
@@ -4897,6 +4916,10 @@ class Hub:
                 continue
             peer = w.peers.get(addr)
             out.setdefault(key[1], []).append("%x" % (peer.xuid if peer is not None and peer.xuid else 0))
+        for w in set(self.route.values()):
+            key = getattr(w, "hub_key", None)
+            if key is not None and key[1]:
+                out.setdefault(key[1], []).extend("%x" % b.xuid for b in w.bots)
         return out
 
     def populations_text(self) -> str:
@@ -5174,7 +5197,7 @@ class Hub:
     def world_load(self, w, addr=None) -> int:
         """Addresses routed to world `w` (connected or still connecting), not counting `addr`. One player holds one address at most
         (replace_connections), so this is the number of players."""
-        return sum(1 for a, rw in self.route.items() if rw is w and a != addr)
+        return sum(1 for a, rw in self.route.items() if rw is w and a != addr) + len(w.bots)
 
     def replace_connections(self, xuid: int, addr) -> None:
         """One connection per player: an OpenConnection that passed the identity check ends the player's connections from other

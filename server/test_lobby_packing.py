@@ -227,6 +227,7 @@ class HubReport(unittest.TestCase):
             w = W()
             w.hub_key = key
             w.peers = {}
+            w.bots = []
             for i, xuid in enumerate(players):
                 addr = ("10.0.0.%d" % (len(hub.route) + 1), 5000)
                 p = S.Peer(addr)
