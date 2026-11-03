@@ -481,6 +481,17 @@ class DrivatarTests(Base):
         self.assertEqual(len(self.d.for_cache(400)), 120)
         self.assertEqual(len({r["Xuid"] for r in out}), 120)
 
+    def test_the_cache_limit_switch_serves_fewer_or_none(self):
+        self.many_templates()
+        for x in range(1, 50):
+            self.d.add_player(x, "P%d" % x, skill=x % 5)
+        for value, want in (("0", 0), ("7", 7), ("500", 120), ("-3", 0), ("abc", 120), ("", 120)):
+            with mock.patch.dict(os.environ, {"FH2MP_DRIVATAR_CACHE_LIMIT": value}):
+                self.assertEqual(len(self.d.for_cache(120)), want, value)
+        with mock.patch.dict(os.environ):
+            os.environ.pop("FH2MP_DRIVATAR_CACHE_LIMIT", None)
+            self.assertEqual(len(self.d.for_cache(120)), 120)
+
     def test_cache_keeps_a_floor_of_shipped_records_for_every_skill(self):
         self.many_templates()
         for x in range(1, 300):
