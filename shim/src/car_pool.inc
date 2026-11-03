@@ -409,6 +409,12 @@ static void car_pool_aictl(void *car)
     g_car_pool_aictl_orig(car);
 }
 
+/* The name tags (CarLabelCacheModule::vfunc_2, game+0x47a830) are a pool of 12 label objects made at module start (`inc edi; cmp edi, 0xc; jb` at +0x146); every
+ * remote car takes one. The 13th remote car found the list empty and CarLabelComponent::OnAdded dereferenced its sentinel (game+0x46dfc0 reading 0x6233, dev
+ * 2026-11-02, the 14th car both times). The pool is made FH2MP_CAR_SLOTS + 2 big (at most 127: the compare is an imm8). */
+#define CAR_POOL_LABELS_RVA 0x47a830
+#define CAR_POOL_LABELS_CMP 0x146           /* from the start of the function to `cmp edi, 0xc` */
+
 static int car_pool_env_flag(const char *name)
 {
     char v[8];
@@ -476,6 +482,8 @@ static int patch_car_pool(void)
     static const unsigned char native[] = {0x41, 0xB9, 0x0B, 0x00, 0x00, 0x00, 0x85, 0xD2, 0x44, 0x0F, 0x49, 0xCA};   /* +0x26 */
     static const unsigned char clamp[] = {0x41, 0x83, 0xF9, 0x0C, 0x48, 0x0F, 0x4D, 0xC1};                            /* +0x49 */
     static const unsigned char nop4[] = {0x90, 0x90, 0x90, 0x90};
+    static const unsigned char labels_head[] = {0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x40, 0x48, 0xC7, 0x44, 0x24, 0x20};
+    static const unsigned char labels_cmp[] = {0xFF, 0xC7, 0x83, 0xFF, 0x0C, 0x0F, 0x82};                              /* inc edi; cmp edi, 0xc; jb */
     static const unsigned char tick_head[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57};
     static const unsigned char find_head[] = {0x4C, 0x89, 0x4C, 0x24, 0x20, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x60};
     static const unsigned char ids_head[] = {0x48, 0x8B, 0xC4, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x50, 0x48, 0xC7, 0x40, 0xC8, 0xFE, 0xFF, 0xFF, 0xFF, 0x48, 0x89, 0x58, 0x10};
@@ -487,7 +495,8 @@ static int patch_car_pool(void)
     static const unsigned char ai_head[] = {0x40, 0x55, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0x6C, 0x24, 0xC9, 0x48, 0x81, 0xEC, 0xA0, 0x00, 0x00, 0x00};
     unsigned char *img = find_fh2_image();
     unsigned char slots[4] = {0, 0, 0, 0};
-    int want = car_pool_from_env(), done = 0, expected = 2;
+    int want = car_pool_from_env(), done = 0, expected = 3;
+    unsigned char labels = 0;
     int parts = car_pool_parts(), ids = car_pool_env_flag("FH2MP_CAR_IDS"), aictl = car_pool_env_flag("FH2MP_CAR_NOAICTL");
 
     if (!img) {
@@ -505,6 +514,8 @@ static int patch_car_pool(void)
         !code_is("carpool", "the Non-LOD0 slot count (11)", img, CAR_POOL_RVA + 0x26, native, sizeof native) ||
         !code_is("carpool", "the clamp to 12 slots", img, CAR_POOL_RVA + 0x49, clamp, sizeof clamp) ||
         !code_is("carpool", "the net vehicle load request builder", img, CAR_POOL_FIND_RVA, find_head, sizeof find_head) ||
+        !code_is("carpool", "the name tag pool's start", img, CAR_POOL_LABELS_RVA, labels_head, sizeof labels_head) ||
+        !code_is("carpool", "the name tag pool's size", img, CAR_POOL_LABELS_RVA + CAR_POOL_LABELS_CMP, labels_cmp, sizeof labels_cmp) ||
         !code_is("carpool", "the car cache's tick", img, CAR_POOL_TICK_RVA, tick_head, sizeof tick_head) ||
         (aictl && !code_is("carpool", "the AI controller attach", img, CAR_POOL_AICTL_RVA, aictl_head, sizeof aictl_head)) ||
         (ids && !code_is("carpool", "the stand-in id search", img, CAR_POOL_IDS_RVA, ids_head, sizeof ids_head)) ||
@@ -516,6 +527,8 @@ static int patch_car_pool(void)
     slots[0] = (unsigned char)want;
     done += plat_patch("carpool: Non-LOD0 car slots", img + CAR_POOL_RVA + 0x28, native + 2, slots, 4);
     done += plat_patch("carpool: no clamp to 12 slots", img + CAR_POOL_RVA + 0x4d, clamp + 4, nop4, 4);
+    labels = (unsigned char)(want + 2 > 127 ? 127 : want + 2);
+    done += plat_patch("carpool: name tag pool", img + CAR_POOL_LABELS_RVA + CAR_POOL_LABELS_CMP + 4, labels_cmp + 4, &labels, 1);
     if (parts & CAR_POOL_PART_CACHE) {
         expected++;
         done += plat_patch("carpool: slot count ignores NumAICars", img + CAR_POOL_RVA + 0x2e, native + 8, nop4, 4);

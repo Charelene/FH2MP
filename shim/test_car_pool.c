@@ -94,6 +94,8 @@ static const unsigned char TICK_HEAD[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x
 static const unsigned char MAX_SETTER[] = {0x44, 0x89, 0x82, 0xf0, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc};
 static const unsigned char MIN_SETTER[] = {0x44, 0x89, 0x82, 0xb0, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc};
 static const unsigned char AI_HEAD[] = {0x40, 0x55, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8d, 0x6c, 0x24, 0xc9, 0x48, 0x81, 0xec, 0xa0, 0x00, 0x00, 0x00};
+static const unsigned char LABELS_HEAD[] = {0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xec, 0x40, 0x48, 0xc7, 0x44, 0x24, 0x20};
+static const unsigned char LABELS_CMP[] = {0xff, 0xc7, 0x83, 0xff, 0x0c, 0x0f, 0x82};
 static const unsigned char AICTL_HEAD[] = {0x4c, 0x8b, 0xdc, 0x57, 0x48, 0x81, 0xec, 0x50, 0x03, 0x00, 0x00, 0x48, 0xc7, 0x44, 0x24, 0x40, 0xfe, 0xff, 0xff, 0xff};
 static const unsigned char IDS_HEAD[] = {0x48, 0x8b, 0xc4, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xec, 0x50, 0x48, 0xc7, 0x40, 0xc8, 0xfe, 0xff, 0xff, 0xff, 0x48, 0x89, 0x58, 0x10};
 static const unsigned char FIND_HEAD[] = {0x4c, 0x89, 0x4c, 0x24, 0x20, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xec, 0x60};
@@ -106,6 +108,8 @@ static void fresh(void)
     memcpy(g_img + CAR_POOL_FIND_RVA, FIND_HEAD, sizeof FIND_HEAD);
     memcpy(g_img + CAR_POOL_IDS_RVA, IDS_HEAD, sizeof IDS_HEAD);
     memcpy(g_img + CAR_POOL_AICTL_RVA, AICTL_HEAD, sizeof AICTL_HEAD);
+    memcpy(g_img + CAR_POOL_LABELS_RVA, LABELS_HEAD, sizeof LABELS_HEAD);
+    memcpy(g_img + CAR_POOL_LABELS_RVA + CAR_POOL_LABELS_CMP, LABELS_CMP, sizeof LABELS_CMP);
     memcpy(g_img + 0x5430d0, MAX_SETTER, sizeof MAX_SETTER);
     memcpy(g_img + 0x653780, MIN_SETTER, sizeof MIN_SETTER);
     memcpy(g_img + 0x720960, AI_HEAD, sizeof AI_HEAD);
@@ -163,7 +167,7 @@ int main(void)
           memset(expect + 0x4d, 0x90, 4);
           SetEnvironmentVariableA("FH2MP_CAR_SLOTS", good[i]);
           fresh();
-          assert(patch_car_pool() == 1 && g_patches == 2 && g_hooks == 2 && g_car_pool_share_ids == 0);
+          assert(patch_car_pool() == 1 && g_patches == 3 && g_hooks == 2 && g_car_pool_share_ids == 0);
           assert(!memcmp(g_img + CAR_POOL_RVA, expect, sizeof expect));
           assert(strstr(g_raw, "remote car slots 11 -> "));
       } }
@@ -299,9 +303,9 @@ int main(void)
     assert(patch_car_pool() == 0 && g_hooks == 1);
     SetEnvironmentVariableA("FH2MP_CAR_DIAG", NULL);
 
-    /* the platform refuses one of the two patches: not reported as done, no hooks, no "slots" line */
+    /* the platform refuses one of the three patches: not reported as done, no hooks, no "slots" line */
     SetEnvironmentVariableA("FH2MP_CAR_SLOTS", "30");
-    for (i = 1; i <= 2; i++) {
+    for (i = 1; i <= 3; i++) {
         fresh();
         g_refuse_patch = i;
         assert(patch_car_pool() == 0 && g_hooks == 0 && !strstr(g_raw, "remote car slots 11 ->"));
@@ -415,6 +419,24 @@ int main(void)
       car_pool_find(NULL, &out, &vehicle_ref, NULL, NULL, 1);
       assert(*(short *)(vehicle + 0x110 + 0x236) == 77);
     }
+    /* the name tag pool: its size is the slot count + 2, capped at 127, nothing else near it moves */
+    { static const struct { const char *slots; unsigned char want; } sizes[] = {{"14", 16}, {"40", 42}, {"75", 77}, {"12", 14}};
+      for (i = 0; i < 4; i++) {
+          SetEnvironmentVariableA("FH2MP_CAR_SLOTS", sizes[i].slots);
+          fresh();
+          assert(patch_car_pool() == 1 && g_img[CAR_POOL_LABELS_RVA + CAR_POOL_LABELS_CMP + 4] == sizes[i].want);
+          assert(!memcmp(g_img + CAR_POOL_LABELS_RVA + CAR_POOL_LABELS_CMP, LABELS_CMP, 4) && !memcmp(g_img + CAR_POOL_LABELS_RVA + CAR_POOL_LABELS_CMP + 5, LABELS_CMP + 5, 2));
+      }
+      SetEnvironmentVariableA("FH2MP_CAR_SLOTS", "30");
+      fresh();
+      g_img[CAR_POOL_LABELS_RVA + CAR_POOL_LABELS_CMP + 4] = 0x10;           /* another build: nothing at all is patched */
+      g_raw[0] = 0;
+      assert(patch_car_pool() == 0 && g_patches == 0 && g_hooks == 0 && strstr(g_raw, "mismatch: the name tag pool's size"));
+      fresh();
+      g_img[CAR_POOL_LABELS_RVA] = 0x41;
+      g_raw[0] = 0;
+      assert(patch_car_pool() == 0 && g_patches == 0 && strstr(g_raw, "mismatch: the name tag pool's start"));
+    }
     /* another build of the id search or the request builder: nothing is patched (a bigger cache with 12 ids makes every car invalid) */
     SetEnvironmentVariableA("FH2MP_CAR_SLOTS", "30");
     SetEnvironmentVariableA("FH2MP_CAR_IDS", "1");
@@ -436,14 +458,14 @@ int main(void)
     SetEnvironmentVariableA("FH2MP_CAR_SLOTS", "40");
     SetEnvironmentVariableA("FH2MP_CAR_IDS", "1");
     fresh();
-    assert(patch_car_pool() == 1 && g_patches == 2 && g_hooks == 3 && g_car_pool_share_ids == 1 && strstr(g_raw, "player cars share stand-in ids"));
+    assert(patch_car_pool() == 1 && g_patches == 3 && g_hooks == 3 && g_car_pool_share_ids == 1 && strstr(g_raw, "player cars share stand-in ids"));
     SetEnvironmentVariableA("FH2MP_CAR_IDS", NULL);
 
     /* FH2MP_CAR_NODRIVATARS=1: the slot count ignores NumAICars, both Drivatar setters store 0, the festival AI connect is hooked */
     SetEnvironmentVariableA("FH2MP_CAR_SLOTS", "14");
     SetEnvironmentVariableA("FH2MP_CAR_NODRIVATARS", "1");
     fresh();
-    assert(patch_car_pool() == 1 && g_patches == 5 && g_hooks == 3 && g_car_pool_share_ids == 0 && strstr(g_raw, "remote car slots 11 -> 14, no Drivatars, parts cxna (FH2MP_CAR_SLOTS)"));
+    assert(patch_car_pool() == 1 && g_patches == 6 && g_hooks == 3 && g_car_pool_share_ids == 0 && strstr(g_raw, "remote car slots 11 -> 14, no Drivatars, parts cxna (FH2MP_CAR_SLOTS)"));
     assert(g_img[CAR_POOL_RVA + 0x28] == 14);
     assert(!memcmp(g_img + CAR_POOL_RVA + 0x2e, "\x90\x90\x90\x90", 4) && !memcmp(g_img + CAR_POOL_RVA + 0x2c, VFUNC2 + 0x2c, 2));
     assert(!memcmp(g_img + 0x5430d0, "\xc7\x82\xf0\x00\x00\x00\x00\x00\x00\x00\xc3", 11));
@@ -457,8 +479,8 @@ int main(void)
           g_raw[0] = 0;
           assert(patch_car_pool() == 0 && g_patches == 0 && g_hooks == 0 && strstr(g_raw, what[i]) && !strstr(g_raw, "remote car slots 11 ->"));
       } }
-    /* the platform refuses any one of the five patches: no hooks, not reported as done */
-    for (i = 1; i <= 5; i++) {
+    /* the platform refuses any one of the six patches: no hooks, not reported as done */
+    for (i = 1; i <= 6; i++) {
         fresh();
         g_refuse_patch = i;
         assert(patch_car_pool() == 0 && g_hooks == 0 && !strstr(g_raw, "remote car slots 11 ->"));
@@ -483,13 +505,13 @@ int main(void)
     }
     /* parts: letters pick which of the four are applied */
     { static const struct { const char *value; int patches, hooks; unsigned set[3]; } cases[] = {
-          {"c", 3, 2, {0x47a570 + 0x2e, 0, 0}},                 /* cache count only */
-          {"x", 3, 2, {0x5430d0, 0, 0}},
-          {"n", 3, 2, {0x653780, 0, 0}},
-          {"a", 2, 3, {0, 0, 0}},                               /* the AI hook only: no byte patch beyond the slots */
-          {"xn", 4, 2, {0x5430d0, 0x653780, 0}},
-          {"cxna", 5, 3, {0x47a570 + 0x2e, 0x5430d0, 0x653780}},
-          {"zz", 2, 2, {0, 0, 0}} };                            /* unknown letters pick nothing */
+          {"c", 4, 2, {0x47a570 + 0x2e, 0, 0}},                 /* cache count only */
+          {"x", 4, 2, {0x5430d0, 0, 0}},
+          {"n", 4, 2, {0x653780, 0, 0}},
+          {"a", 3, 3, {0, 0, 0}},                               /* the AI hook only: no byte patch beyond the slots */
+          {"xn", 5, 2, {0x5430d0, 0x653780, 0}},
+          {"cxna", 6, 3, {0x47a570 + 0x2e, 0x5430d0, 0x653780}},
+          {"zz", 3, 2, {0, 0, 0}} };                            /* unknown letters pick nothing */
       for (i = 0; i < 7; i++) {
           int k;
           SetEnvironmentVariableA("FH2MP_CAR_NODRIVATARS", cases[i].value);
@@ -516,7 +538,7 @@ int main(void)
     SetEnvironmentVariableA("FH2MP_CAR_NODRIVATARS", NULL);
     SetEnvironmentVariableA("FH2MP_CAR_NOAICTL", "1");
     fresh();
-    assert(patch_car_pool() == 1 && g_hooks == 3 && g_patches == 2);
+    assert(patch_car_pool() == 1 && g_hooks == 3 && g_patches == 3);
     fresh();
     g_img[CAR_POOL_AICTL_RVA] = 0x40;                                  /* another build: nothing is patched */
     g_raw[0] = 0;
