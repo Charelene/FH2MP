@@ -7,10 +7,10 @@
  * holds that many slots. A user-set NumAICars still wins, unclamped. Not patched: NumAICars itself (it also sets AI/Drivatar counts). Unset FH2MP_CAR_SLOTS
  * changes nothing; the value is 11 to 75. Each slot is a whole ForzaCar built on demand: memory per slot was not measured. 75 slots alone made every
  * remote car land in load state 12: every net vehicle arrives with no car id and takes a stand-in id from a fixed range by its type (FindOrQueue 0xfd08b0:
- * players 0..11, AI 12..29), and the world's own 11 festival cars (Drivatars, type 0/1) take ids 0..11 before any player joins. The id range is NOT
- * patchable: the loader's table of per-player entries (FUN_140f2b2f0, entries at +0x38 + id * 0x10, 12 of them, a semaphore follows at +0xf8) is
- * indexed by the id, and ids past 11 crashed the game (dev 2026-11-02, write at game+0xf2b32d). FH2MP_CAR_NOAI=1 sets NumAICars (options+0x2538) to 0
- * after the cache is built, so the game does not request its own 11 festival cars and the ids and slots stay free for players. FH2MP_CAR_DIAG=1
+ * players 0..11, AI 12..29), and the world's own 12 Drivatar cars (types 0/1) take ids 0..11 before any player joins. The range is raised for type 3 only
+ * (hooks on FindOrQueue and on its id search 0xfceee0): the Drivatar AI cars index a table of 12 entries with their id (RacingAI::AICar, FUN_140f2b2f0, id 27
+ * crashed the game at game+0xf2b32d), a network player's car does not go through it as far as seen. FH2MP_CAR_NOAI=1 sets NumAICars (options+0x2538) to 0
+ * after the cache is built. FH2MP_CAR_DIAG=1
  * installs only the passive log, with the cache left as the game builds it. */
 #define CAR_POOL_RVA 0x47a570
 #define CAR_POOL_NATIVE 11
@@ -282,6 +282,8 @@ static int car_pool_vehicle_info(unsigned long long vehicle, int *id, int *type)
     return 1;
 }
 
+static int g_car_pool_cur_type = -1;          /* the vehicle type FindOrQueue is working on, -1 outside it (the call runs under the loader's lock) */
+
 static void *car_pool_find(void *self, void *out, void *vehicle_ref, void *manager, void *extra, unsigned priority)
 {
     unsigned long long vehicle = 0, request = 0;
@@ -289,10 +291,12 @@ static void *car_pool_find(void *self, void *out, void *vehicle_ref, void *manag
     unsigned state = 99;
     void *result;
 
-    if (g_car_pool_find_lines < 300 && vehicle_ref && read_game_memory(vehicle_ref, &vehicle, sizeof vehicle)) {
+    if (vehicle_ref && read_game_memory(vehicle_ref, &vehicle, sizeof vehicle)) {
         have_before = car_pool_vehicle_info(vehicle, &id_before, &type);
     }
+    g_car_pool_cur_type = have_before ? type : -1;
     result = g_car_pool_find_orig(self, out, vehicle_ref, manager, extra, priority);
+    g_car_pool_cur_type = -1;
     if (have_before && g_car_pool_find_lines < 300) {
         g_car_pool_find_lines++;
         if (out && read_game_memory(out, &request, sizeof request) && request) {
@@ -317,6 +321,24 @@ static void *car_pool_find(void *self, void *out, void *vehicle_ref, void *manag
     return result;
 }
 
+/* Simulation::helper_fceee0 (game+0xfceee0, only called from FindOrQueue) returns the lowest stand-in id in [lo, hi] that no pending vehicle holds, 0xffff when
+ * the range is full. Vehicle types 0, 1, 3 and 4 share 0..11. The Drivatar AI cars (RacingAI::AICar, types 0 and 1) index a table of 12 entries with their id
+ * (FUN_140f2b2f0: id 27 wrote outside it and crashed the game, dev 2026-11-02), a network player's car (type 3) does not go through it as far as seen: its
+ * range is raised, the others keep 0..11. g_car_pool_ids_hi is the top for type 3, 0 = unchanged. */
+#define CAR_POOL_IDS_RVA 0xfceee0
+#define CAR_POOL_IDS_PLAYER_TYPE 3
+typedef unsigned short (*car_pool_ids_fn)(void *, unsigned short, unsigned short, void *);
+static car_pool_ids_fn g_car_pool_ids_orig;
+static unsigned g_car_pool_ids_hi;
+
+static unsigned short car_pool_ids(void *manager, unsigned short lo, unsigned short hi, void *extra)
+{
+    if (g_car_pool_ids_hi && g_car_pool_cur_type == CAR_POOL_IDS_PLAYER_TYPE && lo == 0 && hi == 0x0b) {
+        hi = (unsigned short)g_car_pool_ids_hi;
+    }
+    return g_car_pool_ids_orig(manager, lo, hi, extra);
+}
+
 static void car_pool_install_find(unsigned char *img)
 {
     static const unsigned char find_head[] = {0x4C, 0x89, 0x4C, 0x24, 0x20, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x60};
@@ -333,6 +355,8 @@ static int patch_car_pool(void)
     static const unsigned char clamp[] = {0x41, 0x83, 0xF9, 0x0C, 0x48, 0x0F, 0x4D, 0xC1};                            /* +0x49 */
     static const unsigned char nop4[] = {0x90, 0x90, 0x90, 0x90};
     static const unsigned char tick_head[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57};
+    static const unsigned char find_head[] = {0x4C, 0x89, 0x4C, 0x24, 0x20, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x60};
+    static const unsigned char ids_head[] = {0x48, 0x8B, 0xC4, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x50, 0x48, 0xC7, 0x40, 0xC8, 0xFE, 0xFF, 0xFF, 0xFF, 0x48, 0x89, 0x58, 0x10};
     unsigned char *img = find_fh2_image();
     unsigned char slots[4] = {0, 0, 0, 0};
     int want = car_pool_from_env(), done = 0;
@@ -352,20 +376,26 @@ static int patch_car_pool(void)
     }
     if (!code_is("carpool", "the car cache's module init", img, CAR_POOL_RVA, head, sizeof head) ||
         !code_is("carpool", "the Non-LOD0 slot count (11)", img, CAR_POOL_RVA + 0x26, native, sizeof native) ||
-        !code_is("carpool", "the clamp to 12 slots", img, CAR_POOL_RVA + 0x49, clamp, sizeof clamp)) {
+        !code_is("carpool", "the clamp to 12 slots", img, CAR_POOL_RVA + 0x49, clamp, sizeof clamp) ||
+        !code_is("carpool", "the net vehicle load request builder", img, CAR_POOL_FIND_RVA, find_head, sizeof find_head) ||
+        !code_is("carpool", "the stand-in id search", img, CAR_POOL_IDS_RVA, ids_head, sizeof ids_head) ||
+        !code_is("carpool", "the car cache's tick", img, CAR_POOL_TICK_RVA, tick_head, sizeof tick_head)) {
         return 0;
     }
     slots[0] = (unsigned char)want;
     done += plat_patch("carpool: Non-LOD0 car slots", img + CAR_POOL_RVA + 0x28, native + 2, slots, 4);
     done += plat_patch("carpool: no clamp to 12 slots", img + CAR_POOL_RVA + 0x4d, clamp + 4, nop4, 4);
     if (done == 2) {
-        if (code_is("carpool", "the car cache's tick", img, CAR_POOL_TICK_RVA, tick_head, sizeof tick_head)) {
-            plat_hook("carpool: cache state, passive", img + CAR_POOL_TICK_RVA, (void *)car_pool_tick, (void **)&g_car_pool_tick_orig);
-            car_pool_install_find(img);
+        plat_hook("carpool: cache state, passive", img + CAR_POOL_TICK_RVA, (void *)car_pool_tick, (void **)&g_car_pool_tick_orig);
+        car_pool_install_find(img);
+        if (plat_hook("carpool: stand-in ids of player cars", img + CAR_POOL_IDS_RVA, (void *)car_pool_ids, (void **)&g_car_pool_ids_orig)) {
+            g_car_pool_ids_hi = (unsigned)want;
         }
         log_begin();
         log_raw("carpool: remote car slots 11 -> ");
         log_dec((unsigned long)want);
+        log_raw(", player car stand-in ids 0..");
+        log_dec(g_car_pool_ids_hi);
         log_raw(" (FH2MP_CAR_SLOTS)\n");
     }
     return done == 2;

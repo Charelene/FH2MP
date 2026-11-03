@@ -23,12 +23,17 @@ static int code_is(const char *tag, const char *what, const unsigned char *img, 
 static int g_patches, g_hooks;
 static unsigned long long fake_tick(void *a, void *b, void *c, void *d) { (void)a; (void)b; (void)c; (void)d; return 7; }
 static unsigned char g_fake_request[0x40];
+static int *g_cur_type_ptr;
+static int g_type_seen_in_find = -2;
+static unsigned short g_ids_hi_seen;
+static unsigned short fake_ids(void *m, unsigned short lo, unsigned short hi, void *p) { (void)m; (void)lo; (void)p; g_ids_hi_seen = hi; return 0xffff; }
 static unsigned char *g_fake_options;
 static unsigned char *fake_options(void) { return g_fake_options; }
 static void *fake_find(void *self, void *out, void *vehicle_ref, void *manager, void *extra, unsigned priority)
 {
     unsigned char *vehicle = *(unsigned char **)vehicle_ref;
     (void)self; (void)manager; (void)extra; (void)priority;
+    g_type_seen_in_find = *g_cur_type_ptr;
     if (!vehicle) {
         return out;
     }
@@ -42,7 +47,7 @@ static int plat_hook(const char *name, void *target, void *detour, void **origin
 {
     (void)name; (void)target; (void)detour;
     g_hooks++;
-    *original = target == g_img + 0xfd08b0 ? (void *)fake_find : (void *)fake_tick;
+    *original = target == g_img + 0xfd08b0 ? (void *)fake_find : target == g_img + 0xfceee0 ? (void *)fake_ids : (void *)fake_tick;
     return 1;
 }
 static int g_refuse_patch;       /* the platform refuses the n-th patch call (1-based) */
@@ -60,6 +65,8 @@ static int plat_patch(const char *name, void *at, const void *expect, const void
 
 #include "src/car_pool.inc"
 
+static void bind_cur_type(void) { g_cur_type_ptr = &g_car_pool_cur_type; }
+
 /* CarCacheModule::vfunc_2 @ 0x47a570, first 0x62 bytes, from forza_durango_release_final.exe */
 static const unsigned char VFUNC2[] = {
     0x48, 0x8b, 0xc4, 0x57, 0x48, 0x83, 0xec, 0x70, 0x48, 0xc7, 0x40, 0xb8, 0xfe, 0xff, 0xff, 0xff, 0x48, 0x89, 0x58, 0x10, 0x48, 0x89, 0x70, 0x18,
@@ -69,6 +76,7 @@ static const unsigned char VFUNC2[] = {
 
 static const unsigned char TICK_HEAD[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57};
 
+static const unsigned char IDS_HEAD[] = {0x48, 0x8b, 0xc4, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xec, 0x50, 0x48, 0xc7, 0x40, 0xc8, 0xfe, 0xff, 0xff, 0xff, 0x48, 0x89, 0x58, 0x10};
 static const unsigned char FIND_HEAD[] = {0x4c, 0x89, 0x4c, 0x24, 0x20, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xec, 0x60};
 
 static void fresh(void)
@@ -77,6 +85,8 @@ static void fresh(void)
     memcpy(g_img + CAR_POOL_RVA, VFUNC2, sizeof VFUNC2);
     memcpy(g_img + CAR_POOL_TICK_RVA, TICK_HEAD, sizeof TICK_HEAD);
     memcpy(g_img + CAR_POOL_FIND_RVA, FIND_HEAD, sizeof FIND_HEAD);
+    memcpy(g_img + CAR_POOL_IDS_RVA, IDS_HEAD, sizeof IDS_HEAD);
+    g_car_pool_ids_hi = 0;
     g_raw[0] = 0;
     g_patches = 0;
     g_hooks = 0;
@@ -87,6 +97,7 @@ static void fresh(void)
 int main(void)
 {
     int i;
+    bind_cur_type();
     g_img = VirtualAlloc(NULL, 0x4000000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     assert(g_img);
 
@@ -128,7 +139,7 @@ int main(void)
           memset(expect + 0x4d, 0x90, 4);
           SetEnvironmentVariableA("FH2MP_CAR_SLOTS", good[i]);
           fresh();
-          assert(patch_car_pool() == 1 && g_patches == 2 && g_hooks == 2);
+          assert(patch_car_pool() == 1 && g_patches == 2 && g_hooks == 3 && g_car_pool_ids_hi == (unsigned)want[i]);
           assert(!memcmp(g_img + CAR_POOL_RVA, expect, sizeof expect));
           assert(strstr(g_raw, "remote car slots 11 -> "));
       } }
@@ -272,7 +283,7 @@ int main(void)
         assert(patch_car_pool() == 0 && g_hooks == 0 && !strstr(g_raw, "remote car slots 11 ->"));
     }
     fresh();
-    assert(patch_car_pool() == 1 && g_hooks == 2 && strstr(g_raw, "remote car slots 11 -> 30 (FH2MP_CAR_SLOTS)"));
+    assert(patch_car_pool() == 1 && g_hooks == 3 && strstr(g_raw, "remote car slots 11 -> 30, player car stand-in ids 0..30 (FH2MP_CAR_SLOTS)"));
 
     /* FH2MP_CAR_NOAI=1: NumAICars (options+0x2538) is set to 0 once, from the first tick */
     { static unsigned char options[0x3000];
@@ -311,6 +322,64 @@ int main(void)
       SetEnvironmentVariableA("FH2MP_CAR_NOAI", NULL);
       g_car_pool_options = NULL;
     }
+
+    /* the id search hook: only a type 3 vehicle's default range 0..11 is raised */
+    { static unsigned char vehicle[0x700];
+      unsigned char *vehicle_ref = vehicle;
+      unsigned long long out = 0;
+      fresh();
+      g_car_pool_ids_orig = (car_pool_ids_fn)fake_ids;
+      g_car_pool_find_orig = (car_pool_find_fn)fake_find;
+      g_car_pool_ids_hi = 40;
+      g_car_pool_cur_type = 3;
+      assert(car_pool_ids(NULL, 0, 0x0b, NULL) == 0xffff && g_ids_hi_seen == 40);
+      g_car_pool_cur_type = 1;                                                /* a Drivatar AI car: its table has 12 entries */
+      car_pool_ids(NULL, 0, 0x0b, NULL);
+      assert(g_ids_hi_seen == 0x0b);
+      g_car_pool_cur_type = 0;
+      car_pool_ids(NULL, 0, 0x0b, NULL);
+      assert(g_ids_hi_seen == 0x0b);
+      g_car_pool_cur_type = 4;
+      car_pool_ids(NULL, 0, 0x0b, NULL);
+      assert(g_ids_hi_seen == 0x0b);
+      g_car_pool_cur_type = 3;                                                /* another range (AI 12..29, the 0..29 default): untouched */
+      car_pool_ids(NULL, 0x0c, 0x1d, NULL);
+      assert(g_ids_hi_seen == 0x1d);
+      car_pool_ids(NULL, 0, 0x1d, NULL);
+      assert(g_ids_hi_seen == 0x1d);
+      g_car_pool_cur_type = -1;                                               /* outside FindOrQueue */
+      car_pool_ids(NULL, 0, 0x0b, NULL);
+      assert(g_ids_hi_seen == 0x0b);
+      g_car_pool_cur_type = 3;
+      g_car_pool_ids_hi = 0;                                                  /* not configured */
+      car_pool_ids(NULL, 0, 0x0b, NULL);
+      assert(g_ids_hi_seen == 0x0b);
+      /* FindOrQueue's wrapper tells the id search which type it is working on, and forgets it afterwards */
+      *(short *)(vehicle + 0x110 + 0x234) = -1;
+      *(int *)(vehicle + 0x110 + 0x488) = 3;
+      g_type_seen_in_find = -2;
+      car_pool_find(NULL, &out, &vehicle_ref, NULL, NULL, 1);
+      assert(g_type_seen_in_find == 3 && g_car_pool_cur_type == -1);
+      g_car_pool_find_lines = 300;                                            /* the log budget does not stop the type from being known */
+      g_type_seen_in_find = -2;
+      car_pool_find(NULL, &out, &vehicle_ref, NULL, NULL, 1);
+      assert(g_type_seen_in_find == 3 && g_car_pool_cur_type == -1);
+      g_car_pool_find_lines = 0;
+    }
+    /* another build of the id search or the request builder: nothing is patched (a bigger cache with 12 ids makes every car invalid) */
+    SetEnvironmentVariableA("FH2MP_CAR_SLOTS", "30");
+    fresh();
+    g_img[CAR_POOL_IDS_RVA] = 0x40;
+    g_raw[0] = 0;
+    assert(patch_car_pool() == 0 && g_patches == 0 && g_hooks == 0 && strstr(g_raw, "mismatch: the stand-in id search"));
+    fresh();
+    g_img[CAR_POOL_FIND_RVA] = 0x40;
+    g_raw[0] = 0;
+    assert(patch_car_pool() == 0 && g_patches == 0 && g_hooks == 0 && strstr(g_raw, "mismatch: the net vehicle load request builder"));
+    fresh();
+    g_img[CAR_POOL_TICK_RVA] = 0x40;
+    assert(patch_car_pool() == 0 && g_patches == 0 && g_hooks == 0);
+    SetEnvironmentVariableA("FH2MP_CAR_SLOTS", NULL);
 
     printf("car pool: ok\n");
     return 0;
