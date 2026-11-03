@@ -6,11 +6,10 @@
  * Patched: the 11 (imm32 of `mov r9d, 0xb` at +0x28) becomes FH2MP_CAR_SLOTS, and the clamp to 12 (`cmovge rax, rcx` at +0x4d) is nopped, so the group
  * holds that many slots. A user-set NumAICars still wins, unclamped. Not patched: NumAICars itself (it also sets AI/Drivatar counts). Unset FH2MP_CAR_SLOTS
  * changes nothing; the value is 11 to 75. Each slot is a whole ForzaCar built on demand: memory per slot was not measured. 75 slots alone made every
- * remote car land in load state 12: every net vehicle arrives with no car id and takes a stand-in id from a fixed range by its type (FindOrQueue 0xfd08b0:
- * players 0..11, AI 12..29), and the world's own 12 Drivatar cars (types 0/1) take ids 0..11 before any player joins. The range is raised for type 3 only
- * (hooks on FindOrQueue and on its id search 0xfceee0): the Drivatar AI cars index a table of 12 entries with their id (RacingAI::AICar, FUN_140f2b2f0, id 27
- * crashed the game at game+0xf2b32d), a network player's car does not go through it as far as seen. FH2MP_CAR_NOAI=1 sets NumAICars (options+0x2538) to 0
- * after the cache is built. FH2MP_CAR_DIAG=1
+ * remote car land in load state 12: every net vehicle takes a stand-in id from a fixed range by its type (FindOrQueue 0xfd08b0: players 0..11, AI 12..29) and the
+ * game's own Drivatar cars (types 0/1) take 0..11 before a player joins. The AI simulation holds 12 controllers in fixed arrays (FUN_140f44170 loops over
+ * 0xc0 bytes), so ids past 11 crash (FH2MP_CAR_IDS=1 raises them anyway: game+0xf2b32d, then game+0xf445ec). FH2MP_CAR_NODRIVATARS=1 stops the game loading
+ * its own Drivatars so 12 players fit in ids 0..11, see below. FH2MP_CAR_NOAI=1 sets NumAICars to 0 after the cache is built (late for the AI module). FH2MP_CAR_DIAG=1
  * installs only the passive log, with the cache left as the game builds it. */
 #define CAR_POOL_RVA 0x47a570
 #define CAR_POOL_NATIVE 11
@@ -373,6 +372,41 @@ static void car_pool_install_find(unsigned char *img)
     }
 }
 
+static int car_pool_env_flag(const char *name)
+{
+    char v[8];
+
+    return GetEnvironmentVariableA(name, v, sizeof v) && v[0] == '1';
+}
+
+/* FH2MP_CAR_NODRIVATARS=1: the game does not load its own AI cars (Drivatars), which are vehicle types 0 and 1 and take the stand-in ids 0..11 and cache slots
+ * before a player's car can. Three things make them: the Free Roam Drivatar component's MaxDrivatarsToAcquire (member +0xf0 of the component, set by its
+ * property setter game+0x5430d0 from the entity XML, 16) and MinDrivatarsForFreeroam (+0xb0, setter +0x653780) are set to 0 by the setters themselves, and
+ * the festival AI count that AICarLoadingModule::ConnectSignalHandlers (game+0x720960) reads from NumAICars (options+0x2538) is 0 for the call. The cache's own
+ * slot count would follow a NumAICars of 0, so its `cmovns r9d, edx` (cache init +0x2e) is nopped: the count is FH2MP_CAR_SLOTS whatever NumAICars says. */
+#define CAR_POOL_DRIVATAR_MAX_SETTER_RVA 0x5430d0
+#define CAR_POOL_DRIVATAR_MIN_SETTER_RVA 0x653780
+#define CAR_POOL_AIMODULE_RVA 0x720960
+typedef void (*car_pool_ai_fn)(void *);
+static car_pool_ai_fn g_car_pool_ai_orig;
+
+static void car_pool_ai_connect(void *module)
+{
+    unsigned char *img = find_fh2_image();
+    unsigned char *options;
+    int saved = 0, have = 0;
+
+    options = img ? (g_car_pool_options ? g_car_pool_options : (car_pool_options_fn)(img + CAR_POOL_OPTIONS_RVA))() : NULL;
+    if (options && read_game_memory(options + CAR_POOL_NUMAICARS, &saved, sizeof saved)) {
+        have = 1;
+        *(int *)(options + CAR_POOL_NUMAICARS) = 0;
+    }
+    g_car_pool_ai_orig(module);
+    if (have) {
+        *(int *)(options + CAR_POOL_NUMAICARS) = saved;
+    }
+}
+
 static int patch_car_pool(void)
 {
     static const unsigned char head[] = {0x48, 0x8B, 0xC4, 0x57, 0x48, 0x83, 0xEC, 0x70, 0x48, 0xC7, 0x40, 0xB8, 0xFE, 0xFF, 0xFF, 0xFF};
@@ -383,18 +417,22 @@ static int patch_car_pool(void)
     static const unsigned char find_head[] = {0x4C, 0x89, 0x4C, 0x24, 0x20, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x60};
     static const unsigned char train_head[] = {0x4C, 0x89, 0x4C, 0x24, 0x20, 0x48, 0x89, 0x54, 0x24, 0x10, 0x55, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x40};
     static const unsigned char ids_head[] = {0x48, 0x8B, 0xC4, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x50, 0x48, 0xC7, 0x40, 0xC8, 0xFE, 0xFF, 0xFF, 0xFF, 0x48, 0x89, 0x58, 0x10};
+    static const unsigned char max_setter[] = {0x44, 0x89, 0x82, 0xF0, 0x00, 0x00, 0x00, 0xC3, 0xCC, 0xCC, 0xCC};     /* mov [rdx+0xf0], r8d; ret; padding */
+    static const unsigned char min_setter[] = {0x44, 0x89, 0x82, 0xB0, 0x00, 0x00, 0x00, 0xC3, 0xCC, 0xCC, 0xCC};     /* mov [rdx+0xb0], r8d; ret; padding */
+    static const unsigned char max_zero[] = {0xC7, 0x82, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC3};      /* mov dword [rdx+0xf0], 0; ret */
+    static const unsigned char min_zero[] = {0xC7, 0x82, 0xB0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC3};      /* mov dword [rdx+0xb0], 0; ret */
+    static const unsigned char ai_head[] = {0x40, 0x55, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0x6C, 0x24, 0xC9, 0x48, 0x81, 0xEC, 0xA0, 0x00, 0x00, 0x00};
     unsigned char *img = find_fh2_image();
     unsigned char slots[4] = {0, 0, 0, 0};
-    int want = car_pool_from_env(), done = 0;
-    char diag[8];
+    int want = car_pool_from_env(), done = 0, expected = 2;
+    int no_drivatars = car_pool_env_flag("FH2MP_CAR_NODRIVATARS"), ids = car_pool_env_flag("FH2MP_CAR_IDS");
 
     if (!img) {
         return 0;
     }
     if (!want) {
         /* FH2MP_CAR_DIAG=1: only the passive log, the cache is left as the game builds it */
-        if (GetEnvironmentVariableA("FH2MP_CAR_DIAG", diag, sizeof diag) && diag[0] == '1' &&
-            code_is("carpool", "the car cache's tick", img, CAR_POOL_TICK_RVA, tick_head, sizeof tick_head)) {
+        if (car_pool_env_flag("FH2MP_CAR_DIAG") && code_is("carpool", "the car cache's tick", img, CAR_POOL_TICK_RVA, tick_head, sizeof tick_head)) {
             plat_hook("carpool: cache state, passive", img + CAR_POOL_TICK_RVA, (void *)car_pool_tick, (void **)&g_car_pool_tick_orig);
             car_pool_install_find(img);
         }
@@ -404,27 +442,39 @@ static int patch_car_pool(void)
         !code_is("carpool", "the Non-LOD0 slot count (11)", img, CAR_POOL_RVA + 0x26, native, sizeof native) ||
         !code_is("carpool", "the clamp to 12 slots", img, CAR_POOL_RVA + 0x49, clamp, sizeof clamp) ||
         !code_is("carpool", "the net vehicle load request builder", img, CAR_POOL_FIND_RVA, find_head, sizeof find_head) ||
-        !code_is("carpool", "the stand-in id search", img, CAR_POOL_IDS_RVA, ids_head, sizeof ids_head) ||
-        !code_is("carpool", "the AI training manager's request", img, CAR_POOL_TRAIN_RVA, train_head, sizeof train_head) ||
-        !code_is("carpool", "the car cache's tick", img, CAR_POOL_TICK_RVA, tick_head, sizeof tick_head)) {
+        !code_is("carpool", "the car cache's tick", img, CAR_POOL_TICK_RVA, tick_head, sizeof tick_head) ||
+        (ids && (!code_is("carpool", "the stand-in id search", img, CAR_POOL_IDS_RVA, ids_head, sizeof ids_head) ||
+                 !code_is("carpool", "the AI training manager's request", img, CAR_POOL_TRAIN_RVA, train_head, sizeof train_head))) ||
+        (no_drivatars && (!code_is("carpool", "the Drivatar maximum setter", img, CAR_POOL_DRIVATAR_MAX_SETTER_RVA, max_setter, sizeof max_setter) ||
+                          !code_is("carpool", "the Drivatar minimum setter", img, CAR_POOL_DRIVATAR_MIN_SETTER_RVA, min_setter, sizeof min_setter) ||
+                          !code_is("carpool", "the festival AI module's connect", img, CAR_POOL_AIMODULE_RVA, ai_head, sizeof ai_head)))) {
         return 0;
     }
     slots[0] = (unsigned char)want;
     done += plat_patch("carpool: Non-LOD0 car slots", img + CAR_POOL_RVA + 0x28, native + 2, slots, 4);
     done += plat_patch("carpool: no clamp to 12 slots", img + CAR_POOL_RVA + 0x4d, clamp + 4, nop4, 4);
-    if (done == 2) {
+    if (no_drivatars) {
+        expected += 3;
+        done += plat_patch("carpool: slot count ignores NumAICars", img + CAR_POOL_RVA + 0x2e, native + 8, nop4, 4);
+        done += plat_patch("carpool: no Drivatars to acquire", img + CAR_POOL_DRIVATAR_MAX_SETTER_RVA, max_setter, max_zero, sizeof max_zero);
+        done += plat_patch("carpool: no Drivatars needed for Free Roam", img + CAR_POOL_DRIVATAR_MIN_SETTER_RVA, min_setter, min_zero, sizeof min_zero);
+    }
+    if (done == expected) {
         plat_hook("carpool: cache state, passive", img + CAR_POOL_TICK_RVA, (void *)car_pool_tick, (void **)&g_car_pool_tick_orig);
         car_pool_install_find(img);
-        if (plat_hook("carpool: AI training entry of cars with a high id", img + CAR_POOL_TRAIN_RVA, (void *)car_pool_train, (void **)&g_car_pool_train_orig) &&
+        if (no_drivatars) {
+            plat_hook("carpool: festival AI count 0", img + CAR_POOL_AIMODULE_RVA, (void *)car_pool_ai_connect, (void **)&g_car_pool_ai_orig);
+        }
+        if (ids && plat_hook("carpool: AI training entry of cars with a high id", img + CAR_POOL_TRAIN_RVA, (void *)car_pool_train, (void **)&g_car_pool_train_orig) &&
             plat_hook("carpool: stand-in ids of player cars", img + CAR_POOL_IDS_RVA, (void *)car_pool_ids, (void **)&g_car_pool_ids_orig)) {
-            g_car_pool_ids_hi = (unsigned)want;      /* the ids are raised only when the table cannot be overrun */
+            g_car_pool_ids_hi = (unsigned)want;      /* experimental, FH2MP_CAR_IDS=1: crashed the game (more arrays of 12 in the AI simulation) */
         }
         log_begin();
         log_raw("carpool: remote car slots 11 -> ");
         log_dec((unsigned long)want);
-        log_raw(", player car stand-in ids 0..");
-        log_dec(g_car_pool_ids_hi);
+        log_raw(no_drivatars ? ", no Drivatars" : "");
+        log_raw(g_car_pool_ids_hi ? ", player car stand-in ids raised (FH2MP_CAR_IDS)" : "");
         log_raw(" (FH2MP_CAR_SLOTS)\n");
     }
-    return done == 2;
+    return done == expected;
 }
