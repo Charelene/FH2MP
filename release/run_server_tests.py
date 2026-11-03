@@ -27,7 +27,7 @@ PLAN = {
         'test_player_setup', 'test_progress_boards', 'test_race_end', 'test_race_flow', 'test_replay',
         'test_restricted_tools', 'test_road_trip', 'test_score_reports', 'test_early_objects',
         'test_reliable', 'test_security', 'test_send_queue', 'test_site_stats', 'test_speedcheck',
-        'test_traffic_manager', 'test_tunnel', 'test_wire_skips', 'test_world_capacity', 'test_capacity', 'test_bots', 'test_xp_audit', 'test_xls',
+        'test_traffic_manager', 'test_tunnel', 'test_hotfix_route', 'test_wire_skips', 'test_world_capacity', 'test_capacity', 'test_bots', 'test_xp_audit', 'test_xls',
     ), 'portable'),
     'test_auth': 'postgres', 'test_gamedb_sync': 'postgres', 'test_community_pg': 'postgres',
     'test_db': 'postgres', 'test_db.DisplayLevelTests': 'portable',

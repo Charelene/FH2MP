@@ -267,6 +267,10 @@ class Api:
     def home(self):
         return self._call("GET", "/v1/home")
 
+    def hotfix(self):
+        """The signed hotfix document {"doc", "sig"}, or {} when the server has none (hotfix.py checks it)."""
+        return self._call("GET", "/v1/hotfix")
+
     def asset(self, name):
         return self._call("GET", "/v1/launcher/assets/" + urllib.parse.quote(name), raw=True)
 

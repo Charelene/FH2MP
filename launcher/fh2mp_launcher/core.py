@@ -5,7 +5,7 @@ import re
 import time
 import threading
 
-from . import azimuth, gamedb, keystore, launch, logs, paths, shim, tunnel, updater, upstream
+from . import azimuth, gamedb, hotfix, keystore, launch, logs, paths, shim, tunnel, updater, upstream
 from .api import Api, ApiError
 from .constants import AZIMUTH_VERSION, BUILTIN_AZIMUTH_BUILDS, DEFAULT_WEBSITE, MODS_DIR, PLATFORM_VERSION, SHIM_DLL
 from .identity import Identity
@@ -156,6 +156,8 @@ class Launcher:
         self.process = None
         self.manifest = None
         self.gamedb_synced = False      # the server sets a car database and this start put it in place (sync_gamedb)
+        self.hotfix = hotfix.Result()   # what the hotfix document asks of this setup (apply_hotfix, at Play)
+        self.hotfix_disabled = []       # mods it turned off at the last Play
         self.gamerpic_converter = None      # set by the UI: server PNG bytes -> the PNG the game expects (needs Qt)
 
     # ---- server
@@ -489,6 +491,26 @@ class Launcher:
             raise updater.UpdateError(str(e)) from None
 
     # ---- play
+    def apply_hotfix(self, shim_version):
+        """The signed hotfix document (hotfix.py): turns off the mods it names, keeps its kill switches for the session file and refuses Play
+        when a rule says so. Without an answer from the server the last good copy applies."""
+        d = self.settings["azimuth_dir"]
+        try:
+            signed = self.api().hotfix()
+        except Exception as e:  # noqa: BLE001 - an older server or no network: the kept copy applies
+            logs.swallowed("hotfix", "hotfix.fetch_failed", e)
+            signed = None
+        doc = hotfix.Store().update(signed)
+        mods = hotfix.mod_hashes(d)
+        self.hotfix = hotfix.evaluate(doc, __version__, shim_version, mods, env=(self.server or {}).get("env"))
+        self.hotfix_disabled = hotfix.apply_mods(d, self.hotfix, mods)
+        if self.hotfix.rules:
+            logs.info("hotfix", "hotfix.applies", serial=self.hotfix.serial, rules=",".join(self.hotfix.rules),
+                      switches=",".join(self.hotfix.switches) or None, disabled=",".join(self.hotfix_disabled) or None)
+        if self.hotfix.refuse:
+            raise PlayBlocked(self.hotfix.refuse, "hotfix")
+        return self.hotfix
+
     def prepare_play(self, require_game=True):
         """Everything up to (not including) starting the process: checks, sign-in, session hand-over. -> (account, notes)."""
         s = self.settings
@@ -504,6 +526,7 @@ class Launcher:
         if not info.supported:
             raise PlayBlocked(f"This launcher requires Azimuth {AZIMUTH_VERSION}. Run setup to install the supported combination.", "azimuth_unsupported")
         kind, _v = self.shim_state()
+        self.apply_hotfix(_v if kind == "ours" else "")
         if kind == "old":
             raise PlayBlocked("The FH2MP shim needs installing again.", "no_shim")
         if kind != "ours":
@@ -559,9 +582,12 @@ class Launcher:
             raise PlayBlocked("The server sent no address.", "no_lsp")
         self.game_env = game_port_env(r.get("game") or (self.server or {}).get("game"))
         d = s["azimuth_dir"]
-        shim.write_session(d, acct["xuid"], self.token, lsp, gamedb.session_path() if self.gamedb_synced else "", run=logs.run())
+        shim.write_session(d, acct["xuid"], self.token, lsp, gamedb.session_path() if self.gamedb_synced else "", run=logs.run(),
+                           switches=self.hotfix.switches)
         shim.write_identity(d, acct["xuid"])
         notes = [cars] if cars else []
+        if self.hotfix_disabled:
+            notes.append("turned off for a known crash: " + ", ".join(self.hotfix_disabled))
         if enabled:
             notes.append("turned FH2MP back on in the MODS tab")
         tcp_note = self.start_tunnel(r.get("game") or (self.server or {}).get("game"))
@@ -952,6 +978,11 @@ class Launcher:
         out.append(("Car database", "your own car packs kept: no play with other people" if s["keep_car_packs"] else "the server's, put in place at Play", "-", None))
         out.append(("Connection", "TCP always" if s["tcp_fallback"] else "UDP, TCP when the probe fails" if s["tcp_auto"] else "UDP only", "-", None))
         out.append(("Mode", "offline" if s["offline_mode"] else "online", "-", None))
+        h = self.hotfix
+        if h.rules:
+            what = ", ".join(filter(None, [("switches " + ", ".join(h.switches)) if h.switches else "",
+                                           ("turned off " + ", ".join(self.hotfix_disabled)) if self.hotfix_disabled else ""]))
+            out.append(("Hotfix", f"serial {h.serial}: {', '.join(h.rules)}" + (f" ({what})" if what else ""), "-", None))
         return out
 
     def clear_leftover_session(self):

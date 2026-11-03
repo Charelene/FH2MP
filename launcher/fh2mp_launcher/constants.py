@@ -16,6 +16,8 @@ AZIMUTH_PAGE = "https://almost-there-games.itch.io/azimuth"
 # Ed25519 public key (base64) whose signature every downloaded manifest must carry. The private half lives only with the maintainer
 # (release/keygen.py); a compromised GitHub account alone therefore cannot push code to players.
 RELEASE_PUBKEY_B64 = os.environ.get("FH2MP_RELEASE_PUBKEY") or "zo6hBWSZYaeL9YsZOC03kHJ8MR9f4awtgndgWR9h0Ic="
+# signs the hotfix document (hotfix.py, release/hotfix.py); its own key, so a hotfix can be signed without the release key
+HOTFIX_PUBKEY_B64 = os.environ.get("FH2MP_HOTFIX_PUBKEY") or "Lm0aUDJtUtC/upbOQOduZj5IGs3mWAyM0ix1BJpIZEs="
 
 # One supplied compatibility set per launcher release. Server metadata cannot broaden it.
 AZIMUTH_VERSION = "1.0.4"

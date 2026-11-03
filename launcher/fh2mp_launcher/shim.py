@@ -273,12 +273,14 @@ def bin_dir(folder):
     return d if os.path.isdir(d) else folder
 
 
-def write_session(folder, xuid, token, lsp_url, gamedb="", run=""):
+def write_session(folder, xuid, token, lsp_url, gamedb="", run="", switches=()):
     """The hand-over to the shim: who signed in, how to reach the server, (gamedb) the car database it synced, relative to the Azimuth folder,
-    which the shim puts in the game's mediaoverride folder and hashes for the server, and (run) the id that ties the logs of this game start
-    together (logs.py). Private to the user; removed when the game ends."""
+    which the shim puts in the game's mediaoverride folder and hashes for the server, (run) the id that ties the logs of this game start
+    together (logs.py) and (switches) the NO_ kill switches of the hotfix document (hotfix.py, shim/src/session_switches.inc). Private to the
+    user; removed when the game ends."""
     d = bin_dir(folder)
-    text = f"xuid={xuid:x}\ntoken={token}\n" + (f"gamedb={gamedb}\n" if gamedb else "") + (f"run={run}\n" if run else "")
+    text = (f"xuid={xuid:x}\ntoken={token}\n" + (f"gamedb={gamedb}\n" if gamedb else "") + (f"run={run}\n" if run else "")
+            + (f"switches={','.join(switches)}\n" if switches else ""))
     paths.atomic_write(os.path.join(d, SESSION_FILE), text.encode(), 0o600)
     paths.atomic_write(os.path.join(d, LSP_FILE), (lsp_url.strip() + "\n").encode(), 0o644)
 
