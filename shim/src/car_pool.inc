@@ -339,6 +339,31 @@ static unsigned short car_pool_ids(void *manager, unsigned short lo, unsigned sh
     return g_car_pool_ids_orig(manager, lo, hi, extra);
 }
 
+/* RacingAI::AsyncTraining::Manager (global at game+0x354f4c8, 0x300 bytes) keeps one entry per AI slot in a table of 12 (entry = 16 bytes at +0x38, a semaphore
+ * follows at +0xf8). FUN_140f21870 (its only caller is RacingAI::AICar::helper_f41840) finds or creates the entry for a key and the lookup FUN_140f2b2f0
+ * indexes the table with it; a car whose stand-in id was 27 or 30 read and wrote past the table (game+0xf2b32d, dev 2026-11-02). Every car that gets an AI
+ * controller needs a key, network player cars among them. For a key of 12 or more the call is made with key % 12, the caller's key is put back afterwards: such
+ * cars share a training entry, which only matters for a car that drives itself, and these are driven by the network. */
+#define CAR_POOL_TRAIN_RVA 0xf21870
+#define CAR_POOL_TRAIN_ENTRIES 12
+typedef void *(*car_pool_train_fn)(void *, void *, unsigned short *, void *);
+static car_pool_train_fn g_car_pool_train_orig;
+
+static void *car_pool_train(void *manager, void *out, unsigned short *key, void *extra)
+{
+    unsigned short original = key ? *key : 0;
+    void *result;
+
+    if (key && original >= CAR_POOL_TRAIN_ENTRIES) {
+        *key = (unsigned short)(original % CAR_POOL_TRAIN_ENTRIES);
+    }
+    result = g_car_pool_train_orig(manager, out, key, extra);
+    if (key) {
+        *key = original;
+    }
+    return result;
+}
+
 static void car_pool_install_find(unsigned char *img)
 {
     static const unsigned char find_head[] = {0x4C, 0x89, 0x4C, 0x24, 0x20, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x60};
@@ -356,6 +381,7 @@ static int patch_car_pool(void)
     static const unsigned char nop4[] = {0x90, 0x90, 0x90, 0x90};
     static const unsigned char tick_head[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57};
     static const unsigned char find_head[] = {0x4C, 0x89, 0x4C, 0x24, 0x20, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x60};
+    static const unsigned char train_head[] = {0x4C, 0x89, 0x4C, 0x24, 0x20, 0x48, 0x89, 0x54, 0x24, 0x10, 0x55, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x40};
     static const unsigned char ids_head[] = {0x48, 0x8B, 0xC4, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x50, 0x48, 0xC7, 0x40, 0xC8, 0xFE, 0xFF, 0xFF, 0xFF, 0x48, 0x89, 0x58, 0x10};
     unsigned char *img = find_fh2_image();
     unsigned char slots[4] = {0, 0, 0, 0};
@@ -379,6 +405,7 @@ static int patch_car_pool(void)
         !code_is("carpool", "the clamp to 12 slots", img, CAR_POOL_RVA + 0x49, clamp, sizeof clamp) ||
         !code_is("carpool", "the net vehicle load request builder", img, CAR_POOL_FIND_RVA, find_head, sizeof find_head) ||
         !code_is("carpool", "the stand-in id search", img, CAR_POOL_IDS_RVA, ids_head, sizeof ids_head) ||
+        !code_is("carpool", "the AI training manager's request", img, CAR_POOL_TRAIN_RVA, train_head, sizeof train_head) ||
         !code_is("carpool", "the car cache's tick", img, CAR_POOL_TICK_RVA, tick_head, sizeof tick_head)) {
         return 0;
     }
@@ -388,8 +415,9 @@ static int patch_car_pool(void)
     if (done == 2) {
         plat_hook("carpool: cache state, passive", img + CAR_POOL_TICK_RVA, (void *)car_pool_tick, (void **)&g_car_pool_tick_orig);
         car_pool_install_find(img);
-        if (plat_hook("carpool: stand-in ids of player cars", img + CAR_POOL_IDS_RVA, (void *)car_pool_ids, (void **)&g_car_pool_ids_orig)) {
-            g_car_pool_ids_hi = (unsigned)want;
+        if (plat_hook("carpool: AI training entry of cars with a high id", img + CAR_POOL_TRAIN_RVA, (void *)car_pool_train, (void **)&g_car_pool_train_orig) &&
+            plat_hook("carpool: stand-in ids of player cars", img + CAR_POOL_IDS_RVA, (void *)car_pool_ids, (void **)&g_car_pool_ids_orig)) {
+            g_car_pool_ids_hi = (unsigned)want;      /* the ids are raised only when the table cannot be overrun */
         }
         log_begin();
         log_raw("carpool: remote car slots 11 -> ");
