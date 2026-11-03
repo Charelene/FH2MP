@@ -446,6 +446,52 @@ static void *car_pool_alloc(void *manager, unsigned long long size, unsigned sho
     return result;
 }
 
+/* FH2MP_CAR_VIEWGUARD=1: the render thread's two callers of CPresentationView::helper_1334e30 (helper_1355ad0, game+0x1355ad0, and FUN_14135b640, game+0x135b640)
+ * pass *(view + 0x4d8) as its out pointer and the function writes through it first thing. For the 14th remote car that pointer was NULL (game+0x1334f34 writing 0x0,
+ * dev 2026-11-03; not an allocation failure: the allocator log was empty). Such a view is not rendered this frame, and the first ten are logged with the view's
+ * vtable (its class) so the cause can be found. */
+#define CAR_POOL_VIEW_A_RVA 0x1355ad0
+#define CAR_POOL_VIEW_B_RVA 0x135b640
+#define CAR_POOL_VIEW_FRAME 0x4d8
+typedef void (*car_pool_view_fn)(void *);
+static car_pool_view_fn g_car_pool_view_a_orig, g_car_pool_view_b_orig;
+static unsigned g_car_pool_view_skipped;
+
+static int car_pool_view_ready(void *view, const char *which)
+{
+    if (view && *(void **)((unsigned char *)view + CAR_POOL_VIEW_FRAME)) {
+        return 1;
+    }
+    if (g_car_pool_view_skipped++ < 10) {
+        unsigned char *img = find_fh2_image();
+        unsigned long long vtable = view ? *(unsigned long long *)view : 0;
+
+        log_begin();
+        log_raw("carpool: view without frame data skipped (");
+        log_raw(which);
+        log_raw("), #");
+        log_dec(g_car_pool_view_skipped);
+        log_raw(", vtable game+0x");
+        log_hex(vtable > (unsigned long long)(ULONG_PTR)img ? vtable - (unsigned long long)(ULONG_PTR)img : 0, 8);
+        log_raw("\n");
+    }
+    return 0;
+}
+
+static void car_pool_view_a(void *view)
+{
+    if (car_pool_view_ready(view, "a")) {
+        g_car_pool_view_a_orig(view);
+    }
+}
+
+static void car_pool_view_b(void *view)
+{
+    if (car_pool_view_ready(view, "b")) {
+        g_car_pool_view_b_orig(view);
+    }
+}
+
 static int car_pool_env_flag(const char *name)
 {
     char v[8];
@@ -534,6 +580,15 @@ static int patch_car_pool(void)
 
     if (!img) {
         return 0;
+    }
+    if (car_pool_env_flag("FH2MP_CAR_VIEWGUARD")) {
+        static const unsigned char view_head[] = {0x40, 0x57, 0x48, 0x83, 0xEC, 0x30, 0x48, 0xC7, 0x44, 0x24, 0x20, 0xFE, 0xFF, 0xFF, 0xFF, 0x48, 0x89, 0x5C, 0x24, 0x48};
+
+        if (code_is("carpool", "the view render call a", img, CAR_POOL_VIEW_A_RVA, view_head, sizeof view_head) &&
+            code_is("carpool", "the view render call b", img, CAR_POOL_VIEW_B_RVA, view_head, sizeof view_head)) {
+            plat_hook("carpool: views without frame data skipped (a)", img + CAR_POOL_VIEW_A_RVA, (void *)car_pool_view_a, (void **)&g_car_pool_view_a_orig);
+            plat_hook("carpool: views without frame data skipped (b)", img + CAR_POOL_VIEW_B_RVA, (void *)car_pool_view_b, (void **)&g_car_pool_view_b_orig);
+        }
     }
     if (car_pool_env_flag("FH2MP_CAR_ALLOCDIAG")) {
         static const unsigned char alloc_head[] = {0x4C, 0x8B, 0xDC, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x81, 0xEC, 0x60, 0x02, 0x00, 0x00, 0x48, 0xC7, 0x44, 0x24, 0x58};
