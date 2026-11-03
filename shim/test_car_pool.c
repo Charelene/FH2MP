@@ -20,7 +20,16 @@ static int code_is(const char *tag, const char *what, const unsigned char *img, 
     log_raw("\n");
     return 0;
 }
-static int g_patches;
+static int g_patches, g_hooks;
+static unsigned long long fake_tick(void *a, void *b, void *c, void *d) { (void)a; (void)b; (void)c; (void)d; return 7; }
+static int read_game_memory(const void *a, void *out, SIZE_T n) { if (!a) return 0; memcpy(out, a, n); return 1; }
+static int plat_hook(const char *name, void *target, void *detour, void **original)
+{
+    (void)name; (void)target; (void)detour;
+    g_hooks++;
+    *original = (void *)fake_tick;
+    return 1;
+}
 static int plat_patch(const char *name, void *at, const void *expect, const void *bytes, unsigned n)
 {
     (void)name;
@@ -39,18 +48,22 @@ static const unsigned char VFUNC2[] = {
     0x49, 0xca, 0x44, 0x89, 0x8c, 0x24, 0x80, 0x00, 0x00, 0x00, 0x48, 0x8d, 0x0d, 0xa7, 0x74, 0x9c, 0x01, 0x48, 0x8d, 0x84, 0x24, 0x80, 0x00, 0x00,
     0x00, 0x41, 0x83, 0xf9, 0x0c, 0x48, 0x0f, 0x4d, 0xc1, 0x8b, 0x18};
 
+static const unsigned char TICK_HEAD[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57};
+
 static void fresh(void)
 {
-    memset(g_img, 0, 0x1000000);
+    memset(g_img, 0, 0x4000000);
     memcpy(g_img + CAR_POOL_RVA, VFUNC2, sizeof VFUNC2);
+    memcpy(g_img + CAR_POOL_TICK_RVA, TICK_HEAD, sizeof TICK_HEAD);
     g_raw[0] = 0;
     g_patches = 0;
+    g_hooks = 0;
 }
 
 int main(void)
 {
     int i;
-    g_img = VirtualAlloc(NULL, 0x1000000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    g_img = VirtualAlloc(NULL, 0x4000000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     assert(g_img);
 
     /* the offsets in the .inc are the ones in the real bytes */
@@ -77,7 +90,7 @@ int main(void)
           memset(expect + 0x4d, 0x90, 4);
           SetEnvironmentVariableA("FH2MP_CAR_SLOTS", good[i]);
           fresh();
-          assert(patch_car_pool() == 1 && g_patches == 2);
+          assert(patch_car_pool() == 1 && g_patches == 2 && g_hooks == 1);
           assert(!memcmp(g_img + CAR_POOL_RVA, expect, sizeof expect));
           assert(strstr(g_raw, "remote car slots 11 -> "));
       } }
@@ -95,6 +108,35 @@ int main(void)
     g_img[CAR_POOL_RVA] = 0x40;
     g_raw[0] = 0;
     assert(patch_car_pool() == 0 && strstr(g_raw, "mismatch: the car cache's module init"));
+
+    /* the diagnostic hook: runs the game's tick, logs the group state once and again only when it changes */
+    { unsigned char module[0x400], queue_obj[0x40];
+      unsigned long long qptr = (unsigned long long)(ULONG_PTR)queue_obj;
+      unsigned char *group = module + CAR_POOL_GROUP;
+      fresh();
+      memset(module, 0, sizeof module);
+      memset(queue_obj, 0, sizeof queue_obj);
+      memcpy(g_img + CAR_POOL_QUEUE_PTR_RVA, &qptr, 8);
+      g_car_pool_tick_orig = (car_pool_tick_fn)fake_tick;
+      g_car_pool_seen_any = 0;
+      *(unsigned long long *)(group + 0x60) = 0x10000;
+      *(unsigned long long *)(group + 0x68) = 0x10000 + 74 * 0x590;
+      *(unsigned *)(group + 0x90) = 74;
+      *(unsigned *)(group + 0x94) = 74;
+      assert(car_pool_tick(module, NULL, NULL, NULL) == 7);
+      assert(strstr(g_raw, "slots 74, free 74, budget 74, queued requests 0, global load queue idle"));
+      g_raw[0] = 0;
+      car_pool_tick(module, NULL, NULL, NULL);
+      assert(g_raw[0] == 0);                                              /* nothing changed: no line */
+      *(unsigned long long *)(group + 0x78) = 0x20000;
+      *(unsigned long long *)(group + 0x80) = 0x20000 + 3 * 8;
+      car_pool_tick(module, NULL, NULL, NULL);
+      assert(strstr(g_raw, "queued requests 3, global load queue idle"));
+      g_raw[0] = 0;
+      *(unsigned *)(queue_obj + 0x14) = 5;                        /* +0x14 non-zero: busy */
+      car_pool_tick(module, NULL, NULL, NULL);
+      assert(strstr(g_raw, "global load queue busy"));
+    }
 
     printf("car pool: ok\n");
     return 0;

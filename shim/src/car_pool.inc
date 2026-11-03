@@ -28,6 +28,67 @@ static int car_pool_from_env(void)
     return total > CAR_POOL_NATIVE && total <= CAR_POOL_MAX ? total : 0;
 }
 
+/* What the cache says while it runs, so a world that shows no cars can be told apart from a cache that never gets a request. The tick function
+ * (CarCacheModule::vfunc_4, game+0x4748f0) is hooked passively; the Non-LOD0 group is module+0xf0 (begin/end of the slot vector +0x60/+0x68, of the
+ * request queue +0x78/+0x80, free slots +0x90, build budget +0x94), the global load queue is *(game+0x365ad70) (idle when +0x14 == 0 and +0xc == +8,
+ * FUN_140fdb330). One line when any of these changes, never per tick. */
+#define CAR_POOL_TICK_RVA 0x4748f0
+#define CAR_POOL_GROUP 0xf0
+#define CAR_POOL_QUEUE_PTR_RVA 0x365ad70
+typedef unsigned long long (*car_pool_tick_fn)(void *, void *, void *, void *);
+static car_pool_tick_fn g_car_pool_tick_orig;
+static unsigned g_car_pool_seen[6];
+static int g_car_pool_seen_any;
+
+static void car_pool_state_line(const unsigned char *group, const unsigned *queue, int have_queue)
+{
+    unsigned long long slots_b = *(const unsigned long long *)(group + 0x60), slots_e = *(const unsigned long long *)(group + 0x68);
+    unsigned long long req_b = *(const unsigned long long *)(group + 0x78), req_e = *(const unsigned long long *)(group + 0x80);
+    unsigned now[6];
+
+    now[0] = (unsigned)((slots_e - slots_b) / 0x590);
+    now[1] = *(const unsigned *)(group + 0x90);
+    now[2] = *(const unsigned *)(group + 0x94);
+    now[3] = (unsigned)((req_e - req_b) / 8);
+    now[4] = have_queue ? (queue[3] == 0 && queue[0] == queue[1]) : 2;      /* queue[] is +8, +0xc, +0x10, +0x14: idle when +0x14 == 0 and +0xc == +8 */
+    now[5] = have_queue ? queue[3] : 0;
+    if (g_car_pool_seen_any && !memcmp(now, g_car_pool_seen, sizeof now)) {
+        return;
+    }
+    memcpy(g_car_pool_seen, now, sizeof now);
+    g_car_pool_seen_any = 1;
+    log_begin();
+    log_raw("carpool: Non-LOD0 group slots ");
+    log_dec(now[0]);
+    log_raw(", free ");
+    log_dec(now[1]);
+    log_raw(", budget ");
+    log_dec(now[2]);
+    log_raw(", queued requests ");
+    log_dec(now[3]);
+    log_raw(now[4] == 2 ? ", global load queue unreadable" : now[4] ? ", global load queue idle" : ", global load queue busy");
+    log_raw("\n");
+}
+
+static unsigned long long car_pool_tick(void *self, void *a, void *b, void *c)
+{
+    unsigned char *img = find_fh2_image();
+    unsigned char group[0xa0];
+    unsigned queue[6] = {0, 0, 0, 0, 0, 0};
+    unsigned long long qptr = 0;
+    unsigned long long result = g_car_pool_tick_orig(self, a, b, c);
+    int have_queue = 0;
+
+    if (img && self && read_game_memory((unsigned char *)self + CAR_POOL_GROUP, group, sizeof group)) {
+        if (read_game_memory(img + CAR_POOL_QUEUE_PTR_RVA, &qptr, sizeof qptr) && qptr &&
+            read_game_memory((unsigned char *)(ULONG_PTR)qptr + 8, queue, 0x10)) {
+            have_queue = 1;
+        }
+        car_pool_state_line(group, queue, have_queue);
+    }
+    return result;
+}
+
 static int patch_car_pool(void)
 {
     static const unsigned char head[] = {0x48, 0x8B, 0xC4, 0x57, 0x48, 0x83, 0xEC, 0x70, 0x48, 0xC7, 0x40, 0xB8, 0xFE, 0xFF, 0xFF, 0xFF};
@@ -50,6 +111,10 @@ static int patch_car_pool(void)
     done += plat_patch("carpool: Non-LOD0 car slots", img + CAR_POOL_RVA + 0x28, native + 2, slots, 4);
     done += plat_patch("carpool: no clamp to 12 slots", img + CAR_POOL_RVA + 0x4d, clamp + 4, nop4, 4);
     if (done == 2) {
+        static const unsigned char tick_head[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57};
+        if (code_is("carpool", "the car cache's tick", img, CAR_POOL_TICK_RVA, tick_head, sizeof tick_head)) {
+            plat_hook("carpool: cache state, passive", img + CAR_POOL_TICK_RVA, (void *)car_pool_tick, (void **)&g_car_pool_tick_orig);
+        }
         log_begin();
         log_raw("carpool: remote car slots 11 -> ");
         log_dec((unsigned long)want);
