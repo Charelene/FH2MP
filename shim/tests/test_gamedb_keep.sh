@@ -4,7 +4,7 @@
 # what is kept online and put back offline (also once it was removed after being put back), and the list of FH2MP's copies
 # (gamedb-placed.txt) written to a file and read back.
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 python3 -I - "$tmp" <<'PY'

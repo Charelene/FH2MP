@@ -2,7 +2,7 @@
 # Checks src/inflate.inc (the shim's zip reader) against Python's zlib: stored, fixed and dynamic blocks at every level, random and text
 # data. With a path to the game's media/stateflow.zip it also inflates global.xml from it. Usage: shim/test_inflate.sh [stateflow.zip]
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 cat > "$tmp/t.c" <<'C'

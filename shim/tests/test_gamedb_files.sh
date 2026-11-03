@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Exercise the actual shim backup/restore functions with Win32 file operations in an isolated Wine prefix.
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 export WINEPREFIX="$tmp/prefix" WINEDEBUG=-all
-. ./wine_prefix.sh; wine_prefix "$WINEPREFIX"
+. tests/wine_prefix.sh; wine_prefix "$WINEPREFIX"
 python3 -I - "$tmp" <<'PY'
 import pathlib, sqlite3, sys
 d = pathlib.Path(sys.argv[1])

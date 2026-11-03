@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Traffic diagnostics (src/diag_trace.inc) against a fake game image and stand-in natives, see test_diag.c.
+# Traffic diagnostics (src/diag_trace.inc) against a fake game image and stand-in natives, see tests/test_diag.c.
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 tmp=$(mktemp -d)
 cleanup() { WINEPREFIX="$tmp/prefix" wineserver -w || true; rm -rf "$tmp"; }
 trap cleanup EXIT
-. ./wine_prefix.sh; wine_prefix "$tmp/prefix"
-${CC:-x86_64-w64-mingw32-gcc} -O2 -Wall -Wextra -Wno-unused-function -I . test_diag.c -o "$tmp/test.exe"
+. tests/wine_prefix.sh; wine_prefix "$tmp/prefix"
+${CC:-x86_64-w64-mingw32-gcc} -O2 -Wall -Wextra -Wno-unused-function -I . tests/test_diag.c -o "$tmp/test.exe"
 WINEPREFIX="$tmp/prefix" WINEDEBUG=-all wine "$tmp/test.exe"
-# The lines the hooks wrote must be the lines tools/diag_report.py reads: every kind, and the count it was told was dropped. tools/ is not in
+# The lines the hooks wrote must be the lines tools/analysis/diag_report.py reads: every kind, and the count it was told was dropped. tools/ is not in
 # every checkout, so without the reader this part says so and is skipped.
-if [ -f ../tools/diag_report.py ]; then
+if [ -f ../tools/analysis/diag_report.py ]; then
     WINEPREFIX="$tmp/prefix" WINEDEBUG=-all wine "$tmp/test.exe" --lines | tr -d '\r' > "$tmp/lines"
-    python3 -I - "$tmp/lines" ../tools <<'PY'
+    python3 -I - "$tmp/lines" ../tools/analysis <<'PY'
 import sys, collections
 sys.path.insert(0, sys.argv[2])
 import diag_report
@@ -23,6 +23,6 @@ assert all(kinds[k] >= n for k, n in want.items()), f'the parser missed a kind o
 assert lost == 60, f'the parser read {lost} dropped lines, the shim wrote 60'
 PY
 else
-    echo "tools/diag_report.py is not in this checkout: the line-format check against it is skipped"
+    echo "tools/analysis/diag_report.py is not in this checkout: the line-format check against it is skipped"
 fi
 WINEPREFIX="$tmp/prefix" wineserver -w

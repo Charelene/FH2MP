@@ -2,11 +2,11 @@
 # Horn side channel (src/honk_wire.h, src/honk_sync.inc): the wire format against server/honk.py, the bank reader, the remote voices with a
 # recording FMOD fake and the left->right stick change of HonkHonk's button, all without the game.
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 work=$(mktemp -d)
 trap 'WINEPREFIX="$work/prefix" wineserver -k >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
-. ./wine_prefix.sh; wine_prefix "$work/prefix"
-x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Wno-unused-function -Wno-cast-function-type test_honk.c -o "$work/test.exe" -lws2_32
+. tests/wine_prefix.sh; wine_prefix "$work/prefix"
+x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Wno-unused-function -Wno-cast-function-type -I . tests/test_honk.c -o "$work/test.exe" -lws2_32
 mkdir -p "$work/prefix"
 WINEPREFIX="$work/prefix" WINEDEBUG=-all wine "$work/test.exe"
 WINEPREFIX="$work/prefix" WINEDEBUG=-all wine "$work/test.exe" --vector > "$work/vector"

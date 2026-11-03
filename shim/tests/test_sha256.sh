@@ -2,7 +2,7 @@
 # Checks src/sha256.inc (the shim's car database hash) against sha256sum on the padding edge cases and a larger random file, and its
 # HMAC (the UDP ticket MAC) against Python's hmac with short and long keys.
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 cat > "$tmp/t.c" <<'EOF'

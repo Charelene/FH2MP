@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Test platform registration and actual process detection, isolated from the user's game/Wine prefix.
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 export WINEPREFIX="$tmp/prefix" WINEDEBUG=-all
-. ./wine_prefix.sh; wine_prefix "$WINEPREFIX"
+. tests/wine_prefix.sh; wine_prefix "$WINEPREFIX"
 cat > "$tmp/test.c" <<'C'
 #include <windows.h>
 #include <stdio.h>

@@ -63,14 +63,14 @@ failed=0
 
 lane_server() {
     run "server checks" "$py" -W ignore -I release/run_server_tests.py
-    run "release flow" "$py" -I -m unittest discover -s ops -p test_release_flow.py
-    run "shim sha256" shim/test_sha256.sh
-    run "shim inflate" shim/test_inflate.sh
-    run "shim gamedb keep" shim/test_gamedb_keep.sh
-    run "shim session age" shim/test_session_age.sh
-    run "shim health" shim/test_health.sh
-    run "shim eo timelock" shim/test_eo_timelock.sh
-    run "shim online setup" shim/test_online_setup.sh
+    [ ! -d ops ] || run "release flow" "$py" -I -m unittest discover -s ops -p test_release_flow.py   # ops/ is private: present on the operator machine only
+    run "shim sha256" shim/tests/test_sha256.sh
+    run "shim inflate" shim/tests/test_inflate.sh
+    run "shim gamedb keep" shim/tests/test_gamedb_keep.sh
+    run "shim session age" shim/tests/test_session_age.sh
+    run "shim health" shim/tests/test_health.sh
+    run "shim eo timelock" shim/tests/test_eo_timelock.sh
+    run "shim online setup" shim/tests/test_online_setup.sh
 }
 
 pg_root=
@@ -101,7 +101,7 @@ lane_pg() {
 }
 
 lane_shim() {
-    # One booted prefix, copied for each check (shim/wine_prefix.sh); a Wine that cannot start is reported as that, not as a failed check.
+    # One booted prefix, copied for each check (shim/tests/wine_prefix.sh); a Wine that cannot start is reported as that, not as a failed check.
     local tpl
     tpl=$(mktemp -d)/prefix
     if ! WINEPREFIX="$tpl" WINEDEBUG=-all wineboot -i >/dev/null 2>&1 || ! WINEPREFIX="$tpl" WINEDEBUG=-all wine cmd /c exit >/dev/null 2>&1; then
@@ -117,7 +117,7 @@ lane_shim() {
     declare -A pids
     t0=$(date +%s)
     for t in gamedb_files game_image title_scope xhr_config health_thread session_log torque_scale net_strings torque_load speed_pb restricted_tools lighting honk diag party_hud car_pool; do
-        "shim/test_$t.sh" > "$logs/$t.log" 2>&1 &
+        "shim/tests/test_$t.sh" > "$logs/$t.log" 2>&1 &
         pids[$t]=$!
     done
     for t in "${!pids[@]}"; do

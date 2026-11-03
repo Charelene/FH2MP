@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Missing upgrade rows must not erase valid torque modifiers or leak their rowset references.
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 cat > "$tmp/test.c" <<'C'

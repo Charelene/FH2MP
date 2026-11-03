@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The session-file age rule (src/session_age.inc): a pure function, so it runs natively without Wine.
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 cat > "$tmp/t.c" <<'EOT'

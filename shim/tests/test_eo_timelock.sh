@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Parking EO Weather Control's time lock during a session (src/eo_timelock.inc): a pure step, so it runs natively without Wine
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 cat > "$tmp/t.c" <<'EOT'

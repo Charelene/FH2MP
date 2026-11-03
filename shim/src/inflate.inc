@@ -1,7 +1,7 @@
 /*
  * Reading one file out of a zip in the game's media folder (stored or deflated), without a C runtime: zip_read_file() for the stateflow
  * change in fh2mp_mod.c. inflate_raw() is a plain RFC 1951 decoder (canonical Huffman codes decoded bit by bit, as in zlib's puff); every
- * read and write is bounds-checked, and any error returns 0. Checked against Python's zlib by shim/test_inflate.sh.
+ * read and write is bounds-checked, and any error returns 0. Checked against Python's zlib by shim/tests/test_inflate.sh.
  */
 typedef struct {
     const unsigned char *in, *in_end;

@@ -2,7 +2,7 @@
  * dbg.inc - live in-process debugger for the FH2 client (included by azimuth_tls_proxy.c).
  *
  * A localhost TCP command server runs inside the game process (port is written to fh2mp-dbg.port next
- * to the shim; 47001.. first free). Use shim/fh2dbg.py. Nothing needs arming at launch or re-building:
+ * to the shim; 47001.. first free). Use tools/rig/fh2dbg.py. Nothing needs arming at launch or re-building:
  *
  *   rd <addr> <len>              hex dump (addr = expression, or a bare RVA)
  *   wr <addr> <hexbytes>         write memory

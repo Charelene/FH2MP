@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Exercise game and XSAPI header reads, including revoked mappings, in an isolated Wine prefix.
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 tmp=$(mktemp -d)
 cleanup() { WINEPREFIX="$tmp/prefix" wineserver -w || true; rm -rf "$tmp"; }
 trap cleanup EXIT
-. ./wine_prefix.sh; wine_prefix "$tmp/prefix"
+. tests/wine_prefix.sh; wine_prefix "$tmp/prefix"
 cat > "$tmp/test.c" <<'C'
 #include <windows.h>
 #include <stddef.h>

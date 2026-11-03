@@ -2,7 +2,7 @@
 # The watcher's decisions and the run id text (src/health.inc, the part without Windows calls): runs natively. The run ids it writes must pass the server's own
 # check (server/diag.py run_id), or the server would drop them from its lines without a word.
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 cat > "$tmp/t.c" <<'EOT'

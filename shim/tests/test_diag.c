@@ -169,7 +169,7 @@ int main(int argc, char **argv)
     assert(diag_line_ok() == 1 && g_nlines == 1 && has(g_lines[0], "60 lines over the limit of 40 a second were not written"));
 
     if (argc > 1 && !strcmp(argv[1], "--lines")) {
-        /* the lines as fh2mp.log has them: "[tick] " in front; tools/diag_report.py must read every kind */
+        /* the lines as fh2mp.log has them: "[tick] " in front; tools/analysis/diag_report.py must read every kind */
         for (i = 0; i < g_nall; i++) printf("[%d] %s\n", i, g_all[i]);
         return 0;
     }

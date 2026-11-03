@@ -2,7 +2,7 @@
 # The online-setup fixes (src/online_setup.inc): the sign-in event listener and the QoS measurement timeout, on a fake game image.
 # Pure logic with the platform calls stubbed, so it runs natively without Wine.
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 cat > "$tmp/t.c" <<'EOT'
