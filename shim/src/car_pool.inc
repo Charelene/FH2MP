@@ -281,6 +281,9 @@ static int car_pool_vehicle_info(unsigned long long vehicle, int *id, int *type)
     return 1;
 }
 
+#define CAR_POOL_SHARED_ID2 0x4000          /* the second half of the key of a car that shares an id, plus a counter */
+static unsigned g_car_pool_share_next;        /* how many player cars shared an id so far */
+static int g_car_pool_shared_now;             /* set by the id search when it handed out an id already in use, read by FindOrQueue's wrapper */
 static int g_car_pool_cur_type = -1;          /* the vehicle type FindOrQueue is working on, -1 outside it (the call runs under the loader's lock) */
 
 static void *car_pool_find(void *self, void *out, void *vehicle_ref, void *manager, void *extra, unsigned priority)
@@ -294,8 +297,14 @@ static void *car_pool_find(void *self, void *out, void *vehicle_ref, void *manag
         have_before = car_pool_vehicle_info(vehicle, &id_before, &type);
     }
     g_car_pool_cur_type = have_before ? type : -1;
+    g_car_pool_shared_now = 0;
     result = g_car_pool_find_orig(self, out, vehicle_ref, manager, extra, priority);
     g_car_pool_cur_type = -1;
+    if (g_car_pool_shared_now && vehicle) {
+        /* The car's key is (id, id2) (CarUniqueId at info+0x234, read by CarLabelComponent and the car events): a shared id needs its own second half or two cars have the same key. */
+        *(unsigned short *)((unsigned char *)(ULONG_PTR)vehicle + 0x110 + 0x236) = (unsigned short)(CAR_POOL_SHARED_ID2 + g_car_pool_share_next);
+    }
+    g_car_pool_shared_now = 0;
     if (have_before && g_car_pool_find_lines < 300) {
         g_car_pool_find_lines++;
         if (out && read_game_memory(out, &request, sizeof request) && request) {
@@ -331,7 +340,6 @@ static void *car_pool_find(void *self, void *out, void *vehicle_ref, void *manag
 typedef unsigned short (*car_pool_ids_fn)(void *, unsigned short, unsigned short, void *);
 static car_pool_ids_fn g_car_pool_ids_orig;
 static int g_car_pool_share_ids;
-static unsigned g_car_pool_share_next;
 
 static unsigned short car_pool_ids(void *manager, unsigned short lo, unsigned short hi, void *extra)
 {
@@ -339,6 +347,7 @@ static unsigned short car_pool_ids(void *manager, unsigned short lo, unsigned sh
 
     if (id == CAR_POOL_IDS_NONE && g_car_pool_share_ids && g_car_pool_cur_type == CAR_POOL_IDS_PLAYER_TYPE && lo == 0 && hi == 0x0b) {
         id = (unsigned short)(1 + g_car_pool_share_next++ % 11);
+        g_car_pool_shared_now = 1;
         if (g_car_pool_share_next <= 5) {
             log_begin();
             log_raw("carpool: stand-in ids full, a player car shares id ");

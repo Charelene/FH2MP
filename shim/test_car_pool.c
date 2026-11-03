@@ -26,11 +26,12 @@ static unsigned char g_fake_request[0x40];
 static int *g_cur_type_ptr;
 static int g_type_seen_in_find = -2;
 static unsigned short g_ids_result = 0xffff;
+static unsigned short fake_ids(void *m, unsigned short lo, unsigned short hi, void *p);
+static void *fake_find_sharing(void *self, void *out, void *vehicle_ref, void *manager, void *extra, unsigned priority);
 static int g_aictl_calls, g_fake_is_local_result = 1;
 static void fake_aictl(void *car) { (void)car; g_aictl_calls++; }
 static unsigned char fake_is_local(void *nc) { (void)nc; return (unsigned char)g_fake_is_local_result; }
 static int g_num_ai_seen = 99, g_ai_calls;
-static unsigned char *g_fake_options_for_ai;
 static unsigned short fake_ids(void *m, unsigned short lo, unsigned short hi, void *p) { (void)m; (void)lo; (void)hi; (void)p; return g_ids_result; }
 static unsigned char *g_fake_options;
 static unsigned char *fake_options(void) { return g_fake_options; }
@@ -72,6 +73,14 @@ static int plat_patch(const char *name, void *at, const void *expect, const void
 #include "src/car_pool.inc"
 
 static void bind_cur_type(void) { g_cur_type_ptr = &g_car_pool_cur_type; }
+
+/* FindOrQueue as far as the wrapper is concerned: it runs the id search for the vehicle's type */
+static void *fake_find_sharing(void *self, void *out, void *vehicle_ref, void *manager, void *extra, unsigned priority)
+{
+    (void)self; (void)vehicle_ref; (void)manager; (void)extra; (void)priority;
+    car_pool_ids(NULL, 0, 0x0b, NULL);
+    return out;
+}
 
 /* CarCacheModule::vfunc_2 @ 0x47a570, first 0x62 bytes, from forza_durango_release_final.exe */
 static const unsigned char VFUNC2[] = {
@@ -381,6 +390,30 @@ int main(void)
       car_pool_find(NULL, &out, &vehicle_ref, NULL, NULL, 1);
       assert(g_type_seen_in_find == 3 && g_car_pool_cur_type == -1);
       g_car_pool_find_lines = 0;
+    }
+    /* a shared id gets its own second half in the car's key (+0x236), an ordinary one is left alone */
+    { static unsigned char vehicle[0x700];
+      unsigned char *vehicle_ref = vehicle;
+      unsigned long long out = 0;
+      fresh();
+      g_car_pool_ids_orig = (car_pool_ids_fn)fake_ids;
+      g_car_pool_find_orig = (car_pool_find_fn)fake_find_sharing;
+      g_car_pool_share_ids = 1;
+      g_ids_result = 0xffff;
+      *(int *)(vehicle + 0x110 + 0x488) = 3;
+      *(short *)(vehicle + 0x110 + 0x236) = 0;
+      car_pool_find(NULL, &out, &vehicle_ref, NULL, NULL, 1);
+      assert(*(unsigned short *)(vehicle + 0x110 + 0x236) == 0x4000 + 1);
+      car_pool_find(NULL, &out, &vehicle_ref, NULL, NULL, 1);
+      assert(*(unsigned short *)(vehicle + 0x110 + 0x236) == 0x4000 + 2);        /* unique for each */
+      g_ids_result = 5;                                                           /* an id was free: nothing shared, id2 untouched */
+      *(short *)(vehicle + 0x110 + 0x236) = 77;
+      car_pool_find(NULL, &out, &vehicle_ref, NULL, NULL, 1);
+      assert(*(short *)(vehicle + 0x110 + 0x236) == 77 && g_car_pool_shared_now == 0);
+      g_car_pool_share_ids = 0;
+      g_ids_result = 0xffff;
+      car_pool_find(NULL, &out, &vehicle_ref, NULL, NULL, 1);
+      assert(*(short *)(vehicle + 0x110 + 0x236) == 77);
     }
     /* another build of the id search or the request builder: nothing is patched (a bigger cache with 12 ids makes every car invalid) */
     SetEnvironmentVariableA("FH2MP_CAR_SLOTS", "30");
