@@ -27,6 +27,9 @@ static int *g_cur_type_ptr;
 static int g_type_seen_in_find = -2;
 static unsigned short g_ids_hi_seen;
 static unsigned short g_train_key_seen;
+static int g_aictl_calls, g_fake_is_local_result = 1;
+static void fake_aictl(void *car) { (void)car; g_aictl_calls++; }
+static unsigned char fake_is_local(void *nc) { (void)nc; return (unsigned char)g_fake_is_local_result; }
 static int g_num_ai_seen = 99, g_ai_calls;
 static unsigned char *g_fake_options_for_ai;
 static void *fake_train(void *m, void *out, unsigned short *key, void *e) { (void)m; (void)e; if (key) g_train_key_seen = *key; return out; }
@@ -52,7 +55,7 @@ static int plat_hook(const char *name, void *target, void *detour, void **origin
 {
     (void)name; (void)target; (void)detour;
     g_hooks++;
-    *original = target == g_img + 0xfd08b0 ? (void *)fake_find : target == g_img + 0xfceee0 ? (void *)fake_ids : target == g_img + 0xf21870 ? (void *)fake_train : target == g_img + 0x720960 ? (void *)fake_ai : (void *)fake_tick;
+    *original = target == g_img + 0xfd08b0 ? (void *)fake_find : target == g_img + 0xfceee0 ? (void *)fake_ids : target == g_img + 0xf21870 ? (void *)fake_train : target == g_img + 0x720960 ? (void *)fake_ai : target == g_img + 0xf73e10 ? (void *)fake_aictl : (void *)fake_tick;
     return 1;
 }
 static int g_refuse_patch;       /* the platform refuses the n-th patch call (1-based) */
@@ -84,6 +87,7 @@ static const unsigned char TICK_HEAD[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x
 static const unsigned char MAX_SETTER[] = {0x44, 0x89, 0x82, 0xf0, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc};
 static const unsigned char MIN_SETTER[] = {0x44, 0x89, 0x82, 0xb0, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc};
 static const unsigned char AI_HEAD[] = {0x40, 0x55, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8d, 0x6c, 0x24, 0xc9, 0x48, 0x81, 0xec, 0xa0, 0x00, 0x00, 0x00};
+static const unsigned char AICTL_HEAD[] = {0x4c, 0x8b, 0xdc, 0x57, 0x48, 0x81, 0xec, 0x50, 0x03, 0x00, 0x00, 0x48, 0xc7, 0x44, 0x24, 0x40, 0xfe, 0xff, 0xff, 0xff};
 static const unsigned char TRAIN_HEAD[] = {0x4c, 0x89, 0x4c, 0x24, 0x20, 0x48, 0x89, 0x54, 0x24, 0x10, 0x55, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xec, 0x40};
 static const unsigned char IDS_HEAD[] = {0x48, 0x8b, 0xc4, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xec, 0x50, 0x48, 0xc7, 0x40, 0xc8, 0xfe, 0xff, 0xff, 0xff, 0x48, 0x89, 0x58, 0x10};
 static const unsigned char FIND_HEAD[] = {0x4c, 0x89, 0x4c, 0x24, 0x20, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xec, 0x60};
@@ -96,6 +100,7 @@ static void fresh(void)
     memcpy(g_img + CAR_POOL_FIND_RVA, FIND_HEAD, sizeof FIND_HEAD);
     memcpy(g_img + CAR_POOL_IDS_RVA, IDS_HEAD, sizeof IDS_HEAD);
     memcpy(g_img + CAR_POOL_TRAIN_RVA, TRAIN_HEAD, sizeof TRAIN_HEAD);
+    memcpy(g_img + CAR_POOL_AICTL_RVA, AICTL_HEAD, sizeof AICTL_HEAD);
     memcpy(g_img + 0x5430d0, MAX_SETTER, sizeof MAX_SETTER);
     memcpy(g_img + 0x653780, MIN_SETTER, sizeof MIN_SETTER);
     memcpy(g_img + 0x720960, AI_HEAD, sizeof AI_HEAD);
@@ -495,6 +500,52 @@ int main(void)
       g_img[0x5430d0] ^= 0xff;                                          /* a setter that does not match is irrelevant when it is not selected */
       assert(patch_car_pool() == 1);
     }
+    /* FH2MP_CAR_NOAICTL=1: the AI controller attach is hooked; only a remote network car skips it */
+    SetEnvironmentVariableA("FH2MP_CAR_SLOTS", "14");
+    SetEnvironmentVariableA("FH2MP_CAR_NODRIVATARS", NULL);
+    SetEnvironmentVariableA("FH2MP_CAR_NOAICTL", "1");
+    fresh();
+    assert(patch_car_pool() == 1 && g_hooks == 3 && g_patches == 2);
+    fresh();
+    g_img[CAR_POOL_AICTL_RVA] = 0x40;                                  /* another build: nothing is patched */
+    g_raw[0] = 0;
+    assert(patch_car_pool() == 0 && g_patches == 0 && g_hooks == 0 && strstr(g_raw, "mismatch: the AI controller attach"));
+    { static unsigned char car[0x5b00];
+      static unsigned char network_car[16];
+      static void *vtable[40];
+      static void *no_vtable[1];
+      g_car_pool_aictl_orig = (car_pool_aictl_fn)fake_aictl;
+      g_car_pool_aictl_skipped = 0;
+      g_aictl_calls = 0;
+      vtable[0xc0 / 8] = (void *)fake_is_local;
+      *(void ***)network_car = vtable;
+      *(unsigned char **)(car + 0x5aa8) = network_car;
+      g_fake_is_local_result = 0;                                      /* a remote car: skipped, and said so */
+      g_raw[0] = 0;
+      car_pool_aictl(car);
+      assert(g_aictl_calls == 0 && g_car_pool_aictl_skipped == 1 && strstr(g_raw, "no AI controller for remote network car #1"));
+      g_fake_is_local_result = 1;                                      /* the local player's own car keeps it */
+      car_pool_aictl(car);
+      assert(g_aictl_calls == 1);
+      *(unsigned char **)(car + 0x5aa8) = NULL;                        /* not a network car (traffic, a Drivatar) */
+      car_pool_aictl(car);
+      assert(g_aictl_calls == 2);
+      *(unsigned char **)(car + 0x5aa8) = network_car;
+      *(void ***)network_car = NULL;                                   /* no vtable: not touched */
+      car_pool_aictl(car);
+      assert(g_aictl_calls == 3);
+      *(void ***)network_car = (void **)no_vtable;
+      no_vtable[0] = NULL;
+      car_pool_aictl(NULL);                                            /* no car: the game's function runs */
+      assert(g_aictl_calls == 4);
+      g_car_pool_aictl_skipped = 100;                                  /* past five, no more log lines */
+      *(void ***)network_car = vtable;
+      g_fake_is_local_result = 0;
+      g_raw[0] = 0;
+      car_pool_aictl(car);
+      assert(g_raw[0] == 0 && g_aictl_calls == 4);
+    }
+    SetEnvironmentVariableA("FH2MP_CAR_NOAICTL", NULL);
     SetEnvironmentVariableA("FH2MP_CAR_NODRIVATARS", NULL);
     SetEnvironmentVariableA("FH2MP_CAR_SLOTS", NULL);
 

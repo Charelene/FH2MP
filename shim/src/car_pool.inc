@@ -372,6 +372,48 @@ static void car_pool_install_find(unsigned char *img)
     }
 }
 
+/* FH2MP_CAR_NOAICTL=1: a remote player's car gets no AI controller. Car::helper_f74050 (game+0xf74050, run when a car is initialised with its flag set)
+ * calls FUN_140f73e10 (game+0xf73e10) to attach a RacingAI controller; the controllers live in fixed arrays of 12 (FUN_140f44170 loops over 0xc0 bytes), which
+ * is why a car with a stand-in id past 11 crashed the game at game+0xf445ec. A car driven by the network (ForzaCar+0x5aa8 = its NetworkCar, whose vslot 0xc0 is
+ * true for the local player's own car) needs none. Only remote network cars are skipped. */
+#define CAR_POOL_AICTL_RVA 0xf73e10
+#define CAR_POOL_NETWORK_CAR 0x5aa8
+#define CAR_POOL_NETWORK_CAR_IS_LOCAL 0xc0
+typedef void (*car_pool_aictl_fn)(void *);
+static car_pool_aictl_fn g_car_pool_aictl_orig;
+static unsigned g_car_pool_aictl_skipped;
+
+static int car_pool_is_remote_network_car(void *car)
+{
+    unsigned char *network_car = car ? *(unsigned char **)((unsigned char *)car + CAR_POOL_NETWORK_CAR) : NULL;
+    void **vtable;
+    unsigned char (*is_local)(void *);
+
+    if (!network_car) {
+        return 0;
+    }
+    vtable = *(void ***)network_car;
+    if (!vtable) {
+        return 0;
+    }
+    is_local = (unsigned char (*)(void *))vtable[CAR_POOL_NETWORK_CAR_IS_LOCAL / sizeof(void *)];
+    return is_local && is_local(network_car) == 0;
+}
+
+static void car_pool_aictl(void *car)
+{
+    if (car_pool_is_remote_network_car(car)) {
+        if (g_car_pool_aictl_skipped++ < 5) {
+            log_begin();
+            log_raw("carpool: no AI controller for remote network car #");
+            log_dec(g_car_pool_aictl_skipped);
+            log_raw(" (FH2MP_CAR_NOAICTL)\n");
+        }
+        return;
+    }
+    g_car_pool_aictl_orig(car);
+}
+
 static int car_pool_env_flag(const char *name)
 {
     char v[8];
@@ -443,6 +485,7 @@ static int patch_car_pool(void)
     static const unsigned char find_head[] = {0x4C, 0x89, 0x4C, 0x24, 0x20, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x60};
     static const unsigned char train_head[] = {0x4C, 0x89, 0x4C, 0x24, 0x20, 0x48, 0x89, 0x54, 0x24, 0x10, 0x55, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x40};
     static const unsigned char ids_head[] = {0x48, 0x8B, 0xC4, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x50, 0x48, 0xC7, 0x40, 0xC8, 0xFE, 0xFF, 0xFF, 0xFF, 0x48, 0x89, 0x58, 0x10};
+    static const unsigned char aictl_head[] = {0x4C, 0x8B, 0xDC, 0x57, 0x48, 0x81, 0xEC, 0x50, 0x03, 0x00, 0x00, 0x48, 0xC7, 0x44, 0x24, 0x40, 0xFE, 0xFF, 0xFF, 0xFF};
     static const unsigned char max_setter[] = {0x44, 0x89, 0x82, 0xF0, 0x00, 0x00, 0x00, 0xC3, 0xCC, 0xCC, 0xCC};     /* mov [rdx+0xf0], r8d; ret; padding */
     static const unsigned char min_setter[] = {0x44, 0x89, 0x82, 0xB0, 0x00, 0x00, 0x00, 0xC3, 0xCC, 0xCC, 0xCC};     /* mov [rdx+0xb0], r8d; ret; padding */
     static const unsigned char max_zero[] = {0xC7, 0x82, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC3};      /* mov dword [rdx+0xf0], 0; ret */
@@ -451,7 +494,7 @@ static int patch_car_pool(void)
     unsigned char *img = find_fh2_image();
     unsigned char slots[4] = {0, 0, 0, 0};
     int want = car_pool_from_env(), done = 0, expected = 2;
-    int parts = car_pool_parts(), ids = car_pool_env_flag("FH2MP_CAR_IDS");
+    int parts = car_pool_parts(), ids = car_pool_env_flag("FH2MP_CAR_IDS"), aictl = car_pool_env_flag("FH2MP_CAR_NOAICTL");
 
     if (!img) {
         return 0;
@@ -469,6 +512,7 @@ static int patch_car_pool(void)
         !code_is("carpool", "the clamp to 12 slots", img, CAR_POOL_RVA + 0x49, clamp, sizeof clamp) ||
         !code_is("carpool", "the net vehicle load request builder", img, CAR_POOL_FIND_RVA, find_head, sizeof find_head) ||
         !code_is("carpool", "the car cache's tick", img, CAR_POOL_TICK_RVA, tick_head, sizeof tick_head) ||
+        (aictl && !code_is("carpool", "the AI controller attach", img, CAR_POOL_AICTL_RVA, aictl_head, sizeof aictl_head)) ||
         (ids && (!code_is("carpool", "the stand-in id search", img, CAR_POOL_IDS_RVA, ids_head, sizeof ids_head) ||
                  !code_is("carpool", "the AI training manager's request", img, CAR_POOL_TRAIN_RVA, train_head, sizeof train_head))) ||
         ((parts & CAR_POOL_PART_MAX) && !code_is("carpool", "the Drivatar maximum setter", img, CAR_POOL_DRIVATAR_MAX_SETTER_RVA, max_setter, sizeof max_setter)) ||
@@ -496,6 +540,9 @@ static int patch_car_pool(void)
         car_pool_install_find(img);
         if (parts & CAR_POOL_PART_AI) {
             plat_hook("carpool: festival AI count 0", img + CAR_POOL_AIMODULE_RVA, (void *)car_pool_ai_connect, (void **)&g_car_pool_ai_orig);
+        }
+        if (aictl) {
+            plat_hook("carpool: no AI controller for remote cars", img + CAR_POOL_AICTL_RVA, (void *)car_pool_aictl, (void **)&g_car_pool_aictl_orig);
         }
         if (ids && plat_hook("carpool: AI training entry of cars with a high id", img + CAR_POOL_TRAIN_RVA, (void *)car_pool_train, (void **)&g_car_pool_train_orig) &&
             plat_hook("carpool: stand-in ids of player cars", img + CAR_POOL_IDS_RVA, (void *)car_pool_ids, (void **)&g_car_pool_ids_orig)) {
