@@ -1,0 +1,17 @@
+#!/bin/bash
+# Keep crash reports bounded: drop reports older than FH2MP_CRASH_KEEP_DAYS (default 30), then the oldest until the folder is under
+# FH2MP_CRASH_MAX_MB (default 10240). One report = one folder named by its id (server/crash_reports.py). The GitHub issue keeps the summary.
+set -euo pipefail
+dir=${FH2MP_CRASH_DIR:-/var/log/fh2mp/crash-reports}
+days=${FH2MP_CRASH_KEEP_DAYS:-30}
+max_mb=${FH2MP_CRASH_MAX_MB:-10240}
+cd "$dir"
+old=$(find . -mindepth 1 -maxdepth 1 -type d -mtime +"$days" | wc -l)
+find . -mindepth 1 -maxdepth 1 -type d -mtime +"$days" -exec rm -rf -- {} +
+over=0
+while [ "$(du -sm . | cut -f1)" -gt "$max_mb" ]; do
+  oldest=$(ls -1tr | head -n1)
+  [ -n "$oldest" ] || break
+  rm -rf -- "./$oldest"; over=$((over + 1))
+done
+logger -t fh2mp-prune-crash "crash-reports: removed $old report(s) older than ${days} days and $over over the ${max_mb} MB cap; $(ls -1 | wc -l) kept, $(du -sh . | cut -f1)"

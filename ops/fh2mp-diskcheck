@@ -1,0 +1,15 @@
+#!/bin/bash
+# Warn when a data disk is nearly full. Run by fh2mp-diskcheck.timer; a failed run shows in `systemctl --failed`.
+# Limit: FH2MP_DISK_LIMIT percent (default 80) on / and /srv/fh2mp.
+limit=${FH2MP_DISK_LIMIT:-80}
+bad=0
+for m in / /srv/fh2mp; do
+  mountpoint -q "$m" || { logger -p user.err -t fh2mp-diskcheck "disk: $m is not mounted, files written there land on the root disk"; bad=1; continue; }
+  used=$(df --output=pcent "$m" | tail -1 | tr -dc '0-9')
+  free=$(df -h --output=avail "$m" | tail -1 | tr -d ' ')
+  if [ "$used" -ge "$limit" ]; then
+    logger -p user.warning -t fh2mp-diskcheck "disk: $m ${used}% used (limit ${limit}%), $free free"
+    bad=1
+  fi
+done
+exit $bad
