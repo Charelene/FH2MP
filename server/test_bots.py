@@ -76,11 +76,16 @@ class Helpers(unittest.TestCase):
         body = int.from_bytes(struct.pack("<3f", math.nan, 1.0, 2.0), "little") | (7 << 200)
         self.assertEqual(bots.shifted_body(body, 6.0, 6.0), body)
 
-    def test_the_ring_places_eight_to_a_ring_and_never_on_the_source(self):
+    def test_the_ring_places_eight_to_a_ring_and_far_enough_from_the_source_to_never_touch_it(self):
         spots = [bots.ring_offset(k) for k in range(24)]
         self.assertEqual(len(set((round(a, 3), round(b, 3)) for a, b in spots)), 24)
-        self.assertTrue(all(math.hypot(a, b) >= bots.RING_STEP_M - 1e-6 for a, b in spots))
-        self.assertAlmostEqual(math.hypot(*spots[8]), 2 * bots.RING_STEP_M)
+        self.assertTrue(all(math.hypot(a, b) >= bots.RING_START_M - 1e-6 for a, b in spots))
+        self.assertAlmostEqual(math.hypot(*spots[0]), 30.0)
+        self.assertAlmostEqual(math.hypot(*spots[8]), 42.0)
+        self.assertAlmostEqual(math.hypot(*spots[16]), 54.0)
+        # two bots are never closer than a car length or two to each other either
+        closest = min(math.hypot(a[0] - b[0], a[1] - b[1]) for i, a in enumerate(spots) for b in spots[i + 1:])
+        self.assertGreater(closest, 10.0)
 
 
 class Adding(unittest.TestCase):

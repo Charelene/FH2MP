@@ -19,7 +19,8 @@ import time
 
 BOT_XUID_BASE = 0x9F00000000000      # far from the test accounts (0x90000...) and from real Xbox ids
 CLONE_ROUTERS = (1, 2, 3)            # LobbyPlayer, the car objects (ForzaCarNetworked), ConsoleSynced
-RING_STEP_M, RING_SIZE = 6.0, 8      # bots sit on rings of 8 around the source, 6 m apart per ring
+RING_START_M, RING_STEP_M, RING_SIZE = 30.0, 12.0, 8   # bots sit on rings of 8 around the source: the first 30 m out, 12 m more for each ring
+# not closer: they trail the source by its latency (8 m at 200 km/h and 150 ms) and a bot that touches the real car throws it (dev 2026-11-03)
 MAX_BOTS = 75
 FREE_ROAM_TYPE = 2
 POSITION_BITS = 96                   # the first 96 bits of a CarPredictionFull body are x, y, z as f32 (car_position in fh2mp_server.py)
@@ -49,8 +50,8 @@ def replace_user_id(payload: int, size: int, old: int, new: int):
 
 
 def ring_offset(k: int):
-    """(dx, dz) in metres of the k-th bot of a source: 8 to a ring, 6 m between rings."""
-    radius = RING_STEP_M * (1 + k // RING_SIZE)
+    """(dx, dz) in metres of the k-th bot of a source: 8 to a ring, the first ring RING_START_M out and RING_STEP_M between rings."""
+    radius = RING_START_M + RING_STEP_M * (k // RING_SIZE)
     angle = 2 * math.pi * (k % RING_SIZE) / RING_SIZE
     return radius * math.cos(angle), radius * math.sin(angle)
 
