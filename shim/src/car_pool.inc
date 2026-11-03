@@ -415,6 +415,12 @@ static void car_pool_aictl(void *car)
 #define CAR_POOL_LABELS_RVA 0x47a830
 #define CAR_POOL_LABELS_CMP 0x146           /* from the start of the function to `cmp edi, 0xc` */
 
+/* FH2MP_CAR_NOBUDGET=1: the allocator's category budgets are off. Mem::MemoryManager::AllocateFromHeap (game+0x125d850) asks FUN_14125de50 (game+0x125de50)
+ * first; with budget enforcement on (bit 4 of the byte at +0x10a3f6 of the tracker) a category that has a budget and not enough left makes the allocation return
+ * NULL, no log line. The 14th remote car's CPresentationView constructor stores its Mem::Alloc(0x3ea0) at +0x4d8 unchecked and the render thread wrote through it
+ * (game+0x1334f34, dev 2026-11-03). Budgets are an Xbox One memory model; the check is made to return true. Also used by two graphics allocators. */
+#define CAR_POOL_BUDGET_RVA 0x125de50
+
 static int car_pool_env_flag(const char *name)
 {
     char v[8];
@@ -484,6 +490,8 @@ static int patch_car_pool(void)
     static const unsigned char nop4[] = {0x90, 0x90, 0x90, 0x90};
     static const unsigned char labels_head[] = {0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x40, 0x48, 0xC7, 0x44, 0x24, 0x20};
     static const unsigned char labels_cmp[] = {0xFF, 0xC7, 0x83, 0xFF, 0x0C, 0x0F, 0x82};                              /* inc edi; cmp edi, 0xc; jb */
+    static const unsigned char budget_head[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57, 0x48, 0x83, 0xEC, 0x20};
+    static const unsigned char budget_true[] = {0xB0, 0x01, 0xC3};               /* mov al, 1; ret */
     static const unsigned char tick_head[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57};
     static const unsigned char find_head[] = {0x4C, 0x89, 0x4C, 0x24, 0x20, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x60};
     static const unsigned char ids_head[] = {0x48, 0x8B, 0xC4, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x50, 0x48, 0xC7, 0x40, 0xC8, 0xFE, 0xFF, 0xFF, 0xFF, 0x48, 0x89, 0x58, 0x10};
@@ -497,7 +505,7 @@ static int patch_car_pool(void)
     unsigned char slots[4] = {0, 0, 0, 0};
     int want = car_pool_from_env(), done = 0, expected = 3;
     unsigned char labels = 0;
-    int parts = car_pool_parts(), ids = car_pool_env_flag("FH2MP_CAR_IDS"), aictl = car_pool_env_flag("FH2MP_CAR_NOAICTL");
+    int parts = car_pool_parts(), ids = car_pool_env_flag("FH2MP_CAR_IDS"), aictl = car_pool_env_flag("FH2MP_CAR_NOAICTL"), budget = car_pool_env_flag("FH2MP_CAR_NOBUDGET");
 
     if (!img) {
         return 0;
@@ -517,6 +525,7 @@ static int patch_car_pool(void)
         !code_is("carpool", "the name tag pool's start", img, CAR_POOL_LABELS_RVA, labels_head, sizeof labels_head) ||
         !code_is("carpool", "the name tag pool's size", img, CAR_POOL_LABELS_RVA + CAR_POOL_LABELS_CMP, labels_cmp, sizeof labels_cmp) ||
         !code_is("carpool", "the car cache's tick", img, CAR_POOL_TICK_RVA, tick_head, sizeof tick_head) ||
+        (budget && !code_is("carpool", "the allocator's budget check", img, CAR_POOL_BUDGET_RVA, budget_head, sizeof budget_head)) ||
         (aictl && !code_is("carpool", "the AI controller attach", img, CAR_POOL_AICTL_RVA, aictl_head, sizeof aictl_head)) ||
         (ids && !code_is("carpool", "the stand-in id search", img, CAR_POOL_IDS_RVA, ids_head, sizeof ids_head)) ||
         ((parts & CAR_POOL_PART_MAX) && !code_is("carpool", "the Drivatar maximum setter", img, CAR_POOL_DRIVATAR_MAX_SETTER_RVA, max_setter, sizeof max_setter)) ||
@@ -529,6 +538,10 @@ static int patch_car_pool(void)
     done += plat_patch("carpool: no clamp to 12 slots", img + CAR_POOL_RVA + 0x4d, clamp + 4, nop4, 4);
     labels = (unsigned char)(want + 2 > 127 ? 127 : want + 2);
     done += plat_patch("carpool: name tag pool", img + CAR_POOL_LABELS_RVA + CAR_POOL_LABELS_CMP + 4, labels_cmp + 4, &labels, 1);
+    if (budget) {
+        expected++;
+        done += plat_patch("carpool: no allocator budget", img + CAR_POOL_BUDGET_RVA, budget_head, budget_true, sizeof budget_true);
+    }
     if (parts & CAR_POOL_PART_CACHE) {
         expected++;
         done += plat_patch("carpool: slot count ignores NumAICars", img + CAR_POOL_RVA + 0x2e, native + 8, nop4, 4);
