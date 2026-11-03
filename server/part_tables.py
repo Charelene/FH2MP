@@ -1,5 +1,5 @@
 """Reads the part and car tables out of a game database (the catalog export, or a gamedbRC.slt such as the canonical one the launchers
-sync, gamedb_sync.py). Shared by tools/make_part_ids.py, which writes part_ids.py once, and the game server, which adds the rows of the
+sync, gamedb_sync.py). Shared by tools/gamedata/make_part_ids.py, which writes part_ids.py once, and the game server, which adds the rows of the
 canonical database (car packs) at run time. Only ids are read, plus media names and top speeds for the car policy."""
 import sqlite3
 

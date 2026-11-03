@@ -43,7 +43,7 @@ import replay  # noqa: E402
 import tunnel as tunnel_mod  # noqa: E402
 STARTUP_PROBLEMS = []        # checks that came up without their data; Hub says so once its log is open. A deploy that lost a file looks like a quiet server otherwise.
 try:
-    from car_policy import BLOCKED_CARS, KNOWN_CARS, TOP_SPEED_KMH  # noqa: E402     # tools/make_car_policy.py
+    from car_policy import BLOCKED_CARS, KNOWN_CARS, TOP_SPEED_KMH  # noqa: E402     # tools/gamedata/make_car_policy.py
 except ImportError as e:
     BLOCKED_CARS, KNOWN_CARS, TOP_SPEED_KMH = {}, frozenset(), {}
     STARTUP_PROBLEMS.append(f"car_policy ({e}): no blocked cars, no known-car list, no stock top speeds")
@@ -53,7 +53,7 @@ except ImportError as e:
     CAR_CHOICES, RENTAL_CARS = {}, frozenset()
     STARTUP_PROBLEMS.append(f"car_policy choices ({e}): no car choices, no rental list")
 try:
-    import parts as parts_check  # noqa: E402     # part ids of the game data: tools/make_part_ids.py -> part_ids.py
+    import parts as parts_check  # noqa: E402     # part ids of the game data: tools/gamedata/make_part_ids.py -> part_ids.py
 except ImportError as e:
     parts_check = None
     STARTUP_PROBLEMS.append(f"parts ({e}): lobby cars get no part check")
@@ -442,7 +442,7 @@ UNRELIABLE_ID = reliable.UNRELIABLE_ID
 NO_ID = 0xFFFE
 RELIABLE = os.environ.get("FH2MP_RELIABLE", "0") == "1"     # resend lost reliable messages (reliable.py); 0 sends exactly what it always did
 
-# The Road Trip event tables (AnthemOnlineEvents, RaceModes) of the game's database, cut out by tools/make_roadtrip_db.py; kept
+# The Road Trip event tables (AnthemOnlineEvents, RaceModes) of the game's database, cut out by tools/gamedata/make_roadtrip_db.py; kept
 # next to the server so a deployment needs no game install.
 ROADTRIP_DB_DEFAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "roadtrip.sqlite")
 
@@ -1483,7 +1483,7 @@ class Server:
                          f"classes {self.rt_candidates[2]}")
             else:
                 self.log(f"road trip: no game database ({gamedb or 'FH2MP_GAMEDB unset'}); the vote will be empty. Build "
-                         f"{ROADTRIP_DB_DEFAULT} with tools/make_roadtrip_db.py or point FH2MP_GAMEDB at gamedbRC.slt")
+                         f"{ROADTRIP_DB_DEFAULT} with tools/gamedata/make_roadtrip_db.py or point FH2MP_GAMEDB at gamedbRC.slt")
 
     # ------------------------------------------------------------------ weather
     def weather_pick_level(self, current):
@@ -3933,7 +3933,7 @@ class Server:
                 if limits and (oid >= limits[0] or (tid is not None and tid >= limits[1])):
                     self.malformed(peer, f"object router={router} id={oid} type={tid}")
                     break
-                if mtype == MSG_OBJECT_CREATE or CAR_CAPTURE:          # tools/decode_creates.py reads the create lines
+                if mtype == MSG_OBJECT_CREATE or CAR_CAPTURE:          # tools/analysis/decode_creates.py reads the create lines
                     self.log(f"{addr[1]} obj {'create' if mtype == 7 else 'update'} router={router} "
                              f"flags={a}{b} id={oid} type={tid} seq={seq} varbits={size}")
                 if mtype == MSG_OBJECT_CREATE or size >= 500:

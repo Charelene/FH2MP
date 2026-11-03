@@ -19,7 +19,7 @@ How the schema is laid out (FH2 1.0.0.64, recovered from Xls::BinaryReader, FUN_
 Usage: python3 -I server/xls_schema.py <exe> <StructOrCallName> [...]   e.g. ForzaUserLogon_Results
 
 The server does not need the exe at run time: `export_tables` copies the descriptors into the tables xls_struct / xls_field /
-xls_name of the game catalog bundle (tools/export_gamedata.py; tools/load_gamedata_pg.py loads it into PostgreSQL), and `TableSource`
+xls_name of the game catalog bundle (tools/gamedata/export_gamedata.py; tools/gamedata/load_gamedata_pg.py loads it into PostgreSQL), and `TableSource`
 serves the same interface from them.
 """
 import re

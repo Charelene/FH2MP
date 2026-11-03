@@ -60,7 +60,7 @@ def iso(t):
 
 
 try:
-    from rival_records import RECORDS as WORLD_RECORDS    # (track id, class id) -> record seconds, from tools/make_rival_records.py
+    from rival_records import RECORDS as WORLD_RECORDS    # (track id, class id) -> record seconds, from tools/gamedata/make_rival_records.py
 except ImportError:
     WORLD_RECORDS = {}
 WR_FLOOR = 1.005         # made-up rival times stay at least this far above a world record
