@@ -37,21 +37,52 @@ static int car_pool_from_env(void)
 #define CAR_POOL_QUEUE_PTR_RVA 0x365ad70
 typedef unsigned long long (*car_pool_tick_fn)(void *, void *, void *, void *);
 static car_pool_tick_fn g_car_pool_tick_orig;
-static unsigned g_car_pool_seen[6];
+#define CAR_POOL_SLOT 0x590
+#define CAR_POOL_SLOTS_MAX 96
+#define CAR_POOL_FIELDS 11
+static unsigned g_car_pool_seen[CAR_POOL_FIELDS];
 static int g_car_pool_seen_any;
+static ULONGLONG g_car_pool_scan_at;
+static unsigned char g_car_pool_slots[CAR_POOL_SLOTS_MAX * CAR_POOL_SLOT];
 
-static void car_pool_state_line(const unsigned char *group, const unsigned *queue, int have_queue)
+/* The slots by what they hold (helper_480a60 promotes a slot's request from state 1 to 2 once its car is loaded and request+0x5a8 is set):
+ * cars = slot+0x560 set, assigned = slot+0x558 (a request) set, unloading = slot+0x568 set, then of the assigned ones the request's state (+0x598)
+ * 1 or 2 and how many have +0x5a8 set. Scanned twice a second at most. */
+static void car_pool_scan(unsigned slots, unsigned *out)
+{
+    unsigned i;
+
+    memset(out, 0, 6 * sizeof out[0]);
+    for (i = 0; i < slots; i++) {
+        const unsigned char *slot = g_car_pool_slots + (size_t)i * CAR_POOL_SLOT;
+        unsigned long long car = *(const unsigned long long *)(slot + 0x560), request = *(const unsigned long long *)(slot + 0x558);
+        unsigned char tail[0x11];
+
+        out[0] += car != 0;
+        out[1] += request != 0;
+        out[2] += *(const unsigned long long *)(slot + 0x568) != 0;
+        if (request && read_game_memory((const void *)(ULONG_PTR)(request + 0x598), tail, sizeof tail)) {
+            unsigned state = *(unsigned *)tail;
+
+            out[3] += state == 1;
+            out[4] += state == 2;
+            out[5] += tail[0x10] != 0;
+        }
+    }
+}
+
+static void car_pool_state_line(const unsigned char *group, const unsigned *queue, int have_queue, int scanned, const unsigned *held)
 {
     unsigned long long slots_b = *(const unsigned long long *)(group + 0x60), slots_e = *(const unsigned long long *)(group + 0x68);
     unsigned long long req_b = *(const unsigned long long *)(group + 0x78), req_e = *(const unsigned long long *)(group + 0x80);
-    unsigned now[6];
+    unsigned now[CAR_POOL_FIELDS];
 
-    now[0] = (unsigned)((slots_e - slots_b) / 0x590);
+    now[0] = (unsigned)((slots_e - slots_b) / CAR_POOL_SLOT);
     now[1] = *(const unsigned *)(group + 0x90);
     now[2] = *(const unsigned *)(group + 0x94);
     now[3] = (unsigned)((req_e - req_b) / 8);
     now[4] = have_queue ? (queue[3] == 0 && queue[0] == queue[1]) : 2;      /* queue[] is +8, +0xc, +0x10, +0x14: idle when +0x14 == 0 and +0xc == +8 */
-    now[5] = have_queue ? queue[3] : 0;
+    memcpy(now + 5, held, 6 * sizeof now[0]);
     if (g_car_pool_seen_any && !memcmp(now, g_car_pool_seen, sizeof now)) {
         return;
     }
@@ -67,6 +98,20 @@ static void car_pool_state_line(const unsigned char *group, const unsigned *queu
     log_raw(", queued requests ");
     log_dec(now[3]);
     log_raw(now[4] == 2 ? ", global load queue unreadable" : now[4] ? ", global load queue idle" : ", global load queue busy");
+    if (scanned) {
+        log_raw(", cars ");
+        log_dec(now[5]);
+        log_raw(", assigned ");
+        log_dec(now[6]);
+        log_raw(", unloading ");
+        log_dec(now[7]);
+        log_raw(", request state 1 ");
+        log_dec(now[8]);
+        log_raw(", state 2 ");
+        log_dec(now[9]);
+        log_raw(", ready flag ");
+        log_dec(now[10]);
+    }
     log_raw("\n");
 }
 
@@ -74,17 +119,32 @@ static unsigned long long car_pool_tick(void *self, void *a, void *b, void *c)
 {
     unsigned char *img = find_fh2_image();
     unsigned char group[0xa0];
-    unsigned queue[6] = {0, 0, 0, 0, 0, 0};
+    unsigned queue[6] = {0, 0, 0, 0, 0, 0}, held[6] = {0, 0, 0, 0, 0, 0};
     unsigned long long qptr = 0;
     unsigned long long result = g_car_pool_tick_orig(self, a, b, c);
-    int have_queue = 0;
+    int have_queue = 0, scanned = 0;
 
     if (img && self && read_game_memory((unsigned char *)self + CAR_POOL_GROUP, group, sizeof group)) {
+        unsigned long long begin = *(unsigned long long *)(group + 0x60), end = *(unsigned long long *)(group + 0x68);
+        ULONGLONG now = GetTickCount64();
+
         if (read_game_memory(img + CAR_POOL_QUEUE_PTR_RVA, &qptr, sizeof qptr) && qptr &&
             read_game_memory((unsigned char *)(ULONG_PTR)qptr + 8, queue, 0x10)) {
             have_queue = 1;
         }
-        car_pool_state_line(group, queue, have_queue);
+        if (end > begin && (end - begin) / CAR_POOL_SLOT <= CAR_POOL_SLOTS_MAX && (end - begin) % CAR_POOL_SLOT == 0) {
+            if (now >= g_car_pool_scan_at || !g_car_pool_seen_any) {
+                g_car_pool_scan_at = now + 500;
+                if (read_game_memory((const void *)(ULONG_PTR)begin, g_car_pool_slots, (SIZE_T)(end - begin))) {
+                    car_pool_scan((unsigned)((end - begin) / CAR_POOL_SLOT), held);
+                    scanned = 1;
+                }
+            } else {
+                memcpy(held, g_car_pool_seen + 5, sizeof held);
+                scanned = g_car_pool_seen_any;
+            }
+        }
+        car_pool_state_line(group, queue, have_queue, scanned, held);
     }
     return result;
 }

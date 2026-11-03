@@ -110,7 +110,9 @@ int main(void)
     assert(patch_car_pool() == 0 && strstr(g_raw, "mismatch: the car cache's module init"));
 
     /* the diagnostic hook: runs the game's tick, logs the group state once and again only when it changes */
-    { unsigned char module[0x400], queue_obj[0x40];
+    { static unsigned char slots[100 * 0x590];
+      static unsigned char request[0x5d0], request2[0x5d0], request3[0x5d0];
+      unsigned char module[0x400], queue_obj[0x40];
       unsigned long long qptr = (unsigned long long)(ULONG_PTR)queue_obj;
       unsigned char *group = module + CAR_POOL_GROUP;
       fresh();
@@ -119,23 +121,52 @@ int main(void)
       memcpy(g_img + CAR_POOL_QUEUE_PTR_RVA, &qptr, 8);
       g_car_pool_tick_orig = (car_pool_tick_fn)fake_tick;
       g_car_pool_seen_any = 0;
-      *(unsigned long long *)(group + 0x60) = 0x10000;
-      *(unsigned long long *)(group + 0x68) = 0x10000 + 74 * 0x590;
+      g_car_pool_scan_at = 0;
+      *(unsigned long long *)(group + 0x60) = (unsigned long long)(ULONG_PTR)slots;
+      *(unsigned long long *)(group + 0x68) = (unsigned long long)(ULONG_PTR)(slots + 74 * 0x590);
       *(unsigned *)(group + 0x90) = 74;
       *(unsigned *)(group + 0x94) = 74;
       assert(car_pool_tick(module, NULL, NULL, NULL) == 7);
-      assert(strstr(g_raw, "slots 74, free 74, budget 74, queued requests 0, global load queue idle"));
+      assert(strstr(g_raw, "slots 74, free 74, budget 74, queued requests 0, global load queue idle, cars 0, assigned 0, unloading 0, request state 1 0, state 2 0, ready flag 0"));
       g_raw[0] = 0;
       car_pool_tick(module, NULL, NULL, NULL);
       assert(g_raw[0] == 0);                                              /* nothing changed: no line */
       *(unsigned long long *)(group + 0x78) = 0x20000;
       *(unsigned long long *)(group + 0x80) = 0x20000 + 3 * 8;
+      g_car_pool_scan_at = 0;
       car_pool_tick(module, NULL, NULL, NULL);
       assert(strstr(g_raw, "queued requests 3, global load queue idle"));
       g_raw[0] = 0;
-      *(unsigned *)(queue_obj + 0x14) = 5;                        /* +0x14 non-zero: busy */
+      *(unsigned *)(queue_obj + 0x14) = 5;                                /* +0x14 non-zero: busy */
       car_pool_tick(module, NULL, NULL, NULL);
       assert(strstr(g_raw, "global load queue busy"));
+      /* slot 0: car built, request assigned in state 1, not ready; slot 5: request in state 2 and ready; slot 9: a car being unloaded */
+      *(unsigned long long *)(slots + 0x560) = 0x1111;
+      *(unsigned long long *)(slots + 0x558) = (unsigned long long)(ULONG_PTR)request;
+      *(unsigned *)(request + 0x598) = 1;
+      *(unsigned long long *)(slots + 5 * 0x590 + 0x560) = 0x2222;
+      *(unsigned long long *)(slots + 5 * 0x590 + 0x558) = (unsigned long long)(ULONG_PTR)request2;
+      *(unsigned *)(request2 + 0x598) = 2;
+      request2[0x5a8] = 1;
+      *(unsigned long long *)(slots + 7 * 0x590 + 0x558) = (unsigned long long)(ULONG_PTR)request3;     /* a second request in state 1 */
+      *(unsigned *)(request3 + 0x598) = 1;
+      *(unsigned long long *)(slots + 9 * 0x590 + 0x568) = 0x3333;
+      g_raw[0] = 0;
+      g_car_pool_scan_at = 0;
+      car_pool_tick(module, NULL, NULL, NULL);
+      assert(strstr(g_raw, "cars 2, assigned 3, unloading 1, request state 1 2, state 2 1, ready flag 1"));
+      /* a slot vector that is not whole slots, or bigger than the scan buffer, is not scanned */
+      *(unsigned long long *)(group + 0x68) = (unsigned long long)(ULONG_PTR)(slots + 74 * 0x590 - 1);
+      g_raw[0] = 0;
+      g_car_pool_scan_at = 0;
+      car_pool_tick(module, NULL, NULL, NULL);
+      assert(g_raw[0] == 0 || !strstr(g_raw, "cars "));
+      /* more slots than the scan buffer holds: the counts are left out */
+      *(unsigned long long *)(group + 0x68) = (unsigned long long)(ULONG_PTR)(slots + 97 * 0x590);
+      g_raw[0] = 0;
+      g_car_pool_scan_at = 0;
+      car_pool_tick(module, NULL, NULL, NULL);
+      assert(strstr(g_raw, "slots 97,") && !strstr(g_raw, "cars "));
     }
 
     printf("car pool: ok\n");
