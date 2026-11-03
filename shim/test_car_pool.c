@@ -23,6 +23,8 @@ static int code_is(const char *tag, const char *what, const unsigned char *img, 
 static int g_patches, g_hooks;
 static unsigned long long fake_tick(void *a, void *b, void *c, void *d) { (void)a; (void)b; (void)c; (void)d; return 7; }
 static unsigned char g_fake_request[0x40];
+static unsigned char *g_fake_options;
+static unsigned char *fake_options(void) { return g_fake_options; }
 static void *fake_find(void *self, void *out, void *vehicle_ref, void *manager, void *extra, unsigned priority)
 {
     unsigned char *vehicle = *(unsigned char **)vehicle_ref;
@@ -67,7 +69,6 @@ static const unsigned char VFUNC2[] = {
 
 static const unsigned char TICK_HEAD[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57};
 
-static const unsigned char FIND_IDS[] = {0x33, 0xc0, 0x0f, 0xb7, 0xf8, 0x8d, 0x58, 0x0b, 0xeb, 0x03};   /* FindOrQueue +0x174 */
 static const unsigned char FIND_HEAD[] = {0x4c, 0x89, 0x4c, 0x24, 0x20, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xec, 0x60};
 
 static void fresh(void)
@@ -76,7 +77,6 @@ static void fresh(void)
     memcpy(g_img + CAR_POOL_RVA, VFUNC2, sizeof VFUNC2);
     memcpy(g_img + CAR_POOL_TICK_RVA, TICK_HEAD, sizeof TICK_HEAD);
     memcpy(g_img + CAR_POOL_FIND_RVA, FIND_HEAD, sizeof FIND_HEAD);
-    memcpy(g_img + CAR_POOL_FIND_RVA + 0x174, FIND_IDS, sizeof FIND_IDS);
     g_raw[0] = 0;
     g_patches = 0;
     g_hooks = 0;
@@ -128,9 +128,8 @@ int main(void)
           memset(expect + 0x4d, 0x90, 4);
           SetEnvironmentVariableA("FH2MP_CAR_SLOTS", good[i]);
           fresh();
-          assert(patch_car_pool() == 1 && g_patches == 3 && g_hooks == 2 && g_img[CAR_POOL_FIND_RVA + 0x17b] == want[i]);
+          assert(patch_car_pool() == 1 && g_patches == 2 && g_hooks == 2);
           assert(!memcmp(g_img + CAR_POOL_RVA, expect, sizeof expect));
-          assert(!memcmp(g_img + CAR_POOL_FIND_RVA + 0x174, FIND_IDS, 7) && !memcmp(g_img + CAR_POOL_FIND_RVA + 0x17c, FIND_IDS + 8, 2));   /* only the imm8 moved */
           assert(strstr(g_raw, "remote car slots 11 -> "));
       } }
 
@@ -147,11 +146,6 @@ int main(void)
     g_img[CAR_POOL_RVA] = 0x40;
     g_raw[0] = 0;
     assert(patch_car_pool() == 0 && strstr(g_raw, "mismatch: the car cache's module init"));
-    /* the player id range bytes differ (another build): nothing is patched, not even the cache (a cache of 74 slots with 12 ids makes every car invalid) */
-    fresh();
-    g_img[CAR_POOL_FIND_RVA + 0x17b] = 0x0c;
-    g_raw[0] = 0;
-    assert(patch_car_pool() == 0 && g_patches == 0 && strstr(g_raw, "mismatch: the stand-in id range of player vehicles") && !strstr(g_raw, "remote car slots 11 ->"));
 
     /* the diagnostic hook: runs the game's tick, logs the group state once and again only when it changes */
     { static unsigned char slots[100 * 0x590];
@@ -270,15 +264,53 @@ int main(void)
     assert(patch_car_pool() == 0 && g_hooks == 1);
     SetEnvironmentVariableA("FH2MP_CAR_DIAG", NULL);
 
-    /* the platform refuses one of the three patches: not reported as done, no hooks, no "slots" line */
+    /* the platform refuses one of the two patches: not reported as done, no hooks, no "slots" line */
     SetEnvironmentVariableA("FH2MP_CAR_SLOTS", "30");
-    for (i = 1; i <= 3; i++) {
+    for (i = 1; i <= 2; i++) {
         fresh();
         g_refuse_patch = i;
         assert(patch_car_pool() == 0 && g_hooks == 0 && !strstr(g_raw, "remote car slots 11 ->"));
     }
     fresh();
-    assert(patch_car_pool() == 1 && g_hooks == 2 && strstr(g_raw, "remote car slots 11 -> 30, player vehicle ids 0..30"));
+    assert(patch_car_pool() == 1 && g_hooks == 2 && strstr(g_raw, "remote car slots 11 -> 30 (FH2MP_CAR_SLOTS)"));
+
+    /* FH2MP_CAR_NOAI=1: NumAICars (options+0x2538) is set to 0 once, from the first tick */
+    { static unsigned char options[0x3000];
+      static unsigned char module[0x400];
+      SetEnvironmentVariableA("FH2MP_CAR_NOAI", "1");
+      fresh();
+      g_car_pool_options = fake_options;
+      g_car_pool_no_ai_done = 0;
+      g_car_pool_tick_orig = (car_pool_tick_fn)fake_tick;
+      memset(options, 0, sizeof options);
+      *(int *)(options + 0x2538) = -1;
+      g_fake_options = options;
+      car_pool_tick(module, NULL, NULL, NULL);
+      assert(*(int *)(options + 0x2538) == 0 && strstr(g_raw, "carpool: NumAICars 4294967295 -> 0 (FH2MP_CAR_NOAI)"));
+      /* once only: a later value is left alone */
+      *(int *)(options + 0x2538) = 5;
+      g_raw[0] = 0;
+      car_pool_tick(module, NULL, NULL, NULL);
+      assert(*(int *)(options + 0x2538) == 5 && !strstr(g_raw, "NumAICars"));
+      /* unset or another value: untouched */
+      SetEnvironmentVariableA("FH2MP_CAR_NOAI", "0");
+      g_car_pool_no_ai_done = 0;
+      *(int *)(options + 0x2538) = -1;
+      car_pool_tick(module, NULL, NULL, NULL);
+      assert(*(int *)(options + 0x2538) == -1);
+      SetEnvironmentVariableA("FH2MP_CAR_NOAI", NULL);
+      g_car_pool_no_ai_done = 0;
+      car_pool_tick(module, NULL, NULL, NULL);
+      assert(*(int *)(options + 0x2538) == -1);
+      /* the options singleton unreadable: nothing is written */
+      SetEnvironmentVariableA("FH2MP_CAR_NOAI", "1");
+      g_car_pool_no_ai_done = 0;
+      g_fake_options = NULL;
+      car_pool_tick(module, NULL, NULL, NULL);
+      assert(*(int *)(options + 0x2538) == -1);
+      SetEnvironmentVariableA("FH2MP_CAR_NOAI", NULL);
+      g_car_pool_options = NULL;
+    }
 
     printf("car pool: ok\n");
     return 0;
