@@ -43,9 +43,13 @@ static int plat_hook(const char *name, void *target, void *detour, void **origin
     *original = target == g_img + 0xfd08b0 ? (void *)fake_find : (void *)fake_tick;
     return 1;
 }
+static int g_refuse_patch;       /* the platform refuses the n-th patch call (1-based) */
+static int g_patch_calls;
 static int plat_patch(const char *name, void *at, const void *expect, const void *bytes, unsigned n)
 {
     (void)name;
+    g_patch_calls++;
+    if (g_refuse_patch == g_patch_calls) return 0;
     if (memcmp(at, expect, n)) return 0;
     memcpy(at, bytes, n);
     g_patches++;
@@ -63,6 +67,7 @@ static const unsigned char VFUNC2[] = {
 
 static const unsigned char TICK_HEAD[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57};
 
+static const unsigned char FIND_IDS[] = {0x33, 0xc0, 0x0f, 0xb7, 0xf8, 0x8d, 0x58, 0x0b, 0xeb, 0x03};   /* FindOrQueue +0x174 */
 static const unsigned char FIND_HEAD[] = {0x4c, 0x89, 0x4c, 0x24, 0x20, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xec, 0x60};
 
 static void fresh(void)
@@ -71,9 +76,12 @@ static void fresh(void)
     memcpy(g_img + CAR_POOL_RVA, VFUNC2, sizeof VFUNC2);
     memcpy(g_img + CAR_POOL_TICK_RVA, TICK_HEAD, sizeof TICK_HEAD);
     memcpy(g_img + CAR_POOL_FIND_RVA, FIND_HEAD, sizeof FIND_HEAD);
+    memcpy(g_img + CAR_POOL_FIND_RVA + 0x174, FIND_IDS, sizeof FIND_IDS);
     g_raw[0] = 0;
     g_patches = 0;
     g_hooks = 0;
+    g_patch_calls = 0;
+    g_refuse_patch = 0;
 }
 
 int main(void)
@@ -120,8 +128,9 @@ int main(void)
           memset(expect + 0x4d, 0x90, 4);
           SetEnvironmentVariableA("FH2MP_CAR_SLOTS", good[i]);
           fresh();
-          assert(patch_car_pool() == 1 && g_patches == 2 && g_hooks == 2);
+          assert(patch_car_pool() == 1 && g_patches == 3 && g_hooks == 2 && g_img[CAR_POOL_FIND_RVA + 0x17b] == want[i]);
           assert(!memcmp(g_img + CAR_POOL_RVA, expect, sizeof expect));
+          assert(!memcmp(g_img + CAR_POOL_FIND_RVA + 0x174, FIND_IDS, 7) && !memcmp(g_img + CAR_POOL_FIND_RVA + 0x17c, FIND_IDS + 8, 2));   /* only the imm8 moved */
           assert(strstr(g_raw, "remote car slots 11 -> "));
       } }
 
@@ -138,6 +147,11 @@ int main(void)
     g_img[CAR_POOL_RVA] = 0x40;
     g_raw[0] = 0;
     assert(patch_car_pool() == 0 && strstr(g_raw, "mismatch: the car cache's module init"));
+    /* the player id range bytes differ (another build): nothing is patched, not even the cache (a cache of 74 slots with 12 ids makes every car invalid) */
+    fresh();
+    g_img[CAR_POOL_FIND_RVA + 0x17b] = 0x0c;
+    g_raw[0] = 0;
+    assert(patch_car_pool() == 0 && g_patches == 0 && strstr(g_raw, "mismatch: the stand-in id range of player vehicles") && !strstr(g_raw, "remote car slots 11 ->"));
 
     /* the diagnostic hook: runs the game's tick, logs the group state once and again only when it changes */
     { static unsigned char slots[100 * 0x590];
@@ -255,6 +269,16 @@ int main(void)
     g_img[CAR_POOL_FIND_RVA] = 0x40;
     assert(patch_car_pool() == 0 && g_hooks == 1);
     SetEnvironmentVariableA("FH2MP_CAR_DIAG", NULL);
+
+    /* the platform refuses one of the three patches: not reported as done, no hooks, no "slots" line */
+    SetEnvironmentVariableA("FH2MP_CAR_SLOTS", "30");
+    for (i = 1; i <= 3; i++) {
+        fresh();
+        g_refuse_patch = i;
+        assert(patch_car_pool() == 0 && g_hooks == 0 && !strstr(g_raw, "remote car slots 11 ->"));
+    }
+    fresh();
+    assert(patch_car_pool() == 1 && g_hooks == 2 && strstr(g_raw, "remote car slots 11 -> 30, player vehicle ids 0..30"));
 
     printf("car pool: ok\n");
     return 0;
