@@ -94,7 +94,7 @@ def _write(text):
         pass
 
 
-def event(level, sub, name, **fields):
+def event(level, sub, name, /, **fields):
     if not enabled(level, sub):
         return
     t = time.time()
@@ -103,23 +103,23 @@ def event(level, sub, name, **fields):
     _write(scrub(f"{stamp} {level} {sub} {name} {text}") + "\n")
 
 
-def trace(sub, name, **fields):
+def trace(sub, name, /, **fields):
     event("TRACE", sub, name, **fields)
 
 
-def debug(sub, name, **fields):
+def debug(sub, name, /, **fields):
     event("DEBUG", sub, name, **fields)
 
 
-def info(sub, name, **fields):
+def info(sub, name, /, **fields):
     event("INFO", sub, name, **fields)
 
 
-def warn(sub, name, **fields):
+def warn(sub, name, /, **fields):
     event("WARN", sub, name, **fields)
 
 
-def error(sub, name, **fields):
+def error(sub, name, /, **fields):
     event("ERROR", sub, name, **fields)
 
 

@@ -44,6 +44,17 @@ class Lines(Case):
         self.assertIn(f"INFO play play.start run={logs.run()} offline=True note='two words'", line)
         self.assertNotIn("skipped", line)
 
+    def test_the_start_line_is_written_and_a_field_may_be_called_level(self):
+        """logs.start passes level= (the configured level) as a field; it used to collide with event()'s own parameter and the launcher died at startup"""
+        with mock.patch.object(sys, "excepthook", sys.excepthook), mock.patch.object(threading, "excepthook", threading.excepthook), \
+                mock.patch.object(logs, "_base", logs.LEVELS["DEBUG"]):
+            logs.start("9.9.9")
+            logs.info("x", "x.field", level="raised", name="n", sub="s")
+        text = self.text()
+        self.assertRegex(text, r"INFO launcher launcher\.start run=[0-9a-f]{8} version=9\.9\.9 ")
+        self.assertIn("level=", text.splitlines()[0])
+        self.assertIn("level=raised name=n sub=s", text)
+
     def test_levels_below_the_setting_are_not_written_and_a_subsystem_can_be_raised(self):
         logs.debug("api", "api.detail")
         self.assertEqual(self.text(), "")
