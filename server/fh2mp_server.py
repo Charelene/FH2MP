@@ -268,7 +268,7 @@ CAR_PREDICTION_BODY_BITS = 710      # CarPredictionFull body, see the handler
 CAR_UNIVERSE_OFFSET = 395          # CarPredictionState +0x33, five bits; confirmed chain in docs/protocol.md
 CAR_UNIVERSE_MASK = 31 << CAR_UNIVERSE_OFFSET
 CAR_TELEPORT_OFFSET = 392          # packed 0x31, two bits, 1..3 cycling on a teleport (AdvanceTeleportCounter 0x12e3200)
-CAR_SPIN_OFFSET = 0x12 * 8          # packed 0x12 of the state, 3 x int16 over +-10 rad/s (docs/exe/netv2.md 7.2)
+CAR_SPIN_OFFSET = 0x12 * 8          # packed 0x12 of the state, 3 x int16 over +-10 rad/s (docs/re/netv2.md 7.2)
 CLOCK_SAMPLES = 30                 # Pings (one a second) per "clock" line, see Server.clock_sample
 SPIN_LIMIT = 6.0                  # rad/s: the game clamps every substep (0x12e7170), so more means changed physics [log only until seen on real clients]
 CAR_POLICY = os.environ.get("FH2MP_CAR_POLICY", "kick")   # a car in BLOCKED_CARS (traffic vehicles): off = ignore, log = report it, kick = withhold it and end the account's connections
@@ -415,7 +415,7 @@ RT_VARS = {"CurrentLocationId": (0, 32), "CompletedEventCount": (1, 3), "EventRa
 RT_INITIALISING, RT_DESTINATION_VOTE, RT_CAR_SELECT, RT_STATE_3, RT_DRIVE_TO_EVENT = 0, 1, 2, 3, 4
 RT_ARRIVED_AT_DESTINATION, RT_PREPARE_FOR_EVENT, RT_IN_EVENT, RT_FINALISE_EVENT = 5, 6, 7, 8
 RELAY_ROUTERS = (1, 2, 3, 9, 12)      # player / console / car / bucket-list player-state objects other clients must see
-# (maxObjects, numTypes) of the routers clients own objects on [C, docs/exe/netv2.md]: the wire fields are wider than these, and a receiver indexes
+# (maxObjects, numTypes) of the routers clients own objects on [C, docs/re/netv2.md]: the wire fields are wider than these, and a receiver indexes
 # its factory table with them unchecked (0x17a2040), so one bad create would hit everybody.
 ROUTER_LIMITS = {1: (0x40, 1), 2: (0x40, 1), 3: (0x40, 1), 9: (13, 3), 12: (13, 2)}
 SCORE_DOUBLES = {MSG_IN_PROGRESS_SCORE_UPDATE: 0, MSG_LAP_SCORE: 3, MSG_SCORE_KEYFRAME: 5}   # the game writes each as 8 bytes (FUN_14176abb0)
@@ -450,7 +450,7 @@ RESULT_OK, RESULT_VERSION_MISMATCH, RESULT_GAME_MISMATCH, RESULT_BANNED = 0, 1, 
 # Relay owner ids a world may hand out. The game's Nerd::ClientSyncedObjectManager (ctor game+17A0140) holds exactly 128 relay-owner tables
 # (manager+0x3c98, 0x70 bytes each: one map of that owner's objects, emptied object by object by DeregisterObject, game+17A3000) and its
 # lookup (game+17AA710) does not range-check the owner byte, so an object relayed under owner 128 or more makes every client read past the
-# array and fault at game+17AA83B / 17AA844 / 17AA84A (reproduced in game 2026-10-26, r12 = the owner id; docs/crash-triage-2026-10-26.md).
+# array and fault at game+17AA83B / 17AA844 / 17AA84A (reproduced in game 2026-10-26, r12 = the owner id; docs/investigations/2026-10/crash-triage-2026-10-26.md).
 # A world gives each connection the lowest id nobody holds. A leaver's id is kept out of use for OWNER_QUARANTINE_S, after the server has
 # sent the deletes of all its objects to everyone, and the receivers' per-owner replay counters for it are cleared; then it is handed out again.
 RELAY_OWNER_LAST = 127

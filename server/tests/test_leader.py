@@ -1,6 +1,6 @@
 """PlayerData.IsLeader: the flag behind the "<gamertag> IS SETTING UP AN EVENT" toast of Online Free Roam.
 
-Inputs are the messages the game itself sends (docs/exe/netv2.md): RequestOwnership of the lobby's GameOptions when a player starts setting up
+Inputs are the messages the game itself sends (docs/re/netv2.md): RequestOwnership of the lobby's GameOptions when a player starts setting up
 an event (States::NetworkGetGameOptionsOwnership), DropLeadership (msg 60, Nerd::Msg::DropLeadership::Send 0x17f7a50: type only) when the
 public activation is cancelled, and MsgRequestRace (msg 38). Outputs are read with the independent wire reader of test_race_flow.Receiver,
 which records the player-object (router 1) messages: a server update with both key flags set for the owner's own flag, a relay update with

@@ -1,4 +1,4 @@
-"""Bucket-list co-op over the real server and a wire reader written from the client's own readers (bucketlist.py, docs/dlc-recon-2026-10-27.md).
+"""Bucket-list co-op over the real server and a wire reader written from the client's own readers (bucketlist.py, docs/investigations/2026-10/dlc-recon-2026-10-27.md).
 
 The 74-bit PlayerState update and the (15, 5) of RequestSynchronize are what a real dev client sent on 2026-10-29 18:13 (server log, router 12
 id 0, then message 63); everything the server sends is read back by the independent Receiver of test_race_flow, which reads the keys the way
