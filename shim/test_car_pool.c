@@ -10,6 +10,7 @@ static unsigned char *g_img;
 static void log_begin(void) {}
 static void log_raw(const char *s) { strncat(g_raw, s, sizeof g_raw - strlen(g_raw) - 1); }
 static void log_dec(unsigned long v) { char b[16]; wsprintfA(b, "%lu", v); log_raw(b); }
+static void log_hex(unsigned long long v, int digits) { char b[24], f[8]; wsprintfA(f, "%%0%dlx", digits); wsprintfA(b, f, (unsigned long)v); log_raw(b); }
 static unsigned char *find_fh2_image(void) { return g_img; }
 static int code_is(const char *tag, const char *what, const unsigned char *img, unsigned rva, const void *expect, unsigned n)
 {
@@ -26,6 +27,8 @@ static unsigned char g_fake_request[0x40];
 static int *g_cur_type_ptr;
 static int g_type_seen_in_find = -2;
 static unsigned short g_ids_result = 0xffff;
+static void *g_alloc_result;
+static void *fake_alloc(void *m, unsigned long long size, unsigned short tag, unsigned long long *p) { (void)m; (void)size; (void)tag; (void)p; return g_alloc_result; }
 static unsigned short fake_ids(void *m, unsigned short lo, unsigned short hi, void *p);
 static void *fake_find_sharing(void *self, void *out, void *vehicle_ref, void *manager, void *extra, unsigned priority);
 static int g_aictl_calls, g_fake_is_local_result = 1;
@@ -54,7 +57,7 @@ static int plat_hook(const char *name, void *target, void *detour, void **origin
 {
     (void)name; (void)target; (void)detour;
     g_hooks++;
-    *original = target == g_img + 0xfd08b0 ? (void *)fake_find : target == g_img + 0xfceee0 ? (void *)fake_ids : target == g_img + 0x720960 ? (void *)fake_ai : target == g_img + 0xf73e10 ? (void *)fake_aictl : (void *)fake_tick;
+    *original = target == g_img + 0xfd08b0 ? (void *)fake_find : target == g_img + 0xfceee0 ? (void *)fake_ids : target == g_img + 0x720960 ? (void *)fake_ai : target == g_img + 0xf73e10 ? (void *)fake_aictl : target == g_img + 0x125d850 ? (void *)fake_alloc : (void *)fake_tick;
     return 1;
 }
 static int g_refuse_patch;       /* the platform refuses the n-th patch call (1-based) */
@@ -95,6 +98,7 @@ static const unsigned char MAX_SETTER[] = {0x44, 0x89, 0x82, 0xf0, 0x00, 0x00, 0
 static const unsigned char MIN_SETTER[] = {0x44, 0x89, 0x82, 0xb0, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc};
 static const unsigned char AI_HEAD[] = {0x40, 0x55, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8d, 0x6c, 0x24, 0xc9, 0x48, 0x81, 0xec, 0xa0, 0x00, 0x00, 0x00};
 static const unsigned char BUDGET_HEAD[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57, 0x48, 0x83, 0xec, 0x20};
+static const unsigned char ALLOC_HEAD[] = {0x4c, 0x8b, 0xdc, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x81, 0xec, 0x60, 0x02, 0x00, 0x00, 0x48, 0xc7, 0x44, 0x24, 0x58};
 static const unsigned char LABELS_HEAD[] = {0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xec, 0x40, 0x48, 0xc7, 0x44, 0x24, 0x20};
 static const unsigned char LABELS_CMP[] = {0xff, 0xc7, 0x83, 0xff, 0x0c, 0x0f, 0x82};
 static const unsigned char AICTL_HEAD[] = {0x4c, 0x8b, 0xdc, 0x57, 0x48, 0x81, 0xec, 0x50, 0x03, 0x00, 0x00, 0x48, 0xc7, 0x44, 0x24, 0x40, 0xfe, 0xff, 0xff, 0xff};
@@ -111,6 +115,7 @@ static void fresh(void)
     memcpy(g_img + CAR_POOL_AICTL_RVA, AICTL_HEAD, sizeof AICTL_HEAD);
     memcpy(g_img + CAR_POOL_LABELS_RVA, LABELS_HEAD, sizeof LABELS_HEAD);
     memcpy(g_img + CAR_POOL_BUDGET_RVA, BUDGET_HEAD, sizeof BUDGET_HEAD);
+    memcpy(g_img + CAR_POOL_ALLOC_RVA, ALLOC_HEAD, sizeof ALLOC_HEAD);
     memcpy(g_img + CAR_POOL_LABELS_RVA + CAR_POOL_LABELS_CMP, LABELS_CMP, sizeof LABELS_CMP);
     memcpy(g_img + 0x5430d0, MAX_SETTER, sizeof MAX_SETTER);
     memcpy(g_img + 0x653780, MIN_SETTER, sizeof MIN_SETTER);
@@ -458,6 +463,33 @@ int main(void)
     fresh();
     assert(patch_car_pool() == 1 && g_patches == 3 && !memcmp(g_img + CAR_POOL_BUDGET_RVA, BUDGET_HEAD, 20));   /* off by default */
     SetEnvironmentVariableA("FH2MP_CAR_SLOTS", NULL);
+
+    /* FH2MP_CAR_ALLOCDIAG=1: failed allocations are logged, successful ones are not, thirty lines at most; nothing else is patched */
+    SetEnvironmentVariableA("FH2MP_CAR_SLOTS", NULL);
+    SetEnvironmentVariableA("FH2MP_CAR_ALLOCDIAG", "1");
+    fresh();
+    assert(patch_car_pool() == 0 && g_hooks == 1 && g_patches == 0);
+    { static unsigned char manager[0x40];
+      unsigned k;
+      manager[0x18] = 2;
+      g_car_pool_alloc_orig = (car_pool_alloc_fn)fake_alloc;
+      g_car_pool_alloc_failed = 0;
+      g_alloc_result = manager;                                              /* success: no line */
+      g_raw[0] = 0;
+      assert(car_pool_alloc(manager, 0x3ea0, 0x1234, NULL) == manager && g_raw[0] == 0);
+      g_alloc_result = NULL;
+      assert(car_pool_alloc(manager, 0x3ea0, 0x1234, NULL) == NULL);
+      assert(strstr(g_raw, "carpool: allocation failed, 16032 bytes, tag 0x1234, heap mode 2\n"));
+      g_raw[0] = 0;
+      car_pool_alloc(manager, 0, 0x1234, NULL);                              /* a zero-byte request is not a failure */
+      assert(g_raw[0] == 0);
+      for (k = 0; k < 40; k++) car_pool_alloc(manager, 64, 1, NULL);
+      assert(g_car_pool_alloc_failed == 30);                                 /* thirty lines at most */
+    }
+    fresh();
+    g_img[CAR_POOL_ALLOC_RVA] = 0x40;                                         /* another build: no hook */
+    assert(patch_car_pool() == 0 && g_hooks == 0);
+    SetEnvironmentVariableA("FH2MP_CAR_ALLOCDIAG", NULL);
 
     /* another build of the id search or the request builder: nothing is patched (a bigger cache with 12 ids makes every car invalid) */
     SetEnvironmentVariableA("FH2MP_CAR_SLOTS", "30");

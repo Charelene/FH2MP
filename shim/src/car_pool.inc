@@ -421,6 +421,31 @@ static void car_pool_aictl(void *car)
  * (game+0x1334f34, dev 2026-11-03). Budgets are an Xbox One memory model; the check is made to return true. Also used by two graphics allocators. */
 #define CAR_POOL_BUDGET_RVA 0x125de50
 
+/* FH2MP_CAR_ALLOCDIAG=1: the first 30 allocations Mem::MemoryManager::AllocateFromHeap (game+0x125d850) fails (returns NULL) are logged with their size, tag
+ * (the category: high byte) and heap mode (manager+0x18: below 2 HeapAlloc, otherwise XMemAlloc). Passive. */
+#define CAR_POOL_ALLOC_RVA 0x125d850
+typedef void *(*car_pool_alloc_fn)(void *, unsigned long long, unsigned short, unsigned long long *);
+static car_pool_alloc_fn g_car_pool_alloc_orig;
+static unsigned g_car_pool_alloc_failed;
+
+static void *car_pool_alloc(void *manager, unsigned long long size, unsigned short tag, unsigned long long *extra)
+{
+    void *result = g_car_pool_alloc_orig(manager, size, tag, extra);
+
+    if (!result && size && g_car_pool_alloc_failed < 30) {
+        g_car_pool_alloc_failed++;
+        log_begin();
+        log_raw("carpool: allocation failed, ");
+        log_dec((unsigned long)size);
+        log_raw(" bytes, tag 0x");
+        log_hex(tag, 4);
+        log_raw(", heap mode ");
+        log_dec(manager ? *((unsigned char *)manager + 0x18) : 99);
+        log_raw("\n");
+    }
+    return result;
+}
+
 static int car_pool_env_flag(const char *name)
 {
     char v[8];
@@ -509,6 +534,13 @@ static int patch_car_pool(void)
 
     if (!img) {
         return 0;
+    }
+    if (car_pool_env_flag("FH2MP_CAR_ALLOCDIAG")) {
+        static const unsigned char alloc_head[] = {0x4C, 0x8B, 0xDC, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x81, 0xEC, 0x60, 0x02, 0x00, 0x00, 0x48, 0xC7, 0x44, 0x24, 0x58};
+
+        if (code_is("carpool", "the heap allocator", img, CAR_POOL_ALLOC_RVA, alloc_head, sizeof alloc_head)) {
+            plat_hook("carpool: failed allocations, passive", img + CAR_POOL_ALLOC_RVA, (void *)car_pool_alloc, (void **)&g_car_pool_alloc_orig);
+        }
     }
     if (!want) {
         /* FH2MP_CAR_DIAG=1: only the passive log, the cache is left as the game builds it */
