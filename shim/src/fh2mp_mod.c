@@ -2425,6 +2425,8 @@ static int patch_online_meet(void)
 #include "car_pool.inc"
 #include "torque_load_guard.inc"
 #include "online_setup.inc"
+#include "hook_guard.inc"
+#include "gameplaylog_guard.inc"
 
 static int patch_torque_load(void)
 {
@@ -5492,6 +5494,8 @@ static DWORD WINAPI late_init(LPVOID unused)
         {
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_PARTYHUD", env, 8) == 0) patch_party_hud();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_HOOKGUARD", env, 8) == 0) patch_hook_guard();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_LOGGUARD", env, 8) == 0) patch_gameplaylog_guard();
         }
         patch_car_pool();
         {
@@ -5621,6 +5625,7 @@ static DWORD WINAPI late_init(LPVOID unused)
 }
 
 #include "session_age.inc"
+#include "session_switches.inc"
 
 /*
  * Session handed over by the launcher: fh2mp-session.txt next to the log, "key=value" lines:
@@ -5750,6 +5755,8 @@ static int session_load(void)
                     g_token[n] = 0;
                 } else if (lstrcmpA(line, "run") == 0 && run_id_ok(eq)) {
                     lstrcpynA(g_run, eq, sizeof g_run);
+                } else if (lstrcmpA(line, "switches") == 0) {
+                    session_switches(eq);
                 } else if (lstrcmpA(line, "gamedb") == 0 && eq[0]) {
                     WCHAR rel[MAX_PATH];
                     int absolute = eq[0] == '\\' || (eq[0] && eq[1] == ':');
