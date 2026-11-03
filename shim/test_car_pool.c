@@ -80,6 +80,20 @@ int main(void)
           assert(patch_car_pool() == 0 && g_patches == 0 && !memcmp(g_img + CAR_POOL_RVA, VFUNC2, sizeof VFUNC2));
       } }
 
+    /* FH2MP_CAR_DIAG=1 alone: the passive hook only, no patch */
+    SetEnvironmentVariableA("FH2MP_CAR_SLOTS", NULL);
+    SetEnvironmentVariableA("FH2MP_CAR_DIAG", "1");
+    fresh();
+    assert(patch_car_pool() == 0 && g_patches == 0 && g_hooks == 1 && !memcmp(g_img + CAR_POOL_RVA, VFUNC2, sizeof VFUNC2));
+    g_img[CAR_POOL_TICK_RVA] = 0x40;                                      /* another build: no hook */
+    fresh();
+    g_img[CAR_POOL_TICK_RVA] = 0x40;
+    assert(patch_car_pool() == 0 && g_hooks == 0);
+    SetEnvironmentVariableA("FH2MP_CAR_DIAG", "0");
+    fresh();
+    assert(patch_car_pool() == 0 && g_hooks == 0);
+    SetEnvironmentVariableA("FH2MP_CAR_DIAG", NULL);
+
     /* 12 to 75: the 11 becomes the value, the clamp is nopped, nothing else moves */
     { static const char *const good[] = {"12", "40", "75"};
       static const int want[] = {12, 40, 75};
@@ -113,6 +127,7 @@ int main(void)
     { static unsigned char slots[100 * 0x590];
       static unsigned char request[0x5d0], request2[0x5d0], request3[0x5d0];
       static unsigned char handle1[0x40], handle2[0x40];
+      static unsigned char vehicle1[0x700], vehicle2[0x700];
       unsigned char module[0x400], queue_obj[0x40];
       unsigned long long qptr = (unsigned long long)(ULONG_PTR)queue_obj;
       unsigned char *group = module + CAR_POOL_GROUP;
@@ -146,10 +161,18 @@ int main(void)
       *(unsigned *)(handle1 + 0x20) = 3;                                  /* load state 3: not loaded */
       *(unsigned long long *)(slots + 0x558) = (unsigned long long)(ULONG_PTR)request;
       *(unsigned *)(request + 0x598) = 1;
+      *(unsigned long long *)(request + 0x568) = (unsigned long long)(ULONG_PTR)vehicle1;
+      *(short *)(vehicle1 + 0x110 + 0x234) = -1;                          /* no id: the pool is asked */
+      *(short *)(vehicle1 + 0x110 + 0x236) = 5;
+      *(int *)(vehicle1 + 0x110 + 0x488) = 3;
       *(unsigned long long *)(slots + 5 * 0x590 + 0x560) = (unsigned long long)(ULONG_PTR)handle2;
       *(unsigned *)(handle2 + 0x20) = 7;                                  /* load state 7: loaded */
       *(unsigned long long *)(slots + 5 * 0x590 + 0x558) = (unsigned long long)(ULONG_PTR)request2;
       *(unsigned *)(request2 + 0x598) = 2;
+      *(unsigned long long *)(request2 + 0x568) = (unsigned long long)(ULONG_PTR)vehicle2;
+      *(short *)(vehicle2 + 0x110 + 0x234) = 1399;
+      *(short *)(vehicle2 + 0x110 + 0x236) = 6;
+      *(int *)(vehicle2 + 0x110 + 0x488) = 2;
       request2[0x5a8] = 1;
       *(unsigned long long *)(slots + 7 * 0x590 + 0x558) = (unsigned long long)(ULONG_PTR)request3;     /* a second request in state 1 */
       *(unsigned *)(request3 + 0x598) = 1;
@@ -158,6 +181,18 @@ int main(void)
       g_car_pool_scan_at = 0;
       car_pool_tick(module, NULL, NULL, NULL);
       assert(strstr(g_raw, "cars 2, assigned 3, unloading 1, request state 1 2, state 2 1, ready flag 1, car load states 3=1 7=1"));
+      assert(strstr(g_raw, "carpool: slot 0 vehicle id 65535/5 type 3, request state 1, load state 3\n"));
+      assert(strstr(g_raw, "carpool: slot 5 vehicle id 1399/6 type 2, request state 2, load state 7\n"));
+      /* the same values again: no new vehicle line */
+      g_raw[0] = 0;
+      g_car_pool_scan_at = 0;
+      car_pool_tick(module, NULL, NULL, NULL);
+      assert(!strstr(g_raw, "vehicle id"));
+      /* a changed id is logged once */
+      *(short *)(vehicle1 + 0x110 + 0x234) = 4;
+      g_car_pool_scan_at = 0;
+      car_pool_tick(module, NULL, NULL, NULL);
+      assert(strstr(g_raw, "carpool: slot 0 vehicle id 4/5 type 3, request state 1, load state 3\n"));
       /* a slot vector that is not whole slots, or bigger than the scan buffer, is not scanned */
       *(unsigned long long *)(group + 0x68) = (unsigned long long)(ULONG_PTR)(slots + 74 * 0x590 - 1);
       g_raw[0] = 0;

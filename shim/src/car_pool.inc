@@ -5,7 +5,9 @@
  * client with 17 or 75 players showed exactly 11 remote cars (dev 2026-11-02).
  * Patched: the 11 (imm32 of `mov r9d, 0xb` at +0x28) becomes FH2MP_CAR_SLOTS, and the clamp to 12 (`cmovge rax, rcx` at +0x4d) is nopped, so the group
  * holds that many slots. A user-set NumAICars still wins, unclamped. Not patched: NumAICars itself (it also sets AI/Drivatar counts). Unset FH2MP_CAR_SLOTS
- * changes nothing; the value is 11 to 75. Each slot is a whole ForzaCar built on demand: memory per slot was not measured. */
+ * changes nothing; the value is 11 to 75. Each slot is a whole ForzaCar built on demand: memory per slot was not measured. 75 slots alone made every
+ * remote car land in load state 12 (no free car id, see the diagnostic below): the loader's id pool (FindOrQueue 0xfd08b0) is a second cap. FH2MP_CAR_DIAG=1
+ * installs only the passive log, with the cache left as the game builds it. */
 #define CAR_POOL_RVA 0x47a570
 #define CAR_POOL_NATIVE 11
 #define CAR_POOL_MAX 75
@@ -49,6 +51,54 @@ static unsigned char g_car_pool_slots[CAR_POOL_SLOTS_MAX * CAR_POOL_SLOT];
 /* The slots by what they hold (helper_480a60 promotes a slot's request from state 1 to 2 once its car is loaded and request+0x5a8 is set):
  * cars = slot+0x560 set, assigned = slot+0x558 (a request) set, unloading = slot+0x568 set, then of the assigned ones the request's state (+0x598)
  * 1 or 2 and how many have +0x5a8 set. Scanned twice a second at most. */
+/* Each assigned slot's pending vehicle (request+0x568; its info is handle+0x110: the car's unique id short at +0x234 and +0x236, the vehicle type at
+ * +0x488, which FindOrQueue 0xfd08b0 uses to pick the stand-in id range). One line per slot when its values change, 300 lines at most. */
+static struct { unsigned long long request; int id, id2, type; unsigned state, load; } g_car_pool_vehicle[CAR_POOL_SLOTS_MAX];
+static unsigned g_car_pool_vehicle_lines;
+
+static void car_pool_vehicle_line(unsigned index, unsigned long long request, unsigned load)
+{
+    unsigned long long vehicle = 0;
+    unsigned char info[4], kind[4];
+    int id, id2, type;
+    unsigned state = 0;
+
+    if (g_car_pool_vehicle_lines >= 300 || !read_game_memory((const void *)(ULONG_PTR)(request + 0x568), &vehicle, sizeof vehicle) || !vehicle ||
+        !read_game_memory((const void *)(ULONG_PTR)(vehicle + 0x110 + 0x234), info, sizeof info) ||
+        !read_game_memory((const void *)(ULONG_PTR)(vehicle + 0x110 + 0x488), kind, sizeof kind)) {
+        return;
+    }
+    read_game_memory((const void *)(ULONG_PTR)(request + 0x598), &state, sizeof state);
+    id = (short)(info[0] | (info[1] << 8));
+    id2 = (short)(info[2] | (info[3] << 8));
+    type = (int)(kind[0] | (kind[1] << 8) | (kind[2] << 16) | ((unsigned)kind[3] << 24));
+    if (g_car_pool_vehicle[index].request == request && g_car_pool_vehicle[index].id == id && g_car_pool_vehicle[index].id2 == id2 &&
+        g_car_pool_vehicle[index].type == type && g_car_pool_vehicle[index].state == state && g_car_pool_vehicle[index].load == load) {
+        return;
+    }
+    g_car_pool_vehicle[index].request = request;
+    g_car_pool_vehicle[index].id = id;
+    g_car_pool_vehicle[index].id2 = id2;
+    g_car_pool_vehicle[index].type = type;
+    g_car_pool_vehicle[index].state = state;
+    g_car_pool_vehicle[index].load = load;
+    g_car_pool_vehicle_lines++;
+    log_begin();
+    log_raw("carpool: slot ");
+    log_dec(index);
+    log_raw(" vehicle id ");
+    log_dec((unsigned long)(unsigned short)id);
+    log_raw("/");
+    log_dec((unsigned long)(unsigned short)id2);
+    log_raw(" type ");
+    log_dec((unsigned long)type);
+    log_raw(", request state ");
+    log_dec(state);
+    log_raw(", load state ");
+    log_dec(load);
+    log_raw("\n");
+}
+
 static void car_pool_scan(unsigned slots, unsigned *out)
 {
     unsigned i;
@@ -58,14 +108,18 @@ static void car_pool_scan(unsigned slots, unsigned *out)
         const unsigned char *slot = g_car_pool_slots + (size_t)i * CAR_POOL_SLOT;
         unsigned long long car = *(const unsigned long long *)(slot + 0x560), request = *(const unsigned long long *)(slot + 0x558);
         unsigned char tail[0x11];
+        unsigned load = 99;
 
         out[0] += car != 0;
         if (car) {
-            unsigned load;
-
             if (read_game_memory((const void *)(ULONG_PTR)(car + 0x20), &load, sizeof load)) {
                 out[6 + (load < 15 ? load : 15)]++;      /* the car's load request: 7, 8 and 0xb are 'loaded' (helper_fd0750) */
+            } else {
+                load = 99;
             }
+        }
+        if (request) {
+            car_pool_vehicle_line(i, request, load);
         }
         out[1] += request != 0;
         out[2] += *(const unsigned long long *)(slot + 0x568) != 0;
@@ -174,11 +228,21 @@ static int patch_car_pool(void)
     static const unsigned char native[] = {0x41, 0xB9, 0x0B, 0x00, 0x00, 0x00, 0x85, 0xD2, 0x44, 0x0F, 0x49, 0xCA};   /* +0x26 */
     static const unsigned char clamp[] = {0x41, 0x83, 0xF9, 0x0C, 0x48, 0x0F, 0x4D, 0xC1};                            /* +0x49 */
     static const unsigned char nop4[] = {0x90, 0x90, 0x90, 0x90};
+    static const unsigned char tick_head[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57};
     unsigned char *img = find_fh2_image();
     unsigned char slots[4] = {0, 0, 0, 0};
     int want = car_pool_from_env(), done = 0;
+    char diag[8];
 
-    if (!want || !img) {
+    if (!img) {
+        return 0;
+    }
+    if (!want) {
+        /* FH2MP_CAR_DIAG=1: only the passive log, the cache is left as the game builds it */
+        if (GetEnvironmentVariableA("FH2MP_CAR_DIAG", diag, sizeof diag) && diag[0] == '1' &&
+            code_is("carpool", "the car cache's tick", img, CAR_POOL_TICK_RVA, tick_head, sizeof tick_head)) {
+            plat_hook("carpool: cache state, passive", img + CAR_POOL_TICK_RVA, (void *)car_pool_tick, (void **)&g_car_pool_tick_orig);
+        }
         return 0;
     }
     if (!code_is("carpool", "the car cache's module init", img, CAR_POOL_RVA, head, sizeof head) ||
@@ -190,7 +254,6 @@ static int patch_car_pool(void)
     done += plat_patch("carpool: Non-LOD0 car slots", img + CAR_POOL_RVA + 0x28, native + 2, slots, 4);
     done += plat_patch("carpool: no clamp to 12 slots", img + CAR_POOL_RVA + 0x4d, clamp + 4, nop4, 4);
     if (done == 2) {
-        static const unsigned char tick_head[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57};
         if (code_is("carpool", "the car cache's tick", img, CAR_POOL_TICK_RVA, tick_head, sizeof tick_head)) {
             plat_hook("carpool: cache state, passive", img + CAR_POOL_TICK_RVA, (void *)car_pool_tick, (void **)&g_car_pool_tick_orig);
         }
