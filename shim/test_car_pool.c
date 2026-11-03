@@ -427,7 +427,7 @@ int main(void)
     SetEnvironmentVariableA("FH2MP_CAR_SLOTS", "14");
     SetEnvironmentVariableA("FH2MP_CAR_NODRIVATARS", "1");
     fresh();
-    assert(patch_car_pool() == 1 && g_patches == 5 && g_hooks == 3 && g_car_pool_ids_hi == 0 && strstr(g_raw, "remote car slots 11 -> 14, no Drivatars (FH2MP_CAR_SLOTS)"));
+    assert(patch_car_pool() == 1 && g_patches == 5 && g_hooks == 3 && g_car_pool_ids_hi == 0 && strstr(g_raw, "remote car slots 11 -> 14, no Drivatars, parts cxna (FH2MP_CAR_SLOTS)"));
     assert(g_img[CAR_POOL_RVA + 0x28] == 14);
     assert(!memcmp(g_img + CAR_POOL_RVA + 0x2e, "\x90\x90\x90\x90", 4) && !memcmp(g_img + CAR_POOL_RVA + 0x2c, VFUNC2 + 0x2c, 2));
     assert(!memcmp(g_img + 0x5430d0, "\xc7\x82\xf0\x00\x00\x00\x00\x00\x00\x00\xc3", 11));
@@ -464,6 +464,36 @@ int main(void)
       car_pool_ai_connect(module);
       assert(g_num_ai_seen == 99 && g_ai_calls == 3);
       g_car_pool_options = NULL;
+    }
+    /* parts: letters pick which of the four are applied */
+    { static const struct { const char *value; int patches, hooks; unsigned set[3]; } cases[] = {
+          {"c", 3, 2, {0x47a570 + 0x2e, 0, 0}},                 /* cache count only */
+          {"x", 3, 2, {0x5430d0, 0, 0}},
+          {"n", 3, 2, {0x653780, 0, 0}},
+          {"a", 2, 3, {0, 0, 0}},                               /* the AI hook only: no byte patch beyond the slots */
+          {"xn", 4, 2, {0x5430d0, 0x653780, 0}},
+          {"cxna", 5, 3, {0x47a570 + 0x2e, 0x5430d0, 0x653780}},
+          {"zz", 2, 2, {0, 0, 0}} };                            /* unknown letters pick nothing */
+      for (i = 0; i < 7; i++) {
+          int k;
+          SetEnvironmentVariableA("FH2MP_CAR_NODRIVATARS", cases[i].value);
+          fresh();
+          assert(patch_car_pool() == 1 && g_patches == cases[i].patches && g_hooks == cases[i].hooks);
+          for (k = 0; k < 3; k++) {
+              if (cases[i].set[k] && cases[i].set[k] != 0x47a570 + 0x2e) assert(g_img[cases[i].set[k]] != MAX_SETTER[0] || g_img[cases[i].set[k] + 1] != 0x89);
+              if (cases[i].set[k] == 0x47a570 + 0x2e) assert(g_img[cases[i].set[k]] == 0x90);
+          }
+      }
+      SetEnvironmentVariableA("FH2MP_CAR_NODRIVATARS", "x");
+      fresh();
+      assert(patch_car_pool() == 1 && g_img[0x5430d0] == 0xc7 && g_img[0x653780] == 0x44 && g_img[0x47a570 + 0x2e] == 0x44);   /* only the maximum setter changed */
+      SetEnvironmentVariableA("FH2MP_CAR_NODRIVATARS", "n");
+      fresh();
+      assert(patch_car_pool() == 1 && g_img[0x5430d0] == 0x44 && g_img[0x653780] == 0xc7);
+      SetEnvironmentVariableA("FH2MP_CAR_NODRIVATARS", "a");
+      fresh();
+      g_img[0x5430d0] ^= 0xff;                                          /* a setter that does not match is irrelevant when it is not selected */
+      assert(patch_car_pool() == 1);
     }
     SetEnvironmentVariableA("FH2MP_CAR_NODRIVATARS", NULL);
     SetEnvironmentVariableA("FH2MP_CAR_SLOTS", NULL);
