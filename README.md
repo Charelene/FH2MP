@@ -1,7 +1,7 @@
 # FH2MP: Forza Horizon 2 online, back from the dead (sort of)
 
 > **v1.1.0.** It works and it is young: expect crashes, desyncs and rough edges.
-> Known problems and workarounds: [KNOWN_ISSUES.md](KNOWN_ISSUES.md). Changes per version: [Releases](https://github.com/Charelene/FH2MP/releases).
+> Known problems: [open issues](https://github.com/Charelene/FH2MP/issues) and the [help pages](https://forza.scuffed.af/help/). Changes per version: [Releases](https://github.com/Charelene/FH2MP/releases).
 
 [![Patreon](https://img.shields.io/badge/Patreon-Support%20FH2MP-FF424D?logo=patreon&logoColor=white)](https://www.patreon.com/fh2mp)
 
@@ -48,7 +48,7 @@ All from real game clients running against our server.
 
 </details>
 
-Details and open bugs are in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
+Open bugs are in the [issue tracker](https://github.com/Charelene/FH2MP/issues).
 
 ## Install (players)
 
@@ -88,7 +88,7 @@ for Azimuth.
 
 ### If something goes wrong
 
-Check [KNOWN_ISSUES.md](KNOWN_ISSUES.md), then [open an issue](https://github.com/Charelene/FH2MP/issues/new/choose) with these files from the
+Check the [help pages](https://forza.scuffed.af/help/) and the [open issues](https://github.com/Charelene/FH2MP/issues), then [open an issue](https://github.com/Charelene/FH2MP/issues/new/choose) with these files from the
 `data` folder inside your Azimuth folder:
 
 - `data\logs\azimuth.log` (always) and the newest `.dmp` in `data\logs` for a crash;
@@ -101,7 +101,7 @@ these contain passwords or keys.
 
 ## Build from source
 
-Sources: `shim/` (C), `launcher/` (Python, PySide6), `server/` (Python), `release/` (packaging and signing), `ops/` (deploy files).
+Sources: `shim/` (C), `launcher/` (Python, PySide6), `server/` (Python), `release/` (packaging and signing).
 
 **Shim.** Needs `x86_64-w64-mingw32-gcc` (and `windres`). It compiles against the FH2 Mod Platform's API header in
 `third_party/fh2-mod-platform`.
@@ -134,8 +134,6 @@ The Windows installer is built by CI with Inno Setup (`packaging/fh2mp.iss`). Th
 commits, tags and pushes. The workflow in `.github/workflows/release.yml` then builds the shim and the Windows and Linux launchers, signs
 `manifest.json` with the Ed25519 key in the `RELEASE_SIGNING_KEY` secret (the launcher embeds the public half) and publishes the GitHub
 release, using `release/notes/<tag>.md` as the description when that file exists. `release/keygen.py` makes a signing key.
-`ops/release-prod.sh` rolls a published release out to the production server and raises its minimum versions. `ops/ship.sh vX.Y.Z
-<user@host> <ssh-key>` does all of it in one go: publish, wait for the build, roll out, lift the maintenance message.
 
 ## Supported setups
 

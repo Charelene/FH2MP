@@ -1,7 +1,7 @@
 name: ci
 
-# Every check on every push and pull request, so a release tag only ever builds a commit that already passed (ops/ship.sh and
-# release/publish.sh refuse a commit without a green run of this workflow). Linux runs release/ci.sh in the image from
+# Every check on every push and pull request, so a release tag only ever builds a commit that already passed (release/publish.sh and the
+# ship step refuse a commit without a green run of this workflow). Linux runs release/ci.sh in the image from
 # release/ci.Containerfile, the same one `release/ci.sh --container` uses on a developer machine; Windows runs the launcher checks.
 on:
   push:
