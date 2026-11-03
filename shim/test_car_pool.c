@@ -425,7 +425,7 @@ int main(void)
     SetEnvironmentVariableA("FH2MP_CAR_SLOTS", "40");
     SetEnvironmentVariableA("FH2MP_CAR_IDS", "1");
     fresh();
-    assert(patch_car_pool() == 1 && g_patches == 2 && g_hooks == 4 && g_car_pool_ids_hi == 40 && strstr(g_raw, "player car stand-in ids raised"));
+    assert(patch_car_pool() == 1 && g_patches == 2 && g_hooks == 4 && g_car_pool_ids_hi == 40 + 29 && strstr(g_raw, "player car stand-in ids raised"));
     SetEnvironmentVariableA("FH2MP_CAR_IDS", NULL);
 
     /* FH2MP_CAR_NODRIVATARS=1: the slot count ignores NumAICars, both Drivatar setters store 0, the festival AI connect is hooked */

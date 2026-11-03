@@ -326,6 +326,7 @@ static void *car_pool_find(void *self, void *out, void *vehicle_ref, void *manag
  * range is raised, the others keep 0..11. g_car_pool_ids_hi is the top for type 3, 0 = unchanged. */
 #define CAR_POOL_IDS_RVA 0xfceee0
 #define CAR_POOL_IDS_PLAYER_TYPE 3
+#define CAR_POOL_AI_IDS_TOP 29       /* the game's AI cars (type 2) hold ids 12..29, so a player car past 11 needs an id above them */
 typedef unsigned short (*car_pool_ids_fn)(void *, unsigned short, unsigned short, void *);
 static car_pool_ids_fn g_car_pool_ids_orig;
 static unsigned g_car_pool_ids_hi;
@@ -546,7 +547,7 @@ static int patch_car_pool(void)
         }
         if (ids && plat_hook("carpool: AI training entry of cars with a high id", img + CAR_POOL_TRAIN_RVA, (void *)car_pool_train, (void **)&g_car_pool_train_orig) &&
             plat_hook("carpool: stand-in ids of player cars", img + CAR_POOL_IDS_RVA, (void *)car_pool_ids, (void **)&g_car_pool_ids_orig)) {
-            g_car_pool_ids_hi = (unsigned)want;      /* experimental, FH2MP_CAR_IDS=1: crashed the game (more arrays of 12 in the AI simulation) */
+            g_car_pool_ids_hi = (unsigned)want + CAR_POOL_AI_IDS_TOP;      /* experimental, FH2MP_CAR_IDS=1: past the AI ids 12..29 the game's own cars take */
         }
         log_begin();
         log_raw("carpool: remote car slots 11 -> ");
