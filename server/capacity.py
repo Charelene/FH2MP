@@ -8,13 +8,13 @@ Above 17 players the private universes run out (PRIVATE_UNIVERSE_COUNT): the ext
 import os
 
 CLIENT_LIMIT = 12
-FREE_ROAM_MAX = 72          # FH4's lobby size; the relay's owner ids (1..127 per world) and the HUD patch's 36 rows are the limits above it in practice
+FREE_ROAM_MAX = 75          # FH4 holds 72; 75 is the dev test size; the relay's owner ids (1..127 per world) and the HUD patch (36 rows by default, FH2MP_PARTY_MAX up to 75) are the limits above it in practice
 FREE_ROAM_TYPE = 2          # Nerd::NetworkLobbyType: 1 RoadTrip, 2 FreeRoam, 3 CarMeet
 ENV = "FH2MP_WORLD_CAPACITY"
 
 
 def free_roam():
-    """Players in one Free Roam world: FH2MP_WORLD_CAPACITY from 12 to 72, 12 when it is unset or not a number."""
+    """Players in one Free Roam world: FH2MP_WORLD_CAPACITY from 12 to 75, 12 when it is unset or not a number."""
     try:
         n = int(os.environ.get(ENV, ""))
     except ValueError:

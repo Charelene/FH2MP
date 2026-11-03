@@ -25,8 +25,8 @@ class Setting(unittest.TestCase):
             os.environ.pop(capacity.ENV, None)
             self.assertEqual(capacity.free_roam(), 12)
 
-    def test_a_number_from_12_to_72_is_taken_and_anything_else_is_not(self):
-        for value, want in (("24", 24), ("72", 72), ("12", 12), ("11", 12), ("0", 12), ("-5", 12), ("500", 72), ("abc", 12), ("", 12), (" 30 ", 30)):
+    def test_a_number_from_12_to_75_is_taken_and_anything_else_is_not(self):
+        for value, want in (("24", 24), ("75", 75), ("72", 72), ("12", 12), ("11", 12), ("0", 12), ("-5", 12), ("500", 75), ("abc", 12), ("", 12), (" 30 ", 30)):
             with env(value):
                 self.assertEqual(capacity.free_roam(), want, repr(value))
 

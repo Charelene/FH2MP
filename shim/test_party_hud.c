@@ -188,7 +188,7 @@ int main(void)
     party_frame(component, NULL, NULL, NULL);
     assert(g_frame_calls == 2 && g_frame_count_seen == 9 && *(int *)(component + 0x1ac) == 9);
 
-    /* FH2MP_PARTY_MAX: 12 to 48 is taken, anything else keeps what was set */
+    /* FH2MP_PARTY_MAX: 12 to 75 is taken, anything else keeps what was set */
     g_party_max = 36;
     SetEnvironmentVariableA("FH2MP_PARTY_MAX", "20");
     party_max_from_env();
@@ -196,7 +196,10 @@ int main(void)
     SetEnvironmentVariableA("FH2MP_PARTY_MAX", "48");
     party_max_from_env();
     assert(g_party_max == 48);
-    { static const char *const bad[] = {"11", "49", "abc", "2x", "", "99999999"};
+    SetEnvironmentVariableA("FH2MP_PARTY_MAX", "75");
+    party_max_from_env();
+    assert(g_party_max == 75);
+    { static const char *const bad[] = {"11", "76", "abc", "2x", "", "99999999"};
       for (i = 0; i < 6; i++) {
           g_party_max = 30;
           SetEnvironmentVariableA("FH2MP_PARTY_MAX", bad[i]);

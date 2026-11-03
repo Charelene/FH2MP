@@ -20,7 +20,7 @@ import time
 BOT_XUID_BASE = 0x9F00000000000      # far from the test accounts (0x90000...) and from real Xbox ids
 CLONE_ROUTERS = (1, 2, 3)            # LobbyPlayer, the car objects (ForzaCarNetworked), ConsoleSynced
 RING_STEP_M, RING_SIZE = 6.0, 8      # bots sit on rings of 8 around the source, 6 m apart per ring
-MAX_BOTS = 60
+MAX_BOTS = 75
 FREE_ROAM_TYPE = 2
 POSITION_BITS = 96                   # the first 96 bits of a CarPredictionFull body are x, y, z as f32 (car_position in fh2mp_server.py)
 

@@ -10,12 +10,12 @@
  *   - the call to +abf2d0 gets an array assembled from the 12 native rows and ours (the list collection is resized to the count it is given),
  *   - the per-frame helper sees the count held at 12 while it runs, so the extra rows are not refreshed every frame (they keep what the rebuild wrote).
  * Hooked at the two call sites, not at the functions, because +abf2d0 serves the other mini leaderboards too. With 12 members or fewer nothing is
- * changed. The maximum is 36 rows; env FH2MP_PARTY_MAX sets it (12 to 48), FH2MP_NO_PARTYHUD turns the patch off. Not verified in a running game: whether
+ * changed. The maximum is 36 rows; env FH2MP_PARTY_MAX sets it (12 to 75), FH2MP_NO_PARTYHUD turns the patch off. Not verified in a running game: whether
  * the HUD template shows more than 12 rows, and what MemberDisplayCount (set from the member vectors, not from this count) does above 12. */
 #define PARTY_NATIVE_ROWS 12
 #define PARTY_ROWS_OFFSET 0x130
 #define PARTY_COUNT_OFFSET 0x1ac
-#define PARTY_EXTRA_MAX 36
+#define PARTY_EXTRA_MAX 63
 #define PARTY_COMPONENTS 2
 
 typedef void (*party_row_fn)(void *, void **, void *, char);
