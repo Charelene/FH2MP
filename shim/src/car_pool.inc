@@ -553,6 +553,98 @@ static void car_pool_ai_connect(void *module)
     }
 }
 
+/* FH2MP_CAR_VIEWLOD=1: the 14th remote car crashed the render thread because CPresentationView::vfunc_42 (game+0x1344820) keeps one LOD value per presentation
+ * object in a table of 32 dwords at view+0x454 (cleared by a memset of 0x80 bytes) and the object index reached 33: the store at game+0x1346639 (`mov [rsi+r13*4+454h],
+ * r14d`, r13 = 0x21) zeroed the low dword of the frame data pointer behind the table at +0x4d8, which the render thread then wrote through (TTD trace of dev 2026-11-03,
+ * last write to the field, view 0x19a83ffca00, left 0x19a00000000). Only vfunc_42 uses the table (the memset, three stores, one load). The table is moved to the end
+ * of the view, which CPresentation::vfunc_19 (game+0x1302160) allocates with Mem::Alloc(0x24df0): the allocation grows by the table, the displacement of the six
+ * accesses and the memset size follow, and a wrapper clears the new part (the constructor only clears what it knows). Nothing else in the exe addresses a view's
+ * bytes past 0x24df0; the tail field at +0x24de0 stays where it is. */
+#define CAR_POOL_VIEW_NEW_RVA 0x1302160
+#define CAR_POOL_VIEW_SIZE 0x24df0                  /* the view's allocation, and where the new table starts */
+#define CAR_POOL_VIEWLOD_ENTRIES 1024
+#define CAR_POOL_VIEWLOD_BYTES (CAR_POOL_VIEWLOD_ENTRIES * 4)
+typedef void *(*car_pool_view_new_fn)(void *);
+static car_pool_view_new_fn g_car_pool_view_new_orig;
+
+static void *car_pool_view_new(void *presentation)
+{
+    unsigned char *view = g_car_pool_view_new_orig(presentation);
+
+    if (view) {
+        memset(view + CAR_POOL_VIEW_SIZE, 0, CAR_POOL_VIEWLOD_BYTES);
+    }
+    return view;
+}
+
+static void car_pool_put32(unsigned char *at, unsigned long v)
+{
+    at[0] = (unsigned char)v;
+    at[1] = (unsigned char)(v >> 8);
+    at[2] = (unsigned char)(v >> 16);
+    at[3] = (unsigned char)(v >> 24);
+}
+
+static int car_pool_install_viewlod(unsigned char *img)
+{
+    static const unsigned char new_head[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xF9, 0xC6, 0x81, 0xA8, 0x26, 0x00, 0x00, 0x01,
+                                             0xB9, 0xF0, 0x4D, 0x02, 0x00};                                          /* ... mov ecx, 0x24df0 (the alloc size) */
+    static const unsigned char clear_site[] = {0x48, 0x8D, 0x8E, 0x54, 0x04, 0x00, 0x00, 0x33, 0xD2, 0x41, 0xB8, 0x80, 0x00, 0x00, 0x00};   /* lea rcx,[rsi+454h]; xor edx,edx; mov r8d,80h */
+    static const unsigned char store_a[] = {0x46, 0x89, 0xB4, 0xAE, 0x54, 0x04, 0x00, 0x00};                         /* mov [rsi+r13*4+454h], r14d */
+    static const unsigned char store_b[] = {0x42, 0xC7, 0x84, 0xAE, 0x54, 0x04, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00};  /* mov dword [rsi+r13*4+454h], 1 */
+    static const unsigned char store_c[] = {0x42, 0x89, 0x84, 0xAE, 0x54, 0x04, 0x00, 0x00};                         /* mov [rsi+r13*4+454h], eax */
+    static const unsigned char load_d[] = {0x42, 0x8B, 0x84, 0xAE, 0x54, 0x04, 0x00, 0x00};                          /* mov eax, [rsi+r13*4+454h] */
+    static const unsigned char old_disp[] = {0x54, 0x04, 0x00, 0x00};
+    static const unsigned char old_size[] = {0x80, 0x00, 0x00, 0x00};
+    static const unsigned char old_alloc[] = {0xF0, 0x4D, 0x02, 0x00};
+    static const struct { unsigned rva; unsigned disp_at; const unsigned char *code; unsigned n; const char *what; } sites[] = {
+        {0x1346332, 3, clear_site, sizeof clear_site, "the LOD table clear"},
+        {0x1346639, 4, store_a, sizeof store_a, "the LOD store (a)"},
+        {0x1346649, 4, store_b, sizeof store_b, "the LOD store (b)"},
+        {0x1346664, 4, store_c, sizeof store_c, "the LOD store (c)"},
+        {0x134666c, 4, load_d, sizeof load_d, "the LOD load"},
+    };
+    unsigned char table[4], size[4], alloc[4];
+    int done = 0, expected = 8;
+    unsigned i;
+
+    for (i = 0; i < sizeof sites / sizeof sites[0]; i++) {
+        if (!code_is("carpool", sites[i].what, img, sites[i].rva, sites[i].code, sites[i].n)) {
+            return 0;
+        }
+    }
+    if (!code_is("carpool", "the view allocation", img, CAR_POOL_VIEW_NEW_RVA, new_head, sizeof new_head)) {
+        return 0;
+    }
+    car_pool_put32(table, CAR_POOL_VIEW_SIZE);
+    car_pool_put32(size, CAR_POOL_VIEWLOD_BYTES);
+    car_pool_put32(alloc, CAR_POOL_VIEW_SIZE + CAR_POOL_VIEWLOD_BYTES);
+    /* the clearing wrapper first and the bigger allocation before any access moves: a moved access on a small view would run off its end */
+    done += plat_hook("carpool: view allocation cleared past its old end", img + CAR_POOL_VIEW_NEW_RVA, (void *)car_pool_view_new, (void **)&g_car_pool_view_new_orig) ? 1 : 0;
+    if (done != 1) {
+        return 0;
+    }
+    done += plat_patch("carpool: view allocation grown", img + CAR_POOL_VIEW_NEW_RVA + 0x15, old_alloc, alloc, 4);
+    if (done != 2) {
+        return 0;
+    }
+    for (i = 0; i < sizeof sites / sizeof sites[0]; i++) {
+        done += plat_patch(sites[i].what, img + sites[i].rva + sites[i].disp_at, old_disp, table, 4);
+    }
+    done += plat_patch("carpool: LOD table clear size", img + sites[0].rva + 11, old_size, size, 4);
+    log_begin();
+    if (done == expected) {
+        log_raw("carpool: view LOD table 32 -> ");
+        log_dec(CAR_POOL_VIEWLOD_ENTRIES);
+        log_raw(" entries at the end of the view (FH2MP_CAR_VIEWLOD)\n");
+        return 1;
+    }
+    log_raw("carpool: view LOD table only partly moved, ");
+    log_dec((unsigned long)done);
+    log_raw(" of 8 steps done (FH2MP_CAR_VIEWLOD)\n");
+    return 0;
+}
+
 static int patch_car_pool(void)
 {
     static const unsigned char head[] = {0x48, 0x8B, 0xC4, 0x57, 0x48, 0x83, 0xEC, 0x70, 0x48, 0xC7, 0x40, 0xB8, 0xFE, 0xFF, 0xFF, 0xFF};
@@ -589,6 +681,9 @@ static int patch_car_pool(void)
             plat_hook("carpool: views without frame data skipped (a)", img + CAR_POOL_VIEW_A_RVA, (void *)car_pool_view_a, (void **)&g_car_pool_view_a_orig);
             plat_hook("carpool: views without frame data skipped (b)", img + CAR_POOL_VIEW_B_RVA, (void *)car_pool_view_b, (void **)&g_car_pool_view_b_orig);
         }
+    }
+    if (car_pool_env_flag("FH2MP_CAR_VIEWLOD")) {
+        car_pool_install_viewlod(img);
     }
     if (car_pool_env_flag("FH2MP_CAR_ALLOCDIAG")) {
         static const unsigned char alloc_head[] = {0x4C, 0x8B, 0xDC, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x81, 0xEC, 0x60, 0x02, 0x00, 0x00, 0x48, 0xC7, 0x44, 0x24, 0x58};

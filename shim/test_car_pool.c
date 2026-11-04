@@ -31,6 +31,8 @@ static void *g_alloc_result;
 static int g_view_a_calls, g_view_b_calls;
 static void fake_view_a(void *v) { (void)v; g_view_a_calls++; }
 static void fake_view_b(void *v) { (void)v; g_view_b_calls++; }
+static unsigned char *g_fake_view_made;                       /* what the game's view maker hands back (NULL: it failed) */
+static void *fake_view_new(void *presentation) { (void)presentation; return g_fake_view_made; }
 static void *fake_alloc(void *m, unsigned long long size, unsigned short tag, unsigned long long *p) { (void)m; (void)size; (void)tag; (void)p; return g_alloc_result; }
 static unsigned short fake_ids(void *m, unsigned short lo, unsigned short hi, void *p);
 static void *fake_find_sharing(void *self, void *out, void *vehicle_ref, void *manager, void *extra, unsigned priority);
@@ -60,7 +62,7 @@ static int plat_hook(const char *name, void *target, void *detour, void **origin
 {
     (void)name; (void)target; (void)detour;
     g_hooks++;
-    *original = target == g_img + 0xfd08b0 ? (void *)fake_find : target == g_img + 0xfceee0 ? (void *)fake_ids : target == g_img + 0x720960 ? (void *)fake_ai : target == g_img + 0xf73e10 ? (void *)fake_aictl : target == g_img + 0x125d850 ? (void *)fake_alloc : target == g_img + 0x1355ad0 ? (void *)fake_view_a : target == g_img + 0x135b640 ? (void *)fake_view_b : (void *)fake_tick;
+    *original = target == g_img + 0xfd08b0 ? (void *)fake_find : target == g_img + 0xfceee0 ? (void *)fake_ids : target == g_img + 0x720960 ? (void *)fake_ai : target == g_img + 0xf73e10 ? (void *)fake_aictl : target == g_img + 0x125d850 ? (void *)fake_alloc : target == g_img + 0x1355ad0 ? (void *)fake_view_a : target == g_img + 0x135b640 ? (void *)fake_view_b : target == g_img + 0x1302160 ? (void *)fake_view_new : (void *)fake_tick;
     return 1;
 }
 static int g_refuse_patch;       /* the platform refuses the n-th patch call (1-based) */
@@ -109,9 +111,23 @@ static const unsigned char AICTL_HEAD[] = {0x4c, 0x8b, 0xdc, 0x57, 0x48, 0x81, 0
 static const unsigned char IDS_HEAD[] = {0x48, 0x8b, 0xc4, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xec, 0x50, 0x48, 0xc7, 0x40, 0xc8, 0xfe, 0xff, 0xff, 0xff, 0x48, 0x89, 0x58, 0x10};
 static const unsigned char FIND_HEAD[] = {0x4c, 0x89, 0x4c, 0x24, 0x20, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xec, 0x60};
 
+/* the bytes of CPresentation::vfunc_19 (game+0x1302160, from the exe on disk) and of the LOD table accesses in CPresentationView::vfunc_42 (from the TTD trace) */
+static const unsigned char VIEWNEW_HEAD[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x57, 0x48, 0x83, 0xec, 0x20, 0x48, 0x8b, 0xf9, 0xc6, 0x81, 0xa8, 0x26, 0x00, 0x00, 0x01, 0xb9, 0xf0, 0x4d, 0x02, 0x00};
+static const unsigned char LOD_CLEAR[] = {0x48, 0x8d, 0x8e, 0x54, 0x04, 0x00, 0x00, 0x33, 0xd2, 0x41, 0xb8, 0x80, 0x00, 0x00, 0x00};
+static const unsigned char LOD_STORE_A[] = {0x46, 0x89, 0xb4, 0xae, 0x54, 0x04, 0x00, 0x00};
+static const unsigned char LOD_STORE_B[] = {0x42, 0xc7, 0x84, 0xae, 0x54, 0x04, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00};
+static const unsigned char LOD_STORE_C[] = {0x42, 0x89, 0x84, 0xae, 0x54, 0x04, 0x00, 0x00};
+static const unsigned char LOD_LOAD[] = {0x42, 0x8b, 0x84, 0xae, 0x54, 0x04, 0x00, 0x00};
+
 static void fresh(void)
 {
     memset(g_img, 0, 0x4000000);
+    memcpy(g_img + 0x1302160, VIEWNEW_HEAD, sizeof VIEWNEW_HEAD);
+    memcpy(g_img + 0x1346332, LOD_CLEAR, sizeof LOD_CLEAR);
+    memcpy(g_img + 0x1346639, LOD_STORE_A, sizeof LOD_STORE_A);
+    memcpy(g_img + 0x1346649, LOD_STORE_B, sizeof LOD_STORE_B);
+    memcpy(g_img + 0x1346664, LOD_STORE_C, sizeof LOD_STORE_C);
+    memcpy(g_img + 0x134666c, LOD_LOAD, sizeof LOD_LOAD);
     memcpy(g_img + CAR_POOL_RVA, VFUNC2, sizeof VFUNC2);
     memcpy(g_img + CAR_POOL_TICK_RVA, TICK_HEAD, sizeof TICK_HEAD);
     memcpy(g_img + CAR_POOL_FIND_RVA, FIND_HEAD, sizeof FIND_HEAD);
@@ -530,6 +546,45 @@ int main(void)
     g_img[CAR_POOL_VIEW_A_RVA] = 0x41;
     assert(patch_car_pool() == 0 && g_hooks == 0);
     SetEnvironmentVariableA("FH2MP_CAR_VIEWGUARD", NULL);
+
+    /* FH2MP_CAR_VIEWLOD=1: the LOD table moves behind the view, the allocation grows by it, the new part is cleared */
+    SetEnvironmentVariableA("FH2MP_CAR_SLOTS", NULL);
+    fresh();
+    assert(patch_car_pool() == 0 && g_hooks == 0 && g_patches == 0);                 /* env not set: nothing touched */
+    SetEnvironmentVariableA("FH2MP_CAR_VIEWLOD", "1");
+    fresh();
+    assert(patch_car_pool() == 0 && g_hooks == 1 && g_patches == 7);                 /* hook, allocation, 5 accesses, memset size */
+    assert(strstr(g_raw, "carpool: view LOD table 32 -> 1024 entries at the end of the view (FH2MP_CAR_VIEWLOD)\n"));
+    assert(*(unsigned *)(g_img + 0x1302160 + 0x15) == 0x24df0 + 0x1000);             /* the allocation */
+    assert(*(unsigned *)(g_img + 0x1346332 + 3) == 0x24df0 && *(unsigned *)(g_img + 0x1346332 + 11) == 0x1000);
+    assert(*(unsigned *)(g_img + 0x1346639 + 4) == 0x24df0 && *(unsigned *)(g_img + 0x1346649 + 4) == 0x24df0);
+    assert(*(unsigned *)(g_img + 0x1346664 + 4) == 0x24df0 && *(unsigned *)(g_img + 0x134666c + 4) == 0x24df0);
+    assert(g_img[0x1346639] == 0x46 && g_img[0x1346649 + 8] == 0x01 && g_img[0x134666c] == 0x42);   /* nothing else in them moved */
+    { static unsigned char view[0x24df0 + 0x1000 + 16];
+      memset(view, 0xaa, sizeof view);
+      g_fake_view_made = view;
+      assert(car_pool_view_new(NULL) == view);
+      assert(view[0x24df0 - 1] == 0xaa && view[0x24df0] == 0 && view[0x24df0 + 0x1000 - 1] == 0 && view[0x24df0 + 0x1000] == 0xaa);   /* the new table, exactly */
+      g_fake_view_made = NULL;
+      assert(car_pool_view_new(NULL) == NULL);                                         /* the game's own failure passes through */
+    }
+    fresh();
+    g_refuse_patch = 1;                                                                /* the allocation is refused: no access moves (it would run off a small view) */
+    patch_car_pool();
+    assert(g_patches == 0 && *(unsigned *)(g_img + 0x1346639 + 4) == 0x454 && *(unsigned *)(g_img + 0x1302160 + 0x15) == 0x24df0);
+    for (i = 2; i <= 7; i++) {                                                         /* any later step refused: partly moved, and reported */
+        fresh();
+        g_refuse_patch = (int)i;
+        patch_car_pool();
+        assert(g_patches == 6 && strstr(g_raw, "carpool: view LOD table only partly moved, 7 of 8 steps done (FH2MP_CAR_VIEWLOD)\n"));
+    }
+    for (i = 0; i < 6; i++) {                                                          /* another build of any of the six places: nothing is touched */
+        static const unsigned rvas[] = {0x1302160, 0x1346332, 0x1346639, 0x1346649, 0x1346664, 0x134666c};
+        fresh();
+        g_img[rvas[i]] ^= 0xff;
+        assert(patch_car_pool() == 0 && g_hooks == 0 && g_patches == 0 && strstr(g_raw, "mismatch: "));
+    }
+    SetEnvironmentVariableA("FH2MP_CAR_VIEWLOD", NULL);
 
     /* another build of the id search or the request builder: nothing is patched (a bigger cache with 12 ids makes every car invalid) */
     SetEnvironmentVariableA("FH2MP_CAR_SLOTS", "30");
