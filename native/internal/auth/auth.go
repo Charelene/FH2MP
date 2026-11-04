@@ -88,6 +88,9 @@ type Error struct {
 
 func (e *Error) Error() string { return e.Message }
 
+// NewError makes an AuthError for other packages.
+func NewError(status int, code, message string) *Error { return aerr(status, code, message) }
+
 func aerr(status int, code, message string) *Error {
 	if message == "" {
 		message = code

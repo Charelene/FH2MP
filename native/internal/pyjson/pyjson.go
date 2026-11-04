@@ -51,6 +51,8 @@ type Opts struct {
 	NoASCII     bool // ensure_ascii=False
 	SortKeys    bool
 	DefaultStr  bool // default=str for values of unknown type
+	Indent      int  // indent=N (0 = single line)
+	level       int
 	ItemSep     string
 	KeySep      string
 	allowNaNOff bool
@@ -62,6 +64,8 @@ func Dumps(v any, o Opts) (string, error) {
 	item, key := ", ", ": "
 	if o.Compact {
 		item, key = ",", ":"
+	} else if o.Indent > 0 {
+		item = ","
 	}
 	if o.ItemSep != "" {
 		item = o.ItemSep
@@ -120,6 +124,24 @@ func quote(b *strings.Builder, s string, noASCII bool) {
 	b.WriteByte('"')
 }
 
+func (o Opts) deeper() Opts { o.level++; return o }
+
+// itemNL starts an item on a line of its own in indent mode.
+func itemNL(b *strings.Builder, o Opts) {
+	if o.Indent > 0 {
+		b.WriteByte(10)
+		b.WriteString(strings.Repeat(" ", o.Indent*(o.level+1)))
+	}
+}
+
+// closeNL puts the closing bracket of a non-empty container on a line of its own in indent mode.
+func closeNL(b *strings.Builder, o Opts, nonEmpty bool) {
+	if o.Indent > 0 && nonEmpty {
+		b.WriteByte(10)
+		b.WriteString(strings.Repeat(" ", o.Indent*o.level))
+	}
+}
+
 func write(b *strings.Builder, v reflect.Value, o Opts) error {
 	if !v.IsValid() {
 		b.WriteString("null")
@@ -144,12 +166,14 @@ func write(b *strings.Builder, v reflect.Value, o Opts) error {
 			if i > 0 {
 				b.WriteString(o.ItemSep)
 			}
+			itemNL(b, o)
 			quote(b, p.K, o.NoASCII)
 			b.WriteString(o.KeySep)
-			if err := write(b, reflect.ValueOf(p.V), o); err != nil {
+			if err := write(b, reflect.ValueOf(p.V), o.deeper()); err != nil {
 				return err
 			}
 		}
+		closeNL(b, o, len(keys) > 0)
 		b.WriteByte('}')
 		return nil
 	}
@@ -188,10 +212,12 @@ func write(b *strings.Builder, v reflect.Value, o Opts) error {
 			if i > 0 {
 				b.WriteString(o.ItemSep)
 			}
-			if err := write(b, v.Index(i), o); err != nil {
+			itemNL(b, o)
+			if err := write(b, v.Index(i), o.deeper()); err != nil {
 				return err
 			}
 		}
+		closeNL(b, o, v.Len() > 0)
 		b.WriteByte(']')
 	case reflect.Map:
 		keys := make([]string, 0, v.Len())
@@ -208,12 +234,14 @@ func write(b *strings.Builder, v reflect.Value, o Opts) error {
 			if i > 0 {
 				b.WriteString(o.ItemSep)
 			}
+			itemNL(b, o)
 			quote(b, k, o.NoASCII)
 			b.WriteString(o.KeySep)
-			if err := write(b, vals[k], o); err != nil {
+			if err := write(b, vals[k], o.deeper()); err != nil {
 				return err
 			}
 		}
+		closeNL(b, o, len(keys) > 0)
 		b.WriteByte('}')
 	default:
 		if o.DefaultStr {
