@@ -217,7 +217,7 @@ func (h *Hub) lightingHandle(data []byte, addr Addr) {
 	if old == nil || old.Flags != data[53] || old.Car != carID {
 		peer.LightingChanges++
 		if now-peer.LightingLoggedAt >= lightingLogEvery || peer.LightingLoggedAt == 0 {
-			world.Logf("lighting: owner %d car %d headlights=%d signal=%d (%d change(s) in the last minute)", peer.Owner, carID, data[53]&1, data[53]>>1, peer.LightingChanges)
+			h.Idle.Logf("lighting: owner %d car %d headlights=%d signal=%d (%d change(s) in the last minute)", peer.Owner, carID, data[53]&1, data[53]>>1, peer.LightingChanges)
 			peer.LightingLoggedAt, peer.LightingChanges = now, 0
 		}
 	}
@@ -346,10 +346,10 @@ func (h *Hub) honkHandle(data []byte, addr Addr) {
 	startedNow := nw.Horn != nil && !(old != nil && bytes.Equal(old.Epoch, epoch) && old.Horn != nil && old.Press == press)
 	if startedNow && (now-peer.HonkLoggedAt >= honkLogEvery || peer.HonkLoggedAt == 0) {
 		peer.HonkLoggedAt = now
-		world.Logf("honk: owner %d car %d horn %d press %d", peer.Owner, carID, *nw.Horn, press)
+		h.Idle.Logf("honk: owner %d car %d horn %d press %d", peer.Owner, carID, *nw.Horn, press)
 	}
 	if nw.CapHit {
-		world.Logf("honk: owner %d held press %d for %s s, silenced; next one allowed %s s after", peer.Owner, press, fmtG(honkCap), fmtG(honkCooldown))
+		h.Idle.Logf("honk: owner %d held press %d for %s s, silenced; next one allowed %s s after", peer.Owner, press, fmtG(honkCap), fmtG(honkCooldown))
 	}
 	var records []byte
 	n := 0

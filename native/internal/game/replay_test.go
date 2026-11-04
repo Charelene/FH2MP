@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"fh2mp/internal/catalog"
@@ -51,6 +52,7 @@ type traceOut struct {
 
 type trace struct {
 	Env    map[string]string `json:"env"`
+	Log    []string          `json:"log"`
 	Events []traceEvent      `json:"events"`
 	Out    []traceOut        `json:"out"`
 }
@@ -79,7 +81,25 @@ func runTrace(t *testing.T, name string, seed uint64) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hub, err := NewHub(HubConfig{Port: 0, Clock: clk, Rng: pyrand.New(seed), Sock: sock, Out: NewLogOut(func(string) error { return nil }), Catalog: cat,
+	var lastCtl string
+	var gotLog []string
+	logSink := func(chunk string) error {
+		for _, ln := range strings.FieldsFunc(chunk, func(r rune) bool { return r == 10 }) {
+			if len(ln) > 9 && ln[2] == ':' && ln[5] == ':' && ln[8] == ' ' {
+				if strings.HasPrefix(ln[9:], "date ") {
+					continue
+				}
+				gotLog = append(gotLog, ln[9:])
+			} else if strings.TrimSpace(ln) != "" {
+				gotLog = append(gotLog, ln)
+			}
+		}
+		return nil
+	}
+	prevReliable := Reliable
+	Reliable = tr.Env["FH2MP_RELIABLE"] == "1"
+	t.Cleanup(func() { Reliable = prevReliable })
+	hub, err := NewHub(HubConfig{CtlSend: func(d []byte, _ Addr) { lastCtl = string(d) }, Port: 0, Clock: clk, Rng: pyrand.New(seed), Sock: sock, Out: NewLogOut(logSink), Catalog: cat,
 		Sinks: &Sinks{Gamemode: func(int, []uint64) (string, string, error) { return "session-1", "template-1", nil }}})
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +111,11 @@ func runTrace(t *testing.T, name string, seed uint64) {
 			data, _ := hex.DecodeString(ev.Hex)
 			hub.Handle(data, toAddr(ev.Addr))
 		case "ctl":
-			hub.ControlText(ev.Text, nil)
+			lastCtl = ""
+			hub.ControlText(ev.Text, &Addr{"127.0.0.1", 1})
+			if lastCtl != ev.Expect {
+				t.Errorf("%s: control %q replied %q, want %q", name, ev.Text, lastCtl, ev.Expect)
+			}
 		case "query":
 			var got string
 			switch ev.Name {
@@ -145,12 +169,50 @@ func runTrace(t *testing.T, name string, seed uint64) {
 			t.Errorf("%s: unexpected datagrams to %v: %d", name, a, len(got[a]))
 		}
 	}
-	t.Log(fmt.Sprintf("%s: %d inputs, %d datagrams compared", name, len(tr.Events), len(tr.Out)))
+	compareLogs(t, name, tr.Log, gotLog)
+	t.Log(fmt.Sprintf("%s: %d inputs, %d datagrams, %d log lines compared", name, len(tr.Events), len(tr.Out), len(tr.Log)))
 }
 
-func TestJoinRelayTrace(t *testing.T) { runTrace(t, "join_relay", 7) }
-func TestControlTrace(t *testing.T)   { runTrace(t, "control", 3) }
-func TestRaceTrace(t *testing.T)      { runTrace(t, "race", 11) }
-func TestPartsTrace(t *testing.T)     { runTrace(t, "parts", 5) }
-func TestTicketsTrace(t *testing.T)   { runTrace(t, "tickets", 9) }
-func TestCarMeetTrace(t *testing.T)   { runTrace(t, "carmeet", 13) }
+func TestJoinRelayTrace(t *testing.T)  { runTrace(t, "join_relay", 7) }
+func TestControlTrace(t *testing.T)    { runTrace(t, "control", 3) }
+func TestRaceTrace(t *testing.T)       { runTrace(t, "race", 11) }
+func TestPartsTrace(t *testing.T)      { runTrace(t, "parts", 5) }
+func TestTicketsTrace(t *testing.T)    { runTrace(t, "tickets", 9) }
+func TestCarMeetTrace(t *testing.T)    { runTrace(t, "carmeet", 13) }
+func TestTagTrace(t *testing.T)        { runTrace(t, "tag", 17) }
+func TestBucketlistTrace(t *testing.T) { runTrace(t, "bucketlist", 19) }
+func TestTrafficTrace(t *testing.T)    { runTrace(t, "traffic", 23) }
+func TestSpeedTrace(t *testing.T)      { runTrace(t, "speed", 29) }
+func TestCapacityTrace(t *testing.T)   { runTrace(t, "capacity", 31) }
+func TestBotsTrace(t *testing.T)       { runTrace(t, "bots", 37) }
+func TestRentalTrace(t *testing.T)     { runTrace(t, "rental", 41) }
+func TestReliableTrace(t *testing.T)   { runTrace(t, "reliable", 43) }
+
+func compareLogs(t *testing.T, name string, want, got []string) {
+	t.Helper()
+	filter := func(in []string) []string {
+		var out []string
+		for _, l := range in {
+			if strings.HasPrefix(l, "[idle] hub listening") {
+				continue
+			}
+			out = append(out, l)
+		}
+		return out
+	}
+	want, got = filter(want), filter(got)
+	for i := 0; i < len(want) && i < len(got); i++ {
+		if want[i] != got[i] {
+			t.Errorf("%s: log line %d differs: want %s got %s", name, i, want[i], got[i])
+			return
+		}
+	}
+	if len(want) != len(got) {
+		more, extra := want, "missing"
+		if len(got) > len(want) {
+			more, extra = got, "extra"
+		}
+		n := minInt(len(want), len(got))
+		t.Errorf("%s: %d log lines, want %d; first %s line: %s", name, len(got), len(want), extra, more[n])
+	}
+}
