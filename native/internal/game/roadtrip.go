@@ -320,7 +320,7 @@ func (w *World) RtNewRound() {
 				here++
 			}
 		}
-		if cand, err := PickRoadTripCandidates(w.Rng, w.RtGamedb, here); err == nil {
+		if cand, err := PickRoadTripCandidates(w.pickRng(), w.RtGamedb, here); err == nil {
 			w.RtCandidates = cand
 		} else {
 			panic(err)
@@ -577,7 +577,7 @@ func (w *World) RoadTripTick(now float64) {
 		}
 		if w.RtState == RTInitialising {
 			if w.RtGamedb != "" {
-				cand, err := PickRoadTripCandidates(w.Rng, w.RtGamedb, here)
+				cand, err := PickRoadTripCandidates(w.pickRng(), w.RtGamedb, here)
 				if err != nil {
 					panic(err)
 				}
@@ -597,7 +597,7 @@ func (w *World) RoadTripTick(now float64) {
 				}
 			}
 			if here > w.RtPickPlayers && !shown {
-				cand, err := PickRoadTripCandidates(w.Rng, w.RtGamedb, here)
+				cand, err := PickRoadTripCandidates(w.pickRng(), w.RtGamedb, here)
 				if err != nil {
 					panic(err)
 				}
@@ -696,4 +696,12 @@ func eventsRepr(c *RtCand) string {
 		rows[i] = intList(c.Events[i][:])
 	}
 	return "[" + strings.Join(rows, ", ") + "]"
+}
+
+// pickRng is the generator for one vote draw: Python makes a fresh random.Random() for it, so it is independent of the world's stream.
+func (w *World) pickRng() Rand {
+	if w.Hub != nil && w.Hub.PickRng != nil {
+		return w.Hub.PickRng()
+	}
+	return w.Rng
 }

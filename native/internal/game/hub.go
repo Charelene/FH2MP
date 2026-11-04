@@ -2,6 +2,7 @@ package game
 
 import (
 	"crypto/hmac"
+	cryptoRand "crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -13,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"fh2mp/internal/bits"
 	"fh2mp/internal/capacity"
@@ -23,6 +25,7 @@ import (
 	"fh2mp/internal/omap"
 	"fh2mp/internal/pyfmt"
 	"fh2mp/internal/pyjson"
+	"fh2mp/internal/pyrand"
 )
 
 type authEnt struct {
@@ -104,6 +107,8 @@ type Hub struct {
 	nextTick       float64
 	nxt            float64
 	Tunnel         TunnelHost
+	// PickRng makes the generator of one Road Trip vote draw (Python: a fresh random.Random() per call).
+	PickRng func() Rand
 }
 
 // TunnelHost is the TCP carrier as the hub sees it.
@@ -122,6 +127,7 @@ func NewHub(cfg HubConfig) (*Hub, error) {
 		AuthLog: map[any]float64{}, Worlds: omap.New[WorldKey, *World](), Route: omap.New[Addr, *World](), EmptySince: map[WorldKey]float64{},
 		LightingRoutes: map[uint64]Addr{}, HonkRoutes: map[uint64]Addr{}, probeSeen: map[Addr]probeEnt{}, nxt: math.Inf(1)}
 	h.DefaultType = 2
+	h.PickRng = func() Rand { return pyrand.New(entropySeed()) }
 	if cfg.Carmeet {
 		h.DefaultType = LobbyTypeCarMeet
 	} else if cfg.Roadtrip {
@@ -210,7 +216,7 @@ func (h *Hub) WorldFor(lobbyType int, name string) *World {
 		}
 		if _, err := os.Stat(gamedb); err == nil {
 			w.RtGamedb = gamedb
-			if cand, err := PickRoadTripCandidates(h.Rng, gamedb, 1); err == nil {
+			if cand, err := PickRoadTripCandidates(h.PickRng(), gamedb, 1); err == nil {
 				w.RtCandidates = cand
 				w.Logf("road trip candidates: locations %s events %s classes %s", locsRepr(cand), eventsRepr(cand), intList(cand.Classes[:]))
 			}
@@ -1194,4 +1200,12 @@ func (h *Hub) Close() {
 	if h.Events != nil {
 		h.Events.Close()
 	}
+}
+
+func entropySeed() uint64 {
+	var b [8]byte
+	if _, err := cryptoRand.Read(b[:]); err != nil {
+		return uint64(time.Now().UnixNano())
+	}
+	return binary.LittleEndian.Uint64(b[:])
 }

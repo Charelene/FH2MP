@@ -51,10 +51,11 @@ type traceOut struct {
 }
 
 type trace struct {
-	Env    map[string]string `json:"env"`
-	Log    []string          `json:"log"`
-	Events []traceEvent      `json:"events"`
-	Out    []traceOut        `json:"out"`
+	Env      map[string]string `json:"env"`
+	Roadtrip bool              `json:"roadtrip"`
+	Log      []string          `json:"log"`
+	Events   []traceEvent      `json:"events"`
+	Out      []traceOut        `json:"out"`
 }
 
 func toAddr(a []any) Addr { return Addr{a[0].(string), int(a[1].(float64))} }
@@ -72,6 +73,9 @@ func runTrace(t *testing.T, name string, seed uint64) {
 	t.Setenv("FH2MP_WEATHER_START", "1")
 	t.Setenv("FH2MP_UDP_AUTH", "off")
 	for k, v := range tr.Env {
+		if v == "@gamedata" {
+			v = filepath.Join("..", "..", "..", "server", "data", "gamedata.sqlite")
+		}
 		t.Setenv(k, v)
 	}
 	t.Setenv("FH2MP_TRAFFIC_CARS", filepath.Join("..", "..", "..", "server", "data", "trafficcars.txt"))
@@ -99,11 +103,13 @@ func runTrace(t *testing.T, name string, seed uint64) {
 	prevReliable := Reliable
 	Reliable = tr.Env["FH2MP_RELIABLE"] == "1"
 	t.Cleanup(func() { Reliable = prevReliable })
-	hub, err := NewHub(HubConfig{CtlSend: func(d []byte, _ Addr) { lastCtl = string(d) }, Port: 0, Clock: clk, Rng: pyrand.New(seed), Sock: sock, Out: NewLogOut(logSink), Catalog: cat,
+	hub, err := NewHub(HubConfig{Roadtrip: tr.Roadtrip, CtlSend: func(d []byte, _ Addr) { lastCtl = string(d) }, Port: 0, Clock: clk, Rng: pyrand.New(seed), Sock: sock, Out: NewLogOut(logSink), Catalog: cat,
 		Sinks: &Sinks{Gamemode: func(int, []uint64) (string, string, error) { return "session-1", "template-1", nil }}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	picks := 0
+	hub.PickRng = func() Rand { picks++; return pyrand.New(uint64(1000 + picks)) }
 	for _, ev := range tr.Events {
 		clk.t = ev.T
 		switch ev.Kind {
@@ -216,3 +222,4 @@ func compareLogs(t *testing.T, name string, want, got []string) {
 		t.Errorf("%s: %d log lines, want %d; first %s line: %s", name, len(got), len(want), extra, more[n])
 	}
 }
+func TestRoadTripTrace(t *testing.T) { runTrace(t, "roadtrip", 47) }
