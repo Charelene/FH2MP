@@ -167,3 +167,57 @@ func (x F) Format(s fmt.State, verb rune) {
 	}
 	fmt.Fprint(s, text)
 }
+
+// DecodeReplace is Python's bytes.decode("utf-8", "replace"): each maximal prefix of a well-formed sequence that is cut short or broken becomes one
+// U+FFFD (Go's own conversion would give one per byte).
+func DecodeReplace(b []byte) string {
+	var out []byte
+	for i := 0; i < len(b); {
+		c := b[i]
+		if c < 0x80 {
+			out = append(out, c)
+			i++
+			continue
+		}
+		var lo, hi byte = 0x80, 0xBF
+		need := 0
+		switch {
+		case c >= 0xC2 && c <= 0xDF:
+			need = 1
+		case c == 0xE0:
+			need, lo = 2, 0xA0
+		case c >= 0xE1 && c <= 0xEC, c == 0xEE, c == 0xEF:
+			need = 2
+		case c == 0xED:
+			need, hi = 2, 0x9F
+		case c == 0xF0:
+			need, lo = 3, 0x90
+		case c >= 0xF1 && c <= 0xF3:
+			need = 3
+		case c == 0xF4:
+			need, hi = 3, 0x8F
+		}
+		if need == 0 {
+			out = append(out, "\uFFFD"...)
+			i++
+			continue
+		}
+		j := i + 1
+		ok := true
+		for k := 0; k < need; k++ {
+			if j >= len(b) || b[j] < lo || b[j] > hi {
+				ok = false
+				break
+			}
+			lo, hi = 0x80, 0xBF
+			j++
+		}
+		if ok {
+			out = append(out, b[i:j]...)
+		} else {
+			out = append(out, "\uFFFD"...)
+		}
+		i = j
+	}
+	return string(out)
+}
