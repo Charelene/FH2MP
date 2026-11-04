@@ -223,3 +223,4 @@ func compareLogs(t *testing.T, name string, want, got []string) {
 	}
 }
 func TestRoadTripTrace(t *testing.T) { runTrace(t, "roadtrip", 47) }
+func TestEdgeTrace(t *testing.T)     { runTrace(t, "edge", 53) }

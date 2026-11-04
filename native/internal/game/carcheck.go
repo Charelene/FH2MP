@@ -551,7 +551,7 @@ func (w *World) NoteTypedChoices(peer *Peer, size int, payload bits.Int) bits.In
 		w.LogEvery([3]any{"setup-parse", "choices", peer.Owner}, 60.0,
 			fmt.Sprintf("player.setup_unreadable %s: relayed as it came, the class and PI seen for this write stay the old ones",
 				diag.KV(diag.KVP{K: "what", V: "car choices"}, diag.KVP{K: "owner", V: peer.Owner}, diag.KVP{K: "xuid", V: fmt.Sprintf("%#x", peer.Xuid)},
-					diag.KVP{K: "bits", V: size}, diag.KVP{K: "error", V: err.Error()})), diag.Info)
+					diag.KVP{K: "bits", V: size}, diag.KVP{K: "error", V: err.Error()})), diag.Warn)
 		return payload
 	}
 	_, has81 := values[81]
@@ -610,7 +610,7 @@ func (w *World) NoteChoices(peer *Peer, size int, payload bits.Int) bits.Int {
 	if ok && cur.HasClass && cur.Class == RentalClassID && !(cur.Class == int64(want.Class) && roundTo(pi, 3) == roundTo(want.PI, 3)) {
 		w.CorrectOwnerChoices(peer, want.Class, want.PI)
 		w.Logf("%d RENTAL: owner %d car %d reports class %d PI %.3f, shown to the others as class %d PI %.3f",
-			peer.Addr.Port, peer.Owner, *peer.RentalCar, cur.Class, pi, want.Class, want.PI)
+			peer.Addr.Port, peer.Owner, *peer.RentalCar, cur.Class, pyfmt.F(pi), want.Class, want.PI)
 		payload = parts.WriteChoices(payload, found, want.Class, float32(want.PI))
 		peer.Choices = &Choices{true, int64(want.Class), want.PI}
 	}
@@ -705,7 +705,7 @@ func (w *World) RentalChoices(peer *Peer, car int64, size int, payload bits.Int)
 			return payload
 		}
 		if cur.HasClass && cur.Class == RentalClassID && pi < RentalPI {
-			w.Logf("%d class R with PI bits %08x (%.5f), car %d: tamper marker or an unusual rental", peer.Addr.Port, math.Float32bits(float32(pi)), pi, car)
+			w.Logf("%d class R with PI bits %08x (%.5f), car %d: tamper marker or an unusual rental", peer.Addr.Port, math.Float32bits(float32(pi)), pyfmt.F(pi), car)
 		}
 		if !(cur.HasClass && cur.Class == int64(want.Class)) || math.Abs(pi-want.PI) > 0.002 {
 			w.CorrectOwnerChoices(peer, want.Class, want.PI)
@@ -713,7 +713,7 @@ func (w *World) RentalChoices(peer *Peer, car int64, size int, payload bits.Int)
 			if cur.HasClass {
 				cs = strconv.FormatInt(cur.Class, 10)
 			}
-			w.Logf("%d RENTAL: owner %d car %d sent class %s PI %.3f, shown as class %d PI %.3f", peer.Addr.Port, peer.Owner, car, cs, pi, want.Class, want.PI)
+			w.Logf("%d RENTAL: owner %d car %d sent class %s PI %.3f, shown as class %d PI %.3f", peer.Addr.Port, peer.Owner, car, cs, pyfmt.F(pi), want.Class, want.PI)
 			payload = parts.WriteChoices(payload, found, want.Class, float32(want.PI))
 		}
 		peer.Choices = &Choices{true, int64(want.Class), want.PI}

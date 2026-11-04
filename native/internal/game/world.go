@@ -415,6 +415,16 @@ func (w *World) Exc(msg string, err any, level int) {
 	w.logAt(level, "", fmt.Sprintf("%s: %s", msg, diag.Scrub(fmt.Sprintf("%T: %v", err, err))))
 }
 
+// LogEverySub is LogEvery for a line that FH2MP_LOG_SUB can raise by subsystem.
+func (w *World) LogEverySub(key any, interval float64, msg string, level int, sub string) {
+	if ok, skipped := rate.Allow([2]any{w.Tag, key}, interval); ok {
+		if skipped > 0 {
+			msg += fmt.Sprintf(" (and %d more in the last %.0f s)", skipped, interval)
+		}
+		w.logAt(level, sub, msg)
+	}
+}
+
 // LogEvery writes a repeating condition once per interval seconds per key, saying how many it stood in for.
 func (w *World) LogEvery(key any, interval float64, msg string, level int) {
 	if ok, skipped := rate.Allow([2]any{w.Tag, key}, interval); ok {

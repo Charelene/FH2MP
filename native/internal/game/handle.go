@@ -133,7 +133,7 @@ loop:
 		if err != nil {
 			w.LogEvery([2]any{"short-count", addr}, 60.0, fmt.Sprintf("packet.short %s: the header announces more messages than the datagram holds, the rest is skipped",
 				diag.KV(diag.KVP{K: "port", V: addr.Port}, diag.KVP{K: "owner", V: peer.Owner}, diag.KVP{K: "announced", V: hdr.Count}, diag.KVP{K: "read", V: len(types)},
-					diag.KVP{K: "bytes", V: len(data)}, diag.KVP{K: "last_types", V: intsRepr(tail6(types))})), diag.Info)
+					diag.KVP{K: "bytes", V: len(data)}, diag.KVP{K: "last_types", V: intsRepr(tail6(types))})), diag.Warn)
 			broke = true
 			break
 		}
@@ -152,7 +152,7 @@ loop:
 			rest := r.intv(restBits)
 			if restBits != netv2.CarPredictionBodyBits {
 				w.LogEvery([2]any{"short-prediction", addr}, 60.0, fmt.Sprintf("%d car prediction body of %d bits (a whole one is %d): not relayed (owner %d xuid %#x, %d bytes)",
-					addr.Port, restBits, netv2.CarPredictionBodyBits, peer.Owner, peer.Xuid, len(data)), diag.Info)
+					addr.Port, restBits, netv2.CarPredictionBodyBits, peer.Owner, peer.Xuid, len(data)), diag.Warn)
 			}
 			peer.CarsRelayed++
 			var pos *[3]float64
@@ -182,7 +182,7 @@ loop:
 					if unusable {
 						tail = fmt.Sprintf("; withheld (limit %s or not finite): its predictions are not relayed while they stay there", pyfmt.FmtG(PositionWithholdLim))
 					}
-					w.Warnf("%d car position out of range: (%.1f,%.1f,%.1f) owner %d xuid %#x%s", addr.Port, pos[0], pos[1], pos[2], peer.Owner, peer.Xuid, tail)
+					w.Warnf("%d car position out of range: (%.1f,%.1f,%.1f) owner %d xuid %#x%s", addr.Port, pyfmt.F(pos[0]), pyfmt.F(pos[1]), pyfmt.F(pos[2]), peer.Owner, peer.Xuid, tail)
 				}
 			}
 			if unusable {
@@ -191,7 +191,7 @@ loop:
 			if peer.CarsRelayed <= 3 || peer.CarsRelayed%500 == 0 {
 				ps := ""
 				if pos != nil {
-					ps = fmt.Sprintf(" pos=(%.0f,%.0f,%.0f)", pos[0], pos[1], pos[2])
+					ps = fmt.Sprintf(" pos=(%.0f,%.0f,%.0f)", pyfmt.F(pos[0]), pyfmt.F(pos[1]), pyfmt.F(pos[2]))
 				}
 				w.Debugf("car", "%d car prediction #%d flags=%d%d id=%d rest=%d bits -> %d peer(s)%s", addr.Port, peer.CarsRelayed, a, b, cid, restBits, len(w.Others(peer)), ps)
 			}
@@ -211,7 +211,7 @@ loop:
 				}
 			}
 			if peer.CarsRelayed%20 == 1 && pos != nil {
-				w.note("car", peer.Owner, fmt.Sprintf("pos=(%.0f,%.0f,%.0f) id=%d", pos[0], pos[1], pos[2], cid))
+				w.note("car", peer.Owner, fmt.Sprintf("pos=(%.0f,%.0f,%.0f) id=%d", pyfmt.F(pos[0]), pyfmt.F(pos[1]), pyfmt.F(pos[2]), cid))
 			}
 			if a == 0 && b == 0 && peer.KickReason == nil {
 				c := cid

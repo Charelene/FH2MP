@@ -7,6 +7,7 @@ import (
 
 	"fh2mp/internal/bits"
 	"fh2mp/internal/bucketlist"
+	"fh2mp/internal/diag"
 	"fh2mp/internal/gameopts"
 	"fh2mp/internal/netv2"
 	"fh2mp/internal/playersetup"
@@ -246,7 +247,7 @@ func (w *World) handleGameOptions(peer *Peer, addr Addr, mtype, router, oid, seq
 			}
 			if err != nil {
 				w.LogEvery([2]any{"gopts-invalid", addr}, 10.0, fmt.Sprintf("%d invalid pending GameOptions: %v; ignored (%d bits, owner %d xuid %#x, not the options owner; owner %d holds them)",
-					addr.Port, err, size, peer.Owner, peer.Xuid, writer.Owner), 20)
+					addr.Port, err, size, peer.Owner, peer.Xuid, writer.Owner), diag.Warn)
 				return true
 			}
 			pend := &gameopts.Options{Size: ps, Payload: pp}
@@ -337,7 +338,7 @@ func (w *World) handleGameOptions(peer *Peer, addr Addr, mtype, router, oid, seq
 				stored = fmt.Sprint(w.GameOptions.Size)
 			}
 			w.LogEvery([2]any{"gopts-invalid", addr}, 10.0, fmt.Sprintf("%d invalid GameOptions: %v; ignored (%d bits, owner %d xuid %#x); the stored options (%s bits) stay",
-				addr.Port, err, rawSize, peer.Owner, peer.Xuid, stored), 20)
+				addr.Port, err, rawSize, peer.Owner, peer.Xuid, stored), diag.Warn)
 			return true
 		}
 		if et, e := gameopts.EndConditionType(size, payload); e == nil && et != nil {

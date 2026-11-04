@@ -9,6 +9,7 @@ import (
 	"fh2mp/internal/bits"
 	"fh2mp/internal/diag"
 	"fh2mp/internal/netv2"
+	"fh2mp/internal/pyfmt"
 	"fh2mp/internal/pyjson"
 	"fh2mp/internal/reliable"
 )
@@ -36,7 +37,7 @@ func (w *World) HandleFailed(rec any, data []byte, addr Addr) {
 		if len(first) > 64 {
 			first = first[:64]
 		}
-		w.LogEvery([2]any{"truncated", addr}, 10.0, fmt.Sprintf("%s: truncated message, datagram dropped; first bytes %x", ctx, first), diag.Info)
+		w.LogEvery([2]any{"truncated", addr}, 10.0, fmt.Sprintf("%s: truncated message, datagram dropped; first bytes %x", ctx, first), diag.Warn)
 		return
 	}
 	w.ExcEvery([2]any{"handle", fmt.Sprint(rec)}, 10.0, fmt.Sprintf("error handling a datagram (%s); datagram dropped; bytes %x", ctx, data), rec, diag.Error)
@@ -221,7 +222,7 @@ func (w *World) ReportWipe(now float64) {
 	for _, d := range gone {
 		p := "unknown"
 		if d.pos != nil {
-			p = fmt.Sprintf("(%.0f,%.0f,%.0f)", d.pos[0], d.pos[1], d.pos[2])
+			p = fmt.Sprintf("(%.0f,%.0f,%.0f)", pyfmt.F(d.pos[0]), pyfmt.F(d.pos[1]), pyfmt.F(d.pos[2]))
 		}
 		car := "None"
 		if d.car != nil {
@@ -370,8 +371,8 @@ func (w *World) Tick() {
 			if len(again) > 0 {
 				peer.Outbox = append(append([]netv2.Baked(nil), again...), peer.Outbox...)
 				w.Send(peer, false)
-				w.LogEvery([2]any{"resend", peer.Addr}, 30.0, fmt.Sprintf("%d reliable: %d message(s) unacked for %.1f s sent again (owner %d, %d resent so far, %d packet(s) waiting)",
-					peer.Addr.Port, len(again), reliable.ResendSeconds, peer.Owner, peer.Window.Resent, len(peer.Window.Pending)), diag.Debug)
+				w.LogEverySub([2]any{"resend", peer.Addr}, 30.0, fmt.Sprintf("%d reliable: %d message(s) unacked for %.1f s sent again (owner %d, %d resent so far, %d packet(s) waiting)",
+					peer.Addr.Port, len(again), reliable.ResendSeconds, peer.Owner, peer.Window.Resent, len(peer.Window.Pending)), diag.Debug, "reliable")
 			}
 			if peer.Window.Lost != peer.LostSeen {
 				w.LogEvery([2]any{"giveup", peer.Addr}, 30.0, fmt.Sprintf("%d reliable: gave up on %d unacked packet(s) (owner %d xuid %#x; more than %d waiting, last packet from it %.1f s ago): its objects may stay stuck; %d given up in total",

@@ -128,3 +128,42 @@ func FmtGPrec(x float64, prec int) string {
 
 // Fixed is format(x, ".Nf").
 func Fixed(x float64, n int) string { return strconv.FormatFloat(x, 'f', n, 64) }
+
+// F makes a float print like Python's format(): nan, inf and -inf in lower case, everything else as Go prints it.
+type F float64
+
+// Format implements fmt.Formatter.
+func (x F) Format(s fmt.State, verb rune) {
+	f := float64(x)
+	var text string
+	switch {
+	case math.IsNaN(f):
+		text = "nan"
+	case math.IsInf(f, 1):
+		text = "inf"
+		if s.Flag('+') {
+			text = "+inf"
+		}
+	case math.IsInf(f, -1):
+		text = "-inf"
+	default:
+		spec := "%"
+		for _, fl := range "+- 0#" {
+			if s.Flag(int(fl)) {
+				spec += string(fl)
+			}
+		}
+		if w, ok := s.Width(); ok {
+			spec += fmt.Sprint(w)
+		}
+		if p, ok := s.Precision(); ok {
+			spec += "." + fmt.Sprint(p)
+		}
+		fmt.Fprintf(s, spec+string(verb), f)
+		return
+	}
+	if w, ok := s.Width(); ok && len(text) < w {
+		text = strings.Repeat(" ", w-len(text)) + text
+	}
+	fmt.Fprint(s, text)
+}

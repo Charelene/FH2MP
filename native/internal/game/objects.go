@@ -527,7 +527,7 @@ func (w *World) NoteProgress(peer *Peer, raw uint64) {
 	}
 	progress := math.Abs(float64(math.Float32frombits(uint32(raw))))
 	if math.IsNaN(progress) || math.IsInf(progress, 0) || !(0.0 <= progress && progress <= float64(*ev.NumLaps)+1.0) {
-		w.LogEvery([2]any{"progress-range", peer.Owner}, 30.0, fmt.Sprintf("%d in-progress score %s is not a lap progress of a %d-lap event; ignored", peer.Addr.Port, floatRepr(progress), *ev.NumLaps), diag.Info)
+		w.LogEvery([2]any{"progress-range", peer.Owner}, 30.0, fmt.Sprintf("%d in-progress score %s is not a lap progress of a %d-lap event; ignored", peer.Addr.Port, floatRepr(progress), *ev.NumLaps), diag.Warn)
 		return
 	}
 	if ev.Progress == nil {
@@ -651,7 +651,7 @@ func (w *World) HideVIP(peer *Peer, oid, size int, payload bits.Int) (int, bits.
 	if err != nil {
 		w.LogEvery([3]any{"setup-parse", "vip", peer.Owner}, 60.0, fmt.Sprintf("player.setup_unreadable %s: relayed as it came, a VIP bit in it stays set",
 			diag.KV(diag.KVP{K: "what", V: "flags"}, diag.KVP{K: "owner", V: peer.Owner}, diag.KVP{K: "xuid", V: fmt.Sprintf("%#x", peer.Xuid)},
-				diag.KVP{K: "bits", V: size}, diag.KVP{K: "error", V: err.Error()})), diag.Info)
+				diag.KVP{K: "bits", V: size}, diag.KVP{K: "error", V: err.Error()})), diag.Warn)
 		return size, payload
 	}
 	f, ok := fields[PlayerVarFlags]

@@ -452,7 +452,7 @@ func (w *World) RetryRefusedReady(peer *Peer) {
 	rule, err := gameopts.CarRule(w.GameOptions)
 	if err != nil {
 		w.LogEvery("ready-rule", 60.0, fmt.Sprintf("event.rule_unreadable %s: the refused Ready stays refused after this car change",
-			diag.KV(diag.KVP{K: "owner", V: peer.Owner}, diag.KVP{K: "error", V: err.Error()})), diag.Info)
+			diag.KV(diag.KVP{K: "owner", V: peer.Owner}, diag.KVP{K: "error", V: err.Error()})), diag.Warn)
 		return
 	}
 	if !gameopts.AcceptsCar(rule, optsChoices(peer.Choices)) {
@@ -732,7 +732,7 @@ func (w *World) EligibleForEvent(peer *Peer, rule *gameopts.Rule) bool {
 	}
 	w.ev("not_eligible", kv("xuid", fmt.Sprintf("%#x", peer.Xuid)), kv("rule_class", r.Class), kv("rule_min", r.Min), kv("rule_max", r.Max), kv("car", car),
 		kv("class", clsV), kv("pi", piV), kv("rentable", peer.RentalCar != nil), kv("repaired", peer.PartsRepairCar != nil))
-	msg := fmt.Sprintf("%d not eligible: rule class %d PI %d-%d, owner %d car %s class %s PI %.0f", peer.Addr.Port, r.Class, r.Min, r.Max, peer.Owner, modelStr(peer), cls, pi*1000)
+	msg := fmt.Sprintf("%d not eligible: rule class %d PI %d-%d, owner %d car %s class %s PI %.0f", peer.Addr.Port, r.Class, r.Min, r.Max, peer.Owner, modelStr(peer), cls, pyfmt.F(pi*1000))
 	if peer.RentalCar != nil {
 		msg += ", rentable model"
 	}
