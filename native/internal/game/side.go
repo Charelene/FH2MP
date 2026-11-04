@@ -126,7 +126,7 @@ func (h *Hub) whyUnmatched(xuid uint64, data []byte, now float64) (string, bool)
 }
 
 // findAuthed matches a side-channel request to the live, ticket-bound game connection of its xuid.
-func (h *Hub) findAuthed(routes map[uint64]Addr, xuid uint64, data []byte, now float64) (*World, *Peer, []byte) {
+func (h *Hub) findAuthed(only *World, routes map[uint64]Addr, xuid uint64, data []byte, now float64) (*World, *Peer, []byte) {
 	last, hasLast := routes[xuid]
 	type cand struct {
 		addr Addr
@@ -143,6 +143,9 @@ func (h *Hub) findAuthed(routes map[uint64]Addr, xuid uint64, data []byte, now f
 		cands = append(cands, cand{a, w})
 	}
 	for _, c := range cands {
+		if only != nil && c.w != only {
+			continue
+		}
 		binding, ok := h.Bound[c.addr]
 		peer, _ := c.w.Peers.Get(c.addr)
 		if !ok || binding.xuid != xuid || peer == nil || !peer.Connected || !peer.Entered || peer.Xuid != xuid || peer.CarID == nil || *peer.CarID != int(data[52]) ||
@@ -165,7 +168,7 @@ func (h *Hub) findAuthed(routes map[uint64]Addr, xuid uint64, data []byte, now f
 	return nil, nil, nil
 }
 
-func (h *Hub) lightingHandle(data []byte, addr Addr) {
+func (h *Hub) lightingHandle(data []byte, addr Addr, only *World) {
 	if len(data) != lightingRequest || !bytes.Equal(data[:9], sideHeader[:9]) || string(data[11:19]) != lightingMagic {
 		return
 	}
@@ -187,7 +190,7 @@ func (h *Hub) lightingHandle(data []byte, addr Addr) {
 	if seq == 0 || h.isRevoked(xuid) {
 		return
 	}
-	world, peer, key := h.findAuthed(h.LightingRoutes, xuid, data, now)
+	world, peer, key := h.findAuthed(only, h.routesFor(only, false), xuid, data, now)
 	if world == nil {
 		if ok, skipped := sideRate.Allow([2]any{"lt-unmatched", xuid}, rejectLogSeconds); ok {
 			why, expected := h.whyUnmatched(xuid, data, now)
@@ -292,7 +295,7 @@ func honkStep(old *HonkState, epoch []byte, seq uint64, now float64, horn, press
 	return &HonkState{Epoch: epoch, Seq: seq, At: now, Car: car, Horn: allowed, HornAsked: horn, Press: press, Started: started, BlockedUntil: blockedUntil, Capped: capped, CapHit: capHit}
 }
 
-func (h *Hub) honkHandle(data []byte, addr Addr) {
+func (h *Hub) honkHandle(data []byte, addr Addr, only *World) {
 	if len(data) != honkRequest || !bytes.Equal(data[:9], sideHeader[:9]) || string(data[11:19]) != honkMagic || envStr("FH2MP_NO_HONK", "") != "" {
 		return
 	}
@@ -314,7 +317,7 @@ func (h *Hub) honkHandle(data []byte, addr Addr) {
 	if seq == 0 || h.isRevoked(xuid) {
 		return
 	}
-	world, peer, key := h.findAuthed(h.HonkRoutes, xuid, data, now)
+	world, peer, key := h.findAuthed(only, h.routesFor(only, true), xuid, data, now)
 	if world == nil {
 		if ok, skipped := sideRate.Allow([2]any{"hn-unmatched", xuid}, rejectLogSeconds); ok {
 			why, expected := h.whyUnmatched(xuid, data, now)
@@ -443,4 +446,24 @@ func (h *Hub) probeHandle(data []byte, addr Addr) bool {
 		}
 	}
 	return true
+}
+
+// routesFor is the cache of the address that matched last time: per world when a worker owns the request, else the hub's.
+func (h *Hub) routesFor(only *World, honk bool) map[uint64]Addr {
+	if only == nil {
+		if honk {
+			return h.HonkRoutes
+		}
+		return h.LightingRoutes
+	}
+	if honk {
+		if only.honkRoutes == nil {
+			only.honkRoutes = map[uint64]Addr{}
+		}
+		return only.honkRoutes
+	}
+	if only.lightRoutes == nil {
+		only.lightRoutes = map[uint64]Addr{}
+	}
+	return only.lightRoutes
 }

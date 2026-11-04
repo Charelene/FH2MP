@@ -786,8 +786,26 @@ func (w *World) KickForCars() {
 		}
 		w.Warnf("kick: owner %d xuid %#x removed: %s (%s)", q.Owner, q.Xuid, reason, how)
 		if w.Hub != nil && q.Xuid != 0 {
-			w.Hub.Flag(q.Xuid, reason)
-			w.Hub.Revoke(q.Xuid)
+			xuid, why := q.Xuid, reason
+			if w.Hub.Workers() == 0 {
+				w.Hub.Flag(xuid, why)
+				w.Hub.Revoke(xuid)
+			} else {
+				// With workers the hub tables change only while they are idle, so the hub's part waits for that; this world's connections end now,
+				// as they do in Python (the rest of this tick must not see the player).
+				ended := w.dropAccount(xuid)
+				w.Hub.Defer(func() {
+					h := w.Hub
+					h.Flag(xuid, why)
+					h.revokeTables(xuid)
+					for _, ow := range h.Worlds.Values() {
+						if ow != w {
+							ended += ow.dropAccount(xuid)
+						}
+					}
+					h.Log(fmt.Sprintf("control: revoked %#x (%d connection(s) ended)", xuid, ended))
+				})
+			}
 		} else {
 			w.Send(q, true, w.Goodbye(q))
 			w.DropPeer(q, "car policy: "+reason)

@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"fh2mp/internal/bits"
@@ -78,7 +80,13 @@ type Hub struct {
 	Out            *LogOut
 	Events         *eventlog.Log
 	Sinks          *Sinks
-	catalog        *catalog.Catalog
+	catalogPtr     atomic.Pointer[catalog.Catalog]
+	catalogMu      sync.Mutex
+	authMu         sync.Mutex
+	deferMu        sync.Mutex
+	deferred       []func()
+	workers        []*Worker
+	manual         bool
 	syncer         *catalog.Syncer
 	CtlSend        func(data []byte, to Addr)
 	DefaultType    int
@@ -121,11 +129,12 @@ func NewHub(cfg HubConfig) (*Hub, error) {
 	if err := ValidatePolicies(); err != nil {
 		return nil, err
 	}
-	h := &Hub{cfg: cfg, Clk: cfg.Clock, Rng: cfg.Rng, Sock: cfg.Sock, Out: cfg.Out, Sinks: cfg.Sinks, catalog: cfg.Catalog, CtlSend: cfg.CtlSend,
+	h := &Hub{cfg: cfg, Clk: cfg.Clock, Rng: cfg.Rng, Sock: cfg.Sock, Out: cfg.Out, Sinks: cfg.Sinks, CtlSend: cfg.CtlSend,
 		Assign: map[uint64]string{}, Runs: map[uint64]string{}, Authed: map[uint64]authEnt{}, Flagged: omap.New[uint64, flagEnt](), Revoked: map[uint64]float64{},
 		Keys: map[uint64]map[string]float64{}, TicketEpochs: map[Addr][]byte{}, Bound: map[Addr]boundEnt{}, Nonces: omap.New[nonceKey, float64](),
 		AuthLog: map[any]float64{}, Worlds: omap.New[WorldKey, *World](), Route: omap.New[Addr, *World](), EmptySince: map[WorldKey]float64{},
 		LightingRoutes: map[uint64]Addr{}, HonkRoutes: map[uint64]Addr{}, probeSeen: map[Addr]probeEnt{}, nxt: math.Inf(1)}
+	h.catalogPtr.Store(cfg.Catalog)
 	h.DefaultType = 2
 	h.PickRng = func() Rand { return pyrand.New(entropySeed()) }
 	if cfg.Carmeet {
@@ -169,12 +178,14 @@ func NewHub(cfg HubConfig) (*Hub, error) {
 }
 
 // Catalog is the current car policy and part data.
-func (h *Hub) Catalog() *catalog.Catalog { return h.catalog }
+func (h *Hub) Catalog() *catalog.Catalog { return h.catalogPtr.Load() }
 
 // PollCatalog re-reads the synced car database when it changed.
 func (h *Hub) PollCatalog() {
-	if n := h.syncer.Poll(h.Clk.Mono(), h.catalog, true, h.Idle.Log); n != nil {
-		h.catalog = n
+	h.catalogMu.Lock()
+	defer h.catalogMu.Unlock()
+	if n := h.syncer.Poll(h.Clk.Mono(), h.catalogPtr.Load(), true, h.Idle.Log); n != nil {
+		h.catalogPtr.Store(n)
 	}
 }
 
@@ -225,6 +236,7 @@ func (h *Hub) WorldFor(lobbyType int, name string) *World {
 		}
 	}
 	h.Worlds.Set(key, w)
+	h.attachWorld(w)
 	h.Log(fmt.Sprintf("new world (%d, %s)", lobbyType, pyReprStr(name)))
 	return w
 }
@@ -710,6 +722,29 @@ func (h *Hub) Logout(xuid uint64, key []byte) {
 
 // Revoke is a ban or kick: forget the sign-in, the lobby assignment, and end every live connection of this player.
 func (h *Hub) Revoke(xuid uint64) {
+	h.revokeTables(xuid)
+	dropped := 0
+	for _, w := range h.Worlds.Values() {
+		dropped += w.dropAccount(xuid)
+	}
+	h.Log(fmt.Sprintf("control: revoked %#x (%d connection(s) ended)", xuid, dropped))
+}
+
+// dropAccount ends this world's connections of an account (CloseConnection, then removal).
+func (w *World) dropAccount(xuid uint64) int {
+	n := 0
+	for _, peer := range w.Peers.Values() {
+		if peer.Xuid == xuid {
+			w.Send(peer, true, w.Goodbye(peer))
+			w.DropPeer(peer, "revoked by the account service")
+			n++
+		}
+	}
+	return n
+}
+
+// revokeTables forgets everything the hub holds for the account; the connections are ended by the caller.
+func (h *Hub) revokeTables(xuid uint64) {
 	delete(h.Authed, xuid)
 	delete(h.Keys, xuid)
 	for addr, b := range h.Bound {
@@ -719,17 +754,6 @@ func (h *Hub) Revoke(xuid uint64) {
 	}
 	delete(h.Assign, xuid)
 	h.Revoked[xuid] = h.Clk.Mono() + 86400.0
-	dropped := 0
-	for _, w := range h.Worlds.Values() {
-		for _, peer := range w.Peers.Values() {
-			if peer.Xuid == xuid {
-				w.Send(peer, true, w.Goodbye(peer))
-				w.DropPeer(peer, "revoked by the account service")
-				dropped++
-			}
-		}
-	}
-	h.Log(fmt.Sprintf("control: revoked %#x (%d connection(s) ended)", xuid, dropped))
 }
 
 // ---- tickets ----
@@ -837,11 +861,11 @@ func (h *Hub) OpenConnectionFields(data []byte) (uint64, int, bool) {
 // Handle is Hub.handle: one datagram from addr.
 func (h *Hub) Handle(data []byte, addr Addr) {
 	if len(data) >= 19 && string(data[11:19]) == lightingMagic {
-		h.lightingHandle(data, addr)
+		h.lightingHandle(data, addr, nil)
 		return
 	}
 	if len(data) >= 19 && string(data[11:19]) == honkMagic {
-		h.honkHandle(data, addr)
+		h.honkHandle(data, addr, nil)
 		return
 	}
 	if h.probeHandle(data, addr) {
@@ -970,6 +994,8 @@ func (h *Hub) OpenAllowed(playerID uint64, addr Addr) bool {
 }
 
 func (h *Hub) refusedOpen(playerID uint64, addr Addr, now float64, why string) {
+	h.authMu.Lock()
+	defer h.authMu.Unlock()
 	if len(h.AuthLog) < 5000 && now-h.authLogGet(addr.IP) > 10 {
 		h.AuthLog[addr.IP] = now
 		h.Idle.Warnf("auth: refused OpenConnection of %#x from %s (%s; mode %s)", playerID, addr.IP, why, h.UDPAuth)
@@ -1134,6 +1160,7 @@ func (h *Hub) Sweep() {
 			}
 			if now-since > IdleWorldSeconds {
 				h.Log(fmt.Sprintf("world (%d, %s) closed (empty)", key.Type, pyReprStr(key.Name)))
+				h.detachWorld(w)
 				h.Worlds.Delete(key)
 				delete(h.EmptySince, key)
 			}
@@ -1209,3 +1236,9 @@ func entropySeed() uint64 {
 	}
 	return binary.LittleEndian.Uint64(b[:])
 }
+
+// Stop runs fn while every worker is idle (immediately when there are none).
+func (h *Hub) Stop(fn func()) { h.stop(fn) }
+
+// Workers is the number of worker goroutines (0 = everything on the calling goroutine).
+func (h *Hub) Workers() int { return len(h.workers) }

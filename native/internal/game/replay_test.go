@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"fh2mp/internal/catalog"
+	"fh2mp/internal/diag"
 	"fh2mp/internal/pyrand"
 )
 
@@ -25,11 +27,14 @@ type outRow struct {
 }
 
 type fakeSock struct {
+	mu   sync.Mutex
 	clk  *fakeClock
 	sent []outRow
 }
 
 func (s *fakeSock) SendTo(data []byte, addr Addr) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.sent = append(s.sent, outRow{s.clk.t, addr, append([]byte(nil), data...)})
 	return nil
 }
@@ -60,7 +65,10 @@ type trace struct {
 
 func toAddr(a []any) Addr { return Addr{a[0].(string), int(a[1].(float64))} }
 
-func runTrace(t *testing.T, name string, seed uint64) {
+func runTrace(t *testing.T, name string, seed uint64) { runTraceN(t, name, seed, 0) }
+
+// runTraceN replays a trace; workers > 0 runs the hub with that many worker goroutines (manual stepping, so the run is deterministic).
+func runTraceN(t *testing.T, name string, seed uint64, workers int) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "game_"+name+".json"))
 	if err != nil {
 		t.Skip("trace not recorded:", err)
@@ -91,6 +99,7 @@ func runTrace(t *testing.T, name string, seed uint64) {
 		t.Setenv(k, v)
 	}
 	t.Setenv("FH2MP_TRAFFIC_CARS", filepath.Join("..", "..", "..", "server", "data", "trafficcars.txt"))
+	diag.ResetRateLimits()
 	clk := &fakeClock{t: 1000.0}
 	sock := &fakeSock{clk: clk}
 	cat, err := catalog.Load()
@@ -120,6 +129,10 @@ func runTrace(t *testing.T, name string, seed uint64) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if workers > 0 {
+		hub.StartWorkers(workers, true)
+		t.Cleanup(hub.StopWorkers)
+	}
 	picks := 0
 	hub.PickRng = func() Rand { picks++; return pyrand.New(uint64(1000 + picks)) }
 	for _, ev := range tr.Events {
@@ -127,28 +140,36 @@ func runTrace(t *testing.T, name string, seed uint64) {
 		switch ev.Kind {
 		case "dgram":
 			data, _ := hex.DecodeString(ev.Hex)
-			hub.Handle(data, toAddr(ev.Addr))
+			hub.HandleDatagram(data, toAddr(ev.Addr))
 		case "ctl":
 			lastCtl = ""
-			hub.ControlText(ev.Text, &Addr{"127.0.0.1", 1})
+			hub.Stop(func() { hub.ControlText(ev.Text, &Addr{"127.0.0.1", 1}) })
 			if lastCtl != ev.Expect {
 				t.Errorf("%s: control %q replied %q, want %q", name, ev.Text, lastCtl, ev.Expect)
 			}
 		case "query":
 			var got string
-			switch ev.Name {
-			case "pop":
-				got = hub.populationsText()
-			case "lobbies":
-				got = jsonDumps(hub.lobbyStatus())
-			case "positions":
-				got = jsonDumps(hub.mapStatus())
-			}
+			hub.Stop(func() {
+				switch ev.Name {
+				case "pop":
+					got = hub.populationsText()
+				case "lobbies":
+					got = jsonDumps(hub.lobbyStatus())
+				case "positions":
+					got = jsonDumps(hub.mapStatus())
+				}
+			})
 			if got != ev.Expect {
 				t.Errorf("%s: query %s: want %s got %s", name, ev.Name, ev.Expect, got)
 			}
 		}
-		hub.Step()
+		if workers > 0 {
+			hub.Stop(func() {})
+			hub.StepWorkers(clk.t)
+			hub.StepHub()
+		} else {
+			hub.Step()
+		}
 	}
 	// compare per receiving address, in order
 	want := map[Addr][]string{}
@@ -187,7 +208,11 @@ func runTrace(t *testing.T, name string, seed uint64) {
 			t.Errorf("%s: unexpected datagrams to %v: %d", name, a, len(got[a]))
 		}
 	}
-	compareLogs(t, name, tr.Log, gotLog)
+	if workers > 0 {
+		compareLogsByTag(t, name, tr.Log, gotLog)
+	} else {
+		compareLogs(t, name, tr.Log, gotLog)
+	}
 	t.Log(fmt.Sprintf("%s: %d inputs, %d datagrams, %d log lines compared", name, len(tr.Events), len(tr.Out), len(tr.Log)))
 }
 
@@ -205,6 +230,33 @@ func TestCapacityTrace(t *testing.T)   { runTrace(t, "capacity", 31) }
 func TestBotsTrace(t *testing.T)       { runTrace(t, "bots", 37) }
 func TestRentalTrace(t *testing.T)     { runTrace(t, "rental", 41) }
 func TestReliableTrace(t *testing.T)   { runTrace(t, "reliable", 43) }
+
+func tagOf(l string) string {
+	if i := strings.Index(l, "] "); i >= 0 {
+		return l[:i+1]
+	}
+	return ""
+}
+
+// compareLogsByTag compares the lines of each log tag in order; lines of different worlds may interleave differently with workers.
+func compareLogsByTag(t *testing.T, name string, want, got []string) {
+	t.Helper()
+	group := func(in []string) map[string][]string {
+		m := map[string][]string{}
+		for _, l := range in {
+			k := tagOf(l)
+			if strings.HasPrefix(l, "WARN ") || strings.HasPrefix(l, "ERROR ") {
+				k = tagOf(strings.SplitN(l, " ", 2)[1])
+			}
+			m[k] = append(m[k], l)
+		}
+		return m
+	}
+	w, g := group(want), group(got)
+	for k := range w {
+		compareLogs(t, name+" "+k, w[k], g[k])
+	}
+}
 
 func compareLogs(t *testing.T, name string, want, got []string) {
 	t.Helper()
@@ -236,3 +288,19 @@ func compareLogs(t *testing.T, name string, want, got []string) {
 }
 func TestRoadTripTrace(t *testing.T) { runTrace(t, "roadtrip", 47) }
 func TestEdgeTrace(t *testing.T)     { runTrace(t, "edge", 53) }
+
+var allTraces = []struct {
+	name string
+	seed uint64
+}{{"join_relay", 7}, {"control", 3}, {"race", 11}, {"parts", 5}, {"tickets", 9}, {"carmeet", 13}, {"tag", 17}, {"bucketlist", 19}, {"traffic", 23},
+	{"speed", 29}, {"capacity", 31}, {"bots", 37}, {"rental", 41}, {"reliable", 43}, {"roadtrip", 47}, {"edge", 53}}
+
+// TestTracesWithWorkers replays every scenario with the worlds on 1, 2 and 4 worker goroutines: the output per receiver and the log must not change.
+func TestTracesWithWorkers(t *testing.T) {
+	for _, n := range []int{1, 2, 4} {
+		for _, tr := range allTraces {
+			tr, n := tr, n
+			t.Run(fmt.Sprintf("%s/w%d", tr.name, n), func(t *testing.T) { runTraceN(t, tr.name, tr.seed, n) })
+		}
+	}
+}

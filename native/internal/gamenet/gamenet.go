@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,8 +47,12 @@ const (
 	sendBacklog    = 48 * 1024
 	maxConnections = 512
 	perIP          = 3
-	helloSeconds   = 10.0
-	idleSeconds    = 60.0
+)
+
+// Tunnel timeouts (variables so the tests can shorten them).
+var (
+	helloSeconds = 10.0
+	idleSeconds  = 60.0
 )
 
 type pcgRand struct{ r *mrand.Rand }
@@ -89,7 +94,7 @@ type tconn struct {
 	dead    bool
 	why     string
 	rx      int
-	dropped int
+	dropped atomic.Int64
 }
 
 type tunnel struct {
@@ -115,9 +120,9 @@ func (t *tunnel) send(data []byte, a game.Addr) bool {
 		return false
 	}
 	if len(data) > maxFrame || c.pending.Load() > sendBacklog {
-		c.dropped++
-		if c.dropped == 1 || c.dropped%500 == 0 {
-			diag.Get("tunnel").Warn(fmt.Sprintf("datagram dropped for port %d: %d bytes are above the frame limit or waiting to be sent (limit %d), the connection is too slow; %d dropped on this connection so far", a.Port, len(data), sendBacklog, c.dropped))
+		d := c.dropped.Add(1)
+		if d == 1 || d%500 == 0 {
+			diag.Get("tunnel").Warn(fmt.Sprintf("datagram dropped for port %d: %d bytes are above the frame limit or waiting to be sent (limit %d), the connection is too slow; %d dropped on this connection so far", a.Port, len(data), sendBacklog, d))
 		}
 		return true
 	}
@@ -129,7 +134,7 @@ func (t *tunnel) send(data []byte, a game.Addr) bool {
 	case c.out <- frame:
 	default:
 		c.pending.Add(-int64(len(frame)))
-		c.dropped++
+		c.dropped.Add(1)
 	}
 	return true
 }
@@ -277,6 +282,9 @@ func New(cfg Config) (*Server, error) {
 	if s.tl != nil {
 		extra = fmt.Sprintf(", tunnel tcp/%d", s.tl.Addr().(*net.TCPAddr).Port)
 	}
+	if n := workerCount(); n >= 2 {
+		hub.StartWorkers(n, false)
+	}
 	hub.Idle.Logf("hub listening on udp/%d, control udp/%s%s", cfg.Port, ctlShown, extra)
 	if s.ctl == nil {
 		hub.Idle.Error(fmt.Sprintf("control port udp/%d on 127.0.0.1 not bound (%v): the account service cannot send assign/auth/revoke/logout/pop to this server, so lobby placement, sign-in checks and kicks do not work", ctlPort, ctlErr))
@@ -423,7 +431,7 @@ func (s *Server) tunnelClose(tc *tconn, why string) {
 		diag.KV(diag.KVP{K: "lived_s", V: int(s.clk.Mono() - tc.born)}, diag.KVP{K: "rx_bytes", V: tc.rx})))
 	tc.c.Close()
 	close(tc.out)
-	s.hub.TunnelClosed(tc.addr)
+	s.hub.Stop(func() { s.hub.TunnelClosed(tc.addr) })
 }
 
 func (s *Server) tunnelSweep(now float64) {
@@ -440,7 +448,7 @@ func (s *Server) tunnelSweep(now float64) {
 		switch {
 		case now-c.lastRx > idleSeconds:
 			s.tunnelClose(c, fmt.Sprintf("silent for %.0f s (limit %g, the proxy sends a keep-alive every 15 s)", now-c.lastRx, idleSeconds))
-		case now-c.born > helloSeconds && !s.hub.Opened(c.addr):
+		case now-c.born > helloSeconds && !s.opened(c.addr):
 			s.tunnelClose(c, fmt.Sprintf("no game connection opened within %g s (the first datagrams were rejected, or none came)", helloSeconds))
 		}
 	}
@@ -464,16 +472,17 @@ func (s *Server) Run() error {
 	handle := func(ev event) bool {
 		switch ev.kind {
 		case 0:
-			s.hub.Handle(ev.data, ev.addr)
+			s.hub.HandleDatagram(ev.data, ev.addr)
 		case 1:
-			s.hub.ControlText(string(ev.data), &game.Addr{IP: ev.ctl.IP.String(), Port: ev.ctl.Port})
+			text, from := string(ev.data), &game.Addr{IP: ev.ctl.IP.String(), Port: ev.ctl.Port}
+			s.hub.Stop(func() { s.hub.ControlText(text, from) })
 		case 2:
 			s.tunnelAccept(ev.conn)
 		case 3:
 			ev.tc.lastRx = s.clk.Mono()
 			ev.tc.rx += len(ev.data) + 2
 			if len(ev.data) > 0 {
-				s.hub.Handle(ev.data, ev.addr)
+				s.hub.HandleDatagram(ev.data, ev.addr)
 			}
 		case 4:
 			s.tunnelClose(ev.tc, ev.why)
@@ -508,7 +517,11 @@ func (s *Server) Run() error {
 			}
 		case <-time.After(wait):
 		}
-		nxtAt = s.hub.Step()
+		if s.hub.Workers() > 0 {
+			nxtAt = s.hub.StepHub()
+		} else {
+			nxtAt = s.hub.Step()
+		}
 		now := s.clk.Mono()
 		if now-lastSweep > 1.0 {
 			lastSweep = now
@@ -517,7 +530,27 @@ func (s *Server) Run() error {
 	}
 }
 
+func (s *Server) opened(a game.Addr) bool {
+	var ok bool
+	s.hub.Stop(func() { ok = s.hub.Opened(a) })
+	return ok
+}
+
+// workerCount is FH2MP_WORKERS, default one fewer than the cores (one core keeps the hub and the sockets), at least 1.
+func workerCount() int {
+	if v := os.Getenv("FH2MP_WORKERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			return n
+		}
+	}
+	if n := runtime.GOMAXPROCS(0) - 1; n >= 1 {
+		return n
+	}
+	return 1
+}
+
 func (s *Server) shutdown() error {
+	s.hub.StopWorkers()
 	s.hub.Log("shutting down")
 	s.hub.Close()
 	if s.logf != nil {

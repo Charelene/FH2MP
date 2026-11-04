@@ -324,6 +324,10 @@ type World struct {
 	noiseAt          float64
 	rate             *diag.RateLimit
 	AutoWorlds       int
+	worker           *Worker
+	nextTick         float64
+	lightRoutes      map[uint64]Addr
+	honkRoutes       map[uint64]Addr
 }
 
 // NewWorld is Server(...) for a hub-owned world.

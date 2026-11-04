@@ -100,6 +100,22 @@ var start = time.Now()
 func monotonic() float64 { return time.Since(start).Seconds() }
 
 // NewRateLimit makes a limiter; clock nil = monotonic seconds, limit 0 = 2048 keys.
+var (
+	limitsMu sync.Mutex
+	limits   []*RateLimit
+)
+
+// ResetRateLimits forgets what every limiter has suppressed (tests that replay a scenario in one process).
+func ResetRateLimits() {
+	limitsMu.Lock()
+	defer limitsMu.Unlock()
+	for _, r := range limits {
+		r.mu.Lock()
+		r.state = map[any]rateState{}
+		r.mu.Unlock()
+	}
+}
+
 func NewRateLimit(clock func() float64, limit int) *RateLimit {
 	if clock == nil {
 		clock = monotonic
@@ -107,7 +123,11 @@ func NewRateLimit(clock func() float64, limit int) *RateLimit {
 	if limit == 0 {
 		limit = 2048
 	}
-	return &RateLimit{clock: clock, limit: limit, state: map[any]rateState{}}
+	r := &RateLimit{clock: clock, limit: limit, state: map[any]rateState{}}
+	limitsMu.Lock()
+	limits = append(limits, r)
+	limitsMu.Unlock()
+	return r
 }
 
 // Allow returns (write?, suppressed since the last written line).

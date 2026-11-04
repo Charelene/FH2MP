@@ -169,7 +169,8 @@ func (w *World) CmTick(nowMs int64) {
 		g.Reset = (nowMs + 30000) & 0xFFFFFFFF
 		for _, q := range joined {
 			if w.Hub != nil {
-				w.Hub.Assign[q.Xuid] = name
+				xuid, lobby := q.Xuid, name
+				w.Hub.Defer(func() { w.Hub.Assign[xuid] = lobby })
 			}
 		}
 		w.cmBroadcast(netv2.CarMeetFields{Session: &name, Template: &template}, nil)
