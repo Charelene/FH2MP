@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"fh2mp/internal/diag"
 	"fh2mp/internal/scoreboard"
 	"fmt"
 	"strconv"
@@ -59,3 +60,15 @@ func b2s(b bool) string {
 }
 
 func hex(x int64) string { return fmt.Sprintf("%#x", x) }
+
+// pyWhere is `TypeName: message` of an error, named as the Python server names it (the "at file:line" part has no counterpart here).
+func pyWhere(e error) string {
+	name := "ValueError"
+	switch e.(type) {
+	case *keyErr:
+		name = "KeyError"
+	case *typeErr:
+		name = "TypeError"
+	}
+	return diag.Scrub(name + ": " + e.Error())
+}
