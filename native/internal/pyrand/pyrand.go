@@ -3,6 +3,7 @@
 package pyrand
 
 import (
+	"crypto/sha512"
 	"math"
 	mb "math/bits"
 )
@@ -42,6 +43,31 @@ func (r *Random) Seed(seed uint64) {
 	if seed>>32 != 0 {
 		key = append(key, uint32(seed>>32))
 	}
+	r.seedKey(key)
+}
+
+// NewString seeds like random.Random("text"): the UTF-8 bytes followed by their SHA-512 digest, read as one big-endian integer.
+func NewString(seed string) *Random {
+	sum := sha512.Sum512([]byte(seed))
+	b := append([]byte(seed), sum[:]...)
+	var key []uint32
+	for end := len(b); end > 0; end -= 4 {
+		start := max(0, end-4)
+		var w uint32
+		for _, c := range b[start:end] {
+			w = w<<8 | uint32(c)
+		}
+		key = append(key, w)
+	}
+	for len(key) > 1 && key[len(key)-1] == 0 {
+		key = key[:len(key)-1]
+	}
+	r := &Random{}
+	r.seedKey(key)
+	return r
+}
+
+func (r *Random) seedKey(key []uint32) {
 	r.initGenrand(19650218)
 	i, j := 1, 0
 	k := n

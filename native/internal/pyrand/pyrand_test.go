@@ -87,3 +87,32 @@ func TestMatchesPython(t *testing.T) {
 		}
 	}
 }
+
+func TestStringSeeds(t *testing.T) {
+	for _, c := range []struct {
+		seed   string
+		floats []float64
+		below  int
+		choice int
+	}{
+		{"fh2mp-rivals-12-3", []float64{0.3323293480449867, 0.10788649236979608, 0.4893067960614962}, 919, 2},
+		{"", []float64{0.9602256525641875, 0.595411957851699, 0.3880117152955401}, 751, 6},
+		{"Ünï", []float64{0.4437022086529785, 0.3707481024169975, 0.4795462545896777}, 428, 0},
+		{"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", []float64{0.8500063097913054, 0.17305576775745346, 0.32172225320517356}, 920, 6},
+		{"a", []float64{0.2720295377534757, 0.06733663088629693, 0.5999141237517758}, 659, 4},
+		{"fh2mp-rivals-0-0", []float64{0.4852150158977303, 0.40632866567517945, 0.8776434818143267}, 862, 2},
+	} {
+		r := NewString(c.seed)
+		for i, want := range c.floats {
+			if got := r.Float64(); got != want {
+				t.Fatalf("seed %q float %d: %v want %v", c.seed, i, got, want)
+			}
+		}
+		if got := r.Intn(1000); got != c.below {
+			t.Fatalf("seed %q Intn: %d want %d", c.seed, got, c.below)
+		}
+		if got := r.Intn(7); got != c.choice {
+			t.Fatalf("seed %q choice: %d want %d", c.seed, got, c.choice)
+		}
+	}
+}
