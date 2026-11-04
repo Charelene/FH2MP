@@ -4,7 +4,7 @@
 #   release/ci.sh [--container] <lane>...
 #
 # Lanes: server (portable server checks, release flow, pure shim checks), pg (disposable PostgreSQL), shim (Wine checks),
-# launcher, mutations (deliberate regressions must be caught), quick (server + launcher, before a push), all.
+# launcher, mutations (deliberate regressions must be caught), go (the Go port: fmt, vet, tests), quick (server + launcher, before a push), all.
 # --container runs the lanes in the image built from release/ci.Containerfile (podman or docker): the same Python, Wine, mingw and
 # PostgreSQL as GitHub. Without it the host's tools are used, which can differ (host Wine 10/11 vs Debian's, Python 3.14 vs 3.12).
 set -euo pipefail
@@ -77,12 +77,21 @@ lane_server() {
 pg_root=
 pg_stop() { [ -z "$pg_root" ] || { pg_ctl -D "$pg_root/data" -m immediate stop >/dev/null 2>&1 || true; rm -rf "$pg_root"; pg_root=; }; }
 trap pg_stop EXIT
-pg_start() {   # a disposable cluster on a private socket directory; FH2MP_TEST_PG_DSN points at its fh2mp_test_ci database
-    local bin
+pg_start() {   # a disposable cluster on a private socket directory; FH2MP_TEST_PG_DSN points at its fh2mp_test_ci database. With "tcp" it also listens
+               # on a loopback port and FH2MP_TEST_PG_ADMIN_DSN names it (the Go tests make their own databases through it)
+    local bin port=
     bin=$(ls /usr/lib/postgresql/*/bin/initdb 2>/dev/null | sort -V | tail -1)
     command -v initdb >/dev/null || { [ -n "$bin" ] && PATH=$(dirname "$bin"):$PATH; } || return 1
     pg_root=$(mktemp -d)
     initdb -D "$pg_root/data" -A trust --no-locale --encoding=UTF8 >/dev/null
+    if [ "${1:-}" = tcp ]; then
+        port=$("$py" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+        pg_ctl -D "$pg_root/data" -l "$pg_root/postgres.log" -o "-h 127.0.0.1 -p $port -k $pg_root" -w start >/dev/null
+        export FH2MP_TEST_PG_ADMIN_DSN="postgresql://$(id -un)@127.0.0.1:$port/postgres"
+        createdb -h 127.0.0.1 -p "$port" fh2mp_test_ci
+        export FH2MP_TEST_PG_DSN="host=127.0.0.1 port=$port dbname=fh2mp_test_ci"
+        return 0
+    fi
     pg_ctl -D "$pg_root/data" -l "$pg_root/postgres.log" -o "-h '' -k $pg_root" -w start >/dev/null
     createdb -h "$pg_root" fh2mp_test_ci
     export FH2MP_TEST_PG_DSN="host=$pg_root dbname=fh2mp_test_ci"
@@ -139,11 +148,18 @@ lane_launcher() {
     run "launcher checks" env FH2MP_NO_KEYRING=1 QT_QPA_PLATFORM=offscreen sh -c 'cd launcher && "$0" -m unittest discover -s tests' "$py"
 }
 
-lane_go() {   # the Go port of the game server (native/); the trace comparisons need server/data and skip without it
+lane_go() {   # the Go port (native/): format, vet, tests. The tests that need the game catalog or server/data skip without them; the others use a disposable PostgreSQL
     command -v go >/dev/null 2>&1 || { echo "go lane: go is not installed" >&2; failed=1; return; }
     run "go fmt" sh -c 'cd native && test -z "$(gofmt -l .)"'
     run "go vet" sh -c 'cd native && go vet ./...'
-    run "go test" sh -c 'cd native && go test ./...'
+    if pg_start tcp; then
+        run "go test" sh -c 'cd native && go test ./...'
+        pg_stop
+        unset FH2MP_TEST_PG_ADMIN_DSN
+    else
+        echo "go lane: no PostgreSQL here, the database tests are skipped" >&2
+        run "go test" sh -c 'cd native && go test ./...'
+    fi
 }
 
 lane_mutations() {
@@ -154,7 +170,7 @@ lane_mutations() {
 for lane in "${lanes[@]}"; do
     case "$lane" in
         quick) lane_server; lane_launcher ;;
-        all) lane_server; lane_pg; lane_shim; lane_launcher; lane_mutations ;;
+        all) lane_server; lane_pg; lane_shim; lane_launcher; lane_mutations; lane_go ;;
         *) "lane_$lane" ;;
     esac
 done

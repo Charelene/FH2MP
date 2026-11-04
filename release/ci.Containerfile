@@ -19,6 +19,11 @@ RUN set -eux; \
         libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0; \
     rm -rf /var/lib/apt/lists/* /tmp/pgdg.asc
 
+# Go for the port in native/ (release/ci.sh go): the version of native/go.mod, checked against the hash go.dev publishes for the tarball.
+ARG GO_VERSION=1.27.3
+ARG GO_SHA256=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
+RUN set -eux;     curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz;     echo "${GO_SHA256}  /tmp/go.tgz" | sha256sum -c -;     tar -C /usr/local -xzf /tmp/go.tgz;     rm /tmp/go.tgz
+
 COPY release/requirements-sign.txt release/requirements-test.txt /reqs/release/
 COPY launcher/requirements-release.txt /reqs/launcher/
 RUN pip install --no-cache-dir --require-hashes -r /reqs/release/requirements-test.txt \
@@ -27,5 +32,5 @@ RUN pip install --no-cache-dir --require-hashes -r /reqs/release/requirements-te
 # PostgreSQL refuses to run as root; the checks run as this user.
 RUN useradd --create-home --uid 1000 ci
 USER ci
-ENV PATH=/usr/lib/postgresql/16/bin:$PATH PYTHONDONTWRITEBYTECODE=1 QT_QPA_PLATFORM=offscreen FH2MP_NO_KEYRING=1
+ENV PATH=/usr/local/go/bin:/usr/lib/postgresql/16/bin:$PATH PYTHONDONTWRITEBYTECODE=1 QT_QPA_PLATFORM=offscreen FH2MP_NO_KEYRING=1
 WORKDIR /src
