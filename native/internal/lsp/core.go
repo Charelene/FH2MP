@@ -53,6 +53,8 @@ type Core struct {
 	AddResult func(body []byte) (int64, error) // the game server's event result (site_stats.add_result); a *valErr is a 400
 	front     frontState
 
+	setupLauncher func(c *Core) error // builds the launcher API and the ops API once the identity service exists
+
 	ClubXPDivisor int64
 	Verbosity     diag.Verbosity
 	Out           func(line string) // where log lines go (default stdout)
