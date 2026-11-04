@@ -105,7 +105,7 @@ func (e *Error) WithDetail(d string) *Error { e.Detail = d; return e }
 
 // WithXuid names the account a refusal is about.
 func (e *Error) WithXuid(x int64) *Error { e.Xuid = x; return e }
-func (e *Error) withXuid(x int64) *Error    { e.Xuid = x; return e }
+func (e *Error) withXuid(x int64) *Error { e.Xuid = x; return e }
 
 // Account is a signed-in player.
 type Account struct {

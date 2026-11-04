@@ -28,6 +28,7 @@ func main() {
 	if bind == "" {
 		bind = "127.0.0.1"
 	}
+	c.StartSampler()
 	if err := c.Serve(bind, port); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

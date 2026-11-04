@@ -211,8 +211,35 @@ func (c *Core) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			c.LogEvery(r, "slow/"+headerCallName(req.Header), 60, fmt.Sprintf("  slow request: %s %s %s took %.1f s", req.Method, short(), headerCallName(req.Header), took), diag.Warn, "")
 		}
 	}()
+	switch req.Method {
+	case "GET", "POST", "PUT", "PATCH", "DELETE":
+	default:
+		w.Header().Set("Connection", "close")
+		respWriter{w}.send(501, "text/html;charset=utf-8", []byte(errorPage(501, fmt.Sprintf("Unsupported method (%s)", pyjson.PyRepr(req.Method)), "Server does not support this operation.")))
+		return
+	}
 	c.handle(respWriter{w}, r, req)
 }
+
+// errorPage is the page Python's http.server sends for send_error.
+func errorPage(code int, message, explain string) string {
+	return fmt.Sprintf(errorPageFmt, code, message, code, explain)
+}
+
+const errorPageFmt = `<!DOCTYPE HTML>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <title>Error response</title>
+    </head>
+    <body>
+        <h1>Error response</h1>
+        <p>Error code: %d</p>
+        <p>Message: %s.</p>
+        <p>Error code explanation: %d - %s</p>
+    </body>
+</html>
+`
 
 func isClientGone(err error) bool {
 	var ne net.Error
@@ -628,7 +655,7 @@ func (c *Core) serveAdmin(rw respWriter, r *Req, req *http.Request, body []byte)
 	if !found {
 		c.Warn(r, fmt.Sprintf("  refused: 404 on %s %s: not an admin endpoint", req.Method, cut(rawPathOf(path), 60)))
 		rw.w.Header().Set("Connection", "close")
-		rw.send(404, "text/html;charset=utf-8", []byte(errorPage404))
+		rw.send(404, "text/html;charset=utf-8", []byte(errorPage(404, "Not Found", "Nothing matches the given URI.")))
 		return
 	}
 	rw.send(200, "text/plain", []byte(out))
@@ -1018,19 +1045,3 @@ func (c *Core) OnRevoke(xuid int64) {
 	c.Xbl.DropPlayer(fmt.Sprint(xuid))
 	c.Xbl.AnnounceRevoke(xuid)
 }
-
-// errorPage404 is what Python's http.server answers with for send_error(404).
-const errorPage404 = `<!DOCTYPE HTML>
-<html lang="en">
-    <head>
-        <meta charset="utf-8">
-        <title>Error response</title>
-    </head>
-    <body>
-        <h1>Error response</h1>
-        <p>Error code: 404</p>
-        <p>Message: Not Found.</p>
-        <p>Error code explanation: 404 - Nothing matches the given URI.</p>
-    </body>
-</html>
-`

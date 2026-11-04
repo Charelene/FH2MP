@@ -261,6 +261,17 @@ func (c *Core) SetupAuth() error {
 		c.SetTag(rows[i].Int("xuid"), rows[i].Str("gamertag"))
 	}
 	c.setupLauncherAPI()
+	ops := c.opsAPI()
+	ops.LoadSaved()
+	state := "enabled"
+	if ops.Cfg.Token == "" {
+		state = "disabled (FH2MP_OPS_TOKEN unset)"
+	}
+	nets := make([]string, len(ops.Cfg.Allow))
+	for i, n := range ops.Cfg.Allow {
+		nets[i] = n.String()
+	}
+	c.Log(nil, fmt.Sprintf("ops api: %s, allowed from %s", state, strings.Join(nets, ", ")))
 	if c.setupLauncher != nil {
 		if err := c.setupLauncher(c); err != nil {
 			return err
@@ -372,4 +383,14 @@ func (c *Core) setupLauncherAPI() {
 	l.Crashes = crashreports.FromEnv(func(m string) { c.Log(nil, m) })
 	l.ClubInv = c.LauncherClubInvite
 	c.Launcher = l
+	ops := NewOps(c, OpsConfigFromEnv())
+	c.Ops = ops
+	l.Boards = ops.Boards
+	c.AddResult = c.AddResultBody
+}
+
+// opsAPI is the operator API (nil-safe for tests that build a core without one).
+func (c *Core) opsAPI() *Ops {
+	o, _ := c.Ops.(*Ops)
+	return o
 }

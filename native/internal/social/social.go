@@ -67,6 +67,17 @@ func OnlineCount() int {
 	return n
 }
 
+// Polled is a copy of the lease table: xuid -> time of the last request.
+func Polled() map[int64]float64 {
+	pollMu.Lock()
+	defer pollMu.Unlock()
+	out := make(map[int64]float64, len(lastPoll))
+	for x, t := range lastPoll {
+		out[x] = t
+	}
+	return out
+}
+
 // ResetPresence forgets every lease (tests).
 func ResetPresence() {
 	pollMu.Lock()

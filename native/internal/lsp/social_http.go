@@ -229,6 +229,8 @@ func toInt(v any) int64 {
 	switch x := v.(type) {
 	case int64:
 		return x
+	case int:
+		return int64(x)
 	case uint64:
 		return int64(x)
 	case float64:
