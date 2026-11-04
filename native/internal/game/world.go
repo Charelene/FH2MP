@@ -117,13 +117,35 @@ func shuffle[T any](r Rand, a []T) {
 	}
 }
 
-func sample[T any](r Rand, a []T, k int) []T {
-	cp := append([]T(nil), a...)
-	shuffle(r, cp)
-	if k > len(cp) {
-		k = len(cp)
+func sample[T any](r Rand, population []T, k int) []T {
+	n := len(population)
+	if k < 0 || k > n {
+		panic("Sample larger than population or is negative")
 	}
-	return cp[:k]
+	result := make([]T, k)
+	setsize := 21
+	if k > 5 {
+		setsize += int(math.Pow(4, math.Ceil(math.Log(float64(k*3))/math.Log(4))))
+	}
+	if n <= setsize {
+		pool := append([]T(nil), population...)
+		for i := 0; i < k; i++ {
+			j := r.Intn(n - i)
+			result[i] = pool[j]
+			pool[j] = pool[n-i-1]
+		}
+		return result
+	}
+	selected := map[int]bool{}
+	for i := 0; i < k; i++ {
+		j := r.Intn(n)
+		for selected[j] {
+			j = r.Intn(n)
+		}
+		selected[j] = true
+		result[i] = population[j]
+	}
+	return result
 }
 
 // PendingRace is (deadline, leader).
@@ -324,9 +346,10 @@ func NewWorld(tag string, out *LogOut, clk Clock, rng Rand, sock PacketConn, eve
 	w.Start = now
 	w.MtNext = now + 30
 	w.LastKeepaliveInit()
-	off := int64(envInt("FH2MP_CLOCK_OFFSET_MS", -1))
-	if os.Getenv("FH2MP_CLOCK_OFFSET_MS") == "" || off < 0 {
-		off = int64(randrange(rng, ClockOffsetMaxMs))
+	drawn := int64(randrange(rng, ClockOffsetMaxMs)) // Python evaluates the default of os.environ.get() even when the variable is set
+	off := drawn
+	if v := strings.TrimSpace(os.Getenv("FH2MP_CLOCK_OFFSET_MS")); v != "" {
+		off = int64(envInt("FH2MP_CLOCK_OFFSET_MS", int(drawn)))
 	}
 	w.ClockOffsetMs = off
 	w.Traffic = traffic.NewWorld[*Peer](&trafficHost{w}, nil)

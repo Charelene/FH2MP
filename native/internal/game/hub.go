@@ -1170,3 +1170,28 @@ func (h *Hub) tickSafe(w *World) {
 	}()
 	w.Tick()
 }
+
+// TunnelClosed drops the player of a TCP connection that ended.
+func (h *Hub) TunnelClosed(addr Addr) {
+	w, _ := h.Route.Get(addr)
+	h.Route.Delete(addr)
+	if w != nil {
+		if peer, ok := w.Peers.Get(addr); ok {
+			w.DropPeer(peer, "tunnel connection closed")
+		}
+	}
+}
+
+// Opened reports whether addr has a game connection in a world.
+func (h *Hub) Opened(addr Addr) bool {
+	w, ok := h.Route.Get(addr)
+	return ok && w.Peers.Has(addr)
+}
+
+// Close flushes what must survive a clean exit: the cheater pool file and the event log.
+func (h *Hub) Close() {
+	h.saveFlags()
+	if h.Events != nil {
+		h.Events.Close()
+	}
+}
