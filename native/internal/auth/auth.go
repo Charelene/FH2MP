@@ -413,6 +413,9 @@ func NewService(d *db.DB, env, mode, registration, tokenIP string) (*Service, er
 	return s, nil
 }
 
+// Hit counts one use of a rate-limited action; false when the limit is exceeded.
+func (s *Service) Hit(key any, limit int, window float64) bool { return s.hit(key, limit, window) }
+
 func (s *Service) hit(key any, limit int, window float64) bool {
 	n := int(float64(limit) * s.Scale)
 	if n < 1 {

@@ -714,6 +714,11 @@ func (s *Store) bestPerPlayer(sb, st, track int64, xuid *int64, pivot int64, vie
 	return out, nil
 }
 
+// BestPerPlayer is every player's best on a board (all tracks when track is -1), as the public boards show them.
+func (s *Store) BestPerPlayer(sb, st, track, pivot int64) ([]*Row, error) {
+	return s.bestPerPlayer(sb, st, track, nil, pivot, nil, true)
+}
+
 // BestOf is a player's best on a board (nil = none).
 func (s *Store) BestOf(xuid, sb, st, track, pivot int64) (*Row, error) {
 	rows, err := s.bestPerPlayer(sb, st, track, &xuid, pivot, &xuid, false)
