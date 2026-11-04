@@ -85,6 +85,9 @@ func (r *Row) Any(name string) any {
 // At returns the i-th column.
 func (r *Row) At(i int) any { return r.Vals[i] }
 
+// IsNullAt reports whether the i-th column is NULL.
+func (r *Row) IsNullAt(i int) bool { return r.Vals[i] == nil }
+
 // Int is an integer column (NULL = 0).
 func (r *Row) Int(name string) int64 { return toInt(r.Any(name)) }
 
