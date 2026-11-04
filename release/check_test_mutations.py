@@ -51,7 +51,9 @@ CASES = {
 
 def child(name, baseline=None, control=False):
     area, names, target, replacement = CASES[name]
-    sys.path.insert(0, str(ROOT / ('launcher/tests' if area == 'launcher' else 'server')))
+    sys.path.insert(0, str(ROOT / ('launcher/tests' if area == 'launcher' else 'server/tests')))
+    if area != 'launcher':
+        sys.path.insert(0, str(ROOT / 'server'))
     if area == 'launcher':
         sys.path.insert(0, str(ROOT / 'launcher'))
     if baseline:

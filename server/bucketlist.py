@@ -1,6 +1,6 @@
 """Bucket-list co-op (router 12, IBucketListRouter, messages 61-68).
 
-Recovered from the 1.0.0.64 client (docs/dlc-recon-2026-10-27.md for the message table):
+Recovered from the 1.0.0.64 client (docs/investigations/2026-10/dlc-recon-2026-10-27.md for the message table):
 
 * Router 12 has two object types. Type 0 BucketListPlayerStateSynced is created by every client for itself (id 0); six variables, so 3-bit
   variable ids: 0 Score (float), 1 CurrentSlotId (s32), 2 CurrentChallengeId (s32), 3 RequestingPartner (bool), 4 State (enum 0..4, 3 bits),

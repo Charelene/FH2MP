@@ -46,12 +46,12 @@ def flatten(suite):
 
 
 def collect():
-    files = {p.stem for p in (ROOT / 'server').glob('test_*.py')}
+    files = {p.stem for p in (ROOT / 'server' / 'tests').glob('test_*.py')}
     classified = {name for name in PLAN if '.' not in name}
     if files != classified:
         raise ValueError(f'Test plan mismatch: unclassified={sorted(files - classified)}, missing={sorted(classified - files)}')
     sys.path.insert(0, str(ROOT / 'server'))
-    suite = unittest.defaultTestLoader.discover(str(ROOT / 'server'), pattern='test_*.py')
+    suite = unittest.defaultTestLoader.discover(str(ROOT / 'server' / 'tests'), pattern='test_*.py')
     tests = list(flatten(suite))
     if unittest.defaultTestLoader.errors:
         raise ValueError('\n'.join(unittest.defaultTestLoader.errors))

@@ -8,7 +8,7 @@
  *   health: predictions      the game stopped or resumed sending its car; this also happens in loading screens, so it only says when, not why
  * and every HEALTH_SUMMARY_S seconds a summary with the requests of that period, if there were any or some are in flight. FH2MP_NO_HEALTH turns it off.
  *
- * The part above the #ifndef has no Windows calls: shim/test_health.sh runs it natively; shim/test_health_thread.sh runs the thread under Wine. */
+ * The part above the #ifndef has no Windows calls: shim/tests/test_health.sh runs it natively; shim/tests/test_health_thread.sh runs the thread under Wine. */
 #define HEALTH_PROCESS_GAP_MS 3000u     /* a wake this late means the process did not run */
 #define HEALTH_FRESH_MS 2000u           /* predictions counted as flowing */
 #define HEALTH_SILENT_MS 5000u          /* flowing before, nothing for this long: stopped */

@@ -60,6 +60,6 @@ def fetch(kind, updater, progress=None, cancelled=lambda: False):
 
 
 def read_zip(kind, path):
-    """A local copy of the pinned release (tests, tools/rig.py --platform-zip) -> extract()'s files."""
+    """A local copy of the pinned release (tests, tools/rig/rig.py --platform-zip) -> extract()'s files."""
     with open(path, "rb") as f:
         return extract(kind, f.read())

@@ -1,11 +1,11 @@
-"""Read-only lookup of car, track and route data in the game catalog (PostgreSQL schema `game`, loaded by tools/load_gamedata_pg.py
-from the bundle tools/export_gamedata.py builds). The server never reads the game's own files.
+"""Read-only lookup of car, track and route data in the game catalog (PostgreSQL schema `game`, loaded by tools/gamedata/load_gamedata_pg.py
+from the bundle tools/gamedata/export_gamedata.py builds). The server never reads the game's own files.
 """
 
 
 class CarDb:
     def __init__(self, database):
-        """`database`: the db.Database whose `game` schema holds the catalog (tools/load_gamedata_pg.py): a copy of the game's tables
+        """`database`: the db.Database whose `game` schema holds the catalog (tools/gamedata/load_gamedata_pg.py): a copy of the game's tables
         plus resolved strings, route metrics and views. No game file is touched."""
         self.db = database
 

@@ -13,7 +13,7 @@ Response: 12-byte header (Result u32, ErrorCode u32, DataLength u32; all big end
 
 Usage: python3 -I server/fh2mp_lsp.py [port]
        State and game catalog (cars, tracks, strings, schemas, shipped Drivatars) live in PostgreSQL: FH2MP_PG_DSN (libpq conninfo,
-       default `dbname=fh2mp`); the catalog is loaded once with tools/export_gamedata.py + tools/load_gamedata_pg.py from an install:
+       default `dbname=fh2mp`); the catalog is loaded once with tools/gamedata/export_gamedata.py + tools/gamedata/load_gamedata_pg.py from an install:
        the server itself never reads game files. Also: FH2MP_LSP_BIND (listen address, default 127.0.0.1), FH2MP_PUBLIC_HOST /
        FH2MP_GAME_PORT (the game server address handed to clients).
 """
@@ -2892,7 +2892,7 @@ def setup(dsn=None):
     global SC, CARS, DB, NOTIF
     DB = db.open_db(dsn)
     if not DB.one("SELECT 1 FROM information_schema.schemata WHERE schema_name='game'"):
-        sys.exit("the game catalog is not loaded: build the bundle with tools/export_gamedata.py and load it with tools/load_gamedata_pg.py")
+        sys.exit("the game catalog is not loaded: build the bundle with tools/gamedata/export_gamedata.py and load it with tools/gamedata/load_gamedata_pg.py")
     SC = xls.Schema(DB)
     CARS = cardb.CarDb(DB)
     log(f"database {DB.path}: game catalog schema `game` present")
