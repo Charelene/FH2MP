@@ -59,7 +59,6 @@ var (
 	rtTeamModes        = []int{0, 1, 2, 4, 5, 31}
 	rtHubXZ            = map[int64][2]float64{3: {-3532.0, -2308.0}, 4: {-821.0, -6061.0}, 5: {2241.0, -3100.0}, 6: {9941.0, -7896.0}, 7: {8831.0, -3573.0}, 8: {5111.0, -3528.0}}
 	rtFestivalXZ       = [2]float64{0.0, 0.0}
-	roadTripDBDefault  = DataDir + "/roadtrip.sqlite"
 )
 
 func rtv(name string, v int64) netv2.RTValue { return netv2.RTValue{Name: name, Value: v} }
@@ -705,3 +704,5 @@ func (w *World) pickRng() Rand {
 	}
 	return w.Rng
 }
+
+func roadTripDBPath() string { return DataDir + "/roadtrip.sqlite" }

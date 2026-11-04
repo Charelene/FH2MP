@@ -17,10 +17,11 @@ import (
 	"fh2mp/internal/playersetup"
 	"fh2mp/internal/pyfmt"
 	"fh2mp/internal/pyjson"
+	"fh2mp/internal/traffic"
 )
 
 // DlcCars are car ids that exist in the game but not in the base catalog (data/dlc_cars.txt, env FH2MP_DLC_CARS).
-var DlcCars = loadDlcCars()
+var DlcCars = map[int64]struct{}{}
 
 // StartupProblems are checks that came up without their data; the hub says so once its log is open.
 var StartupProblems []string
@@ -28,10 +29,16 @@ var StartupProblems []string
 // DataDir is the folder with the server's data files (dlc_cars.txt, trafficcars.txt, roadtrip.sqlite).
 var DataDir = envStr("FH2MP_DATA_DIR", "data")
 
+// SetDataDir points the data files (dlc_cars.txt, trafficcars.txt, roadtrip.sqlite) at a folder.
+func SetDataDir(dir string) {
+	DataDir = dir
+	traffic.DataDir = dir
+}
+
 func loadDlcCars() map[int64]struct{} {
 	path := os.Getenv("FH2MP_DLC_CARS")
 	if path == "" {
-		path = envStr("FH2MP_DATA_DIR", "data") + "/dlc_cars.txt"
+		path = DataDir + "/dlc_cars.txt"
 	}
 	out := map[int64]struct{}{}
 	raw, err := os.ReadFile(path)

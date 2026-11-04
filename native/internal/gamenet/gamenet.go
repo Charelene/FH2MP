@@ -15,6 +15,7 @@ import (
 	neturl "net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -209,6 +210,7 @@ func httpSinks() *game.Sinks {
 
 // New opens the sockets and builds the hub.
 func New(cfg Config) (*Server, error) {
+	game.SetDataDir(dataDir())
 	s := &Server{cfg: cfg, clk: game.NewRealClock(), events: make(chan event, 8192)}
 	addr := &net.UDPAddr{IP: net.IPv4zero, Port: cfg.Port}
 	udp, err := net.ListenUDP("udp4", addr)
@@ -522,4 +524,23 @@ func (s *Server) shutdown() error {
 		s.logf.Sync()
 	}
 	return nil
+}
+
+// dataDir finds the folder with the server's data files: FH2MP_DATA_DIR, else the Python layout next to the binary (../server/data), else ./data.
+func dataDir() string {
+	if v := os.Getenv("FH2MP_DATA_DIR"); v != "" {
+		return v
+	}
+	var cands []string
+	if exe, err := os.Executable(); err == nil {
+		d := filepath.Dir(exe)
+		cands = append(cands, filepath.Join(d, "..", "server", "data"), filepath.Join(d, "data"))
+	}
+	cands = append(cands, "server/data", "data")
+	for _, c := range cands {
+		if st, err := os.Stat(filepath.Join(c, "trafficcars.txt")); err == nil && !st.IsDir() {
+			return c
+		}
+	}
+	return "data"
 }

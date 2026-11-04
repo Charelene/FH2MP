@@ -133,6 +133,7 @@ func NewHub(cfg HubConfig) (*Hub, error) {
 	} else if cfg.Roadtrip {
 		h.DefaultType = LobbyTypeRoadTrip
 	}
+	DlcCars = loadDlcCars()
 	if cfg.LogPath != "" {
 		dir := filepath.Dir(cfg.LogPath)
 		h.Events = eventlog.Open(filepath.Join(dir, "events.jsonl"))
@@ -155,7 +156,6 @@ func NewHub(cfg HubConfig) (*Hub, error) {
 	h.Idle = idle
 	idle.IsIdle = true
 	diag.SetSink(func(level int, sub, msg string) { idle.logAt(level, sub, msg) })
-	idle.Logf("hub listening on udp/%d, control udp/%s", cfg.Port, "-")
 	if h.UDPAuth == "off" {
 		idle.Log("WARNING: FH2MP_UDP_AUTH=off: any OpenConnection is taken at its word (set ticket, or required, on a public server)")
 	}
@@ -212,7 +212,7 @@ func (h *Hub) WorldFor(lobbyType int, name string) *World {
 	if w.Roadtrip {
 		gamedb := envStr("FH2MP_GAMEDB", "")
 		if gamedb == "" {
-			gamedb = roadTripDBDefault
+			gamedb = roadTripDBPath()
 		}
 		if _, err := os.Stat(gamedb); err == nil {
 			w.RtGamedb = gamedb
@@ -221,7 +221,7 @@ func (h *Hub) WorldFor(lobbyType int, name string) *World {
 				w.Logf("road trip candidates: locations %s events %s classes %s", locsRepr(cand), eventsRepr(cand), intList(cand.Classes[:]))
 			}
 		} else {
-			w.Logf("road trip: no game database (%s); the vote will be empty. Build %s with tools/gamedata/make_roadtrip_db.py or point FH2MP_GAMEDB at gamedbRC.slt", gamedb, roadTripDBDefault)
+			w.Logf("road trip: no game database (%s); the vote will be empty. Build %s with tools/gamedata/make_roadtrip_db.py or point FH2MP_GAMEDB at gamedbRC.slt", gamedb, roadTripDBPath())
 		}
 	}
 	h.Worlds.Set(key, w)

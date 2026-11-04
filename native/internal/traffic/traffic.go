@@ -117,13 +117,16 @@ func Layouts() map[int][]int { return updateLayout }
 
 var radiusKinds = map[int]bool{0: true, 1: true, 2: true, 4: true, 5: true, 6: true}
 
+// DataDir is the folder with trafficcars.txt (set by the game package).
+var DataDir = "data"
+
 // LoadModels reads the traffic car model ids (data/trafficcars.txt or FH2MP_TRAFFIC_CARS), comma or newline separated.
 func LoadModels(path string) []int {
 	if path == "" {
 		path = os.Getenv("FH2MP_TRAFFIC_CARS")
 	}
 	if path == "" {
-		path = "data/trafficcars.txt"
+		path = DataDir + "/trafficcars.txt"
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
