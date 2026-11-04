@@ -24,9 +24,29 @@ static int readable_game_range(const void *address, SIZE_T size)
     return 1;
 }
 
+/* The two VirtualQuery walks below are for Wine (see above). On Windows they are the most expensive thing the shim does: every VirtualQuery scans the pages
+ * of the region it describes, and the hooks on the remote cars' predictions and lighting read 7+ fields per car per frame through here. Profile of the game's
+ * App Thread with 29 cars (dev 2026-11-03, 25 fps, one core at 97%): 73% of its time in these VirtualQuery calls, 0.6% in ReadProcessMemory. Windows'
+ * ReadProcessMemory already fails (ERROR_PARTIAL_COPY, fewer bytes copied) for uncommitted, reserved and PAGE_NOACCESS memory, so the copy alone gives the
+ * same answer there. */
+static int running_under_wine(void)
+{
+    static volatile LONG state;         /* 0 unknown, 1 Windows, 2 Wine; every thread that races here finds the same answer */
+    LONG s = state;
+    if (!s) {
+        HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+        s = ntdll && GetProcAddress(ntdll, "wine_get_version") ? 2 : 1;
+        state = s;
+    }
+    return s == 2;
+}
+
 static int read_game_memory(const void *address, void *out, SIZE_T size)
 {
     SIZE_T got = 0;
+    if (!running_under_wine()) {
+        return ReadProcessMemory(GetCurrentProcess(), address, out, size, &got) && got == size;
+    }
     /* Wine 6 can also copy a page revoked after the initial range check.
      * Inspect the mapping again before trusting the copied header/fields.
      */
