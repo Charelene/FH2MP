@@ -247,8 +247,17 @@ static void honk_audio_tick(void *engine)
 }
 static void honk_audio_update(void *engine)
 {
+#ifdef FH2MP_PERF
+    LONG64 perf_a;
+#endif
     g_honk_update_original(engine);
+#ifdef FH2MP_PERF
+    perf_a=perf_now();
+#endif
     if(g_honk_enabled) honk_audio_tick(engine);
+#ifdef FH2MP_PERF
+    perf_add(PERF_HORN,perf_now()-perf_a);
+#endif
 }
 
 /* ---- HonkHonk.dll: the horn it holds, its button, its bank ---- */
@@ -273,6 +282,48 @@ static int honk_move_button(unsigned char *hh)
     FlushInstructionCache(GetCurrentProcess(),imm,1);
     VirtualProtect(imm,1,old,&old);
     return 1;
+}
+
+/* HonkHonk's worker calls XInputGetState on all four pad slots every 16 ms. Under Wine one call costs 0.5-0.8 ms even for an empty slot (measured under
+ * Proton 11 in a scratch prefix: avg 530-825 us, max 3-5 ms): ~240 calls/s, about a sixth of a core and constant wineserver traffic. With HonkHonk off the
+ * lag in a full lobby was gone (issue #354, hand test), and with the pad read from the game it stayed gone. So on Wine its import slot for XInputGetState
+ * (ordinal 2 of XINPUT1_4.dll, IAT slot HonkHonk.dll+0x92b0, the target of the thunk at +0x7678) points at honk_xinput_state: the button mask comes from the
+ * game's own active controller, the way Extra Options reads it (input manager game+0x365d7c8 with vtable game+0x2e7a2e8, active controller at +0xab28 inside
+ * 8 controllers of 0x1300 bytes from +0x10, connected byte +4, buttons u16 +0xc0, triggers +0x70), and the other slots answer "not connected". */
+#define HH_XINPUT_IAT_RVA 0x92b0u
+static const unsigned char honk_xinput_thunk[6]={0xff,0x25,0x32,0x1c,0x00,0x00};      /* +0x7678: jmp [rip+0x1c32] -> +0x92b0 */
+typedef struct { DWORD packet; WORD buttons; BYTE left_trigger, right_trigger; SHORT lx, ly, rx, ry; } honk_xinput_state_t;
+static unsigned char *g_honk_pad_image;
+static DWORD WINAPI honk_xinput_state(DWORD user, honk_xinput_state_t *state)
+{
+    unsigned char *img=g_honk_pad_image, *manager=NULL, *controller=NULL, connected=0, triggers[2]={0,0}; WORD buttons=0; static DWORD packet;
+    if(!state) return ERROR_BAD_ARGUMENTS;
+    if(user!=0 || !img) return ERROR_DEVICE_NOT_CONNECTED;
+    if(!read_game_memory(img+0x365d7c8,&manager,8) || !manager || !honk_code_is(manager,(const unsigned char *)&(void *const){img+0x2e7a2e8},8) ||
+       !read_game_memory(manager+0xab28,&controller,8) || !controller ||
+       (UINT_PTR)controller<(UINT_PTR)manager+0x10 || (UINT_PTR)controller>=(UINT_PTR)manager+0x10+8*0x1300 || ((UINT_PTR)controller-((UINT_PTR)manager+0x10))%0x1300 ||
+       !read_game_memory(controller+4,&connected,1) || connected!=1 || !read_game_memory(controller+0xc0,&buttons,2)) return ERROR_DEVICE_NOT_CONNECTED;
+    read_game_memory(controller+0x70,triggers,2);
+    state->packet=++packet; state->buttons=buttons; state->left_trigger=triggers[0]; state->right_trigger=triggers[1];
+    state->lx=state->ly=state->rx=state->ry=0;
+    return ERROR_SUCCESS;
+}
+static void honk_redirect_pad(unsigned char *hh)
+{
+    HMODULE nt=GetModuleHandleW(L"ntdll.dll"); unsigned char *slot=hh+HH_XINPUT_IAT_RVA, *image=find_fh2_image(); DWORD old; void *target=(void *)honk_xinput_state;
+    if(!nt || !GetProcAddress(nt,"wine_get_version") || !image) return;
+    if(!honk_code_is(hh+0x7678,honk_xinput_thunk,6)) {
+        log_begin();log_raw("honk: pad redirect skipped, HonkHonk.dll+0x7678 is not the 0.3.4 XInputGetState thunk\n");
+        return;
+    }
+    if(!VirtualProtect(slot,8,PAGE_READWRITE,&old)) {
+        log_begin();log_raw("honk: pad redirect failed, VirtualProtect on HonkHonk.dll+0x92b0 error ");log_dec(GetLastError());log_raw("\n");
+        return;
+    }
+    g_honk_pad_image=image;
+    mem_copy(slot,&target,8);
+    VirtualProtect(slot,8,old,&old);
+    log_begin();log_raw("honk: HonkHonk.dll XInputGetState redirected to the game's active controller (Wine)\n");
 }
 
 /* ---- which stick the horn is on: never the one Extra Options' headlight or roof toggle uses ----
@@ -366,7 +417,7 @@ static int honk_attach(void)
     HMODULE m=GetModuleHandleW(L"HonkHonk.dll"); unsigned char *hh=(unsigned char *)m; wchar_t path[MAX_PATH+40]; DWORD n, i, slash=0;
     if(attached) return 1;
     if(!hh) return 0;
-    if(!placed) {placed=1; honk_place_button(hh);}
+    if(!placed) {placed=1; honk_place_button(hh); honk_redirect_pad(hh);}
     if(!g_honk_enabled) return -1;
     if(!honk_code_is(hh+HH_REQUEST_RVA,honk_request_code,7)) {
         if(!told_other) {

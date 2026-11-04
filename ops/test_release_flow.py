@@ -160,10 +160,10 @@ class VersionedEntryPoint(unittest.TestCase):
     def test_saved_target_supports_no_argument_plan_and_explicit_execution(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            (root / 'release/notes').mkdir(parents=True)
+            (root / 'release').mkdir()
             (root / 'ops').mkdir()
-            wrapper = root / 'release/notes/v1.1.1.deploy.sh'
-            shutil.copyfile(ROOT / 'release/notes/v1.1.1.deploy.sh', wrapper)
+            wrapper = root / 'ops/ship-release.sh'
+            shutil.copyfile(ROOT / 'ops/ship-release.sh', wrapper)
             (root / 'release/operator.local.env').write_text(
                 'FH2MP_DEPLOY_HOST=deploy@example.invalid\nFH2MP_DEPLOY_KEY=/test/key with spaces\n')
             ship = root / 'ops/ship.sh'
@@ -173,13 +173,13 @@ class VersionedEntryPoint(unittest.TestCase):
             env.pop('FH2MP_DEPLOY_HOST', None)
             env.pop('FH2MP_DEPLOY_KEY', None)
             for args in ([], ['--execute']):
-                result = subprocess.run(['bash', str(wrapper), *args], env=env, capture_output=True, text=True)
+                result = subprocess.run(['bash', str(wrapper), 'v1.1.1', *args], env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout.splitlines(),
                                  ['<v1.1.1>', '<deploy@example.invalid>', '</test/key with spaces>'] +
                                  (['<--execute>'] if args else []))
             (root / 'release/operator.local.env').unlink()
-            missing = subprocess.run(['bash', str(wrapper)], env=env, capture_output=True, text=True)
+            missing = subprocess.run(['bash', str(wrapper), 'v1.1.1'], env=env, capture_output=True, text=True)
             self.assertEqual(missing.returncode, 2)
             self.assertIn('Usage:', missing.stderr)
             self.assertNotIn('parameter null or not set', missing.stderr)

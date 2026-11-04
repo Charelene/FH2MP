@@ -23,6 +23,8 @@ elif [ "${1:-}" = diag ]; then
 else
   OUT=build/FH2MP.dll; FLAGS=(-Wno-unused-function)
 fi
+# FH2MP_PERF=1 adds the frame/hook timing of src/perf.inc (one "perf:" log line every 15 s). Not for release; give it a "-debug" FH2MP_SHIM_VERSION so the launcher keeps it.
+if [ "${FH2MP_PERF:-}" = 1 ]; then FLAGS+=(-DFH2MP_PERF); fi
 "$WINDRES" -DFH2MP_V1="$V1" -DFH2MP_V2="$V2" -DFH2MP_V3="$V3" -DFH2MP_VERSION_STR="\\\"$VERSION\\\"" -O coff -o build/version.o src/version.rc
 $CC "${FLAGS[@]}" -DFH2MP_SHIM_VERSION="\"$VERSION\"" -o "$OUT" src/fh2mp_mod.c build/version.o "${COMMON[@]}"
 rm -f build/version.o

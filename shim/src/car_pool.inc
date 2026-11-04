@@ -421,6 +421,62 @@ static void car_pool_aictl(void *car)
  * (game+0x1334f34, dev 2026-11-03). Budgets are an Xbox One memory model; the check is made to return true. Also used by two graphics allocators. */
 #define CAR_POOL_BUDGET_RVA 0x125de50
 
+/* The name tag allocator (EntityModel::CarLabelComponent::helper_46df80, game+0x46df80) takes the last label of the pool's free list (the list at module+0x60, its
+ * head's _Prev) without looking whether there is one: an empty list's head holds no value, and the 0x6233 it read there was dereferenced (game+0x46dfc0). Dev
+ * 2026-11-04: a client joining a world of 71 players crashed when the 13th car asked for a label ("SYNCING Player 13 / 71"); in the dump the module (vtable
+ * game+0x2c817a8) had 12 in use and 0 free, so its pool was the stock 12 although the bound above was patched in memory (the same module in the other client: 77).
+ * The game handles a car without a label everywhere else (OnAdded takes one only when +0x130 is null, and most handlers test it), so an empty pool answers
+ * "no label" and the car has no name tag. The pool maker is wrapped to log how big each pool was built, which says whether the bound was patched in time. */
+#define CAR_POOL_LABEL_TAKE_RVA 0x46df80
+typedef void **(*car_pool_label_take_fn)(void *, void **);
+static car_pool_label_take_fn g_car_pool_label_take_orig;
+static unsigned g_car_pool_label_empty;
+
+static void **car_pool_label_take(void *self, void **out)
+{
+    unsigned char *list = NULL, *last = NULL;
+
+    if (self && out && read_game_memory((unsigned char *)self + 0x60, &list, sizeof list) && list &&
+        read_game_memory(list + 8, &last, sizeof last) && last == list) {
+        if (g_car_pool_label_empty++ < 5) {
+            unsigned long long used = 0;
+
+            read_game_memory((unsigned char *)self + 0x58, &used, sizeof used);
+            log_begin();
+            log_raw("carpool: name tag pool empty with ");
+            log_dec((unsigned long)used);
+            log_raw(" in use, the car gets no name tag (#");
+            log_dec(g_car_pool_label_empty);
+            log_raw(")\n");
+        }
+        out[0] = NULL;
+        out[1] = NULL;
+        return out;
+    }
+    return g_car_pool_label_take_orig(self, out);
+}
+
+typedef void (*car_pool_labels_make_fn)(void *);
+static car_pool_labels_make_fn g_car_pool_labels_make_orig;
+
+static void car_pool_labels_make(void *module)
+{
+    unsigned char *img = find_fh2_image();
+    unsigned char bound = 0;
+    unsigned long long free_now = 0;
+
+    g_car_pool_labels_make_orig(module);
+    if (img && module && read_game_memory(img + CAR_POOL_LABELS_RVA + CAR_POOL_LABELS_CMP + 4, &bound, 1) &&
+        read_game_memory((unsigned char *)module + 0x68, &free_now, sizeof free_now)) {
+        log_begin();
+        log_raw("carpool: name tag pool built with ");
+        log_dec((unsigned long)free_now);
+        log_raw(" labels, loop bound in memory ");
+        log_dec(bound);
+        log_raw("\n");
+    }
+}
+
 /* FH2MP_CAR_ALLOCDIAG=1: the first 30 allocations Mem::MemoryManager::AllocateFromHeap (game+0x125d850) fails (returns NULL) are logged with their size, tag
  * (the category: high byte) and heap mode (manager+0x18: below 2 HeapAlloc, otherwise XMemAlloc). Passive. */
 #define CAR_POOL_ALLOC_RVA 0x125d850
@@ -653,6 +709,8 @@ static int patch_car_pool(void)
     static const unsigned char nop4[] = {0x90, 0x90, 0x90, 0x90};
     static const unsigned char labels_head[] = {0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x40, 0x48, 0xC7, 0x44, 0x24, 0x20};
     static const unsigned char labels_cmp[] = {0xFF, 0xC7, 0x83, 0xFF, 0x0C, 0x0F, 0x82};                              /* inc edi; cmp edi, 0xc; jb */
+    static const unsigned char label_take_head[] = {0x48, 0x89, 0x54, 0x24, 0x10, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x30, 0x48, 0xC7, 0x44, 0x24, 0x28, 0xFE, 0xFF, 0xFF, 0xFF,
+                                                    0x48, 0x89, 0x5C, 0x24, 0x50, 0x48, 0x89, 0x6C, 0x24, 0x60, 0x48, 0x8B, 0xFA, 0x48, 0x8B, 0xE9, 0x33, 0xC0, 0x89, 0x44, 0x24, 0x20, 0x48, 0x8B, 0x59, 0x60};
     static const unsigned char budget_head[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57, 0x48, 0x83, 0xEC, 0x20};
     static const unsigned char budget_true[] = {0xB0, 0x01, 0xC3};               /* mov al, 1; ret */
     static const unsigned char tick_head[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57};
@@ -706,6 +764,7 @@ static int patch_car_pool(void)
         !code_is("carpool", "the net vehicle load request builder", img, CAR_POOL_FIND_RVA, find_head, sizeof find_head) ||
         !code_is("carpool", "the name tag pool's start", img, CAR_POOL_LABELS_RVA, labels_head, sizeof labels_head) ||
         !code_is("carpool", "the name tag pool's size", img, CAR_POOL_LABELS_RVA + CAR_POOL_LABELS_CMP, labels_cmp, sizeof labels_cmp) ||
+        !code_is("carpool", "the name tag allocator", img, CAR_POOL_LABEL_TAKE_RVA, label_take_head, sizeof label_take_head) ||
         !code_is("carpool", "the car cache's tick", img, CAR_POOL_TICK_RVA, tick_head, sizeof tick_head) ||
         (budget && !code_is("carpool", "the allocator's budget check", img, CAR_POOL_BUDGET_RVA, budget_head, sizeof budget_head)) ||
         (aictl && !code_is("carpool", "the AI controller attach", img, CAR_POOL_AICTL_RVA, aictl_head, sizeof aictl_head)) ||
@@ -738,6 +797,8 @@ static int patch_car_pool(void)
     }
     if (done == expected) {
         plat_hook("carpool: cache state, passive", img + CAR_POOL_TICK_RVA, (void *)car_pool_tick, (void **)&g_car_pool_tick_orig);
+        plat_hook("carpool: no name tag instead of a crash when the pool is empty", img + CAR_POOL_LABEL_TAKE_RVA, (void *)car_pool_label_take, (void **)&g_car_pool_label_take_orig);
+        plat_hook("carpool: name tag pool size, passive", img + CAR_POOL_LABELS_RVA, (void *)car_pool_labels_make, (void **)&g_car_pool_labels_make_orig);
         car_pool_install_find(img);
         if (parts & CAR_POOL_PART_AI) {
             plat_hook("carpool: festival AI count 0", img + CAR_POOL_AIMODULE_RVA, (void *)car_pool_ai_connect, (void **)&g_car_pool_ai_orig);

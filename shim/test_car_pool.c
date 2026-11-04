@@ -33,6 +33,9 @@ static void fake_view_a(void *v) { (void)v; g_view_a_calls++; }
 static void fake_view_b(void *v) { (void)v; g_view_b_calls++; }
 static unsigned char *g_fake_view_made;                       /* what the game's view maker hands back (NULL: it failed) */
 static void *fake_view_new(void *presentation) { (void)presentation; return g_fake_view_made; }
+static int g_label_take_calls, g_labels_make_calls;
+static void **fake_label_take(void *self, void **out) { (void)self; g_label_take_calls++; out[0] = (void *)(ULONG_PTR)0x1234; out[1] = (void *)(ULONG_PTR)0x5678; return out; }
+static void fake_labels_make(void *module) { g_labels_make_calls++; *(unsigned long long *)((unsigned char *)module + 0x68) = 77; }
 static void *fake_alloc(void *m, unsigned long long size, unsigned short tag, unsigned long long *p) { (void)m; (void)size; (void)tag; (void)p; return g_alloc_result; }
 static unsigned short fake_ids(void *m, unsigned short lo, unsigned short hi, void *p);
 static void *fake_find_sharing(void *self, void *out, void *vehicle_ref, void *manager, void *extra, unsigned priority);
@@ -62,7 +65,7 @@ static int plat_hook(const char *name, void *target, void *detour, void **origin
 {
     (void)name; (void)target; (void)detour;
     g_hooks++;
-    *original = target == g_img + 0xfd08b0 ? (void *)fake_find : target == g_img + 0xfceee0 ? (void *)fake_ids : target == g_img + 0x720960 ? (void *)fake_ai : target == g_img + 0xf73e10 ? (void *)fake_aictl : target == g_img + 0x125d850 ? (void *)fake_alloc : target == g_img + 0x1355ad0 ? (void *)fake_view_a : target == g_img + 0x135b640 ? (void *)fake_view_b : target == g_img + 0x1302160 ? (void *)fake_view_new : (void *)fake_tick;
+    *original = target == g_img + 0xfd08b0 ? (void *)fake_find : target == g_img + 0xfceee0 ? (void *)fake_ids : target == g_img + 0x720960 ? (void *)fake_ai : target == g_img + 0xf73e10 ? (void *)fake_aictl : target == g_img + 0x125d850 ? (void *)fake_alloc : target == g_img + 0x1355ad0 ? (void *)fake_view_a : target == g_img + 0x135b640 ? (void *)fake_view_b : target == g_img + 0x1302160 ? (void *)fake_view_new : target == g_img + 0x46df80 ? (void *)fake_label_take : target == g_img + 0x47a830 ? (void *)fake_labels_make : (void *)fake_tick;
     return 1;
 }
 static int g_refuse_patch;       /* the platform refuses the n-th patch call (1-based) */
@@ -113,6 +116,8 @@ static const unsigned char FIND_HEAD[] = {0x4c, 0x89, 0x4c, 0x24, 0x20, 0x55, 0x
 
 /* the bytes of CPresentation::vfunc_19 (game+0x1302160, from the exe on disk) and of the LOD table accesses in CPresentationView::vfunc_42 (from the TTD trace) */
 static const unsigned char VIEWNEW_HEAD[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x57, 0x48, 0x83, 0xec, 0x20, 0x48, 0x8b, 0xf9, 0xc6, 0x81, 0xa8, 0x26, 0x00, 0x00, 0x01, 0xb9, 0xf0, 0x4d, 0x02, 0x00};
+static const unsigned char LABEL_TAKE_HEAD[] = {0x48, 0x89, 0x54, 0x24, 0x10, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xec, 0x30, 0x48, 0xc7, 0x44, 0x24, 0x28, 0xfe, 0xff, 0xff, 0xff,
+                                                0x48, 0x89, 0x5c, 0x24, 0x50, 0x48, 0x89, 0x6c, 0x24, 0x60, 0x48, 0x8b, 0xfa, 0x48, 0x8b, 0xe9, 0x33, 0xc0, 0x89, 0x44, 0x24, 0x20, 0x48, 0x8b, 0x59, 0x60};
 static const unsigned char LOD_CLEAR[] = {0x48, 0x8d, 0x8e, 0x54, 0x04, 0x00, 0x00, 0x33, 0xd2, 0x41, 0xb8, 0x80, 0x00, 0x00, 0x00};
 static const unsigned char LOD_STORE_A[] = {0x46, 0x89, 0xb4, 0xae, 0x54, 0x04, 0x00, 0x00};
 static const unsigned char LOD_STORE_B[] = {0x42, 0xc7, 0x84, 0xae, 0x54, 0x04, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00};
@@ -123,6 +128,7 @@ static void fresh(void)
 {
     memset(g_img, 0, 0x4000000);
     memcpy(g_img + 0x1302160, VIEWNEW_HEAD, sizeof VIEWNEW_HEAD);
+    memcpy(g_img + 0x46df80, LABEL_TAKE_HEAD, sizeof LABEL_TAKE_HEAD);
     memcpy(g_img + 0x1346332, LOD_CLEAR, sizeof LOD_CLEAR);
     memcpy(g_img + 0x1346639, LOD_STORE_A, sizeof LOD_STORE_A);
     memcpy(g_img + 0x1346649, LOD_STORE_B, sizeof LOD_STORE_B);
@@ -196,7 +202,7 @@ int main(void)
           memset(expect + 0x4d, 0x90, 4);
           SetEnvironmentVariableA("FH2MP_CAR_SLOTS", good[i]);
           fresh();
-          assert(patch_car_pool() == 1 && g_patches == 3 && g_hooks == 2 && g_car_pool_share_ids == 0);
+          assert(patch_car_pool() == 1 && g_patches == 3 && g_hooks == 4 && g_car_pool_share_ids == 0);
           assert(!memcmp(g_img + CAR_POOL_RVA, expect, sizeof expect));
           assert(strstr(g_raw, "remote car slots 11 -> "));
       } }
@@ -340,7 +346,7 @@ int main(void)
         assert(patch_car_pool() == 0 && g_hooks == 0 && !strstr(g_raw, "remote car slots 11 ->"));
     }
     fresh();
-    assert(patch_car_pool() == 1 && g_hooks == 2 && strstr(g_raw, "remote car slots 11 -> 30 (FH2MP_CAR_SLOTS)"));
+    assert(patch_car_pool() == 1 && g_hooks == 4 && strstr(g_raw, "remote car slots 11 -> 30 (FH2MP_CAR_SLOTS)"));
 
     /* FH2MP_CAR_NOAI=1: NumAICars (options+0x2538) is set to 0 once, from the first tick */
     { static unsigned char options[0x3000];
@@ -586,6 +592,49 @@ int main(void)
     }
     SetEnvironmentVariableA("FH2MP_CAR_VIEWLOD", NULL);
 
+    /* the name tag allocator: an empty pool answers "no label" (the game reads the empty list head's garbage otherwise, dev 2026-11-04), a filled one runs the game's function */
+    { static unsigned char self[0x100], head[0x20], node[0x20];
+      void *out[2] = {(void *)(ULONG_PTR)1, (void *)(ULONG_PTR)2};
+      unsigned k;
+      g_car_pool_label_take_orig = (car_pool_label_take_fn)fake_label_take;
+      g_car_pool_label_empty = 0;
+      *(unsigned char **)(self + 0x60) = head;
+      *(unsigned long long *)(self + 0x58) = 12;                                   /* 12 in use */
+      *(unsigned char **)(head + 8) = head;                                         /* empty: the head's _Prev is the head */
+      g_label_take_calls = 0;
+      g_raw[0] = 0;
+      assert(car_pool_label_take(self, out) == (void **)out && out[0] == NULL && out[1] == NULL && g_label_take_calls == 0);
+      assert(strstr(g_raw, "carpool: name tag pool empty with 12 in use, the car gets no name tag (#1)\n"));
+      *(unsigned char **)(head + 8) = node;                                         /* one free label: the game's own function */
+      assert(car_pool_label_take(self, out) == (void **)out && g_label_take_calls == 1 && out[0] == (void *)(ULONG_PTR)0x1234 && out[1] == (void *)(ULONG_PTR)0x5678);
+      *(unsigned char **)(head + 8) = head;
+      g_raw[0] = 0;
+      for (k = 0; k < 10; k++) car_pool_label_take(self, out);                      /* five lines at most, every call still answered */
+      assert(strstr(g_raw, "(#5)\n") && !strstr(g_raw, "(#6)") && g_label_take_calls == 1 && g_car_pool_label_empty == 11);
+      *(unsigned char **)(self + 0x60) = NULL;                                      /* no list at all: not ours to judge, the game's function runs */
+      car_pool_label_take(self, out);
+      assert(g_label_take_calls == 2);
+    }
+    /* the pool maker's wrapper says how big the pool came out, and what the loop bound in memory was at that moment */
+    { static unsigned char module[0x100];
+      g_car_pool_labels_make_orig = (car_pool_labels_make_fn)fake_labels_make;
+      fresh();
+      g_img[CAR_POOL_LABELS_RVA + CAR_POOL_LABELS_CMP + 4] = 0x4d;
+      g_raw[0] = 0;
+      g_labels_make_calls = 0;
+      car_pool_labels_make(module);
+      assert(g_labels_make_calls == 1 && strstr(g_raw, "carpool: name tag pool built with 77 labels, loop bound in memory 77\n"));
+      g_img[CAR_POOL_LABELS_RVA + CAR_POOL_LABELS_CMP + 4] = 0x0c;                  /* patched too late: the line shows the stock bound */
+      g_raw[0] = 0;
+      car_pool_labels_make(module);
+      assert(strstr(g_raw, "loop bound in memory 12\n"));
+    }
+    SetEnvironmentVariableA("FH2MP_CAR_SLOTS", "30");
+    fresh();
+    g_img[CAR_POOL_LABEL_TAKE_RVA] ^= 0xff;                                         /* another build of the allocator: nothing is patched or hooked */
+    assert(patch_car_pool() == 0 && g_hooks == 0 && g_patches == 0 && strstr(g_raw, "mismatch: the name tag allocator"));
+    SetEnvironmentVariableA("FH2MP_CAR_SLOTS", NULL);
+
     /* another build of the id search or the request builder: nothing is patched (a bigger cache with 12 ids makes every car invalid) */
     SetEnvironmentVariableA("FH2MP_CAR_SLOTS", "30");
     SetEnvironmentVariableA("FH2MP_CAR_IDS", "1");
@@ -607,14 +656,14 @@ int main(void)
     SetEnvironmentVariableA("FH2MP_CAR_SLOTS", "40");
     SetEnvironmentVariableA("FH2MP_CAR_IDS", "1");
     fresh();
-    assert(patch_car_pool() == 1 && g_patches == 3 && g_hooks == 3 && g_car_pool_share_ids == 1 && strstr(g_raw, "player cars share stand-in ids"));
+    assert(patch_car_pool() == 1 && g_patches == 3 && g_hooks == 5 && g_car_pool_share_ids == 1 && strstr(g_raw, "player cars share stand-in ids"));
     SetEnvironmentVariableA("FH2MP_CAR_IDS", NULL);
 
     /* FH2MP_CAR_NODRIVATARS=1: the slot count ignores NumAICars, both Drivatar setters store 0, the festival AI connect is hooked */
     SetEnvironmentVariableA("FH2MP_CAR_SLOTS", "14");
     SetEnvironmentVariableA("FH2MP_CAR_NODRIVATARS", "1");
     fresh();
-    assert(patch_car_pool() == 1 && g_patches == 6 && g_hooks == 3 && g_car_pool_share_ids == 0 && strstr(g_raw, "remote car slots 11 -> 14, no Drivatars, parts cxna (FH2MP_CAR_SLOTS)"));
+    assert(patch_car_pool() == 1 && g_patches == 6 && g_hooks == 5 && g_car_pool_share_ids == 0 && strstr(g_raw, "remote car slots 11 -> 14, no Drivatars, parts cxna (FH2MP_CAR_SLOTS)"));
     assert(g_img[CAR_POOL_RVA + 0x28] == 14);
     assert(!memcmp(g_img + CAR_POOL_RVA + 0x2e, "\x90\x90\x90\x90", 4) && !memcmp(g_img + CAR_POOL_RVA + 0x2c, VFUNC2 + 0x2c, 2));
     assert(!memcmp(g_img + 0x5430d0, "\xc7\x82\xf0\x00\x00\x00\x00\x00\x00\x00\xc3", 11));
@@ -654,13 +703,13 @@ int main(void)
     }
     /* parts: letters pick which of the four are applied */
     { static const struct { const char *value; int patches, hooks; unsigned set[3]; } cases[] = {
-          {"c", 4, 2, {0x47a570 + 0x2e, 0, 0}},                 /* cache count only */
-          {"x", 4, 2, {0x5430d0, 0, 0}},
-          {"n", 4, 2, {0x653780, 0, 0}},
-          {"a", 3, 3, {0, 0, 0}},                               /* the AI hook only: no byte patch beyond the slots */
-          {"xn", 5, 2, {0x5430d0, 0x653780, 0}},
-          {"cxna", 6, 3, {0x47a570 + 0x2e, 0x5430d0, 0x653780}},
-          {"zz", 3, 2, {0, 0, 0}} };                            /* unknown letters pick nothing */
+          {"c", 4, 4, {0x47a570 + 0x2e, 0, 0}},                 /* cache count only */
+          {"x", 4, 4, {0x5430d0, 0, 0}},
+          {"n", 4, 4, {0x653780, 0, 0}},
+          {"a", 3, 5, {0, 0, 0}},                               /* the AI hook only: no byte patch beyond the slots */
+          {"xn", 5, 4, {0x5430d0, 0x653780, 0}},
+          {"cxna", 6, 5, {0x47a570 + 0x2e, 0x5430d0, 0x653780}},
+          {"zz", 3, 4, {0, 0, 0}} };                            /* unknown letters pick nothing */
       for (i = 0; i < 7; i++) {
           int k;
           SetEnvironmentVariableA("FH2MP_CAR_NODRIVATARS", cases[i].value);
@@ -687,7 +736,7 @@ int main(void)
     SetEnvironmentVariableA("FH2MP_CAR_NODRIVATARS", NULL);
     SetEnvironmentVariableA("FH2MP_CAR_NOAICTL", "1");
     fresh();
-    assert(patch_car_pool() == 1 && g_hooks == 3 && g_patches == 3);
+    assert(patch_car_pool() == 1 && g_hooks == 5 && g_patches == 3);
     fresh();
     g_img[CAR_POOL_AICTL_RVA] = 0x40;                                  /* another build: nothing is patched */
     g_raw[0] = 0;

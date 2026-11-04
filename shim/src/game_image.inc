@@ -24,6 +24,9 @@ static int readable_game_range(const void *address, SIZE_T size)
     return 1;
 }
 
+#ifdef FH2MP_PERF
+static volatile LONG g_perf_reads;      /* read_game_memory calls, each is 2x VirtualQuery + ReadProcessMemory (perf.inc) */
+#endif
 /* The two VirtualQuery walks below are for Wine (see above). On Windows they are the most expensive thing the shim does: every VirtualQuery scans the pages
  * of the region it describes, and the hooks on the remote cars' predictions and lighting read 7+ fields per car per frame through here. Profile of the game's
  * App Thread with 29 cars (dev 2026-11-03, 25 fps, one core at 97%): 73% of its time in these VirtualQuery calls, 0.6% in ReadProcessMemory. Windows'
@@ -44,6 +47,9 @@ static int running_under_wine(void)
 static int read_game_memory(const void *address, void *out, SIZE_T size)
 {
     SIZE_T got = 0;
+#ifdef FH2MP_PERF
+    InterlockedIncrement(&g_perf_reads);
+#endif
     if (!running_under_wine()) {
         return ReadProcessMemory(GetCurrentProcess(), address, out, size, &got) && got == size;
     }

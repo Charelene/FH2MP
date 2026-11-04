@@ -629,16 +629,31 @@ def _honk_path(folder, rel):
     return os.path.join(folder, *rel.split("/"))
 
 
+HONK_LOCAL_MARK = "fh2-mods/HonkHonk.dll.local"
+
+
+def _honk_local_sha(folder):
+    """The SHA-256 the player wrote into fh2-mods\\HonkHonk.dll.local to keep their own HonkHonk build (a fork), "" when there is none."""
+    try:
+        with open(_honk_path(folder, HONK_LOCAL_MARK), encoding="ascii") as f:
+            return f.read().strip().lower()
+    except OSError:
+        return ""
+
+
 def honk_complete(folder):
-    """The pinned HonkHonk DLL and horn bank are in place (the settings file is the player's and only has to exist)."""
+    """The pinned HonkHonk DLL and horn bank are in place (the settings file is the player's and only has to exist). A DLL whose hash is
+    written in fh2-mods\\HonkHonk.dll.local counts as in place too: a local build of HonkHonk the player keeps on purpose."""
     pin = UPSTREAM["honkHonk"]
     if not os.path.isfile(_honk_path(folder, HONK_INI)):
         return False
+    local = _honk_local_sha(folder)
     try:
         for rel, digest in pin["fileSha256"].items():
             with open(_honk_path(folder, rel), "rb") as f:
-                if hashlib.sha256(f.read()).hexdigest() != digest:
-                    return False
+                have = hashlib.sha256(f.read()).hexdigest()
+            if have != digest and not (rel == HONK_DLL and local and have == local):
+                return False
     except OSError:
         return False
     return True

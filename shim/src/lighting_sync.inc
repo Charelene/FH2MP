@@ -83,12 +83,18 @@ static void lighting_sample(void *published_car)
 }
 static void *lighting_send(void *out, void *stream, const light_car_key *key, const void *state, unsigned stamp)
 {
+#ifdef FH2MP_PERF
+    LONG64 perf_a=perf_now();
+#endif
     if(g_light_enabled && key && !(key->word & 0xe0000000u) && (key->word & 0x1fffffffu)<=127) {
         AcquireSRWLockExclusive(&g_light_lock);
         g_light.car=(unsigned char)(key->word & 0x1fffffffu);
         g_light.prediction_at=GetTickCount64();
         ReleaseSRWLockExclusive(&g_light_lock);
     }
+#ifdef FH2MP_PERF
+    perf_add(PERF_SEND,perf_now()-perf_a);
+#endif
     return g_light_send_original(out,stream,key,state,stamp);
 }
 static unsigned char lighting_receive(void *self, const void *context, const void *state, unsigned stamp)
@@ -98,6 +104,9 @@ static unsigned char lighting_receive(void *self, const void *context, const voi
      * own key at +20/+24, i.e. self-68. Constructors1789ba0/17dbdd0/9afb10 and
      * getter17a5dc0 confirm this layout. */
     static volatile LONG observations;
+#ifdef FH2MP_PERF
+    LONG64 perf_a=perf_now(),perf_b,perf_c;
+#endif
     light_car_key native_key={0}; const light_car_key *key=&native_key;
     int have_key=read_game_memory((unsigned char *)self-0x68,&native_key,sizeof native_key);
     void *holder=NULL,*prediction=NULL,*car=NULL,*animation=NULL;
@@ -115,7 +124,13 @@ static unsigned char lighting_receive(void *self, const void *context, const voi
         log_raw(" owner=");log_dec(key->owner);log_raw(accepted?" accepted\n":" awaiting usable prediction\n");
     }
     {
+#ifdef FH2MP_PERF
+        perf_b=perf_now();
+#endif
         unsigned char result=g_light_receive_original(self,context,state,stamp);
+#ifdef FH2MP_PERF
+        perf_c=perf_now();
+#endif
         if(accepted) {
             unsigned i,slot=32; int first=0;
             AcquireSRWLockExclusive(&g_light_lock);
@@ -128,6 +143,9 @@ static unsigned char lighting_receive(void *self, const void *context, const voi
                 log_raw(" id=");log_dec(key->word & 0x1fffffffu);log_raw("\n");
             }
         }
+#ifdef FH2MP_PERF
+        perf_add(PERF_RECEIVE,(perf_b-perf_a)+(perf_now()-perf_c));
+#endif
         return result;
     }
 }
@@ -172,16 +190,41 @@ static void lighting_end(void *car, light_scope scope)
 }
 static void lighting_publish(void *car, float dt)
 {
+#ifdef FH2MP_PERF
+    LONG64 t0=perf_now(),t1,t2;
+    perf_tick(car);
+#endif
     if(g_light_enabled) lighting_sample(car);
     light_scope scope=lighting_begin(car);
+#ifdef FH2MP_PERF
+    t1=perf_now();
+#endif
     g_light_publish_original(car,dt);
+#ifdef FH2MP_PERF
+    t2=perf_now();
+#endif
     lighting_end(car,scope);
+#ifdef FH2MP_PERF
+    perf_add(PERF_PUBLISH,(t1-t0)+(perf_now()-t2));
+#endif
 }
 static void lighting_animation(void *car)
 {
+#ifdef FH2MP_PERF
+    LONG64 t0=perf_now(),t1,t2;
+#endif
     light_scope scope=lighting_begin(car);
+#ifdef FH2MP_PERF
+    t1=perf_now();
+#endif
     g_light_animation_original(car);
+#ifdef FH2MP_PERF
+    t2=perf_now();
+#endif
     lighting_end(car,scope);
+#ifdef FH2MP_PERF
+    perf_add(PERF_ANIM,(t1-t0)+(perf_now()-t2));
+#endif
 }
 
 static DWORD WINAPI lighting_worker(void *unused)
@@ -294,6 +337,9 @@ static int patch_lighting(void)
        !plat_hook("lighting: light material publication",g_light_image+0xf5c900,(void *)lighting_publish,(void **)&g_light_publish_original) ||
        !plat_hook("lighting: headlight animation parameter",g_light_image+0xf7bcc0,(void *)lighting_animation,(void **)&g_light_animation_original)) return 0;
     InterlockedExchange(&g_light_enabled,1);
+#ifdef FH2MP_PERF
+    perf_start();
+#endif
     thread=CreateThread(NULL,0,lighting_worker,NULL,0,NULL);
     if(!thread) {
         DWORD err=GetLastError();
