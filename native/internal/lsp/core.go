@@ -48,6 +48,11 @@ type Core struct {
 	Xbl    *xbl.Server
 	Tables *catalog.Tables // part ids of the game data (nil: tune checks are skipped)
 
+	Launcher  LauncherAPI                      // /v1/* (nil: not served)
+	Ops       OpsAPI                           // /ops/* (nil: not served)
+	AddResult func(body []byte) (int64, error) // the game server's event result (site_stats.add_result); a *valErr is a 400
+	front     frontState
+
 	ClubXPDivisor int64
 	Verbosity     diag.Verbosity
 	Out           func(line string) // where log lines go (default stdout)
