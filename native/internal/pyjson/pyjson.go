@@ -256,6 +256,22 @@ func write(b *strings.Builder, v reflect.Value, o Opts) error {
 // Parse is json.loads: objects become Obj (keys in document order), arrays []any, integers int64 (uint64 when above int64), other numbers
 // float64, then string, bool and nil.
 func Parse(text string) (any, error) {
+	v, err := parse(text)
+	if err != nil {
+		if m := ErrorText(text); m != "" {
+			return nil, &DecodeError{m} // Python's words for it
+		}
+		return nil, err
+	}
+	return v, nil
+}
+
+// DecodeError is a refusal worded as Python's json.JSONDecodeError.
+type DecodeError struct{ Msg string }
+
+func (e *DecodeError) Error() string { return e.Msg }
+
+func parse(text string) (any, error) {
 	dec := json.NewDecoder(strings.NewReader(text))
 	dec.UseNumber()
 	v, err := parseValue(dec)

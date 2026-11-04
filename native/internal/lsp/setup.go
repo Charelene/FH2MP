@@ -13,6 +13,7 @@ import (
 	"fh2mp/internal/cardb"
 	"fh2mp/internal/catalog"
 	"fh2mp/internal/clubs"
+	"fh2mp/internal/crashreports"
 	"fh2mp/internal/db"
 	"fh2mp/internal/drivatar"
 	"fh2mp/internal/notifstore"
@@ -259,9 +260,9 @@ func (c *Core) SetupAuth() error {
 	for i := range rows {
 		c.SetTag(rows[i].Int("xuid"), rows[i].Str("gamertag"))
 	}
-	ops := c.setupLauncher
-	if ops != nil {
-		if err := ops(c); err != nil {
+	c.setupLauncherAPI()
+	if c.setupLauncher != nil {
+		if err := c.setupLauncher(c); err != nil {
 			return err
 		}
 	}
@@ -340,3 +341,35 @@ func (c *Core) Serve(bind string, port int) error {
 }
 
 var _ = strings.Join
+
+// setupLauncherAPI builds the /v1 API around the identity service.
+func (c *Core) setupLauncherAPI() {
+	host := publicHost()
+	l := NewLauncher(c)
+	url := os.Getenv("FH2MP_LSP_URL")
+	if url == "" {
+		port := os.Getenv("FH2MP_LSP_PUBLIC_PORT")
+		if port == "" {
+			port = "5080"
+		}
+		url = fmt.Sprintf("http://%s:%s", host, port)
+	}
+	l.LspPub = pyjson.Obj{{K: "url", V: url}}
+	port := int64(5000)
+	if s := os.Getenv("FH2MP_GAME_PORT"); s != "" {
+		port = p10(s)
+	}
+	l.GamePub = pyjson.Obj{{K: "host", V: host}, {K: "port", V: port}}
+	if s := os.Getenv("FH2MP_GAME_TCP_PORT"); s != "" {
+		l.GamePub.Set("tcp", p10(s)) // the game server's experimental TCP carrier (FH2MP_TUNNEL_PORT)
+	}
+	if os.Getenv("FH2MP_GAME_PROBE") == "1" {
+		l.GamePub.Set("probe", int64(1)) // the game server answers UDP reachability probes: launchers may then switch to TCP by themselves
+	}
+	if os.Getenv("FH2MP_NET_TRAFFIC") == "1" {
+		l.GamePub.Set("traffic", int64(1)) // launchers start the game with FH2MP_NET_TRAFFIC=1: the shim keeps the game's networked traffic
+	}
+	l.Crashes = crashreports.FromEnv(func(m string) { c.Log(nil, m) })
+	l.ClubInv = c.LauncherClubInvite
+	c.Launcher = l
+}

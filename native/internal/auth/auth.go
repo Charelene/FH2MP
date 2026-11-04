@@ -99,6 +99,12 @@ func aerr(status int, code, message string) *Error {
 }
 
 func (e *Error) withDetail(d string) *Error { e.Detail = d; return e }
+
+// WithDetail and WithXuid add what a refusal's log line names (the client sees Message only).
+func (e *Error) WithDetail(d string) *Error { e.Detail = d; return e }
+
+// WithXuid names the account a refusal is about.
+func (e *Error) WithXuid(x int64) *Error { e.Xuid = x; return e }
 func (e *Error) withXuid(x int64) *Error    { e.Xuid = x; return e }
 
 // Account is a signed-in player.

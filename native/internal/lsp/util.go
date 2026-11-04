@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"fh2mp/internal/diag"
+	"fh2mp/internal/pyjson"
 	"fh2mp/internal/scoreboard"
 	"fmt"
 	"strconv"
@@ -10,9 +11,17 @@ import (
 
 // parseIntBase0 is int(text, 0): an optional sign, then 0x / 0o / 0b prefixes or decimal, underscores between digits allowed.
 func parseIntBase0(s string) (int64, error) {
+	n, ok := parseIntBase0Raw(s)
+	if !ok {
+		return 0, fmt.Errorf("invalid literal for int() with base 0: %s", pyjson.PyRepr(s))
+	}
+	return n, nil
+}
+
+func parseIntBase0Raw(s string) (int64, bool) {
 	t := strings.TrimSpace(s)
 	if t == "" {
-		return 0, fmt.Errorf("empty")
+		return 0, false
 	}
 	neg := false
 	if t[0] == '+' || t[0] == '-' {
@@ -31,7 +40,7 @@ func parseIntBase0(s string) (int64, error) {
 	case len(t) > 1 && t[0] == '0':
 		// a leading zero is only valid for zero itself in base 0
 		if strings.Trim(t, "0_") != "" {
-			return 0, fmt.Errorf("leading zero")
+			return 0, false
 		}
 	}
 	t = strings.ReplaceAll(t, "_", "")
@@ -39,14 +48,14 @@ func parseIntBase0(s string) (int64, error) {
 	if err != nil {
 		u, err2 := strconv.ParseUint(t, base, 64)
 		if err2 != nil {
-			return 0, err
+			return 0, false
 		}
 		n = int64(u)
 	}
 	if neg {
 		n = -n
 	}
-	return n, nil
+	return n, true
 }
 
 // iso formats a time like the Python helper (UTC, whole seconds).

@@ -10,6 +10,7 @@ import (
 
 	"fh2mp/internal/auth"
 	"fh2mp/internal/capacity"
+	"fh2mp/internal/pyjson"
 )
 
 // Launcher seat leases (= server/launcher_lobbies.py). A hold only influences the next ordinary matchmaking request; it never moves a connected
@@ -261,3 +262,79 @@ func (s *Server) pickLog(key, msg string) {
 
 var _ = time.Now
 var _ = sort.Strings
+
+// LauncherRow is one lobby of the launcher's list: the hub's summary without its member ids, which are returned apart.
+type LauncherRow struct {
+	Row pyjson.Obj
+	IDs []any // memberXuids as the hub sent them (hex text); nil for the synthetic row of a pending reservation
+}
+
+// LauncherRows is the matchmaking-locked part of the launcher's lobby list (community.lobbies): the hub's lobbies that fit the caller's pool, with the
+// seats held for launchers and the occupancy, then the caller's own pending reservation as a row of its own.
+func (s *Server) LauncherRows(me int64, lobbies []any, pops map[string][]string, flags map[int64]bool) []LauncherRow {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.Now()
+	s.pruneHolds(now)
+	sessions := map[string]*Session{}
+	for key, rec := range s.sessions {
+		if key[1] == strings.ToLower(TargetTemplate) {
+			sessions[key[2]] = rec
+		}
+	}
+	var out []LauncherRow
+	for _, lv := range lobbies {
+		row, _ := lv.(pyjson.Obj)
+		idv, _ := row.Get("id")
+		id, _ := idv.(string)
+		rec := sessions[strings.ToLower(id)]
+		occupied := -1
+		if rec != nil {
+			occupied = s.lobbyOccupancy(id, rec, pops, true)
+		}
+		if !s.poolFits(id, pops, flags, flags[me]) {
+			continue
+		}
+		var ids []any
+		clean := pyjson.Obj{}
+		for _, p := range row {
+			if p.K == "memberXuids" {
+				ids, _ = p.V.([]any)
+			} else {
+				clean = append(clean, p)
+			}
+		}
+		present := []string{}
+		for _, x := range pops[id] {
+			if x != "" {
+				n, _ := strconv.ParseInt(x, 16, 64)
+				present = append(present, strconv.FormatInt(n, 10))
+			}
+		}
+		held := len(s.seatsLocked(id, present, now))
+		if occupied < 0 {
+			pl, _ := row.Get("players")
+			occupied = int(toInt(pl)) + held
+		}
+		clean.Set("held", int64(held))
+		clean.Set("occupied", int64(occupied))
+		out = append(out, LauncherRow{Row: clean, IDs: ids})
+	}
+	if h, ok := s.holds[strconv.FormatInt(me, 10)]; ok && h.Key == nil {
+		out = append(out, LauncherRow{Row: pyjson.Obj{{K: "id", V: h.ID}, {K: "kind", V: h.Kind}, {K: "players", V: int64(0)}, {K: "held", V: int64(1)}, {K: "occupied", V: int64(1)},
+			{K: "capacity", V: int64(capacity.FreeRoam())}, {K: "status", V: "Waiting for your matchmaking request"}, {K: "members", V: []any{}}}})
+	}
+	return out
+}
+
+func toInt(v any) int64 {
+	switch x := v.(type) {
+	case int64:
+		return x
+	case uint64:
+		return int64(x)
+	case float64:
+		return int64(x)
+	}
+	return 0
+}

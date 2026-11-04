@@ -28,8 +28,8 @@ type LauncherAPI interface {
 	MinShim() string
 	VersionAtLeast(have, need string) bool
 	BodyLimit(path string) int64
-	// GameDB is the sha256 of the server's car database and its path; ok=false when it cannot be read.
-	GameDB() (sha, path string, ok bool)
+	// GameDBInfo is the sha256 of the server's car database and its path; ok=false when it cannot be read.
+	GameDBInfo() (sha, path string, ok bool)
 	Handle(r *Req, method, path string, h http.Header, body []byte, ip string) (status int, obj any, ctype string)
 }
 
@@ -627,7 +627,8 @@ func (c *Core) serveAdmin(rw respWriter, r *Req, req *http.Request, body []byte)
 	}
 	if !found {
 		c.Warn(r, fmt.Sprintf("  refused: 404 on %s %s: not an admin endpoint", req.Method, cut(rawPathOf(path), 60)))
-		rw.send(404, "text/html;charset=utf-8", []byte("<!DOCTYPE HTML><html><head><title>Error response</title></head><body><h1>Error response</h1><p>Error code: 404</p><p>Message: Not Found.</p></body></html>"))
+		rw.w.Header().Set("Connection", "close")
+		rw.send(404, "text/html;charset=utf-8", []byte(errorPage404))
 		return
 	}
 	rw.send(200, "text/plain", []byte(out))
@@ -726,7 +727,7 @@ func (c *Core) gamedbOK(rw respWriter, r *Req, req *http.Request, acct *auth.Acc
 	if c.Launcher == nil {
 		return true
 	}
-	sha, path, ok := c.Launcher.GameDB()
+	sha, path, ok := c.Launcher.GameDBInfo()
 	if !ok {
 		if path != "" {
 			c.LogEvery(r, "gamedb-unavailable", 60, fmt.Sprintf("  refused: 503 gamedb_unavailable: the server's car database %s cannot be read, so every signed-in request is refused until it can (xuid %#x, call=%s)",
@@ -1017,3 +1018,19 @@ func (c *Core) OnRevoke(xuid int64) {
 	c.Xbl.DropPlayer(fmt.Sprint(xuid))
 	c.Xbl.AnnounceRevoke(xuid)
 }
+
+// errorPage404 is what Python's http.server answers with for send_error(404).
+const errorPage404 = `<!DOCTYPE HTML>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <title>Error response</title>
+    </head>
+    <body>
+        <h1>Error response</h1>
+        <p>Error code: 404</p>
+        <p>Message: Not Found.</p>
+        <p>Error code explanation: 404 - Nothing matches the given URI.</p>
+    </body>
+</html>
+`
