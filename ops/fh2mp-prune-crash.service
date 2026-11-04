@@ -1,8 +1,0 @@
-[Unit]
-Description=Prune old crash reports
-
-[Service]
-Type=oneshot
-User=fh2mp
-ExecStart=/usr/local/sbin/fh2mp-prune-crash
-Nice=19

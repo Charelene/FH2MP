@@ -74,7 +74,7 @@ def where_for(attrs):
 
 
 class RivalCatalog:
-    """`cars` is a CarDb opened on the game catalog (server/catalog.py): its views v_cars, v_tracks, v_makes, ... carry the names."""
+    """`cars` is a CarDb opened on the game catalog (tools/gamedata/catalog.py): its views v_cars, v_tracks, v_makes, ... carry the names."""
 
     def __init__(self, cars, mount=None, database=None):
         self.cars, self.database = cars, database
@@ -116,7 +116,7 @@ class RivalCatalog:
     def usable_themes(self):
         """Themes a new event may use: the class can be enforced and the car selector offers a rental to anybody who owns no fitting car
         (rentals.enough: 2 rentals, or all cars of a smaller theme). Without rentals in the catalog, or when no theme passes, every theme
-        that can be enforced (the stock 22 rentals fit almost none: tools/make_rentals_db.py adds the missing ones)."""
+        that can be enforced (the stock 22 rentals fit almost none: tools/gamedata/make_rentals_db.py adds the missing ones)."""
         if getattr(self, "_usable", None) is None:
             themes = [t for t in self.themes() if not t.get("avoid")]
             rent = self.rentals()

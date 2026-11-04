@@ -1,7 +1,7 @@
 """A structured record of what happened to players, one JSON object per line (events.jsonl next to the game server's log).
 
 The free-text server.log needs a day of grep to answer "how many sessions ended how, and why did events fail?" (prod 2026-10-29: 600 MB, no
-dates on the lines). These lines carry the answer directly, and `summarize` is what tools/prod_report.py prints. Fields are short and carry
+dates on the lines). These lines carry the answer directly, and `summarize` is what tools/analysis/prod_report.py prints. Fields are short and carry
 no addresses, tokens or names: an xuid is the only identifier. Writing never raises into the game server; a file that cannot be opened or written is
 said in the log, because the report built from this file would otherwise just look like a quiet day."""
 import collections

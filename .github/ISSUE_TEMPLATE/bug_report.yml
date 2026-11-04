@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting. Please check [KNOWN_ISSUES.md](https://github.com/Charelene/FH2MP/blob/main/KNOWN_ISSUES.md) first, and search the open issues.
+        Thanks for reporting. Please check the [help pages](https://forza.scuffed.af/help/) first, and search the open issues.
         The more of the fields below you fill in, the faster it can be found. Do not post passwords or anything private: the log files below do not contain any.
   - type: textarea
     id: what

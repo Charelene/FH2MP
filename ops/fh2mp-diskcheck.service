@@ -1,8 +1,0 @@
-[Unit]
-Description=Warn when a disk is nearly full
-
-[Service]
-Type=oneshot
-User=root
-ExecStart=/usr/local/sbin/fh2mp-diskcheck
-Nice=19

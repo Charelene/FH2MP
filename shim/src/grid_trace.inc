@@ -8,7 +8,7 @@
  *   grid: RenderReady set +83100 ms (19:59:31.512 UTC)
  *   grid: race start message +111700 ms, RenderReady had been set 28600 ms ago
  *
- * Natives (netv2-messages.tsv, docs/exe, stateflow race_flow.xml prerace_prepare): MsgStartingGrid::Receive +1824040, MsgStartRace::Receive
+ * Natives (netv2-messages.tsv, docs/re, stateflow race_flow.xml prerace_prepare): MsgStartingGrid::Receive +1824040, MsgStartRace::Receive
  * +18241e0, ConsoleSynced::SetRenderReady +17deda0, and the Execute (entry) of the pre-race state nodes below.
  */
 typedef unsigned (*grid_msg_fn)(void *, void *, void *);

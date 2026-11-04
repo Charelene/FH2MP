@@ -4,7 +4,7 @@ The game lists a rental car for an event when it is in RentalCars and passes the
 filter as the garage: "SELECT Id FROM Data_Car AS Garage JOIN RentalCars ON ... WHERE <restrictions>", FUN_1408d1300). The stock table has
 22 cars, 3-4 per class, picked for the retail events: of the 59 themes Monthly Rivals can use, none but a few country themes has even one
 fitting rental, so e.g. "Retro Icons Cup, C class" offered nothing (2026-10-22). `plan_extra` picks the fewest cars to add to the table so
-that every theme has min(target, cars in the theme) rentals; tools/make_rentals_db.py writes them into the canonical gamedbRC.slt that the
+that every theme has min(target, cars in the theme) rentals; tools/gamedata/make_rentals_db.py writes them into the canonical gamedbRC.slt that the
 launchers sync (gamedb_sync.py). Rivals only generate events a rental covers (rivals.RivalCatalog.rentable).
 """
 

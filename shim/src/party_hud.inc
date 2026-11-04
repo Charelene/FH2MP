@@ -3,7 +3,7 @@
  * the class, so the array cannot grow in place. Three places walk it by the count, `*(component+0x1ac)`, with no bound: the rebuild helper_78bc60
  * (the per-row write +785d30, and the call that hands the array to the mini leaderboard +abf2d0) and the per-frame helper_78bbd0 that
  * GameIndependentUpdate runs. A 13th member made all three read and write the vector's header as if it were a row, and every client in the lobby
- * crashed within a frame (game+0x144661d, issue #47; docs/exe/second-pass.md).
+ * crashed within a frame (game+0x144661d, issue #47; docs/re/second-pass.md).
  *
  * Rows 12 and up are rows of our own, made with the game's own factory (+7389d0), one table per component:
  *   - the call to +785d30 for row i >= 12 gets a pointer into our table instead of component+0x130+8*i (and no call at all past the maximum),

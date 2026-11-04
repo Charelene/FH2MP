@@ -8,7 +8,7 @@
  *   diag: 19:58:09.870 UTC request car 17 sent, 2120 ms after the last one, local was 0, now 1
  *   diag: 19:58:09.905 UTC warp of a remote traffic car (object 0x1a2b3c)
  *
- * Natives (docs/exe, netv2; build 1.0.0.64): SyncTrafficModule::OnTakeOwnership +728e50, OnDropOwnership +71b180 and OnOwnershipRequestDenied
+ * Natives (docs/re, netv2; build 1.0.0.64): SyncTrafficModule::OnTakeOwnership +728e50, OnDropOwnership +71b180 and OnOwnershipRequestDenied
  * +723fa0 (ClientTrafficMessage kinds 6, 7 and 8: module, vehicle id, ...); the traffic car record's authority setter +726570 (car, local:
  * +0x98 is "local authority", +0x9c the vehicle id); the RequestOwnership sender +717410 (the collision path; it sets local authority at
  * once and stamps +0xcc with the network clock, at most every 2000 ms); the warp in NetworkComponent::Update +18ed840, the call to

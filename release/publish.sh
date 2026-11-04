@@ -59,7 +59,7 @@ done
 gh run watch "$id" --exit-status >/dev/null || { echo "checks failed (gh run view $id): nothing was tagged"; exit 1; }
 echo "  ci.yml run $id passed"
 gh secret set RELEASE_SIGNING_KEY < "$key"
-if [ -n "${FH2MP_PUBLISH_NO_TAG:-}" ]; then        # ops/ship.sh: it merges develop into main and tags main itself
+if [ -n "${FH2MP_PUBLISH_NO_TAG:-}" ]; then        # the ship step merges develop into main and tags main itself
   echo "Pushed (not tagged)."; exit 0
 fi
 git tag -a "$tag" -m "FH2MP $tag"

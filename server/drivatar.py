@@ -20,7 +20,7 @@ import db  # noqa: E402
 import diag  # noqa: E402
 import xls_schema as S  # noqa: E402
 try:
-    from car_policy import KNOWN_CARS  # noqa: E402     # tools/make_car_policy.py
+    from car_policy import KNOWN_CARS  # noqa: E402     # tools/gamedata/make_car_policy.py
 except ImportError:
     KNOWN_CARS = frozenset()
 

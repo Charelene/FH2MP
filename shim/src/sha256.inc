@@ -1,6 +1,6 @@
 /*
  * SHA-256 (FIPS 180-4), plain C with no library calls (the shim links KERNEL32 only). Used for the car database check (gamedb_hash in
- * fh2mp_mod.c) and the UDP connection ticket (udp_ticket_send). Checked against Python's hashlib by shim/test_sha256.sh.
+ * fh2mp_mod.c) and the UDP connection ticket (udp_ticket_send). Checked against Python's hashlib by shim/tests/test_sha256.sh.
  */
 typedef struct {
     unsigned int h[8];

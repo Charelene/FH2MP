@@ -1,7 +1,7 @@
 """Reads what the leader chose in the event options (Nerd::GameOptionsSynced, the transfer object a Free Roam leader writes when an event starts).
 
 The object is a stream of [variable id: 10 bits][value] pairs with ascending ids (10-bit ids, registration order recovered with
-tools/gameopts_schema.py). Writes are deltas: omitted values retain the previous state. The native constructor schema has 493 fields.
+tools/gamedata/gameopts_schema.py). Writes are deltas: omitted values retain the previous state. The native constructor schema has 493 fields.
 
 NumTeams (ScoringOptions, 2 bits, 0..2) is variable 428 and TeamScoringType (3 bits) is 429, right behind it. Found 2026-10-22 from the
 game's constructors and checked on the logs: every Road Trip team event of the dev server (7 of 7) and 25 Free Roam payloads on prod carry
