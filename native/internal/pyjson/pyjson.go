@@ -3,6 +3,7 @@
 package pyjson
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"reflect"
@@ -222,4 +223,79 @@ func write(b *strings.Builder, v reflect.Value, o Opts) error {
 		return fmt.Errorf("pyjson: unsupported type %s", v.Type())
 	}
 	return nil
+}
+
+// Parse is json.loads: objects become Obj (keys in document order), arrays []any, integers int64 (uint64 when above int64), other numbers
+// float64, then string, bool and nil.
+func Parse(text string) (any, error) {
+	dec := json.NewDecoder(strings.NewReader(text))
+	dec.UseNumber()
+	v, err := parseValue(dec)
+	if err != nil {
+		return nil, err
+	}
+	if dec.More() {
+		return nil, fmt.Errorf("extra data")
+	}
+	if _, err := dec.Token(); err == nil {
+		return nil, fmt.Errorf("extra data")
+	}
+	return v, nil
+}
+
+func parseValue(dec *json.Decoder) (any, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	switch t := tok.(type) {
+	case json.Delim:
+		switch t {
+		case '{':
+			obj := Obj{}
+			for dec.More() {
+				kt, err := dec.Token()
+				if err != nil {
+					return nil, err
+				}
+				v, err := parseValue(dec)
+				if err != nil {
+					return nil, err
+				}
+				obj.Set(kt.(string), v)
+			}
+			if _, err := dec.Token(); err != nil {
+				return nil, err
+			}
+			return obj, nil
+		case '[':
+			arr := []any{}
+			for dec.More() {
+				v, err := parseValue(dec)
+				if err != nil {
+					return nil, err
+				}
+				arr = append(arr, v)
+			}
+			if _, err := dec.Token(); err != nil {
+				return nil, err
+			}
+			return arr, nil
+		}
+	case json.Number:
+		s := t.String()
+		if !strings.ContainsAny(s, ".eE") {
+			if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+				return i, nil
+			}
+			if u, err := strconv.ParseUint(s, 10, 64); err == nil {
+				return u, nil
+			}
+		}
+		f, err := t.Float64()
+		return f, err
+	case string, bool, nil:
+		return t, nil
+	}
+	return nil, fmt.Errorf("unexpected token %v", tok)
 }
