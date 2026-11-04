@@ -1724,15 +1724,15 @@ class HonkHonkTests(unittest.TestCase):
     def test_the_real_pin_names_the_release_and_its_layout(self):
         from fh2mp_launcher.constants import UPSTREAM
         pin = UPSTREAM["honkHonk"]
-        self.assertTrue(pin["url"].startswith("https://github.com/suderek22/FH2_HonkHonk/releases/download/v0.3.4/"))
+        self.assertTrue(pin["url"].startswith("https://github.com/suderek22/FH2_HonkHonk/releases/download/v0.4.0-online/"))
         self.assertEqual(set(pin["files"].values()), {shim.HONK_DLL, shim.HONK_INI, shim.HONK_BANK})
         self.assertEqual(pin["fileSha256"][shim.HONK_DLL], pin["dllSha256"])
 
     def test_extract_takes_the_pinned_zip_and_maps_it_into_the_azimuth_folder(self):
         from fh2mp_launcher import upstream
-        data, pin = fake_release("honkHonk", {"HonkHonk_v0.3.4/fh2-mods/HonkHonk.dll": self.dll, "HonkHonk_v0.3.4/fh2-mods/HonkHonk.ini": self.ini,
-                                              "HonkHonk_v0.3.4/fh2-mods/HonkHonk/HZ2_SFX_HonkHonk.bank": self.bank, "HonkHonk_v0.3.4/README.md": b"r"},
-                                 "HonkHonk_v0.3.4/fh2-mods/HonkHonk.dll")
+        data, pin = fake_release("honkHonk", {"HonkHonk_v0.4.0/fh2-mods/HonkHonk.dll": self.dll, "HonkHonk_v0.4.0/fh2-mods/HonkHonk.ini": self.ini,
+                                              "HonkHonk_v0.4.0/fh2-mods/HonkHonk/HZ2_SFX_HonkHonk.bank": self.bank, "HonkHonk_v0.4.0/README.md": b"r"},
+                                 "HonkHonk_v0.4.0/fh2-mods/HonkHonk.dll")
         self.assertEqual(upstream.extract("honkHonk", data, pin), self.files)
         with self.assertRaises(upstream.UpstreamError):
             upstream.extract("honkHonk", data + b"x", pin)

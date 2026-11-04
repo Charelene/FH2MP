@@ -14,6 +14,7 @@ static unsigned long long g_xuid;
 #define FH2_SIZE_OF_IMAGE 0x3a18000u
 static int (WINAPI *g_r_wsasendto)(UINT_PTR,void *,DWORD,DWORD *,DWORD,const void *,int,void *,void *);
 static int read_game_memory(const void *p,void *out,SIZE_T n) { if(!p)return 0;memcpy(out,p,n);return 1; }
+static void mem_copy(void *to,const void *from,SIZE_T n) {memcpy(to,from,n);}
 static unsigned char *find_fh2_image(void) {return NULL;}
 static int plat_hook(const char *name,void *target,void *detour,void **original) {(void)name;(void)target;(void)detour;(void)original;return 0;}
 static void log_begin(void) {}
@@ -227,21 +228,38 @@ int main(int argc,char **argv)
     /* ---- HonkHonk.dll: the horn it holds ---- */
     {
         int held;
-        /* HonkHonk's request variable, as honk_attach derives it from the pinned instruction */
-        assert((HH_REQUEST_RVA+6+*(const int *)(honk_request_code+2))==0xe044u);
+        unsigned b; unsigned char *img=VirtualAlloc(NULL,0x10000,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
+        /* HonkHonk's request variable, as honk_attach derives it from each known build's instruction: RVA 0xe044 in 0.4.0 and 0.3.4 */
+        assert(HH_BUILDS==2 && !strcmp(honk_builds[0].version,"0.4.0") && !strcmp(honk_builds[1].version,"0.3.4"));
+        for(b=0;b<HH_BUILDS;b++) assert((honk_builds[b].request_rva+6+*(const int *)(honk_builds[b].request_code+2))==0xe044u);
+        assert(!honk_builds[0].xinput_redirect && honk_builds[1].xinput_redirect);       /* 0.4.0 reads the game's controller, no XInput polling */
+        /* the build is recognised by its request setter, each at its own RVA; anything else is no known build */
+        assert(img && !honk_build_at(img));
+        for(b=0;b<HH_BUILDS;b++) {
+            memset(img,0,0x10000); memcpy(img+honk_builds[b].request_rva,honk_builds[b].request_code,7);
+            assert(honk_build_at(img)==&honk_builds[b]);
+            img[honk_builds[b].request_rva+2]^=1; assert(!honk_build_at(img));            /* another disp32: another build */
+        }
+        memset(img,0,0x10000); memcpy(img+honk_builds[1].request_rva,honk_builds[0].request_code,7); assert(!honk_build_at(img));   /* right bytes, wrong RVA */
+        VirtualFree(img,0,MEM_RELEASE);
         held=5; g_honk_request=(unsigned char *)&held; assert(honk_local_horn()==5);
         held=-1; assert(honk_local_horn()==-1);
         held=31; assert(honk_local_horn()==-1);
         g_honk_request=NULL; assert(honk_local_horn()==-1);
     }
-    {   /* the button: the left stick test becomes the right stick test, in a copy of the pinned instruction bytes at image base + 0x222d */
-        unsigned char *base=VirtualAlloc(NULL,0x10000,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE); DWORD old;
-        assert(base);
-        memcpy(base+HH_BUTTON_RVA,honk_button_code,7);
-        VirtualProtect(base,0x10000,PAGE_EXECUTE_READ,&old);
-        assert(honk_move_button(base) && base[HH_BUTTON_RVA+4]==0x80 && honk_code_is(base+HH_BUTTON_RVA,honk_moved_code,7));
-        assert(!honk_code_is(base+HH_BUTTON_RVA,honk_button_code,7));
-        VirtualFree(base,0,MEM_RELEASE);
+    {   /* the button: the left stick test becomes the right stick test, in a copy of each build's instruction bytes (0.4.0 +0x2267, 0.3.4 +0x222d) */
+        unsigned b;
+        for(b=0;b<HH_BUILDS;b++) {
+            const honk_build *hb=&honk_builds[b]; unsigned char *base=VirtualAlloc(NULL,0x10000,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE); DWORD old;
+            assert(base && hb->button_code[HH_BUTTON_IMM]==0x40);
+            memcpy(base+hb->button_rva,hb->button_code,7);
+            VirtualProtect(base,0x10000,PAGE_EXECUTE_READ,&old);
+            assert(honk_button_is(base,hb,0x40) && !honk_button_is(base,hb,0x80));
+            assert(honk_move_button(base,hb) && base[hb->button_rva+4]==0x80 && honk_button_is(base,hb,0x80));
+            assert(!honk_button_is(base,hb,0x40) && !memcmp(base+hb->button_rva,hb->button_code,4) && !memcmp(base+hb->button_rva+5,hb->button_code+5,2));
+            assert(!honk_button_is(base,&honk_builds[1-b],0x80));                           /* the other build's bytes do not match here */
+            VirtualFree(base,0,MEM_RELEASE);
+        }
     }
     {   /* which stick the horn goes on: never the one Extra Options' headlight/roof toggle uses, and the launcher is told */
         wchar_t dir[MAX_PATH], ini[MAX_PATH+40]; char st[256]; unsigned char *base; DWORD old;
@@ -259,19 +277,25 @@ int main(int argc,char **argv)
         write_file(ini,swapped); assert(honk_eo_sticks(ini)==HH_STICK_LEFT);
         write_file(ini,"[Bindings]\r\nHeadlightsXbox=LeftStick\r\n"); assert(honk_eo_sticks(ini)==(HH_STICK_LEFT|HH_STICK_RIGHT));   /* RoofXbox missing */
         base=VirtualAlloc(NULL,0x10000,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE); assert(base);
-        /* swapped toggles: the horn goes right */
-        write_file(ini,swapped); memcpy(base+HH_BUTTON_RVA,honk_button_code,7); VirtualProtect(base,0x10000,PAGE_EXECUTE_READ,&old);
-        assert(honk_place_button(base)==1 && base[HH_BUTTON_RVA+4]==0x80);
-        assert(read_status(st,sizeof st) && !strncmp(st,"horn=RightStick\r\nmovable=1\r\n",28));
-        assert(honk_place_button(base)==1);                                                                 /* already moved */
-        /* the stock toggles (the launcher did not or could not move them): the horn stays left, no conflict either way */
-        VirtualProtect(base,0x10000,PAGE_READWRITE,&old); memcpy(base+HH_BUTTON_RVA,honk_button_code,7);
-        write_file(ini,stock); assert(honk_place_button(base)==0 && base[HH_BUTTON_RVA+4]==0x40);
-        assert(read_status(st,sizeof st) && !strncmp(st,"horn=LeftStick\r\nmovable=1\r\n",27));
-        /* another HonkHonk build: nothing changed, and the launcher learns the horn cannot be moved */
-        write_file(ini,swapped); base[HH_BUTTON_RVA+4]=0x20;
-        assert(honk_place_button(base)==0 && base[HH_BUTTON_RVA+4]==0x20);
-        assert(read_status(st,sizeof st) && !strncmp(st,"horn=LeftStick\r\nmovable=0\r\n",27));
+        {   const honk_build *hb=&honk_builds[0]; unsigned rva=hb->button_rva;          /* the pinned 0.4.0 */
+            /* swapped toggles: the horn goes right */
+            write_file(ini,swapped); memcpy(base+rva,hb->button_code,7); VirtualProtect(base,0x10000,PAGE_EXECUTE_READ,&old);
+            assert(honk_place_button(base,hb)==1 && base[rva+4]==0x80);
+            assert(read_status(st,sizeof st) && !strncmp(st,"horn=RightStick\r\nmovable=1\r\n",28));
+            assert(honk_place_button(base,hb)==1);                                                          /* already moved */
+            /* the stock toggles (the launcher did not or could not move them): the horn stays left, no conflict either way */
+            VirtualProtect(base,0x10000,PAGE_READWRITE,&old); memcpy(base+rva,hb->button_code,7);
+            write_file(ini,stock); assert(honk_place_button(base,hb)==0 && base[rva+4]==0x40);
+            assert(read_status(st,sizeof st) && !strncmp(st,"horn=LeftStick\r\nmovable=1\r\n",27));
+            /* the build's request setter matched but its button test is other bytes: nothing changed, the launcher learns the horn cannot be moved */
+            write_file(ini,swapped); base[rva+4]=0x20;
+            assert(honk_place_button(base,hb)==0 && base[rva+4]==0x20);
+            assert(read_status(st,sizeof st) && !strncmp(st,"horn=LeftStick\r\nmovable=0\r\n",27));
+            /* no known build at all: same answer, nothing written */
+            memcpy(base+rva,hb->button_code,7); write_file(ini,"");
+            assert(honk_place_button(base,NULL)==0 && base[rva+4]==0x40);
+            assert(read_status(st,sizeof st) && !strncmp(st,"horn=LeftStick\r\nmovable=0\r\n",27));
+        }
         honk_switched_off(dir,dir); assert(read_status(st,sizeof st) && strstr(st,"movable=0") && strstr(st,"FH2MP_NO_HONK"));
         honk_paths(dir,dir); assert(!read_status(st,sizeof st));                                           /* a new game drops the last game's note */
         VirtualFree(base,0,MEM_RELEASE); DeleteFileW(ini); RemoveDirectoryW(dir);
