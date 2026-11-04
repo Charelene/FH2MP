@@ -16,7 +16,7 @@ lanes=()
 for a in "$@"; do
     case "$a" in
         --container) container=1 ;;
-        server|pg|shim|launcher|mutations|quick|all) lanes+=("$a") ;;
+        server|pg|shim|launcher|mutations|go|quick|all) lanes+=("$a") ;;
         -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
         *) echo "unknown lane or option: $a" >&2; exit 2 ;;
     esac
@@ -136,6 +136,13 @@ lane_shim() {
 
 lane_launcher() {
     run "launcher checks" env FH2MP_NO_KEYRING=1 QT_QPA_PLATFORM=offscreen sh -c 'cd launcher && "$0" -m unittest discover -s tests' "$py"
+}
+
+lane_go() {   # the Go port of the game server (native/); the trace comparisons need server/data and skip without it
+    command -v go >/dev/null 2>&1 || { echo "go lane: go is not installed" >&2; failed=1; return; }
+    run "go fmt" sh -c 'cd native && test -z "$(gofmt -l .)"'
+    run "go vet" sh -c 'cd native && go vet ./...'
+    run "go test" sh -c 'cd native && go test ./...'
 }
 
 lane_mutations() {

@@ -69,6 +69,18 @@ func runTrace(t *testing.T, name string, seed uint64) {
 	if err := json.Unmarshal(raw, &tr); err != nil {
 		t.Fatal(err)
 	}
+	// The traces were recorded with the local data files (server/data is not in the public repository): without them the comparison is skipped.
+	need := []string{filepath.Join("..", "..", "..", "server", "data", "trafficcars.txt")}
+	for _, v := range tr.Env {
+		if v == "@gamedata" {
+			need = append(need, filepath.Join("..", "..", "..", "server", "data", "gamedata.sqlite"))
+		}
+	}
+	for _, f := range need {
+		if _, err := os.Stat(f); err != nil {
+			t.Skip("local data file missing:", f)
+		}
+	}
 	t.Setenv("FH2MP_CLOCK_OFFSET_MS", "5000000")
 	t.Setenv("FH2MP_WEATHER_START", "1")
 	t.Setenv("FH2MP_UDP_AUTH", "off")
