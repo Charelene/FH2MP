@@ -852,6 +852,26 @@ class Launcher:
         return shim.install_honk(d, files)
 
     def ensure_controls(self):
+        """Extra Options' buttons out of the way of the horn and of quick chat. -> list of things done."""
+        return self.ensure_horn_controls() + self.ensure_quickchat_controls()
+
+    def ensure_quickchat_controls(self):
+        """With QuickChat installed (it sends on LB + the d-pad), Extra Options' d-pad shortcuts move under the left stick, once; a binding the
+        player chose is never touched, and one they set back afterwards stays. When QuickChat is gone, the shortcuts this launcher moved go
+        back to the plain d-pad. -> list of things done."""
+        d = self.settings["azimuth_dir"]
+        if not d or not os.path.isdir(d):
+            return []
+        on = shim.quickchat_installed(d)
+        if on == bool(self.settings["quickchat_dpad"]):
+            return []
+        found, did = shim.chord_dpad_bindings(d) if on else shim.unchord_dpad_bindings(d)
+        if found or not on:                         # no Extra Options settings yet: decided once they exist
+            self.settings["quickchat_dpad"] = on
+            self.settings.save()
+        return did
+
+    def ensure_horn_controls(self):
         """Extra Options' headlight and roof toggles leave the right stick (the horn) once; a binding the player chose is never touched, and
         a player who sets RightStick again afterwards keeps it. When the last game says the shim could not put the horn on the right stick
         (fh2mp-controls.txt), the toggles this launcher moved go back to the right stick, so horn and toggles never share the left stick; they

@@ -422,6 +422,13 @@ def announce_auth(xuid, ip, key=""):
     _control("auth %x %s %s" % (int(xuid), ip, key) if key else "auth %x %s" % (int(xuid), ip))
 
 
+def announce_name(xuid, gamertag):
+    """Tell the game server the gamertag of a signed-in xuid, for the senders of quick-chat messages (quickchat.py). Hex, so a gamertag
+    with spaces stays one field."""
+    if xuid and gamertag:
+        _control("name %x %s" % (int(xuid), gamertag.encode("utf-8").hex()))
+
+
 def announce_logout(xuid, key):
     """A session signed out: the game server forgets its ticket key and ends the connections that key opened (not a ban)."""
     if xuid and key:

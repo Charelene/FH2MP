@@ -590,6 +590,64 @@ def restore_stick_bindings(folder):
     return True, [f"put the Extra Options headlight/roof buttons back on the right stick ({n} setting(s)); the horn stayed on the left stick"]
 
 
+# ---- Controls: QuickChat (fh2-mods\QuickChat.dll, an optional add-on) sends phrases on LB + the d-pad. The platform keeps the d-pad from the
+# game while LB is held, but Extra Options reads the pad itself, so its d-pad shortcuts (signals, hazards, photo mode, autodrive) would fire
+# too: they move under the left stick (LeftStick+DPadLeft ...), where a tap of the stick alone still toggles the headlights.
+
+QUICKCHAT_DLL = "fh2-mods/QuickChat.dll"
+DPAD_KEYS = ("SignalLeftXbox", "SignalRightXbox", "HazardsXbox", "PhotoModeXbox", "AutodriveXbox")
+_DPAD_KEYS_RE = b"|".join(k.encode() for k in DPAD_KEYS)
+_DPAD_RE = re.compile(rb"^(" + _DPAD_KEYS_RE + rb")([ \t]*=[ \t]*)(DPad(?:Up|Down|Left|Right))([ \t]*\r?)$", re.I | re.M)
+_UNDPAD_RE = re.compile(rb"^(" + _DPAD_KEYS_RE + rb")([ \t]*=[ \t]*)LeftStick\+(DPad(?:Up|Down|Left|Right))([ \t]*\r?)$", re.I | re.M)
+
+
+def quickchat_installed(folder):
+    return os.path.isfile(os.path.join(folder, *QUICKCHAT_DLL.split("/")))
+
+
+def chord_dpad_bindings_bytes(data):
+    """The Extra Options settings file `data` with its d-pad shortcuts under the left stick wherever they are still a plain d-pad direction (any
+    letter case); a binding the player chose (a combination, another button) and every other byte stays. -> (bytes, number of keys changed)."""
+    return _DPAD_RE.subn(rb"\1\2LeftStick+\3\4", data)
+
+
+def unchord_dpad_bindings_bytes(data):
+    """The reverse of chord_dpad_bindings_bytes(): LeftStick+DPad<dir> back to the plain direction. -> (bytes, number of keys changed)."""
+    return _UNDPAD_RE.subn(rb"\1\2\3\4", data)
+
+
+def _rewrite_extra_ini(folder, change, backup, done):
+    """change() on the FH2_ExtraOptions.ini in `folder`, written back (the old file kept as `backup`) only when something changed.
+    -> (ini found, list of things done)."""
+    path = os.path.join(folder, EXTRA_INI)
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except FileNotFoundError:
+        return False, []
+    except OSError as e:
+        raise ShimError(f"could not read the FH2 Extra Options settings: {e.strerror or e}") from None
+    new, n = change(data)
+    if not n:
+        return True, []
+    try:
+        shutil.copy2(path, path + backup)
+        paths.atomic_write(path, new, 0o644)
+    except OSError as e:
+        raise ShimError(f"could not update the FH2 Extra Options settings: {e.strerror or e}. Is the game still running?") from None
+    return True, [done % n]
+
+
+def chord_dpad_bindings(folder):
+    return _rewrite_extra_ini(folder, chord_dpad_bindings_bytes, ".before-fh2mp-quickchat",
+                              "moved the Extra Options d-pad shortcuts under the left stick (%d setting(s)); LB + the d-pad is quick chat")
+
+
+def unchord_dpad_bindings(folder):
+    return _rewrite_extra_ini(folder, unchord_dpad_bindings_bytes, ".before-fh2mp-unquickchat",
+                              "put the Extra Options d-pad shortcuts back on the plain d-pad (%d setting(s)); QuickChat isn't installed")
+
+
 CONTROLS_NOTE_FILE = "fh2mp-controls.txt"    # written by the shim each game once HonkHonk is found (shim/src/honk_sync.inc honk_place_button)
 
 
