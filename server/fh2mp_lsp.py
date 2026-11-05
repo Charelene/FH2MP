@@ -2551,7 +2551,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._gamedb_ok(acct):
                     return False
                 if not CTX.own_cars:
-                    announce_auth(acct.xuid, self.client_ip(), token)      # the game server only admits the server's car database
+                    announce_auth(acct.xuid, self.client_ip(), token, acct.gamertag)   # the game server only admits the server's car database
                 return True
             if AUTH.mode == "required":
                 log_every(("no-token", claimed_xuid(self.headers), CTX.shim), 300, f"  refused: 401 login_required: no X-FH2MP-Token on {call_name(self.headers)} "
@@ -2911,10 +2911,10 @@ def online_count():
 _AUTH_ANNOUNCED = {}
 
 
-def announce_auth(xuid, ip, token=""):
+def announce_auth(xuid, ip, token="", gamertag=""):
     """Tell the game server (UDP, loopback) that this xuid is signed in from this address, so it accepts that player's OpenConnection,
-    with the UDP ticket key of the session token (auth.udp_ticket_key). Repeated at most every 20 s per player and session; the game
-    server forgets an entry after a few minutes without news."""
+    with the UDP ticket key of the session token (auth.udp_ticket_key), and its gamertag (for quick chat) when given. Repeated at most
+    every 20 s per player and session; the game server forgets an entry after a few minutes without news."""
     now = time.monotonic()
     tkey = auth.udp_ticket_key(token)
     key = (xuid, ip, tkey)
@@ -2924,6 +2924,8 @@ def announce_auth(xuid, ip, token=""):
     if len(_AUTH_ANNOUNCED) > 20000:
         _AUTH_ANNOUNCED.clear()
     xbl.announce_auth(xuid, ip, tkey)
+    if gamertag:
+        xbl.announce_name(xuid, gamertag)
 
 
 _LAST_POLL = {}

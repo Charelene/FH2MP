@@ -28,6 +28,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import honk
+import quickchat
 import lighting
 import diag
 import event_log
@@ -4615,6 +4616,7 @@ class Hub:
         if self.udp_auth not in UDP_AUTH_MODES:
             raise SystemExit(f"FH2MP_UDP_AUTH={self.udp_auth!r}: expected one of {', '.join(UDP_AUTH_MODES)}")
         self.keys = {}        # xuid -> {ticket key: valid until}: the signed-in sessions of a player ("auth <xuid> <ip> <key hex>")
+        self.gamertags = {}   # xuid -> gamertag, from the account service ("name <xuid> <UTF-8 hex>"), for quick chat's senders
         self.ticket_epochs = {}  # native address -> last verified ticket nonce, for opt-in lighting
         self.bound = {}       # address -> (xuid, valid until, key): the address showed a valid ticket for xuid (kept while it is routed)
         self.nonces = {}      # (xuid, nonce) -> forget after: tickets already used
@@ -4681,7 +4683,7 @@ class Hub:
 
     def ctl_text(self, text: str, reply_to=None) -> None:
         """One control message: "assign <xuid hex> <lobby name>", "auth <xuid hex> <ip> [ticket key hex]", "logout <xuid hex> <key hex>",
-        "revoke" / "allow" / "unflag <xuid hex>", "pop", "lobbies", "positions"."""
+        "revoke" / "allow" / "unflag <xuid hex>", "name <xuid hex> <gamertag as UTF-8 hex>", "pop", "lobbies", "positions"."""
         parts = text.split()
         if len(parts) == 1 and parts[0] == "pop":
             try:
@@ -4760,6 +4762,14 @@ class Hub:
                     self.log(f"control: {parts[1]} allowed again (revoke lifted)")
             except ValueError as exc:
                 self.ctl_ignored(parts, f"allow message unreadable ({exc})")
+        elif len(parts) == 3 and parts[0] == "name":
+            try:
+                xuid, tag = int(parts[1], 16), bytes.fromhex(parts[2]).decode("utf-8")
+                if len(self.gamertags) >= 50000 and xuid not in self.gamertags:
+                    self.gamertags.clear()
+                self.gamertags[xuid] = tag[:32]
+            except (ValueError, UnicodeDecodeError) as exc:
+                self.ctl_ignored(parts, f"name message unreadable ({exc})")
         elif len(parts) == 3 and parts[0] == "assign":
             try:
                 self.assign[int(parts[1], 16)] = parts[2]
@@ -4963,6 +4973,9 @@ class Hub:
             return
         if len(data) >= 19 and data[11:19] == honk.MAGIC:
             honk.handle(self, data, addr)
+            return
+        if len(data) >= 19 and data[11:19] == quickchat.MAGIC:
+            quickchat.handle(self, data, addr)
             return
         if probe.handle(self, data, addr):
             return
