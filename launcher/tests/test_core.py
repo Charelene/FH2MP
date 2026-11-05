@@ -1805,6 +1805,58 @@ class HonkHonkTests(unittest.TestCase):
             with open(ini, "rb") as f:
                 self.assertEqual(f.read(), self.INI)
 
+    def test_quickchat_d_pad_shortcuts_move_under_the_left_stick_only_where_still_the_default(self):
+        ini = (b"[Bindings]\r\nAutodriveXbox=DPadDown\r\nSignalLeftXbox=dpadleft\r\nSignalRightXbox=LB+DPadRight\r\nHazardsXbox=DPadUp\r\n"
+               b"PhotoModeXbox=DPadUp\r\nHeadlightsXbox=LeftStick\r\n")
+        new, n = shim.chord_dpad_bindings_bytes(ini)
+        self.assertEqual(n, 4)
+        self.assertEqual(new, ini.replace(b"=DPadDown", b"=LeftStick+DPadDown").replace(b"=dpadleft", b"=LeftStick+dpadleft")
+                         .replace(b"=DPadUp", b"=LeftStick+DPadUp"))
+        self.assertEqual(shim.unchord_dpad_bindings_bytes(new), (ini, 4))
+        self.assertEqual(shim.chord_dpad_bindings_bytes(new), (new, 0))                       # twice: nothing more
+
+    def test_quickchat_installed_moves_the_shortcuts_once_and_puts_them_back_when_it_goes(self):
+        from fh2mp_launcher import core
+        from fh2mp_launcher.settings import Settings
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, FH2MP_LAUNCHER_HOME=home):
+            lc = core.Launcher(Settings(os.path.join(home, "settings.json")), load_identity=False)
+            lc.settings["azimuth_dir"] = self.az
+            ini = os.path.join(self.az, "FH2_ExtraOptions.ini")
+            with open(ini, "wb") as f:
+                f.write(self.INI)
+            lc.ensure_controls()
+            with open(ini, "rb") as f:
+                self.assertIn(b"SignalLeftXbox=DPadLeft", f.read())                               # no QuickChat: the d-pad stays
+            self.assertFalse(lc.settings["quickchat_dpad"])
+            dll = self.path(shim.QUICKCHAT_DLL)
+            os.makedirs(os.path.dirname(dll), exist_ok=True)
+            with open(dll, "wb") as f:
+                f.write(b"MZ-quickchat")
+            did = lc.ensure_controls()
+            self.assertTrue(any("quick chat" in line for line in did))
+            self.assertTrue(lc.settings["quickchat_dpad"])
+            self.assertTrue(os.path.exists(ini + ".before-fh2mp-quickchat"))
+            with open(ini, "rb") as f:
+                text = f.read()
+            self.assertIn(b"SignalLeftXbox=LeftStick+DPadLeft", text)
+            with open(ini, "wb") as f:
+                f.write(text.replace(b"SignalLeftXbox=LeftStick+DPadLeft", b"SignalLeftXbox=DPadLeft"))   # the player sets it back
+            self.assertEqual(lc.ensure_quickchat_controls(), [])
+            with open(ini, "rb") as f:
+                self.assertIn(b"SignalLeftXbox=DPadLeft", f.read())                               # and it stays
+            os.remove(dll)
+            self.assertEqual(lc.ensure_quickchat_controls(), [])                                  # gone, and nothing of ours left to put back
+            self.assertFalse(lc.settings["quickchat_dpad"])
+            with open(dll, "wb") as f:
+                f.write(b"MZ-quickchat")
+            self.assertTrue(lc.ensure_quickchat_controls())                                       # installed again: moved again
+            os.remove(dll)
+            did = lc.ensure_quickchat_controls()
+            self.assertTrue(did and "isn't installed" in did[0])
+            self.assertFalse(lc.settings["quickchat_dpad"])
+            with open(ini, "rb") as f:
+                self.assertNotIn(b"LeftStick+DPad", f.read())
+
     def write_note(self, text):
         d = os.path.join(self.az, "data", "bin")
         os.makedirs(d, exist_ok=True)
