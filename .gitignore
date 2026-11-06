@@ -54,6 +54,7 @@ ops/fh2mp-lsp.service
 *.deb
 # Local release operator settings (host and SSH key path).
 release/operator.local.env
+release/operator.windows.env
 
 # Local editor configuration
 /.vscode/
