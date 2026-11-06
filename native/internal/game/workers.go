@@ -19,6 +19,7 @@ const (
 	jobData jobKind = iota
 	jobLight
 	jobHonk
+	jobCarsel
 	jobPause
 	jobStep
 	jobTick
@@ -147,6 +148,8 @@ func (wk *Worker) do(j job) bool {
 		wk.h.lightingHandle(j.data, j.addr, j.w)
 	case jobHonk:
 		wk.h.honkHandle(j.data, j.addr, j.w)
+	case jobCarsel:
+		wk.h.carselHandle(j.data, j.addr, j.w)
 	case jobPause:
 		j.ack.Done()
 		<-j.resume
@@ -240,6 +243,9 @@ func (h *Hub) HandleDatagram(data []byte, addr Addr) {
 	case len(data) >= 19 && string(data[11:19]) == honkMagic:
 		h.sideDispatch(data, addr, jobHonk)
 		return
+	case len(data) >= 19 && string(data[11:19]) == carselMagic:
+		h.sideDispatch(data, addr, jobCarsel)
+		return
 	case len(data) == probeLength && string(data[11:19]) == probeMagic:
 		h.probeHandle(data, addr)
 		return
@@ -280,9 +286,12 @@ func (h *Hub) sideDispatch(data []byte, addr Addr, kind jobKind) {
 	}
 	if world == nil || multiple || world.worker == nil {
 		h.stop(func() {
-			if kind == jobLight {
+			switch kind {
+			case jobLight:
 				h.lightingHandle(data, addr, nil)
-			} else {
+			case jobCarsel:
+				h.carselHandle(data, addr, nil)
+			default:
 				h.honkHandle(data, addr, nil)
 			}
 		})

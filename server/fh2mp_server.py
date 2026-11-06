@@ -29,6 +29,7 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bots
 import capacity
+import carsel
 import honk
 import lighting
 import diag
@@ -351,6 +352,18 @@ PLAYER_VAR_FLAGS, PLAYER_FLAG_VIP = 31, 1
 # reward screen). Left at 0 every player's "private" universe was the same one, so on the Road Trip XP reward screen both cars stood on the
 # same spot (dev 2026-10-22). The server gives every player in a world its own OnlinePrivateN.
 PLAYER_VAR_PRIVATE_UNIVERSE, PRIVATE_UNIVERSE_BITS = 40, 5
+# LobbyPlayer.PlayerStatus (var 19, 4 bits; CPlayerStatus::Enum, registered at 0x10fb20 [C]): 0 Joining, 1 CarSelect, 2 InFreeroam, 3 PreRace,
+# 4 InRace, 5 PostRace, 6 Voting, 7 BucketList. The state flow sets CarSelect when a player enters its event car select and PreRace when it
+# leaves it for the loading screen (global.xml set_player_lobby_state_*; network_freeroam_states.xml pre_event_ui / wait_for_event_to_start).
+PLAYER_VAR_STATUS, PLAYER_STATUS_CAR_SELECT, PLAYER_STATUS_PRE_RACE = 19, 1, 3
+# Free Roam event setup (carsel.py). Every participant's event car select runs its own 20 s countdown from the moment THAT client enters it
+# (network_freeroam_states.xml event_car_select_internal, NetworkSetLocalUiCountdown 20000), so the timers differ by however late each one got
+# there. The server gives the group one deadline: the first participant's entry into the car select (LobbyPlayer.PlayerStatus = CarSelect) plus
+# 20 s; the shims write it into the game's countdown, and a participant that left early waits on the loading screen ('Waiting for Players m:ss',
+# LoadingMessages index 4) until everybody has left the car select or the deadline plus a short grace has passed.
+CARSEL_SELECT_SECONDS = 20.0
+CARSEL_ENTRY_FALLBACK_SECONDS = 3.0      # no participant was seen entering the car select: the leader's client gets there about this late
+CARSEL_HOLD_GRACE_SECONDS = 3.0          # time to reload a changed car after the deadline
 PRIVATE_UNIVERSE_FIRST, PRIVATE_UNIVERSE_COUNT = 1, 17
 AUTH_TTL_SECONDS = 600.0      # how long a sign-in announced by the LSP lets that address open a connection without further news
 # UDP connection ticket (shim udp_ticket_send, security audit 2026-10-25 F01): before each OpenConnection the shim sends, from the same
@@ -1310,6 +1323,7 @@ class Peer:
         self.console_vars = {}     # latest bool Console vars reported by this client
         self.gopts_seq = 0         # numbering of the server-owned GameOptions object sent to this client
         self.vip_hidden = None        # (width, value) of PlayerFlags with the VIP bit cleared, to tell the owner once it has entered
+        self.player_status = None     # latest LobbyPlayer.PlayerStatus this client wrote (PLAYER_VAR_STATUS), None until it wrote one
         self.gopts_released = False   # message 12 was sent to this client and it has not been granted the options since
         self.gopts_own_seq = None  # sequence number of the last GameOptions write this client made itself (it applied that to its own copy)
         self.console_oid = None    # id of this client's ConsoleSynced object (router 3)
@@ -2912,10 +2926,27 @@ class Server:
         if not gameopts.accepts_car(rule, peer.choices):
             return
         peer.ready_retry = None
+        if self.event_seats_full(ignoring=peer):
+            self.refuse_event_ready(peer, "car changed to one that fits, too late")
+            return
         self.log(f"{peer.addr[1]} car changed to one that meets the event restrictions: the refused Ready counts now")
         self.set_console_bool(peer, 4, 1, "ready request accepted after a car change")
         peer.console_vars[4] = 1
         self.check_invitees_ready()
+
+    def event_seats_full(self, ignoring: "Peer | None" = None) -> bool:
+        """The leader plus the invitees that said Ready already fill the event (an event holds CLIENT_LIMIT, a Free Roam world may be bigger:
+        the starting grid message has 12 keys). `ignoring` is the peer asking, so a repeated Ready of a seated peer does not count against it."""
+        leader = self.pending_race[1]
+        ready = sum(1 for q in self.others(leader) if q is not ignoring and q.console_vars.get(4))
+        return 1 + ready >= capacity.CLIENT_LIMIT
+
+    def refuse_event_ready(self, peer: Peer, why: str) -> None:
+        """Take a Ready back from an invitee that would be the 13th: Console.Ready stays 0, it never gets a seat or the loading screen."""
+        self.log(f"event.full {diag.kv(owner=peer.owner_id, limit=capacity.CLIENT_LIMIT)}: Ready of owner {peer.owner_id} refused, the event "
+                 f"has {capacity.CLIENT_LIMIT} players already ({why})")
+        self.set_console_bool(peer, 4, 0, "event full")
+        peer.console_vars[4] = 0
 
     def check_invitees_ready(self) -> None:
         others_waiting = [q for q in self.others(self.pending_race[1])
@@ -2923,6 +2954,9 @@ class Server:
         if not others_waiting:   # everybody invited has accepted: no need to wait out the window
             self.pending_race = (min(self.pending_race[0], time.monotonic() + 1.5), self.pending_race[1])
             self.log("all invited clients ready -> starting the event now")
+        elif self.event_seats_full():   # the others cannot get in: no need to wait out the window either
+            self.pending_race = (min(self.pending_race[0], time.monotonic() + 1.5), self.pending_race[1])
+            self.log(f"event full: {capacity.CLIENT_LIMIT} players ready, {len(others_waiting)} invited client(s) stay out -> starting the event now")
 
     def request_race_blocked(self, peer: Peer) -> bool:
         """One event at a time per Free Roam lobby (prod 2026-10-21/22: 61 of 285 multi-player events were started while the lobby's
@@ -3196,6 +3230,68 @@ class Server:
             self.set_player_team(q, self.event["team"][q])
         self.log(f"team event: {what}, {len(people)} player(s): "
                  + " ".join(f"owner{q.owner_id}={'blue' if t else 'red'}" for q, t in self.event["team"].items()))
+
+    def note_player_status(self, peer: Peer, size: int, payload: int) -> None:
+        """A client wrote PlayerStatus. During an event's setup, CarSelect -> PreRace is the moment that participant finished its car select
+        (picked a car, or its 20 s ran out): when each one did is what decides how long the others wait on 'Setting Up Event'."""
+        try:
+            field = player_setup.fields(size, payload).get(PLAYER_VAR_STATUS)
+        except ValueError:
+            return                     # hide_vip already logged an unreadable object
+        if field is None:
+            return
+        before, peer.player_status = peer.player_status, field[2]
+        ev = self.event
+        if before == field[2] or self.roadtrip or not ev or ev["begun"] or peer not in ev["people"]:
+            return
+        now = time.monotonic()
+        if field[2] == PLAYER_STATUS_CAR_SELECT:
+            if "select_entered_at" not in ev:
+                ev["select_entered_at"] = now
+                self.log(f"event car select: owner{peer.owner_id} is the first in it, {now - ev.get('started', now):.1f} s after the start; "
+                         f"the group's deadline is {CARSEL_SELECT_SECONDS:g} s after that")
+            return
+        if field[2] != PLAYER_STATUS_PRE_RACE:
+            return
+        done = ev.setdefault("picked_after", {})
+        if peer in done:
+            return
+        done[peer] = now - ev.get("started", now)
+        count = sum(1 for q in ev["people"] if q in done)
+        self.log(f"event car select: owner{peer.owner_id} left it {done[peer]:.1f} s after the start, {count}/{len(ev['people'])} participant(s) done"
+                 + ("" if count < len(ev["people"]) else ", everybody is"))
+
+    def carsel_deadline(self, ev) -> float:
+        """The group's car select deadline (monotonic): the first participant's entry into the car select, plus the client's own 20 s."""
+        entered = ev.get("select_entered_at", ev.get("started", 0.0) + CARSEL_ENTRY_FALLBACK_SECONDS)
+        return entered + CARSEL_SELECT_SECONDS
+
+    def carsel_answer(self, peer: Peer):
+        """What the shim of this player is told (carsel.py): (keep waiting?, ms left to the group's deadline, None = no deadline). Only during a Free
+        Roam event's setup. Waiting while a connected participant has not reached PreRace yet and the deadline plus CARSEL_HOLD_GRACE_SECONDS has
+        not passed."""
+        ev = self.event
+        if self.roadtrip or not ev or ev["begun"] or peer not in ev["people"]:
+            return False, None
+        now = time.monotonic()
+        deadline = self.carsel_deadline(ev)
+        left = max(0, int((deadline - now) * 1000))
+        done = ev.get("picked_after", {})
+        waiting = [q for q in ev["people"] if q.connected and q not in done]
+        if not waiting:
+            return False, left
+        if now >= deadline + CARSEL_HOLD_GRACE_SECONDS:
+            if not ev.get("hold_limit_logged"):
+                ev["hold_limit_logged"] = True
+                self.log(f"carsel: hold ends {now - deadline:.0f} s after the group's deadline, still in the car select: "
+                         + " ".join(f"owner{q.owner_id}" for q in waiting))
+            return False, left
+        held = ev.setdefault("held", set())
+        others = [q for q in waiting if q is not peer]
+        if others and peer not in held:
+            held.add(peer)
+            self.log(f"carsel: owner{peer.owner_id} waits for " + " ".join(f"owner{q.owner_id}" for q in others) + " to leave the car select")
+        return True, left
 
     def note_loaded(self, peer: Peer) -> None:
         """A participant's HasLoadedCarsForAllParticipants went to 1: how long after the event start (the grid line and a load timeout quote it)."""
@@ -3871,9 +3967,14 @@ class Server:
                     r.bits(8)
                 ready = r.bits(1)
                 accepted = not ready or self.eligible_for_event(peer)
-                self.log(f"{addr[1]} MsgReadyRequest key={a}{b} id={oid} ready={ready} accepted={accepted} (owner {peer.owner_id}"
+                full = bool(accepted and ready and self.pending_race and peer is not self.pending_race[1]
+                            and not self.event and self.event_seats_full(ignoring=peer))
+                self.log(f"{addr[1]} MsgReadyRequest key={a}{b} id={oid} ready={ready} accepted={accepted and not full} (owner {peer.owner_id}"
                          + ("" if accepted else f"; REFUSED, car class/PI {peer.choices}, see the 'not eligible' line above") + ")")
-                replies.append(ready_request_response(0 if accepted else 1))
+                replies.append(ready_request_response(0 if accepted and not full else 1))
+                if full:
+                    self.refuse_event_ready(peer, "MsgReadyRequest")
+                    continue
                 if not accepted:
                     self.set_console_bool(peer, 4, 0, "car does not meet the event restrictions")
                     peer.console_vars[4] = 0
@@ -3954,6 +4055,7 @@ class Server:
                         payload = self.short_rental_choices(peer, size, payload)
                     payload = self.note_typed_choices(peer, size, payload)
                     self.retry_refused_ready(peer)
+                    self.note_player_status(peer, size, payload)
                 if CAR_CAPTURE and router == ROUTER_CAR and size:
                     self.log(f"{addr[1]} CAPTURE car {'create' if mtype == 7 else 'update'} id={oid} seq={seq} bits={size} "
                              f"hex={payload.to_bytes((size + 7) // 8, 'little').hex()}")
@@ -4089,6 +4191,9 @@ class Server:
                         pass
                     if seen:
                         self.log(f"{addr[1]} Console vars: {' '.join(seen)}")
+                        if "Ready=1" in seen and self.pending_race and peer is not self.pending_race[1] and not self.event \
+                                and self.event_seats_full(ignoring=peer):
+                            self.refuse_event_ready(peer, "Console.Ready")      # a client that set it without asking (or after a refused ask)
                         for item in seen:
                             if item.startswith("RenderReady="):
                                 self.note_render_ready(peer, int(item[-1]))
@@ -5064,6 +5169,9 @@ class Hub:
             return
         if len(data) >= 19 and data[11:19] == honk.MAGIC:
             honk.handle(self, data, addr)
+            return
+        if len(data) >= 19 and data[11:19] == carsel.MAGIC:
+            carsel.handle(self, data, addr)
             return
         if probe.handle(self, data, addr):
             return

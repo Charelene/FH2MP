@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test platform registration and actual process detection, isolated from the user's game/Wine prefix.
+# Test platform registration, and that a process named Redline.exe is no longer reported, isolated from the user's game/Wine prefix.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -26,9 +26,8 @@ int main(int argc, char **argv) {
     CHECK(CreateProcessW(path,command,NULL,NULL,FALSE,CREATE_NO_WINDOW,NULL,NULL,&si,&pi));
     LONG result=scan_restricted_tools();
     TerminateProcess(pi.hProcess,0); WaitForSingleObject(pi.hProcess,5000); CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
-    // Only the helper has the restricted executable name.
-    CHECK(result & 2);
-    puts("restricted tools: NitroSystem registration and Redline.exe process detected");
+    CHECK(result == 0);
+    puts("restricted tools: NitroSystem registration detected, Redline.exe ignored");
     return 0;
 }
 C

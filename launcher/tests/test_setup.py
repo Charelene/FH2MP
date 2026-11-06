@@ -196,6 +196,15 @@ class WizardFlow(unittest.TestCase):
         self.w = Wizard(self.lc)
         self.addCleanup(self.w.deleteLater)
 
+    def test_sizing_the_dialog_does_not_feed_itself_through_layout_requests(self):
+        from PySide6.QtTest import QTest
+        calls = []
+        real = self.w._size_for_page
+        self.w._size_for_page = lambda *a, **k: (calls.append(1), real(*a, **k))[1]
+        self.w.show()
+        QTest.qWait(300)
+        self.assertLess(len(calls), 10)                   # it used to run hundreds of times a second, re-placing the window each time
+
     def test_game_validation_and_old_install_routes_to_update_without_destination(self):
         self.w.game_edit.setText(str(self.root))
         self.w._game_next()
@@ -234,7 +243,7 @@ class WizardFlow(unittest.TestCase):
         self.assertFalse(self.w.az_edit.isVisible())
         self.w.have_az.setChecked(True)
         self.assertTrue(self.w.az_edit.isVisible())
-        self.assertLessEqual(self.w.height(), 400)
+        self.assertEqual(self.w.height(), self._tallest_page())
 
     def test_download_methods_show_only_the_selected_controls(self):
         self.w.stack.setCurrentIndex(self.w.ACQUIRE)
@@ -302,19 +311,54 @@ class WizardFlow(unittest.TestCase):
         page = w.stack.currentWidget()
         heading = page.findChild(QLabel, 'setup-heading')
         self.assertEqual(heading.parentWidget().layout().spacing(), 10)
-        self.assertLess(w.height(), 330)
+        self.assertEqual(w.height(), self._tallest_page())
         w.stack.setCurrentIndex(w.AZIMUTH)
         w.need_az.setChecked(True)
         for _ in range(3):
             self.app.processEvents()
         self.assertTrue(w.az_folder_box.isHidden())
-        self.assertLess(w.height(), 260)
         before = w.height()
         w.az_banner.show_message('Select the folder containing azimuth.exe.', 'bad')
         for _ in range(4):
             self.app.processEvents()
-        self.assertGreater(w.height(), before)
+        self.assertEqual(w.height(), before)           # the banner fits in the window every page already has
         w.close()
+
+    def _tallest_page(self):
+        w = self.w
+        return max(w.stack.widget(i).layout().totalHeightForWidth(w.width()) for i in range(w.stack.count()))
+
+    def test_every_page_has_the_same_window_so_nothing_is_resized_between_pages(self):
+        # Windows (Qt 6.12, 125 % scaling) made the native window as tall as the tallest page on the first resize after it was shown, whatever
+        # was asked for, which left grey space, stacked pages' buttons and a frame that kept moving up (#384): the window never changes now.
+        w = self.w
+        w.show()
+        self.app.processEvents()
+        size, pos = (w.width(), w.height()), w.pos()
+        self.assertGreaterEqual(w.height(), self._tallest_page())
+        for i in range(w.stack.count()):
+            w.stack.setCurrentIndex(i)
+            for _ in range(3):
+                self.app.processEvents()
+            self.assertEqual((w.width(), w.height()), size, f"page {i}")
+            self.assertEqual(w.pos(), pos, f"page {i}")
+        w.close()
+
+    def test_the_wizard_centres_itself_and_tells_qt_not_to(self):
+        # QDialog::showEvent centres a dialog that was never moved, and on Windows that move is what broke the native window's height (#384).
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QWidget
+        parent = QWidget()
+        parent.setGeometry(100, 50, 600, 400)          # inside the 800x600 offscreen screen, so the on-screen clamp does not move the dialog sideways
+        parent.show()
+        self.addCleanup(parent.deleteLater)             # the wizard is the parent's child and goes with it
+        w = type(self.w)(self.lc, parent)
+        w.show()
+        self.app.processEvents()
+        self.assertTrue(w.testAttribute(Qt.WidgetAttribute.WA_Moved))
+        self.assertAlmostEqual(w.frameGeometry().center().x(), parent.frameGeometry().center().x(), delta=40)
+        w.close()
+        parent.close()
 
     def test_validated_automatic_download_has_no_stale_download_button(self):
         self.w.stack.setCurrentIndex(self.w.ACQUIRE)

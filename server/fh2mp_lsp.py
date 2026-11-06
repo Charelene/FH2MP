@@ -2520,6 +2520,7 @@ class Handler(BaseHTTPRequestHandler):
                       f"{sorted(set(tools) - {'redline', 'nitrosystem'})}, known are redline and nitrosystem (shim {_shim()})", "WARN")
             self._reply_json(400, {"error": "bad_tool_report"})
             return False
+        tools = tuple(t for t in tools if t != "redline")     # older shims still report Redline.exe; it is not a restricted tool any more (user decision 2026-11-05)
         if not tools:
             return True
         now = time.monotonic()

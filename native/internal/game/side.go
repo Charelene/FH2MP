@@ -127,6 +127,11 @@ func (h *Hub) whyUnmatched(xuid uint64, data []byte, now float64) (string, bool)
 
 // findAuthed matches a side-channel request to the live, ticket-bound game connection of its xuid.
 func (h *Hub) findAuthed(only *World, routes map[uint64]Addr, xuid uint64, data []byte, now float64) (*World, *Peer, []byte) {
+	return h.findAuthedCar(only, routes, xuid, data, now, true)
+}
+
+// findAuthedCar is findAuthed; checkCar says whether byte 52 of the request is the player's car id (lighting, horn) or something else.
+func (h *Hub) findAuthedCar(only *World, routes map[uint64]Addr, xuid uint64, data []byte, now float64, checkCar bool) (*World, *Peer, []byte) {
 	last, hasLast := routes[xuid]
 	type cand struct {
 		addr Addr
@@ -148,7 +153,7 @@ func (h *Hub) findAuthed(only *World, routes map[uint64]Addr, xuid uint64, data 
 		}
 		binding, ok := h.Bound[c.addr]
 		peer, _ := c.w.Peers.Get(c.addr)
-		if !ok || binding.xuid != xuid || peer == nil || !peer.Connected || !peer.Entered || peer.Xuid != xuid || peer.CarID == nil || *peer.CarID != int(data[52]) ||
+		if !ok || binding.xuid != xuid || peer == nil || !peer.Connected || !peer.Entered || peer.Xuid != xuid || checkCar && (peer.CarID == nil || *peer.CarID != int(data[52])) ||
 			!(1 <= peer.Owner && peer.Owner <= 254) {
 			continue
 		}

@@ -325,10 +325,21 @@ class Overlay(QFrame):
     def showEvent(self, event):
         super().showEvent(event)
         self.place()
-        self._capture_transition()
         self.raise_()
+        if self._closing:                      # shown again while it is leaving (the window was restored): the exit carries on
+            return
+        if self.motion.v >= 1 and self._transition_pixmap is None:
+            return                              # already open: the main window was only hidden and shown again, no second enter
+        self._capture_transition()
         self.setFocus()
         self.motion.to(1)
+
+    def reopen(self):
+        """Asked for again while it is closing: turn round instead of finishing the exit and then being gone."""
+        if self._closing:
+            self._closing = False
+            self.raise_()
+            self.motion.to(1)
 
     def paintEvent(self, _):
         if self._capturing_backdrop:
@@ -369,12 +380,13 @@ class Overlay(QFrame):
             self.close()
 
     def closeEvent(self, event):
-        if self.motion.v > 0:
+        if self.motion.v > 0 and self.isVisible():
             event.ignore()
             self._closing = True
             self._capture_transition()
             self.motion.to(0)
         else:
+            self.motion.anim.stop()
             self.finished.emit(0)
             super().closeEvent(event)
 

@@ -14,10 +14,31 @@ type CarDb struct {
 	DB    *db.DB
 	mu    sync.Mutex
 	route map[int64]*[2]float64
+	known map[int64]bool
 }
 
 // New makes a CarDb on the database whose `game` schema holds the catalog.
 func New(d *db.DB) *CarDb { return &CarDb{DB: d, route: map[int64]*[2]float64{}} }
+
+// KnownIDs is the set of every car id of the catalog (official DLC included; car packs that are not in the server's database are not). Read once;
+// an error is returned and not cached.
+func (c *CarDb) KnownIDs() (map[int64]bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.known != nil {
+		return c.known, nil
+	}
+	rows, err := c.DB.Query("select Id from Data_Car")
+	if err != nil {
+		return nil, err
+	}
+	ids := make(map[int64]bool, len(rows))
+	for i := range rows {
+		ids[rows[i].IntAt(0)] = true
+	}
+	c.known = ids
+	return ids, nil
+}
 
 // Row returns the Data_Car row (nil = unknown car).
 func (c *CarDb) Row(carID int64) (*db.Row, error) {

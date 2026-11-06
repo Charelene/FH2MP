@@ -17,6 +17,8 @@ DEFAULTS = {
     "prefix": "",                   # Proton prefix directory = STEAM_COMPAT_DATA_PATH (Linux)
     "custom_command": "",           # e.g. steam steam://rungameid/1234567890 ; {exe} {dir} are replaced
     "check_updates": True,
+    "seen_release": {},             # channel -> newest signed manifest tag seen: an older one served later (a replay) is refused
+    "shim_signed": {},              # {launcher, version, tag}: the shim this launcher last installed from a signed manifest (without a manifest it is the one to keep)
     "offline_mode": False,          # solo play without sign-in, server checks or downloads
     "gamertag": "",                 # last known, for display before the server answers
     "xuid": 0,

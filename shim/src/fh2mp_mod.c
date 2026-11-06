@@ -2422,11 +2422,13 @@ static int patch_online_meet(void)
 #include "grid_trace.inc"
 #include "diag_trace.inc"
 #include "party_hud.inc"
+#include "race_toast.inc"
 #include "car_pool.inc"
 #include "torque_load_guard.inc"
 #include "online_setup.inc"
 #include "hook_guard.inc"
 #include "gameplaylog_guard.inc"
+#include "picker_pi.inc"
 
 static int patch_torque_load(void)
 {
@@ -3270,6 +3272,8 @@ static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *
 #include "perf.inc"
 #include "lighting_sync.inc"
 #include "honk_sync.inc"
+#include "carsel_sync.inc"
+#include "stall_trace.inc"
 
 /*
  * #64: a Monthly Rival started from the pause menu inside an online session loaded for ever. The menu's launch (RivalsModule
@@ -3399,6 +3403,57 @@ static int stateflow_bucket_cars_online(void)
 {
     return stateflow_replace(L"\\media\\stateflow.zip", "network.xml", "stateflow/network.xml", BUCKET_CARS_OLD, sizeof BUCKET_CARS_OLD - 1, BUCKET_CARS_NEW,
                              sizeof BUCKET_CARS_NEW - 1, "bucketcars");
+}
+
+/*
+ * Race toast layout (src/race_toast.inc): UI.zip's Controls/NotificationPopupControl.xaml lays the toast title (line 1) out as TitlePreGamertag, the
+ * bold gamertag and TitlePostGamertag, and line 2 as 'Press (X) to join'. The shim puts the track's name in TitlePreGamertag (empty for races). For a
+ * race event (IsRaceEvent) line 1 no longer shows it, and line 2 starts with it in the gamertag's bold style: 'Castelletto Meadow Circuit | Press (X) to
+ * join' (user 2026-11-05). Only converters and styles the file already uses. Disable with env FH2MP_NO_RACETOAST.
+ */
+static const char RACE_TOAST_OLD[] =
+    "                                <local:FZTextBlock Text=\"{Binding TitlePreGamertag}\"\r\n"
+    "                                                   Style=\"{StaticResource A_Style_FZTextBlock_Notification_Title}\"/>\r\n"
+    "                                <local:FZTextBlock Text=\"{Binding UserProfile.FormattedGamertag}\"\r\n"
+    "                                                   Style=\"{StaticResource A_Style_FZTextBlock_Notification_Gamertag}\" />\r\n"
+    "                                <local:FZTextBlock Text=\"{Binding TitlePostGamertag}\"\r\n"
+    "                                                   Style=\"{StaticResource A_Style_FZTextBlock_Notification_Title}\"/>\r\n"
+    "                            </StackPanel>\r\n"
+    "                            <Grid Visibility=\"{Binding CanBeActivated, Converter={StaticResource A_FZBooleanToVisibilityConverter}}\">\r\n"
+    "                                <Grid Visibility=\"{Binding PlayerHasAccepted, Converter={StaticResource A_FZBooleanToVisibilityConverter_Inverse}}\">\r\n"
+    "                                    <StackPanel Orientation=\"Horizontal\" \r\n"
+    "                                            Visibility=\"{Binding IsInputBlocked, Converter={StaticResource A_FZBooleanToVisibilityConverter_Inverse}}\">\r\n"
+    "                                        <local:FZTextBlock Text=\"{local:Loc Lobby.IDS_Invite_Join_Prefix}\"\r\n"
+    "                                                       Style=\"{StaticResource A_Style_FZTextBlock_Notification_BodyText}\"/>\r\n";
+static const char RACE_TOAST_NEW[] =
+    "                                <local:FZTextBlock Text=\"{Binding TitlePreGamertag}\"\r\n"
+    "                                                   Visibility=\"{Binding IsRaceEvent, Converter={StaticResource A_FZBooleanToVisibilityConverter_Inverse}}\"\r\n"
+    "                                                   Style=\"{StaticResource A_Style_FZTextBlock_Notification_Title}\"/>\r\n"
+    "                                <local:FZTextBlock Text=\"{Binding UserProfile.FormattedGamertag}\"\r\n"
+    "                                                   Style=\"{StaticResource A_Style_FZTextBlock_Notification_Gamertag}\" />\r\n"
+    "                                <local:FZTextBlock Text=\"{Binding TitlePostGamertag}\"\r\n"
+    "                                                   Style=\"{StaticResource A_Style_FZTextBlock_Notification_Title}\"/>\r\n"
+    "                            </StackPanel>\r\n"
+    "                            <Grid Visibility=\"{Binding CanBeActivated, Converter={StaticResource A_FZBooleanToVisibilityConverter}}\">\r\n"
+    "                                <Grid Visibility=\"{Binding PlayerHasAccepted, Converter={StaticResource A_FZBooleanToVisibilityConverter_Inverse}}\">\r\n"
+    "                                    <StackPanel Orientation=\"Horizontal\" \r\n"
+    "                                            Visibility=\"{Binding IsInputBlocked, Converter={StaticResource A_FZBooleanToVisibilityConverter_Inverse}}\">\r\n"
+    "                                        <local:FZTextBlock Text=\"{Binding TitlePreGamertag}\"\r\n"
+    "                                                   Visibility=\"{Binding IsRaceEvent, Converter={StaticResource A_FZBooleanToVisibilityConverter}}\"\r\n"
+    "                                                   Style=\"{StaticResource A_Style_FZTextBlock_Notification_Gamertag}\"/>\r\n"
+    "                                        <local:FZTextBlock Text=\"{local:Loc Lobby.IDS_Invite_Join_Prefix}\"\r\n"
+    "                                                       Style=\"{StaticResource A_Style_FZTextBlock_Notification_BodyText}\"/>\r\n";
+
+static int ui_race_toast_layout(void)
+{
+    int ok = stateflow_replace(L"\\media\\UI.zip", "Controls/NotificationPopupControl.xaml", "UI/Controls/NotificationPopupControl.xaml", RACE_TOAST_OLD,
+                               sizeof RACE_TOAST_OLD - 1, RACE_TOAST_NEW, sizeof RACE_TOAST_NEW - 1, "racetoast layout");
+    if (ok) {
+        InterlockedExchange(&g_rt_layout, 1);
+        log_begin();
+        log_raw("racetoast layout: Controls/NotificationPopupControl.xaml handed to the platform, race toasts show the event name in bold at the start of line 2\n");
+    }
+    return ok;
 }
 
 /*
@@ -3945,23 +4000,6 @@ static DWORD WINAPI option_monitor(LPVOID unused)
                 log_raw("speedpb: switched itself off, the thread-local slot could not be written (error ");
                 log_dec((unsigned long)(pb - 1));
                 log_raw("); speed notifications use the online result only\n");
-            }
-        }
-        {
-            static LONG tools_seen;
-            LONG fault = g_tools_scan_fault;
-            if (fault != tools_seen) {
-                tools_seen = fault;
-                log_begin();
-                if (fault) {
-                    log_raw("tools: the process scan failed (");
-                    log_raw(fault == 1 ? "ProcessIdToSessionId" : "CreateToolhelp32Snapshot");
-                    log_raw(" error ");
-                    log_dec((unsigned long)g_tools_scan_error);
-                    log_raw("), requests report no restricted tools until it works again\n");
-                } else {
-                    log_raw("tools: the process scan works again\n");
-                }
             }
         }
         Sleep(1000);
@@ -5477,6 +5515,7 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_LIGHTING", env, 8) == 0) patch_lighting();
             if (GetEnvironmentVariableW(L"FH2MP_NO_HONK", env, 8) == 0) patch_honk(g_exe_dir, g_dir);
             else honk_switched_off(g_exe_dir, g_dir);
+            if (GetEnvironmentVariableW(L"FH2MP_NO_CARSELECT_HOLD", env, 8) == 0) patch_carsel();
         }
         {
             wchar_t env[8];
@@ -5490,11 +5529,13 @@ static DWORD WINAPI late_init(LPVOID unused)
         {
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_DIAG", env, 8) == 0) patch_diag_trace();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_STALLTRACE", env, 8) == 0) patch_stall_trace();
         }
 #endif
         {
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_PARTYHUD", env, 8) == 0) patch_party_hud();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_RACETOAST", env, 8) == 0) patch_race_toast();
             if (GetEnvironmentVariableW(L"FH2MP_NO_HOOKGUARD", env, 8) == 0) patch_hook_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_LOGGUARD", env, 8) == 0) patch_gameplaylog_guard();
         }
@@ -5534,6 +5575,12 @@ static DWORD WINAPI late_init(LPVOID unused)
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_TORQUELOAD", env, 8) == 0) {
                 patch_torque_load();
+            }
+        }
+        {
+            wchar_t env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_PICKERPI", env, 8) == 0) {
+                patch_picker_pi();
             }
         }
         {
@@ -6079,6 +6126,9 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
         }
         if (GetEnvironmentVariableW(L"FH2MP_BUCKETCARS", tmp, 8) != 0) {    /* opt-in: retail online Free Roam parks no bucket-list cars */
             stateflow_bucket_cars_online();
+        }
+        if (GetEnvironmentVariableW(L"FH2MP_NO_RACETOAST", tmp, 8) == 0) {
+            ui_race_toast_layout();    /* now: the game reads its UI files when the first screen loads */
         }
     }
     {

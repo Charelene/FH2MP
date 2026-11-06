@@ -594,3 +594,88 @@ func zlibCompress(b []byte) []byte {
 	w.Close()
 	return buf.Bytes()
 }
+
+// A car outside the game catalog never reaches a car board: refused on submit, hidden when already stored (reversibly), counters unaffected.
+func TestCarOutsideCatalog(t *testing.T) {
+	d, err := db.Open(dbtest.New(t, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	oldNow := Now
+	Now = func() float64 { return 1000 }
+	defer func() { Now = oldNow }()
+	st := New(d, nil, nil)
+	st.GhostPolicy = "log"
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	// stored before there was a catalog check
+	old, err := st.Submit(10, "old", 1, sub(3, 70.0, car(999999)))
+	must(err)
+	ok, err := st.Submit(10, "ok", 1, sub(3, 71.0, car(5)))
+	must(err)
+	if old == nil || ok == nil {
+		t.Fatal("without a catalog nothing is refused")
+	}
+	if n, err := st.HideUnknownCars(); n != 0 || err != nil {
+		t.Fatalf("HideUnknownCars without a catalog = %d, %v", n, err)
+	}
+	st.KnownCars = func() map[int64]bool { return map[int64]bool{5: true, 6: true} }
+	for _, sb := range []int64{1, 3, 6, 9} {
+		for _, c := range []int64{999999, 0} {
+			s, err := st.Submit(11, "pack", 1, sub(sb, 80.0, car(c)))
+			must(err)
+			if s != nil {
+				t.Errorf("board %d car %d was stored", sb, c)
+			}
+		}
+		s, err := st.Submit(11, "stock", 1, sub(sb, 80.0, car(6)))
+		must(err)
+		if s == nil {
+			t.Errorf("board %d car 6 (in the catalog) was refused", sb)
+		}
+	}
+	if s, err := st.Submit(11, "count", 2, sub(4, 5.0, car(0))); err != nil || s == nil {
+		t.Errorf("a progress counter (no car) was refused: %v %v", s, err)
+	}
+	if why := st.Refusal(1, sub(1, 80.0, car(0)), 80.0); why == "" {
+		t.Error("Refusal is empty for car 0")
+	}
+	// an operator restore stays: run 3 below is restored before the pass
+	extra, err := st.Submit(12, "restored", 1, sub(6, 90.0, car(5)))
+	must(err)
+	_, err = d.Exec("UPDATE score_submissions SET car=424242 WHERE id=?", extra.ID)
+	must(err)
+	_, err = d.Exec("INSERT INTO score_overrides (submission_id, at) VALUES (?,?)", extra.ID, 1.0)
+	must(err)
+	if n, err := st.HideUnknownCars(); n != 1 || err != nil {
+		t.Fatalf("HideUnknownCars = %d, %v; want 1", n, err)
+	}
+	if n, err := st.HideUnknownCars(); n != 0 || err != nil {
+		t.Fatalf("second HideUnknownCars = %d, %v; want 0 (idempotent)", n, err)
+	}
+	h, err := d.Query("SELECT submission_id, source, reason FROM hidden_scores")
+	must(err)
+	if len(h) != 1 || h[0].Int("submission_id") != old.ID || h[0].Str("source") != "auto" || h[0].Str("reason") != "car not in the game catalog" {
+		t.Fatalf("hidden_scores = %+v", h)
+	}
+	top, err := st.Top(3, 1, 1001, 0, 10)
+	must(err)
+	if len(top) != 2 || top[0].Car+top[1].Car != 11 {
+		t.Errorf("board shows %d rows, want cars 5 and 6 only", len(top))
+	}
+	v, err := st.IsVisible(extra.ID)
+	must(err)
+	if !v {
+		t.Error("a restored run was hidden again")
+	}
+	cnt, err := st.Count()
+	must(err)
+	if cnt != 2+4+1+1 {
+		t.Errorf("rows deleted? count = %d", cnt)
+	}
+}

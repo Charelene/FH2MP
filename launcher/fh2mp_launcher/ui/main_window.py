@@ -266,9 +266,10 @@ class MainWindow(QMainWindow):
         self.patreon.setVisible(bool(lc.links["patreon"]))
         self.online.set_count(None if s["offline_mode"] or getattr(lc, "offline_run", False) else lc.online)
         self.version.setStyleSheet(f"color: {theme.MUTED}; font-size: 13px;")
-        m = lc.motd
+        notice = lc.hotfix_notice
+        m = notice or lc.motd
         if m:
-            self.motd.show_message(m, "info")
+            self.motd.show_message(m, "warn" if notice else "info")
         else:
             self.motd.hide()
         self.hero.set_picture(self._pix(lc.hero_image))
@@ -550,20 +551,31 @@ class MainWindow(QMainWindow):
         if self.lc.settings["offline_mode"] or getattr(self.lc, "offline_run", False):
             return
         self.refresh_server()
-        if not self.lc.settings["check_updates"]:
-            return
 
         def fail(e):
             if "no release key" not in str(e):
                 self.say(f"Could not check for updates: {friendly(e)}", theme.WARN)
+            self.render()
+
         def check(_job):
+            try:
+                self.lc.refresh_hotfix()
+            except Exception as e:  # noqa: BLE001 - Play fetches it again and refuses or turns off what it must
+                logs.swallowed("hotfix", "hotfix.refresh_failed", e)
+            if not self.lc.settings["check_updates"]:
+                return False
             self.lc.check_updates()
             try:
                 return self.lc.auto_update_shim()
             except Exception as e:  # noqa: BLE001 - the update button and Play still offer it, with the reason
                 logs.swallowed("update", "update.shim_auto_failed", e)
                 return False
-        run_async(check, lambda _m: self.render(), fail)
+
+        def ok(updated):
+            if updated:
+                self.say(f"FH2MP shim {self.lc.shim_state()[1]} installed.")
+            self.render()
+        run_async(check, ok, fail)
 
     def _load_avatar(self):
         if self.lc.settings["offline_mode"] or getattr(self.lc, "offline_run", False):

@@ -189,6 +189,82 @@ class EventSize(unittest.TestCase):
         w.start_event(peers[0])
         self.assertEqual(len(w.event["people"]), 5)
 
+class EventSeats(unittest.TestCase):
+    """A Free Roam world above 12 players: only the leader and 11 invitees get a seat, the 13th Ready is refused when it is asked, not when the
+    event starts (the starting grid has 12 keys; a 13th participant is what made clients crash in the event)."""
+
+    def invited(self, n, ready):
+        """A world of n clients, owner 1 asked for the race; `ready` of the invitees (in order) have said Ready."""
+        w, peers = world()
+        w.log = lambda text: None
+        for i in range(3, n + 1):
+            p = S.Peer(("10.0.0.%d" % i, 5000 + i))
+            p.connected, p.owner_id, p.car_id, p.choices = True, i, i, (3, 0.750)
+            w.peers[p.addr] = p
+            peers.append(p)
+        for p in peers:
+            p.entered = True
+            p.console_vars[4] = 0
+        w.pending_race = (S.time.monotonic() + 20.0, peers[0])
+        w.race_requested_at = S.time.monotonic()
+        for p in peers[1:1 + ready]:
+            p.console_vars[4] = 1
+        return w, peers
+
+    def test_the_seats_fill_at_the_leader_and_11_invitees(self):
+        w, peers = self.invited(16, 10)
+        self.assertFalse(w.event_seats_full(ignoring=peers[11]))      # leader + 10 ready: the 12th seat is free
+        w, peers = self.invited(16, 11)
+        self.assertTrue(w.event_seats_full(ignoring=peers[12]))       # leader + 11 ready: a 13th is turned away
+        self.assertFalse(w.event_seats_full(ignoring=peers[11]))      # ... but one that is already seated asking again is not
+        self.assertFalse(w.event_seats_full(ignoring=peers[1]))
+
+    def test_a_small_world_never_fills(self):
+        w, peers = self.invited(8, 7)
+        self.assertFalse(w.event_seats_full(ignoring=peers[7]))
+
+    def test_the_refused_ready_stays_off(self):
+        w, peers = self.invited(16, 11)
+        late = peers[13]
+        late.console_vars[4] = 1
+        w.refuse_event_ready(late, "test")
+        self.assertEqual(late.console_vars[4], 0)
+        self.assertEqual(sum(1 for q in peers[1:] if q.console_vars[4]), 11)
+
+    def test_a_full_event_starts_without_waiting_out_the_window(self):
+        w, peers = self.invited(16, 11)
+        w.pending_race = (S.time.monotonic() + 20.0, peers[0])
+        w.check_invitees_ready()
+        self.assertLess(w.pending_race[0] - S.time.monotonic(), 2.0)
+
+    def test_a_not_yet_full_event_keeps_waiting(self):
+        w, peers = self.invited(16, 6)
+        w.pending_race = (S.time.monotonic() + 20.0, peers[0])
+        w.check_invitees_ready()
+        self.assertGreater(w.pending_race[0] - S.time.monotonic(), 15.0)
+
+    def test_a_refused_ready_retried_after_a_car_change_does_not_take_a_full_seat(self):
+        w, peers = self.invited(16, 11)
+        late = peers[13]
+        late.ready_retry = w.race_requested_at
+        w.game_options = options("FR_CIRCUIT")
+        w.retry_refused_ready(late)
+        self.assertEqual(late.console_vars[4], 0)
+        self.assertIsNone(late.ready_retry)
+        free = peers[12]
+        peers[1].console_vars[4] = 0                                  # a seated invitee left: one seat is free again
+        w.pending_race = (S.time.monotonic() + 20.0, peers[0])
+        free.ready_retry = w.race_requested_at
+        w.retry_refused_ready(free)                                   # one seat is free again: this one gets it
+        self.assertEqual(free.console_vars[4], 1)
+
+    def test_the_start_still_cuts_to_12_as_a_last_resort(self):
+        w, peers = self.invited(16, 15)                               # everybody got a Ready through (an older server, a lost refusal)
+        w.start_event(peers[0])
+        self.assertEqual(len(w.event["people"]), 12)
+
+
+class EventSizeGrid(unittest.TestCase):
     def test_the_starting_grid_never_lists_more_than_12(self):
         for count, want in ((12, 12), (15, 12), (5, 5)):
             w = S.BitWriter()

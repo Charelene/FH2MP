@@ -459,6 +459,10 @@ func (w *World) RetryRefusedReady(peer *Peer) {
 		return
 	}
 	peer.ReadyRetry = nil
+	if w.EventSeatsFull(peer) {
+		w.RefuseEventReady(peer, "car changed to one that fits, too late")
+		return
+	}
 	w.Logf("%d car changed to one that meets the event restrictions: the refused Ready counts now", peer.Addr.Port)
 	w.SetConsoleBool(peer, 4, 1, "ready request accepted after a car change")
 	peer.ConsoleVars[4] = true
@@ -472,7 +476,27 @@ func optsChoices(c *Choices) *gameopts.Choices {
 	return &gameopts.Choices{HaveClass: c.HasClass, Class: uint64(c.Class), PI: c.PI}
 }
 
-// CheckInviteesReady shortens the invite window when everybody invited has accepted.
+// EventSeatsFull: the leader plus the invitees that said Ready already fill the event (an event holds ClientLimit, a Free Roam world may be
+// bigger: the starting grid message has 12 keys). ignoring is the peer asking, so a repeated Ready of a seated peer does not count against it.
+func (w *World) EventSeatsFull(ignoring *Peer) bool {
+	ready := 0
+	for _, q := range w.Others(w.PendingRace.Leader) {
+		if q != ignoring && q.ConsoleVars[4] {
+			ready++
+		}
+	}
+	return 1+ready >= capacity.ClientLimit
+}
+
+// RefuseEventReady takes a Ready back from an invitee that would be the 13th: Console.Ready stays 0, it never gets a seat or the loading screen.
+func (w *World) RefuseEventReady(peer *Peer, why string) {
+	w.Logf("event.full %s: Ready of owner %d refused, the event has %d players already (%s)",
+		diag.KV(diag.KVP{K: "owner", V: peer.Owner}, diag.KVP{K: "limit", V: capacity.ClientLimit}), peer.Owner, capacity.ClientLimit, why)
+	w.SetConsoleBool(peer, 4, 0, "event full")
+	peer.ConsoleVars[4] = false
+}
+
+// CheckInviteesReady shortens the invite window when everybody invited has accepted, or when the seats are full.
 func (w *World) CheckInviteesReady() {
 	waiting := 0
 	for _, q := range w.Others(w.PendingRace.Leader) {
@@ -483,6 +507,9 @@ func (w *World) CheckInviteesReady() {
 	if waiting == 0 {
 		w.PendingRace.Deadline = math.Min(w.PendingRace.Deadline, w.Mono()+1.5)
 		w.Log("all invited clients ready -> starting the event now")
+	} else if w.EventSeatsFull(nil) {
+		w.PendingRace.Deadline = math.Min(w.PendingRace.Deadline, w.Mono()+1.5)
+		w.Logf("event full: %d players ready, %d invited client(s) stay out -> starting the event now", capacity.ClientLimit, waiting)
 	}
 }
 
@@ -601,21 +628,57 @@ func boolInt(b bool) int {
 	return 0
 }
 
-// DropUnloaded removes participants that never reported HasLoadedCarsForAllParticipants.
-func (w *World) DropUnloaded(now float64) {
-	ev := w.Event
-	var stuck []*Peer
+// loadRelease is when the group's car select is over for the shim's cars-loaded wait: every connected participant has left it, or the group's
+// deadline plus the hold's grace has passed, whichever is first (the same two conditions as CarselAnswer).
+func (ev *Event) loadRelease() float64 {
+	limit := ev.carselDeadline() + CarselHoldGraceSeconds
+	latest := ev.Started
 	for _, q := range ev.People {
-		if !(q.Connected && q.ConsoleVars[ConsoleVarHasLoadedCars]) {
-			stuck = append(stuck, q)
+		if q.Connected {
+			latest = math.Max(latest, ev.carDoneAt(q))
 		}
 	}
-	if len(stuck) == 0 {
-		ev.LoadChecked = true
+	return math.Min(latest, limit)
+}
+
+// carDoneAt is when this participant left the car select (PreRace); one that has not is counted at the end of the hold.
+func (ev *Event) carDoneAt(q *Peer) float64 {
+	if ev.PickedAfter != nil {
+		if t, ok := ev.PickedAfter.Get(q); ok {
+			return ev.Started + t
+		}
+	}
+	return ev.carselDeadline() + CarselHoldGraceSeconds
+}
+
+// loadStart is when this participant's car load could begin (monotonic): after the group's car select, after its own, after it (re)connected to
+// the event, and after the last restart of the clocks (a suspect was dropped). The car select time never counts against EventLoadTimeout.
+func (ev *Event) loadStart(q *Peer, release float64) float64 {
+	return math.Max(math.Max(release, ev.carDoneAt(q)), math.Max(q.ConnectedAt, ev.LoadRestart))
+}
+
+// DropUnloaded runs on every tick while an event loads, after EventLoadTimeout has passed since it started. Each participant that has not reported
+// HasLoadedCarsForAllParticipants EventLoadTimeout seconds after its own load could begin is dropped back to Free Roam on its own; the others keep
+// going. When nobody has loaded the fault is not one player's: one suspect is dropped once, and the lobby is never emptied by this path (a
+// group that still has not loaded 2 x EventLoadTimeout after its clocks started ends the event in one step instead).
+func (w *World) DropUnloaded(now float64) {
+	ev := w.Event
+	release := ev.loadRelease()
+	var overdue, waiting []*Peer
+	loaded := 0
+	for _, q := range ev.People {
+		switch {
+		case q.Connected && q.ConsoleVars[ConsoleVarHasLoadedCars]:
+			loaded++
+		case now-ev.loadStart(q, release) > EventLoadTimeout:
+			overdue = append(overdue, q)
+		default:
+			waiting = append(waiting, q)
+		}
+	}
+	if len(overdue) == 0 {
 		return
 	}
-	var drop []*Peer
-	var why string
 	loadedAfter := func() string {
 		var parts []string
 		if ev.LoadedAfter != nil {
@@ -629,21 +692,24 @@ func (w *World) DropUnloaded(now float64) {
 		}
 		return strings.Join(parts, " ")
 	}
-	states := func() string {
-		parts := make([]string, len(stuck))
-		for i, q := range stuck {
-			parts[i] = w.loadState(q, now)
+	states := func(l []*Peer) string {
+		parts := make([]string, len(l))
+		for i, q := range l {
+			parts[i] = fmt.Sprintf("%s, load could begin %.0f s ago", w.loadState(q, now), now-ev.loadStart(q, release))
 		}
 		return strings.Join(parts, "; ")
 	}
-	if len(stuck) < len(ev.People) || len(stuck) == 1 {
-		ev.LoadChecked = true
-		drop, why = stuck, "did not load in time"
-		w.Warnf("event load timeout: dropping %s from the event, %d participant(s) remain; %.0f s after the start (limit %.0f s), loaded: %s; dropped: %s",
-			owners(stuck), len(ev.People)-len(stuck), now-ev.Started, EventLoadTimeout, loadedAfter(), states())
-	} else {
+	var drop []*Peer
+	var why string
+	if loaded > 0 {
+		drop, why = overdue, "did not load in time"
+		w.Warnf("event load timeout: dropping %s from the event: it has not loaded its cars %.0f s after its own load could begin; %d participant(s) remain and keep loading (%d loaded: %s; %d still within the limit); %.0f s after the event start; dropped: %s",
+			owners(overdue), EventLoadTimeout, len(ev.People)-len(overdue), loaded, loadedAfter(), len(waiting), now-ev.Started, states(overdue))
+	} else if len(waiting) > 0 {
+		return // nobody has loaded, but some have not had their full time yet: the fault cannot be told from a slow start
+	} else if !ev.SuspectDropped && len(ev.People) >= 2 {
 		leader := ev.People[0]
-		suspect := stuck[0]
+		suspect := overdue[0]
 		better := func(a, b *Peer) bool { // key = (not connected, a is not leader, car_doubt_at, car_seen_at, connected_at); max wins
 			ka := [5]float64{float64(boolInt(!a.Connected)), float64(boolInt(a != leader)), a.CarDoubtAt, a.CarSeenAt, a.ConnectedAt}
 			kb := [5]float64{float64(boolInt(!b.Connected)), float64(boolInt(b != leader)), b.CarDoubtAt, b.CarSeenAt, b.ConnectedAt}
@@ -654,19 +720,29 @@ func (w *World) DropUnloaded(now float64) {
 			}
 			return false
 		}
-		for _, q := range stuck[1:] {
+		for _, q := range overdue[1:] {
 			if better(q, suspect) {
 				suspect = q
 			}
 		}
+		ev.SuspectDropped, ev.LoadRestart = true, now
 		drop, why = []*Peer{suspect}, "the others could not load its car"
-		ev.LoadNext = now + LoadSuspectStep
 		failed := ""
 		if suspect.CarDoubtAt != 0 {
 			failed = ", failed a check"
 		}
-		w.Warnf("event load timeout: nobody loaded; dropping owner %d as the likeliest blocker (car checked %.0f s ago%s), %d participant(s) remain; %.0f s after the start (limit %.0f s), next suspect in %.0f s if still nobody; waiting: %s",
-			suspect.Owner, now-suspect.CarSeenAt, failed, len(ev.People)-1, now-ev.Started, EventLoadTimeout, LoadSuspectStep, states())
+		w.Warnf("event load timeout: nobody loaded %.0f s after the load could begin; dropping only owner %d as the likeliest blocker (car checked %.0f s ago%s), the other %d participant(s) get a fresh %.0f s and the event ends if still nobody has loaded after %.0f s; %.0f s after the event start; waiting: %s",
+			EventLoadTimeout, suspect.Owner, now-suspect.CarSeenAt, failed, len(ev.People)-1, EventLoadTimeout, 2*EventLoadTimeout, now-ev.Started, states(overdue))
+	} else {
+		for _, q := range ev.People {
+			if now-ev.loadStart(q, release) <= 2*EventLoadTimeout {
+				return // the last players are not removed one by one: the whole event is ended once the long limit is reached
+			}
+		}
+		w.Warnf("event load timeout: nobody loaded %.0f s after the load could begin and the likeliest blocker was already dropped or is the only player left; ending the event for its %d participant(s) instead of dropping them one by one; %.0f s after the event start; waiting: %s",
+			2*EventLoadTimeout, len(ev.People), now-ev.Started, states(overdue))
+		w.EndEvent("nobody loaded the event in time", false)
+		return
 	}
 	for _, q := range drop {
 		ev.People = removeFrom(ev.People, q)
@@ -968,6 +1044,55 @@ func (w *World) AssignTeams(people []*Peer, what string) {
 		parts = append(parts, fmt.Sprintf("owner%d=%s", q.Owner, c))
 	}
 	w.Logf("team event: %s, %d player(s): %s", what, len(people), strings.Join(parts, " "))
+}
+
+// NotePlayerStatus: a client wrote PlayerStatus. During an event's setup, CarSelect -> PreRace is the moment that participant finished its
+// car select (picked a car, or its 20 s ran out): when each one did is what decides how long the others wait on "Setting Up Event".
+func (w *World) NotePlayerStatus(peer *Peer, size int, payload bits.Int) {
+	fields, err := playersetupFields(size, payload)
+	if err != nil {
+		return // HideVIP already logged an unreadable object
+	}
+	f, ok := fields[PlayerVarStatus]
+	if !ok {
+		return
+	}
+	before, had := peer.PlayerStatus, peer.HasPlayerStatus
+	peer.PlayerStatus, peer.HasPlayerStatus = int(f.Value.Uint64()), true
+	ev := w.Event
+	if had && before == peer.PlayerStatus || w.Roadtrip || ev == nil || ev.Begun || !inList(ev.People, peer) {
+		return
+	}
+	if peer.PlayerStatus == PlayerStatusCarSelect {
+		if ev.SelectEnteredAt == nil {
+			now := w.Mono()
+			ev.SelectEnteredAt = &now
+			w.Logf("event car select: owner%d is the first in it, %.1f s after the start; the group's deadline is %s s after that", peer.Owner, now-ev.Started, fmtG(CarselSelectSeconds))
+		}
+		return
+	}
+	if peer.PlayerStatus != PlayerStatusPreRace {
+		return
+	}
+	if ev.PickedAfter == nil {
+		ev.PickedAfter = omap.New[*Peer, float64]()
+	}
+	if ev.PickedAfter.Has(peer) {
+		return
+	}
+	ev.PickedAfter.Set(peer, w.Mono()-ev.Started)
+	t, _ := ev.PickedAfter.Get(peer)
+	count := 0
+	for _, q := range ev.People {
+		if ev.PickedAfter.Has(q) {
+			count++
+		}
+	}
+	msg := fmt.Sprintf("event car select: owner%d left it %.1f s after the start, %d/%d participant(s) done", peer.Owner, t, count, len(ev.People))
+	if count >= len(ev.People) {
+		msg += ", everybody is"
+	}
+	w.Log(msg)
 }
 
 // NoteLoaded notes how long after the event start a participant's HasLoadedCarsForAllParticipants went to 1.

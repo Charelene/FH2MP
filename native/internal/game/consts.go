@@ -129,10 +129,14 @@ const (
 	PlayerVarFlags           = 31
 	PlayerFlagVIP            = 1
 	PlayerVarPrivateUniverse = 40
-	PrivateUniverseBits      = 5
-	PrivateUniverseFirst     = 1
-	PrivateUniverseCount     = 17
-	LobbyPlayerPlayerHost    = 1
+	// LobbyPlayer.PlayerStatus (var 19, 4 bits, CPlayerStatus::Enum): 1 CarSelect, 3 PreRace (see the Python server's PLAYER_VAR_STATUS).
+	PlayerVarStatus       = 19
+	PlayerStatusCarSelect = 1
+	PlayerStatusPreRace   = 3
+	PrivateUniverseBits   = 5
+	PrivateUniverseFirst  = 1
+	PrivateUniverseCount  = 17
+	LobbyPlayerPlayerHost = 1
 )
 
 // ConsoleBoolVarNames names the Console bool variables.
@@ -153,8 +157,7 @@ var (
 	SpeedPolicy      = envStr("FH2MP_SPEED_POLICY", "kick")
 	CarCapture       = os.Getenv("FH2MP_CAR_CAPTURE") != ""
 	CheaterPoolHours = envFloat("FH2MP_CHEATER_POOL_HOURS", 24)
-	LoadSuspectStep  = envFloat("FH2MP_LOAD_SUSPECT_STEP", 10)
-	EventLoadTimeout = envFloat("FH2MP_EVENT_LOAD_TIMEOUT", 60)
+	EventLoadTimeout = envFloat("FH2MP_EVENT_LOAD_TIMEOUT", 30)
 	LspURL           = envStr("FH2MP_LSP", "http://127.0.0.1:5080")
 	TracePackets     = Verbosity.Enabled(diag.Trace, "packet")
 )

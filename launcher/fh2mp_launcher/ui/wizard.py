@@ -45,6 +45,25 @@ class AccountWizard(QDialog):
             self.stack.setCurrentIndex(self.ACCOUNT)
             self.acct_back.hide()
 
+    def setVisible(self, visible):
+        """Centres the dialog over its parent itself, before its native window exists, and tells Qt not to (Qt::WA_Moved).
+        QDialog::showEvent centres a dialog that was never moved (adjustPosition), and on Windows with this fixed size that move gave the dialog a
+        native window about 220 px taller than the widget (seen 2026-11-05 on a 125 % screen, Qt 6.12: the widget 600x262, the window 600x482,
+        WINDOWPOSCHANGING asked for 768x375 and WINDOWPOSCHANGED came back 768x649), which then refused every later resize: grey space under the
+        page, the page's Back/Next on top of the next page's, the frame pushed up by _keep_on_screen and its size changing when moved (#384)."""
+        if visible and not self.isVisible():
+            self.setAttribute(Qt.WidgetAttribute.WA_Moved, True)
+            self._center_on_parent()
+        super().setVisible(visible)
+
+    def _center_on_parent(self):
+        parent = self.parentWidget()
+        if parent is not None:
+            centre = parent.window().frameGeometry().center()
+        else:
+            centre = (self.screen() or QGuiApplication.primaryScreen()).availableGeometry().center()
+        self.move(centre.x() - self.width() // 2, centre.y() - self.height() // 2)
+
     # ---- pages
     def _page(self, title, sub=None):
         w = QWidget()
@@ -266,6 +285,7 @@ class Wizard(AccountWizard):
         self._setup_job = None
         self._closing = False
         self._resize_pending = False
+        self._fixed_height = 0
         super().__init__(lc, parent, existing_key)
         self.setWindowTitle('Set up FH2MP')
         from . import theme
@@ -348,6 +368,7 @@ class Wizard(AccountWizard):
         if nxt:
             advance.clicked.connect(nxt)
         row.addWidget(advance)
+        page.layout().addStretch(1)            # every page has the height of the tallest: the buttons sit at the bottom
         page.layout().addSpacing(24)
         page.layout().addWidget(footer)
         advance.nav_row = row
@@ -359,23 +380,32 @@ class Wizard(AccountWizard):
         self._resize_pending = True
         def update():
             self._resize_pending = False
-            self._size_for_page()
+            self._size_for_page(remeasure=False)
         QTimer.singleShot(0, self, update)
 
-    def _size_for_page(self, index=None):
+    def _size_for_page(self, index=None, remeasure=True):
+        """remeasure=False when the page's layout was just invalidated by its own LayoutRequest: invalidating it again posts another
+        LayoutRequest, which schedules this again - an endless loop (~400 resizes and moves a second, seen in an offscreen run) that kept the
+        dialog's frame being re-placed on Windows and starved the other windows' animations."""
+        """Every page gets the same window: as tall as the tallest page at this width, never shorter (a page that grows later makes it taller).
+        The window used to follow each page's own height, and on Windows (Qt 6.12, 125 % display scaling, seen 2026-11-05) the first resize after the
+        window was shown made the native window as tall as the tallest page whatever was asked for (WINDOWPOSCHANGING 768x386, WINDOWPOSCHANGED
+        768x649; the widget stayed 271 high): grey under the page, the frame pushed up by _keep_on_screen on every page change and its size
+        changing when it was moved (#384). A word-wrapped label in a page is what it takes (the same run with the wrapping off resized fine)."""
         index = self.stack.currentIndex() if index is None else index
-        page = self.stack.widget(index)
-        if page is None:
+        if self.stack.widget(index) is None:
             return
         screen = self.screen().availableGeometry()
         width = min(600, screen.width() - 40)
-        layout = page.layout()
-        layout.invalidate()
-        # Measure this page alone: hidden pages must not inflate the dialog.
-        height = layout.totalHeightForWidth(width)
-        if height < 0:
-            height = layout.sizeHint().height()
-        height = min(max(160, height), screen.height() - 80)
+        tallest = 0
+        for i in range(self.stack.count()):
+            layout = self.stack.widget(i).layout()
+            if remeasure and i == index:
+                layout.invalidate()
+            h = layout.totalHeightForWidth(width)
+            tallest = max(tallest, h if h >= 0 else layout.sizeHint().height())
+        height = min(max(160, tallest, self._fixed_height), screen.height() - 80)
+        self._fixed_height = height
         if self.width() != width or self.height() != height:
             self.setFixedSize(width, height)
         self._keep_on_screen()

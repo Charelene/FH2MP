@@ -169,6 +169,29 @@ class FriendsUi(unittest.TestCase):
         QTest.qWait(250)
         self.assertFalse(isValid(dlg))
 
+    def test_panel_asked_for_again_while_closing_stays_open_and_a_window_restore_does_not_replay_it(self):
+        self.c.data['chats'] = [{'id': '1', 'title': 'DriftKing', 'last': 'Hi', 'unread': 0}]
+        dlg = self.c.chats()
+        QTest.qWait(300)
+        self.assertEqual(dlg.motion.v, 1.0)
+        dlg.close()
+        QTest.qWait(60)
+        self.assertTrue(dlg._closing)
+        self.assertIs(self.c.chats(), dlg)                # the chat button pressed during the exit turns it round
+        QTest.qWait(300)
+        self.assertTrue(isValid(dlg))
+        self.assertFalse(dlg._closing)
+        self.assertEqual(dlg.motion.v, 1.0)
+        self.assertTrue(dlg.shell.isVisible())
+        self.window.hide()
+        self.window.show()
+        self.app.processEvents()
+        self.assertIsNone(dlg._transition_pixmap)         # no second enter animation, the shell is not hidden behind a picture
+        self.assertTrue(dlg.shell.isVisible())
+        dlg.close()
+        QTest.qWait(300)
+        self.assertFalse(isValid(dlg))
+
     def test_lobby_browser_has_no_empty_scroll_overflow_and_fits_small_window(self):
         row = {'id': 'fbece95a', 'kind': 'freeroam', 'status': 'Free roaming', 'players': 1,
                'occupied': 1, 'capacity': 12, 'held': 0, 'members': []}

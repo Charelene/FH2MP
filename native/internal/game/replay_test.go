@@ -227,6 +227,7 @@ func TestBucketlistTrace(t *testing.T) { runTrace(t, "bucketlist", 19) }
 func TestTrafficTrace(t *testing.T)    { runTrace(t, "traffic", 23) }
 func TestSpeedTrace(t *testing.T)      { runTrace(t, "speed", 29) }
 func TestCapacityTrace(t *testing.T)   { runTrace(t, "capacity", 31) }
+func TestEventfullTrace(t *testing.T)  { runTrace(t, "eventfull", 61) }
 func TestBotsTrace(t *testing.T)       { runTrace(t, "bots", 37) }
 func TestRentalTrace(t *testing.T)     { runTrace(t, "rental", 41) }
 func TestReliableTrace(t *testing.T)   { runTrace(t, "reliable", 43) }
@@ -288,12 +289,13 @@ func compareLogs(t *testing.T, name string, want, got []string) {
 }
 func TestRoadTripTrace(t *testing.T) { runTrace(t, "roadtrip", 47) }
 func TestEdgeTrace(t *testing.T)     { runTrace(t, "edge", 53) }
+func TestCarselTrace(t *testing.T)   { runTrace(t, "carsel", 59) }
 
 var allTraces = []struct {
 	name string
 	seed uint64
 }{{"join_relay", 7}, {"control", 3}, {"race", 11}, {"parts", 5}, {"tickets", 9}, {"carmeet", 13}, {"tag", 17}, {"bucketlist", 19}, {"traffic", 23},
-	{"speed", 29}, {"capacity", 31}, {"bots", 37}, {"rental", 41}, {"reliable", 43}, {"roadtrip", 47}, {"edge", 53}}
+	{"speed", 29}, {"capacity", 31}, {"bots", 37}, {"rental", 41}, {"reliable", 43}, {"roadtrip", 47}, {"edge", 53}, {"carsel", 59}, {"eventfull", 61}}
 
 // TestTracesWithWorkers replays every scenario with the worlds on 1, 2 and 4 worker goroutines: the output per receiver and the log must not change.
 func TestTracesWithWorkers(t *testing.T) {

@@ -35,7 +35,13 @@ class ToolReports(unittest.TestCase):
         with mock.patch.object(L.xbl, "quarantine_tools", return_value="ok") as flag:
             self.assertTrue(self.ask("v1,redline,nitrosystem"))
             self.assertTrue(self.ask("v1,nitrosystem,redline"))
-            flag.assert_called_once_with(123, ("nitrosystem", "redline"))
+            flag.assert_called_once_with(123, ("nitrosystem",))
+
+    def test_redline_alone_is_accepted_and_not_flagged(self):
+        with mock.patch.object(L.xbl, "quarantine_tools") as flag:
+            self.assertTrue(self.ask("v1,redline"))
+            flag.assert_not_called()
+        self.assertEqual(self.replies, [])
 
     def test_clean_client_and_unknown_tool_are_not_flagged(self):
         with mock.patch.object(L.xbl, "quarantine_tools") as flag:
@@ -47,7 +53,7 @@ class ToolReports(unittest.TestCase):
 
     def test_missing_hub_ack_cannot_allow_a_tool_client_through(self):
         with mock.patch.object(L.xbl, "quarantine_tools", return_value=None):
-            self.assertFalse(self.ask("v1,redline"))
+            self.assertFalse(self.ask("v1,nitrosystem"))
         self.assertEqual(self.replies[0][0], 503)
 
     def test_mid_session_detection_requires_rejoin_once(self):

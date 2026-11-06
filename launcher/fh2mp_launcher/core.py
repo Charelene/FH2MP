@@ -154,7 +154,8 @@ class Launcher:
         self._session_lock = threading.RLock()
         self.account = None             # dict from the API: xuid, gamertag
         self.process = None
-        self.manifest = None
+        self.manifest = None            # the newest signed release manifest of the channel (check_updates)
+        self.own_manifest = None        # this launcher's own release's, fetched when the newest offers it no shim (install_shim)
         self.gamedb_synced = False      # the server sets a car database and this start put it in place (sync_gamedb)
         self.hotfix = hotfix.Result()   # what the hotfix document asks of this setup (apply_hotfix, at Play)
         self.hotfix_disabled = []       # mods it turned off at the last Play
@@ -391,12 +392,37 @@ class Launcher:
     def check_updates(self):
         """-> manifest (verified) or raises updater.UpdateError. Remembers it."""
         try:
-            self.manifest = updater.Updater(channel=self.settings["channel"]).fetch_manifest()
+            m = updater.Updater(channel=self.settings["channel"]).fetch_manifest()
+            self._refuse_replay(m)
         except updater.UpdateError as e:
             from .api import log_failure
             log_failure("GET", "update-check", e, str(e))          # so a player's launcher.log says why no update was offered
             raise
+        self.manifest = m
         return self.manifest
+
+    def _refuse_replay(self, m):
+        """A signed manifest older than one this channel already served is a replay (or a deleted release): it would take the shim back."""
+        ch = self.settings["channel"]
+        seen = dict(self.settings["seen_release"] or {})
+        if updater.newer(seen.get(ch, ""), m["tag"]):           # check_updates logs it (update-check call.failed)
+            raise updater.UpdateError(f"the release manifest {m['tag']} on the {ch} channel is older than {seen[ch]}, which this launcher already saw")
+        if seen.get(ch) != m["tag"]:
+            seen[ch] = m["tag"]
+            self.settings["seen_release"] = seen
+            self.settings.save()
+
+    def wanted_shim(self):
+        """The shim version that belongs in the Azimuth folder: what the newest signed manifest offers this launcher (a hotfix can be newer than
+        the launcher, or older when one was withdrawn), else what its own release's manifest offers, else the shim this launcher last installed
+        from a signed manifest, else its own version."""
+        e = updater.shim_entry(self.manifest, __version__) or updater.shim_entry(self.own_manifest, __version__)
+        if e:
+            return e["version"]
+        rec = self.settings["shim_signed"] or {}
+        if rec.get("launcher") == __version__ and rec.get("version"):
+            return rec["version"]
+        return __version__
 
     def update_status(self):
         """What a refresh found: dict(launcher=None|version, shim=None|reason, min_launcher_ok=bool)."""
@@ -409,8 +435,9 @@ class Launcher:
         if updater.newer(lv, __version__):
             out["launcher"] = lv
         if self.settings["azimuth_dir"] and not self.shim_pinned(kind, ver):
-            if kind != 'ours' or ver != __version__:
-                out['shim'] = f'Install FH2MP {__version__} for this launcher.'
+            want = self.wanted_shim()
+            if kind != 'ours' or ver != want:
+                out['shim'] = f'Install FH2MP {want} for this launcher.'
         need = max((m.get("minLauncher", "0.0.0"), (self.server or {}).get("minLauncher", "0.0.0")), key=updater.vkey)
         out["minLauncherOk"] = updater.at_least(__version__, need)
         return out
@@ -421,14 +448,15 @@ class Launcher:
         return not updater.at_least(__version__, need)
 
     def shim_outdated(self):
-        """The shim must match this release and meet the server's minimum."""
+        """The shim must be the one this launcher wants (wanted_shim) and meet the server's minimum."""
         kind, ver = self.shim_state()
         if self.shim_pinned(kind, ver):
             return False
-        return kind == "ours" and (ver != __version__ or not updater.at_least(ver, (self.server or {}).get("minShim", "0.0.0")))
+        return kind == "ours" and (ver != self.wanted_shim() or not updater.at_least(ver, (self.server or {}).get("minShim", "0.0.0")))
 
     def auto_update_shim(self):
-        """Replaces our own shim in the Azimuth folder with this launcher's when it is older, without waiting for Play. -> True when it did.
+        """Replaces our own shim in the Azimuth folder with the one this launcher wants (wanted_shim: its release's, or a hotfix's) when it is
+        another version, without waiting for Play. -> True when it did. Also downgrades, when a newer signed manifest withdrew a hotfix.
         Prod 2026-10-29: 256 of 530 players refused for an outdated shim ran launcher 1.1.2 from the same address; the game was started
         without Play (directly, or restarted from in-game), so the old shim in the folder was used. Never while the game runs (the DLL is
         loaded), never a pinned shim, and never a file that is not ours: replacing someone else's DLL needs the player's click."""
@@ -436,7 +464,7 @@ class Launcher:
         if not d or not os.path.isdir(d) or not self.manifest or self.game_running():
             return False
         kind, ver = self.shim_state()
-        if kind != "ours" or self.shim_pinned(kind, ver) or updater.at_least(ver, __version__):
+        if kind != "ours" or self.shim_pinned(kind, ver) or ver == self.wanted_shim():
             return False
         self.install_shim()
         return True
@@ -466,20 +494,30 @@ class Launcher:
 
     def install_shim(self, progress=None, cancelled=lambda: False):
         up = updater.Updater(channel=self.settings["channel"])
-        manifest = up.fetch_manifest(tag=f"v{__version__}")
-        e = manifest["shim"]
-        if e['version'] != __version__:
-            raise updater.UpdateError('The signed shim does not match this launcher release.')
-        zip_path = up.download(manifest["tag"], e, progress, cancelled)
+        manifest, e = updater.shim_release(up, self.manifest, __version__)
+        if manifest is not self.manifest:
+            self.own_manifest = manifest
+        zip_path = up.download(e["tag"], e, progress, cancelled)
         dll = read_shim_zip(zip_path)
-        if shim.blob_version(dll) != __version__:
-            raise updater.UpdateError('The FH2MP DLL does not match this launcher release.')
+        if shim.blob_version(dll) != e["version"]:
+            raise updater.UpdateError('The FH2MP DLL does not match its signed release.')
+        before = self.shim_state()
         did = shim.install(self.settings["azimuth_dir"], dll, e.get("dllSha256"), self.platform_files(progress, cancelled))
+        self.remember_shim(e, manifest, before)
         did += self.repair_tls_helper()
         did += self.ensure_extra_options(progress, cancelled)
         did += self.ensure_honk(progress, cancelled)
         did += self.ensure_controls()
         return did
+
+    def remember_shim(self, entry, manifest, before):
+        """Notes the signed shim just put in place (wanted_shim without a manifest) and logs the change. `before` is shim_state() before it."""
+        kind, old = before
+        self.settings["shim_signed"] = {"launcher": __version__, "version": entry["version"], "tag": entry["tag"]}
+        self.settings.save()
+        if kind != "ours" or old != entry["version"]:
+            logs.info("shim", "shim.installed", previous=old if kind == "ours" else kind, version=entry["version"], tag=entry["tag"],
+                      kind=manifest.get("kind", "release"), launcher=__version__)
 
     def platform_files(self, progress=None, cancelled=lambda: False):
         """Fetch the supplied platform when any installed loader differs from its pin."""
@@ -491,18 +529,36 @@ class Launcher:
             raise updater.UpdateError(str(e)) from None
 
     # ---- play
-    def apply_hotfix(self, shim_version):
-        """The signed hotfix document (hotfix.py): turns off the mods it names, keeps its kill switches for the session file and refuses Play
-        when a rule says so. Without an answer from the server the last good copy applies."""
-        d = self.settings["azimuth_dir"]
+    def _hotfix_result(self, shim_version):
+        """-> (hotfix.Result for this setup, mod_hashes of the Azimuth folder), from the server's document or the kept copy."""
         try:
             signed = self.api().hotfix()
         except Exception as e:  # noqa: BLE001 - an older server or no network: the kept copy applies
             logs.swallowed("hotfix", "hotfix.fetch_failed", e)
             signed = None
         doc = hotfix.Store().update(signed)
-        mods = hotfix.mod_hashes(d)
-        self.hotfix = hotfix.evaluate(doc, __version__, shim_version, mods, env=(self.server or {}).get("env"))
+        mods = hotfix.mod_hashes(self.settings["azimuth_dir"])
+        return hotfix.evaluate(doc, __version__, shim_version, mods, env=(self.server or {}).get("env")), mods
+
+    def refresh_hotfix(self):
+        """Between Plays: what the hotfix document asks of this setup, for its notice and the status lines. Nothing is turned off until Play."""
+        if not self.settings["azimuth_dir"]:
+            return self.hotfix
+        kind, ver = self.shim_state()
+        self.hotfix, _mods = self._hotfix_result(ver if kind == "ours" else "")
+        return self.hotfix
+
+    @property
+    def hotfix_notice(self):
+        """The hotfix document's notice, when one of its rules applies to this setup."""
+        h = self.hotfix
+        return h.notice if h.rules and isinstance(h.notice, str) else ""
+
+    def apply_hotfix(self, shim_version):
+        """The signed hotfix document (hotfix.py): turns off the mods it names, keeps its kill switches for the session file and refuses Play
+        when a rule says so. Without an answer from the server the last good copy applies."""
+        d = self.settings["azimuth_dir"]
+        self.hotfix, mods = self._hotfix_result(shim_version)
         self.hotfix_disabled = hotfix.apply_mods(d, self.hotfix, mods)
         if self.hotfix.rules:
             logs.info("hotfix", "hotfix.applies", serial=self.hotfix.serial, rules=",".join(self.hotfix.rules),
@@ -963,7 +1019,7 @@ class Launcher:
                     bool(info.found and info.supported)))
         kind, ver = self.shim_state()
         out.append(("FH2MP shim", ver if kind == "ours" else {"none": "not installed", "old": "needs installing again"}.get(kind, kind),
-                    __version__ + (f" (server needs {(self.server or {}).get('minShim')})" if (self.server or {}).get("minShim") else ""),
+                    self.wanted_shim() + (f" (server needs {(self.server or {}).get('minShim')})" if (self.server or {}).get("minShim") else ""),
                     kind == "ours" and not self.shim_outdated()))
         pkind, pver = shim.platform_installed(d)
         out.append(("FH2 Mod Platform", pver if pkind == "platform" else {"none": "not installed"}.get(pkind, pkind), PLATFORM_VERSION,

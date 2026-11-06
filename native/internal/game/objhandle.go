@@ -100,6 +100,7 @@ func (w *World) handleObject(peer *Peer, r rd, br *bits.Reader, mtype int, data 
 		}
 		payload = w.NoteTypedChoices(peer, size, payload)
 		w.RetryRefusedReady(peer)
+		w.NotePlayerStatus(peer, size, payload)
 	}
 	if CarCapture && router == netv2.RouterCar && size != 0 {
 		w.Logf("%d CAPTURE car %s id=%d seq=%d bits=%d hex=%s", addr.Port, kindName(mtype), oid, seq, size, hexOf(payload, size))
@@ -401,6 +402,9 @@ func (w *World) consoleUpdate(peer *Peer, addr Addr, size int, payload bits.Int)
 		return
 	}
 	w.Logf("%d Console vars: %s", addr.Port, strings.Join(seen, " "))
+	if containsStr(seen, "Ready=1") && w.PendingRace != nil && peer != w.PendingRace.Leader && w.Event == nil && w.EventSeatsFull(peer) {
+		w.RefuseEventReady(peer, "Console.Ready") // a client that set it without asking (or after a refused ask)
+	}
 	for _, item := range seen {
 		if strings.HasPrefix(item, "RenderReady=") {
 			w.NoteRenderReady(peer, int(item[len(item)-1]-'0'))

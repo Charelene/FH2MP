@@ -39,3 +39,12 @@ func TestHandlerKeys(t *testing.T) {
 		t.Errorf("missing %v\nextra %v", missing, extra)
 	}
 }
+
+func TestReportsNitro(t *testing.T) {
+	for v, want := range map[string]bool{"": false, "v1": false, "v1,redline": false, "v1,nitrosystem": true, "v1,redline,nitrosystem": true,
+		"v2,nitrosystem": false, "nitrosystem": false, "v1,NitroSystem": false, "v1," + strings.Repeat("x,", 40) + "nitrosystem": false} {
+		if got := reportsNitro(v); got != want {
+			t.Errorf("reportsNitro(%q) = %v, want %v", v, got, want)
+		}
+	}
+}

@@ -105,6 +105,11 @@ func sbSubmitScore(c *Core, r *Req, req *xls.Struct) (*xls.Struct, error) {
 	if v, ok := d.Vals["score"].(uint64); ok {
 		sub.Score = v
 	}
+	if r.Nitro && scoreboard.CarBoards[sub.ScoreboardType] {
+		c.LogEvery(r, fmt.Sprintf("score-nitro/%d", xuid), 60, fmt.Sprintf("  SubmitScore board=(%d,%d) track=%d car=%d: not stored, the game reports NitroSystem in X-FH2MP-Tools (user %#x, shim %s)",
+			sub.ScoreboardType, typ, sub.TrackID, sub.CarID, xuid, c.shimOrNone(r)), diag.Warn, "")
+		return nil, nil
+	}
 	s, err := c.Sb.Submit(xuid, tag, typ, sub)
 	if err != nil {
 		return nil, err
@@ -118,6 +123,8 @@ func sbSubmitScore(c *Core, r *Req, req *xls.Struct) (*xls.Struct, error) {
 			why = "class X/R not allowed on a Rivals board"
 		case req != nil && sub.CarClassID != *req:
 			why = fmt.Sprintf("car class %d does not match event class %d", sub.CarClassID, *req)
+		case c.Sb.UnknownCar(sub):
+			why = fmt.Sprintf("car %d is not in the game catalog", sub.CarID)
 		case !math.IsNaN(score) && !math.IsInf(score, 0):
 			why = fmt.Sprintf("speed %.3f m/s is above the %s m/s cap", score, fmtG(scoreboard.SpeedCap))
 		default:

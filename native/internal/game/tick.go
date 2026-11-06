@@ -281,7 +281,7 @@ func (w *World) Tick() {
 	w.AuditVisibility(now)
 	w.BlFallback(now)
 	ev := w.Event
-	if ev != nil && !ev.Begun && !ev.LoadChecked && !w.Roadtrip && now-orNow(ev.Started, now) > EventLoadTimeout && now >= ev.LoadNext {
+	if ev != nil && !ev.Begun && !w.Roadtrip && now-orNow(ev.Started, now) > EventLoadTimeout {
 		w.DropUnloaded(now)
 	}
 	if w.Event != nil && w.Event.GoAt != nil {

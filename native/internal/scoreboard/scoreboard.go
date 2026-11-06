@@ -68,6 +68,7 @@ var (
 	SpeedBoards    = map[int64]bool{9: true}
 	GsidBoards     = map[int64]bool{9: true}
 	GhostBoards    = map[int64]bool{1: true, 3: true, 6: true}
+	CarBoards      = map[int64]bool{1: true, 3: true, 6: true, 9: true} // boards whose rows show the car; the counter boards (4) send no car
 	ClassAvgKmh    = [6]float64{88, 103, 119, 134, 150, 166}
 	ClassTopPI     = [8]float64{0.4345, 0.525628, 0.6179, 0.748432, 0.846368, 0.997086, 1.0, 1.1}
 	// FakeRows tops a board up with made-up rivals (env FH2MP_FAKE_ROWS; 0 = real players only).
@@ -148,6 +149,7 @@ type Store struct {
 	Names       []string
 	Cars        []cardb.PoolCar // by PI
 	GhostPolicy string
+	KnownCars   func() map[int64]bool // the car ids of the game catalog (nil = no catalog: no car check); car boards refuse other cars
 	fakeNames   map[int64]string
 }
 
@@ -188,6 +190,48 @@ func (s *Store) eventCars(event int64) []cardb.PoolCar {
 		return nil
 	}
 	return s.EventCars(event)
+}
+
+// HideUnknownCars hides every stored run on a car board whose car is not in the game catalog (they show as "DLC Car"). Reversible: it is an 'auto'
+// row of hidden_scores that an operator's restore (score_overrides) overrides; nothing is deleted. Runs that already have a hidden row or an override
+// are left as they are, so it is safe to run at every start. Returns the number of runs newly hidden.
+func (s *Store) HideUnknownCars() (int, error) {
+	if s.KnownCars == nil {
+		return 0, nil
+	}
+	known := s.KnownCars()
+	if known == nil {
+		return 0, nil
+	}
+	rows, err := s.DB.Query("SELECT s.id, s.car FROM score_submissions s WHERE s.sb IN (1,3,6,9) AND NOT EXISTS " +
+		"(SELECT 1 FROM hidden_scores hs WHERE hs.submission_id = s.id) AND NOT EXISTS (SELECT 1 FROM score_overrides o WHERE o.submission_id = s.id)")
+	if err != nil {
+		return 0, err
+	}
+	var bad []int64
+	for i := range rows {
+		if !known[rows[i].Int("car")] {
+			bad = append(bad, rows[i].Int("id"))
+		}
+	}
+	if len(bad) == 0 {
+		return 0, nil
+	}
+	now := Now()
+	err = s.DB.Do(func(t *db.Tx) error {
+		for _, id := range bad {
+			if _, err := t.Exec("INSERT INTO hidden_scores (submission_id, hidden_at, source, reason) VALUES (?,?,'auto','car not in the game catalog') "+
+				"ON CONFLICT (submission_id) DO NOTHING", id, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	log.Warn(fmt.Sprintf("hid %d stored runs on car boards whose car is not in the game catalog (source auto, reversible by restoring the run)", len(bad)))
+	return len(bad), nil
 }
 
 // Count is the number of stored submissions.
@@ -276,6 +320,15 @@ func (s *Store) Submit(xuid int64, tag string, scoreType int64, d *Submission) (
 
 func hexX(x int64) string { return fmt.Sprintf("%#x", x) }
 
+// UnknownCar is true when d is for a car board and its car (0 included) is not in the game catalog.
+func (s *Store) UnknownCar(d *Submission) bool {
+	if !CarBoards[d.ScoreboardType] || s.KnownCars == nil {
+		return false
+	}
+	known := s.KnownCars()
+	return known != nil && !known[d.CarID]
+}
+
 // Refusal says why Submit will not store this score ("" when it will): the measured value and the limit it broke.
 func (s *Store) Refusal(scoreType int64, d *Submission, score float64) string {
 	if math.IsNaN(score) || math.IsInf(score, 0) {
@@ -300,6 +353,9 @@ func (s *Store) Refusal(scoreType int64, d *Submission, score float64) string {
 	}
 	if SpeedBoards[d.ScoreboardType] && score > SpeedCap {
 		return fmt.Sprintf("speed %.3f m/s is above the %s m/s cap (%.0f km/h)", score, pyfmt.ReprFloat(SpeedCap), score*3.6)
+	}
+	if s.UnknownCar(d) {
+		return fmt.Sprintf("car %d is not in the game catalog (a car pack or an invented id shows as \"DLC Car\" on every other player's board)", d.CarID)
 	}
 	if EventBoards[d.ScoreboardType] && (d.CarClassID == 6 || d.CarClassID == 7) {
 		return fmt.Sprintf("car class %d (X/R) is not allowed on a Rivals board", d.CarClassID)

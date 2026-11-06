@@ -478,16 +478,21 @@ loop:
 			}
 			ready := r.bits(1)
 			accepted := ready == 0 || w.EligibleForEvent(peer, nil)
+			full := accepted && ready != 0 && w.PendingRace != nil && peer != w.PendingRace.Leader && w.Event == nil && w.EventSeatsFull(peer)
 			tail := ""
 			if !accepted {
 				tail = fmt.Sprintf("; REFUSED, car class/PI %s, see the 'not eligible' line above", choicesPtrRepr(peer.Choices))
 			}
-			w.Logf("%d MsgReadyRequest key=%d%d id=%d ready=%d accepted=%s (owner %d%s)", addr.Port, a, b, oid, ready, pyBool(accepted), peer.Owner, tail)
+			w.Logf("%d MsgReadyRequest key=%d%d id=%d ready=%d accepted=%s (owner %d%s)", addr.Port, a, b, oid, ready, pyBool(accepted && !full), peer.Owner, tail)
 			code := uint64(0)
-			if !accepted {
+			if !accepted || full {
 				code = 1
 			}
 			replies = append(replies, netv2.ReadyRequestResponse(code))
+			if full {
+				w.RefuseEventReady(peer, "MsgReadyRequest")
+				continue
+			}
 			if !accepted {
 				w.SetConsoleBool(peer, 4, 0, "car does not meet the event restrictions")
 				peer.ConsoleVars[4] = false

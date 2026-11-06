@@ -5,7 +5,7 @@ name: ci
 # release/ci.Containerfile, the same one `release/ci.sh --container` uses on a developer machine; Windows runs the launcher checks.
 on:
   push:
-    branches: [develop, main]
+    branches: [develop, main, "hotfix/**"]       # hotfix/X.Y: ops/ship-hotfix.sh tags only commits whose run passed
   pull_request:
   workflow_dispatch:
 

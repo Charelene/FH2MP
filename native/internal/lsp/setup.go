@@ -15,6 +15,7 @@ import (
 	"fh2mp/internal/clubs"
 	"fh2mp/internal/crashreports"
 	"fh2mp/internal/db"
+	"fh2mp/internal/diag"
 	"fh2mp/internal/drivatar"
 	"fh2mp/internal/notifstore"
 	"fh2mp/internal/pyjson"
@@ -147,6 +148,19 @@ func (c *Core) Setup(dsn string) error {
 	}
 	c.Sb = scoreboard.New(d, names, pool)
 	c.Sb.RouteLength = c.Cars.RouteLength
+	c.Sb.KnownCars = func() map[int64]bool {
+		ids, err := c.Cars.KnownIDs()
+		if err != nil {
+			c.LogExc(nil, "score boards: the car catalog could not be read, car ids are not checked on this submission", err, diag.Warn)
+			return nil
+		}
+		return ids
+	}
+	if n, err := c.Sb.HideUnknownCars(); err != nil {
+		return err
+	} else if n > 0 {
+		c.Log(nil, fmt.Sprintf("scoreboards: %d stored runs on cars outside the game catalog hidden (source auto)", n))
+	}
 	c.Sb.EventInfo = func(id int64) *scoreboard.EventInfo {
 		e := c.eventInfo(id)
 		if e == nil {

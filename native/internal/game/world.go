@@ -191,8 +191,12 @@ type Event struct {
 	ProgressAt           float64
 	Laps                 *omap.Map[*Peer, int]
 	LoadedAfter          *omap.Map[*Peer, float64]
-	LoadChecked          bool
-	LoadNext             float64
+	PickedAfter          *omap.Map[*Peer, float64]
+	SelectEnteredAt      *float64
+	Held                 map[*Peer]bool
+	HoldLimitLogged      bool
+	LoadRestart          float64 // load clocks restart here after a suspect was dropped
+	SuspectDropped       bool
 	GridAt, GridReportAt float64
 	GridReadyAfter       *omap.Map[*Peer, float64]
 	GoAt                 *float64
@@ -328,6 +332,7 @@ type World struct {
 	nextTick         float64
 	lightRoutes      map[uint64]Addr
 	honkRoutes       map[uint64]Addr
+	carselRoutes     map[uint64]Addr
 }
 
 // NewWorld is Server(...) for a hub-owned world.

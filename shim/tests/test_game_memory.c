@@ -26,7 +26,7 @@ int main(void)
     HMODULE ntdll = GetModuleHandleA("ntdll.dll");
     int wine = ntdll && GetProcAddress(ntdll, "wine_get_version") != NULL;      /* its own answer, not the shim's */
 
-    assert(running_under_wine() == wine);
+    assert(game_reads_need_range_check() == wine);
     assert(page);
     /* page 0 readable, page 1 PAGE_NOACCESS, page 2 guard, page 3 reserved only */
     assert(VirtualAlloc(page, 3 * 0x1000, MEM_COMMIT, PAGE_READWRITE));

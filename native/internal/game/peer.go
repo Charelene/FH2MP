@@ -97,6 +97,8 @@ type Peer struct {
 	ConsoleVars                           map[int]bool
 	GoptsSeq                              int
 	VipHidden                             *VipHidden
+	PlayerStatus                          int // latest LobbyPlayer.PlayerStatus this client wrote (PlayerVarStatus); valid when HasPlayerStatus
+	HasPlayerStatus                       bool
 	GoptsReleased                         bool
 	GoptsOwnSeq                           *int
 	ConsoleOid                            *int
@@ -154,6 +156,7 @@ type Peer struct {
 	LightingLoggedAt float64
 	Honk             *HonkState
 	HonkLoggedAt     float64
+	Carsel           *CarselState
 	Extra            map[string]any
 	TeamID           int
 	RtPstate         int

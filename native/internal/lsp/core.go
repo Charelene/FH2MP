@@ -99,6 +99,7 @@ type Req struct {
 	Run     string
 	Shim    string
 	OwnCars bool
+	Nitro   bool      // the game reports NitroSystem in X-FH2MP-Tools (set by identify)
 	GameDB  [2]string // client's and server's database hash, for the lines that refuse a request later
 }
 

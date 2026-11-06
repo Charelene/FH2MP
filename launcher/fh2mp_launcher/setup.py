@@ -157,6 +157,7 @@ class Packages:
         self.dependencies = {}
         self.shim_package = None
         self.manifest = None
+        self.shim_entry = None
 
     def get_azimuth(self, progress=None, cancelled=lambda: False):
         """Azimuth's pinned ZIP from the FH2MP mirror (constants.AZIMUTH_ARCHIVE) -> its path; size and SHA-256 are checked by the download, the
@@ -170,19 +171,19 @@ class Packages:
 
     def shim_current(self):
         """A version marker alone cannot distinguish successive local candidates."""
-        manifest = self.lc.manifest
-        if not manifest or manifest.get('tag') != f'v{__version__}':
+        entry = updater.shim_entry(self.lc.manifest) or updater.shim_entry(self.lc.own_manifest)
+        if not entry:
             up = updater.Updater(channel=self.lc.settings['channel'])
             if not up.base.startswith('file://'):
                 return False
             try:
-                manifest = up.fetch_manifest(tag=f'v{__version__}')
+                entry = updater.shim_entry(up.fetch_manifest(tag=f'v{__version__}'))
             except updater.UpdateError as e:
                 logs.swallowed('setup', 'setup.manifest_failed', e, effect='the installed shim is not compared with the signed one')
                 return False
-        expected = manifest.get('shim', {}).get('dllSha256')
-        if manifest.get('shim', {}).get('version') != __version__:
-            return False
+            if not entry:
+                return False
+        expected = entry.get('dllSha256')
         try:
             from .constants import MODS_DIR, SHIM_DLL
             target = os.path.join(self.lc.settings['azimuth_dir'], MODS_DIR, SHIM_DLL)
@@ -209,19 +210,21 @@ class Packages:
     def get_shim(self, progress=None, cancelled=lambda: False):
         from .core import read_shim_zip
         up = updater.Updater(channel=self.lc.settings['channel'])
-        manifest = up.fetch_manifest(tag=f'v{__version__}')
-        if manifest['shim']['version'] != __version__:
-            raise updater.UpdateError(f'This launcher requires FH2MP {__version__}. The signed release does not match.')
-        entry = manifest['shim']
-        path = up.download(manifest['tag'], entry, progress, cancelled)
+        manifest, entry = updater.shim_release(up, self.lc.manifest)
+        path = up.download(entry['tag'], entry, progress, cancelled)
         data = read_shim_zip(path)
         if shim.blob_version(data) != entry['version']:
             raise updater.UpdateError('The FH2MP DLL version does not match its signed manifest.')
-        self.manifest, self.shim_package = manifest, data
+        self.manifest, self.shim_entry, self.shim_package = manifest, entry, data
         return entry['version']
 
     def install_shim(self):
         if self.shim_package is None:
             raise ValueError('Download FH2MP first.')
-        shim.install(self.lc.settings['azimuth_dir'], self.shim_package, self.manifest['shim'].get('dllSha256'))
-        self.lc.manifest = self.manifest
+        before = self.lc.shim_state()
+        shim.install(self.lc.settings['azimuth_dir'], self.shim_package, self.shim_entry.get('dllSha256'))
+        if self.lc.manifest is None:
+            self.lc.manifest = self.manifest
+        elif self.manifest is not self.lc.manifest:
+            self.lc.own_manifest = self.manifest
+        self.lc.remember_shim(self.shim_entry, self.manifest, before)
