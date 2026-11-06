@@ -52,6 +52,49 @@ def at_least(have, need):
     return (have or "").endswith("-debug") or vkey(have) >= vkey(need)
 
 
+def line(v):
+    """The X.Y release line of a version ('1.1' for 1.1.5, v1.1.5, 1.1.5-rc2), '' when it is not one."""
+    m = re.match(r"^v?(\d+)\.(\d+)\.\d+", v or "")
+    return f"{m[1]}.{m[2]}" if m else ""
+
+
+def shim_entry(manifest, launcher_version=None):
+    """The shim a signed manifest offers this launcher, as its manifest entry plus the manifest's release tag ("tag"), or None.
+
+    Any shim of an X.Y line works with any launcher of it unless the entry's minLauncher says otherwise, so a hotfix release can hold a newer
+    shim than the launcher, or (a hotfix that was withdrawn) the older one of an earlier release, carried: every release holds each file its
+    manifest names (release/make_manifest.py). A manifest of another line, or one older than this launcher (GitHub's "latest" behind a
+    launcher that was just published), offers nothing: the launcher then takes its own release's (shim_release)."""
+    launcher_version = launcher_version or __version__
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("shim"), dict):
+        return None
+    s = manifest["shim"]
+    ver = str(s.get("version", ""))
+    release = str(manifest.get("version") or manifest.get("tag", ""))
+    if not line(ver) or line(ver) != line(launcher_version) or vkey(release) < vkey(launcher_version):
+        return None
+    if not at_least(launcher_version, s.get("minLauncher", "")):
+        return None
+    tag = str(manifest.get("tag", ""))
+    if not _TAG_RE.fullmatch(tag):
+        return None
+    return dict(s, tag=tag)
+
+
+def shim_release(up, latest=None, launcher_version=None):
+    """(manifest, shim entry) to install: what the newest signed manifest of the channel (`latest`, already fetched) offers this launcher,
+    else what this launcher's own release offers. Raises UpdateError when neither does."""
+    launcher_version = launcher_version or __version__
+    e = shim_entry(latest, launcher_version)
+    if e:
+        return latest, e
+    m = up.fetch_manifest(tag=f"v{launcher_version}")
+    e = shim_entry(m, launcher_version)
+    if not e:
+        raise UpdateError(f"The signed release has no FH2MP shim for launcher {launcher_version}.")
+    return m, e
+
+
 def verify_manifest(raw, sig_b64, pubkey_b64=None):
     pub = pubkey_b64 if pubkey_b64 is not None else RELEASE_PUBKEY_B64
     if not pub:
@@ -118,14 +161,17 @@ class Updater:
 
     def _release_tag(self):
         """stable: the latest non-prerelease. dev, and any pre-release launcher (GitHub's "latest" skips pre-releases, so it could never find its
-        own shim): the newest release, pre-releases included."""
+        own shim): the highest version with a manifest, pre-releases included. Highest, not newest: a hotfix of the stable line published after
+        a release candidate of the next one must not take the candidate's testers back."""
         if self.channel != "dev" and "-" not in __version__:
             return None
         rels = json.loads(self._get(f"{self.api}/repos/{self.repo}/releases?per_page=15", 1_000_000, accept="application/vnd.github+json"))
-        for r in rels:
-            if not r.get("draft") and any(a.get("name") == "manifest.json" for a in r.get("assets", [])):
-                return r["tag_name"]
-        raise UpdateError("no release with a manifest was found")
+        tags = [str(r.get("tag_name") or "") for r in rels
+                if not r.get("draft") and any(a.get("name") == "manifest.json" for a in r.get("assets", []))]
+        tags = [t for t in tags if _TAG_RE.fullmatch(t)]
+        if not tags:
+            raise UpdateError("no release with a manifest was found")
+        return max(tags, key=vkey)
 
     def releases(self, n=5):
         """The newest published releases (no drafts), for the launcher's patch-notes card: [{tag, name, body, url, prerelease}]."""

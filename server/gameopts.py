@@ -1,12 +1,14 @@
 """Reads what the leader chose in the event options (Nerd::GameOptionsSynced, the transfer object a Free Roam leader writes when an event starts).
 
 The object is a stream of [variable id: 10 bits][value] pairs with ascending ids (10-bit ids, registration order recovered with
-tools/gameopts_schema.py). Writes are deltas: omitted values retain the previous state. The native constructor schema has 493 fields.
+tools/gamedata/gameopts_schema.py). Writes are deltas: omitted values retain the previous state. The native constructor schema has 493 fields.
 
 NumTeams (ScoringOptions, 2 bits, 0..2) is variable 428 and TeamScoringType (3 bits) is 429, right behind it. Found 2026-10-22 from the
 game's constructors and checked on the logs: every Road Trip team event of the dev server (7 of 7) and 25 Free Roam payloads on prod carry
 [428][2][429]; random bits match it about once in four million offsets (a 22-bit signature).
 """
+
+import struct
 
 NUM_TEAMS_ID = 428
 TEAM_SCORING_ID = 429
@@ -146,6 +148,19 @@ def _lap_fields(size, payload):
         pos += width
         previous = vid
     return pos, None, pos if end_offset is None else end_offset, end_type
+
+
+MAX_TIME_ID = 420       # EndConditionOptions.MaxTime / Time (float seconds; 0x9918b0 writes it at +0x60 for Time and AllPlayersInBucket)
+MAX_TIME_LIMIT = 86400.0
+
+
+def max_time(size, payload):
+    """The event time limit in seconds the leader set (King: Time, Infection: MaxTime), or None when it is absent or not a usable number."""
+    entry = fields(size, payload).get(MAX_TIME_ID)
+    if entry is None or entry[0] != 32:
+        return None
+    seconds = struct.unpack("<f", entry[1].to_bytes(4, "little"))[0]
+    return seconds if 0.0 < seconds <= MAX_TIME_LIMIT else None
 
 
 def lap_field(size, payload):

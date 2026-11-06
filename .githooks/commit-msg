@@ -1,0 +1,6 @@
+#!/bin/sh
+# Rejects commit messages that credit an AI assistant (user rule: nobody but the repo owner is ever a co-author).
+if grep -Eiq '^[[:space:]]*co-authored-by:.*(claude|anthropic)|generated (with|by).*claude|noreply@anthropic\.com' "$1"; then
+    echo "commit-msg: refused, the message credits Claude/Anthropic. Remove that line and commit again." >&2
+    exit 1
+fi

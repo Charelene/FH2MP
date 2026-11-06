@@ -1,0 +1,6 @@
+Prepare 1.2.0: the Go servers, event and leaderboard fixes, the toast, launcher fixes
+
+The game server and the web services run on the Go port (native/) instead of the Python servers. Events drop only the player who does not
+finish loading (30 s), cars with unknown parts are reset to the stock class and PI, leaderboards hide and refuse unknown cars and nitro scores,
+a Free Roam event's car select ends at one shared time, race event toasts name the track, the setup wizard keeps one size, and the signed
+hotfix delivery between releases is in the launcher. HonkHonk 0.4.0 is the pinned version.

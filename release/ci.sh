@@ -4,7 +4,7 @@
 #   release/ci.sh [--container] <lane>...
 #
 # Lanes: server (portable server checks, release flow, pure shim checks), pg (disposable PostgreSQL), shim (Wine checks),
-# launcher, mutations (deliberate regressions must be caught), quick (server + launcher, before a push), all.
+# launcher, mutations (deliberate regressions must be caught), go (the Go port: fmt, vet, tests), quick (server + launcher, before a push), all.
 # --container runs the lanes in the image built from release/ci.Containerfile (podman or docker): the same Python, Wine, mingw and
 # PostgreSQL as GitHub. Without it the host's tools are used, which can differ (host Wine 10/11 vs Debian's, Python 3.14 vs 3.12).
 set -euo pipefail
@@ -16,7 +16,7 @@ lanes=()
 for a in "$@"; do
     case "$a" in
         --container) container=1 ;;
-        server|pg|shim|launcher|mutations|quick|all) lanes+=("$a") ;;
+        server|pg|shim|launcher|mutations|go|quick|all) lanes+=("$a") ;;
         -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
         *) echo "unknown lane or option: $a" >&2; exit 2 ;;
     esac
@@ -63,24 +63,35 @@ failed=0
 
 lane_server() {
     run "server checks" "$py" -W ignore -I release/run_server_tests.py
-    run "release flow" "$py" -I -m unittest discover -s ops -p test_release_flow.py
-    run "shim sha256" shim/test_sha256.sh
-    run "shim inflate" shim/test_inflate.sh
-    run "shim gamedb keep" shim/test_gamedb_keep.sh
-    run "shim session age" shim/test_session_age.sh
-    run "shim eo timelock" shim/test_eo_timelock.sh
-    run "shim online setup" shim/test_online_setup.sh
+    [ ! -d ops ] || run "release flow" "$py" -I -m unittest discover -s ops -p test_release_flow.py   # ops/ is private: present on the operator machine only
+    run "shim sha256" shim/tests/test_sha256.sh
+    run "shim inflate" shim/tests/test_inflate.sh
+    run "shim gamedb keep" shim/tests/test_gamedb_keep.sh
+    run "shim session age" shim/tests/test_session_age.sh
+    run "shim session switches" shim/tests/test_session_switches.sh
+    run "shim health" shim/tests/test_health.sh
+    run "shim eo timelock" shim/tests/test_eo_timelock.sh
+    run "shim online setup" shim/tests/test_online_setup.sh
 }
 
 pg_root=
 pg_stop() { [ -z "$pg_root" ] || { pg_ctl -D "$pg_root/data" -m immediate stop >/dev/null 2>&1 || true; rm -rf "$pg_root"; pg_root=; }; }
 trap pg_stop EXIT
-pg_start() {   # a disposable cluster on a private socket directory; FH2MP_TEST_PG_DSN points at its fh2mp_test_ci database
-    local bin
+pg_start() {   # a disposable cluster on a private socket directory; FH2MP_TEST_PG_DSN points at its fh2mp_test_ci database. With "tcp" it also listens
+               # on a loopback port and FH2MP_TEST_PG_ADMIN_DSN names it (the Go tests make their own databases through it)
+    local bin port=
     bin=$(ls /usr/lib/postgresql/*/bin/initdb 2>/dev/null | sort -V | tail -1)
     command -v initdb >/dev/null || { [ -n "$bin" ] && PATH=$(dirname "$bin"):$PATH; } || return 1
     pg_root=$(mktemp -d)
     initdb -D "$pg_root/data" -A trust --no-locale --encoding=UTF8 >/dev/null
+    if [ "${1:-}" = tcp ]; then
+        port=$("$py" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+        pg_ctl -D "$pg_root/data" -l "$pg_root/postgres.log" -o "-h 127.0.0.1 -p $port -k $pg_root" -w start >/dev/null
+        export FH2MP_TEST_PG_ADMIN_DSN="postgresql://$(id -un)@127.0.0.1:$port/postgres"
+        createdb -h 127.0.0.1 -p "$port" fh2mp_test_ci
+        export FH2MP_TEST_PG_DSN="host=127.0.0.1 port=$port dbname=fh2mp_test_ci"
+        return 0
+    fi
     pg_ctl -D "$pg_root/data" -l "$pg_root/postgres.log" -o "-h '' -k $pg_root" -w start >/dev/null
     createdb -h "$pg_root" fh2mp_test_ci
     export FH2MP_TEST_PG_DSN="host=$pg_root dbname=fh2mp_test_ci"
@@ -100,7 +111,7 @@ lane_pg() {
 }
 
 lane_shim() {
-    # One booted prefix, copied for each check (shim/wine_prefix.sh); a Wine that cannot start is reported as that, not as a failed check.
+    # One booted prefix, copied for each check (shim/tests/wine_prefix.sh); a Wine that cannot start is reported as that, not as a failed check.
     local tpl
     tpl=$(mktemp -d)/prefix
     if ! WINEPREFIX="$tpl" WINEDEBUG=-all wineboot -i >/dev/null 2>&1 || ! WINEPREFIX="$tpl" WINEDEBUG=-all wine cmd /c exit >/dev/null 2>&1; then
@@ -115,8 +126,8 @@ lane_shim() {
     logs=$(dirname "$tpl")
     declare -A pids
     t0=$(date +%s)
-    for t in gamedb_files game_image title_scope xhr_config torque_scale net_strings torque_load speed_pb restricted_tools lighting honk; do
-        "shim/test_$t.sh" > "$logs/$t.log" 2>&1 &
+    for t in gamedb_files game_image game_memory title_scope xhr_config health_thread session_log torque_scale net_strings torque_load speed_pb restricted_tools lighting honk diag party_hud car_pool crash_guards; do
+        "shim/tests/test_$t.sh" > "$logs/$t.log" 2>&1 &
         pids[$t]=$!
     done
     for t in "${!pids[@]}"; do
@@ -137,6 +148,20 @@ lane_launcher() {
     run "launcher checks" env FH2MP_NO_KEYRING=1 QT_QPA_PLATFORM=offscreen sh -c 'cd launcher && "$0" -m unittest discover -s tests' "$py"
 }
 
+lane_go() {   # the Go port (native/): format, vet, tests. The tests that need the game catalog or server/data skip without them; the others use a disposable PostgreSQL
+    command -v go >/dev/null 2>&1 || { echo "go lane: go is not installed" >&2; failed=1; return; }
+    run "go fmt" sh -c 'cd native && test -z "$(gofmt -l .)"'
+    run "go vet" sh -c 'cd native && go vet ./...'
+    if pg_start tcp; then
+        run "go test" sh -c 'cd native && go test ./...'
+        pg_stop
+        unset FH2MP_TEST_PG_ADMIN_DSN
+    else
+        echo "go lane: no PostgreSQL here, the database tests are skipped" >&2
+        run "go test" sh -c 'cd native && go test ./...'
+    fi
+}
+
 lane_mutations() {
     run "mutations server" "$py" -I release/check_test_mutations.py --area server
     run "mutations launcher" sh -c 'cd launcher && "$0" -I ../release/check_test_mutations.py --area launcher' "$py"
@@ -145,7 +170,7 @@ lane_mutations() {
 for lane in "${lanes[@]}"; do
     case "$lane" in
         quick) lane_server; lane_launcher ;;
-        all) lane_server; lane_pg; lane_shim; lane_launcher; lane_mutations ;;
+        all) lane_server; lane_pg; lane_shim; lane_launcher; lane_mutations; lane_go ;;
         *) "lane_$lane" ;;
     esac
 done

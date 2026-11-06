@@ -2,7 +2,7 @@
  * Keeping the car database another mod had in mediaoverride while the server's copy is there, and putting it back for offline play.
  * A traffic car mod's database, or a car pack's put in mediaoverride, would otherwise be lost after one online session. These are the
  * decisions only, on what the caller found out about the files, with no library calls (the shim links KERNEL32 only); gamedb_place and
- * gamedb_put_back in fh2mp_mod.c do the file work. Checked by shim/test_gamedb_keep.sh.
+ * gamedb_put_back in fh2mp_mod.c do the file work. Checked by shim/tests/test_gamedb_keep.sh.
  *
  *   F   <Azimuth>\fh2mp\gamedbRC.slt, the launcher's copy of the server's database
  *   T   <Mount>\mediaoverride\Stripped\gamedbRC.slt, what the game reads

@@ -1,6 +1,8 @@
 """Run blocking work (network, files, proof of work) off the UI thread and deliver the result back on it."""
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, Slot
 
+from .. import logs
+
 
 class _Dispatcher(QObject):
     """Lives in the main thread; emitting `call` from any thread runs the callable here (a queued, thread-safe hop)."""
@@ -36,6 +38,7 @@ class _Job(QRunnable):
         try:
             result = self.fn(self)
         except BaseException as e:  # noqa: BLE001 - everything is reported to the UI
+            logs.job_failed(getattr(self.fn, "__qualname__", repr(self.fn)), e)
             if self.err:
                 d.call.emit(lambda e=e: self.err(e))
             return

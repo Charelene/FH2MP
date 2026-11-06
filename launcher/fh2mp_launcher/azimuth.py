@@ -5,7 +5,7 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from . import paths
+from . import logs, paths
 from .constants import BUILTIN_AZIMUTH_BUILDS
 
 EXE = "azimuth.exe"
@@ -68,7 +68,8 @@ def read_ini(folder):
     out, sec = {}, None
     try:
         text = _read_text(os.path.join(folder, "data", "azimuth.ini"))
-    except OSError:
+    except OSError as e:
+        logs.swallowed("azimuth", "azimuth.ini_unreadable", e, effect="no game folder or player name known")
         return out
     for line in text.splitlines():
         line = line.strip()
@@ -364,7 +365,7 @@ def steam_shortcut_folders():
 
 # ---- progress: Azimuth keeps saves per Xbox user id. 0.9.10: data/titles/<id>/saves/player-N/User_<HEX>; 0.9.7 and older: data/saves/player-N/User_<HEX>
 # (0.9.10 moves those on its first start and keeps the old folder as data/saves-backup-<time>). Vanilla Azimuth uses one fixed id, an FH2MP account
-# has its own, so without this a new account would open an empty profile and the player's campaign would look lost (docs/issues.md #36).
+# has its own, so without this a new account would open an empty profile and the player's campaign would look lost (docs/archive/issues.md #36).
 
 LEGACY_SAVE_DIR = "User_9000000000000"
 TITLE_DIR = "1A96545B"                     # data/titles/<id> of Forza Horizon 2 (GAME_ID upper-case)

@@ -1,9 +1,9 @@
-/* Horns of other players (issue 293). HonkHonk (suderek22, fh2-mods\HonkHonk.dll 0.3.4, a required add-on) plays the local horn through the game's
- * own FMOD; this file reads which horn the player is holding out of HonkHonk's memory, tells the server (a side channel like lighting, server/honk.py,
- * its own magic FH2MPHN1) and plays the horns the server lists at those cars with the same FMOD calls and the same bank. HonkHonk itself is not changed
- * on disk; the addresses below are for the pinned DLL (sha256 4ed6ba03...) and are checked byte for byte, another build is left alone.
+/* Horns of other players (issue 293). HonkHonk (suderek22, fh2-mods\HonkHonk.dll 0.4.0 pinned, 0.3.4 still known, a required add-on) plays the local
+ * horn through the game's own FMOD; this file reads which horn the player is holding out of HonkHonk's memory, tells the server (a side channel like
+ * lighting, server/honk.py, its own magic FH2MPHN1) and plays the horns the server lists at those cars with the same FMOD calls and the same bank.
+ * HonkHonk itself is not changed on disk; the addresses in honk_builds are per known DLL build and are checked byte for byte, another build is left alone.
  *
- * Controls: HonkHonk honks on the left stick (L3, XInput bit 0x40, one `test byte [rsp+0x2c], 0x40` in its input loop). Forza honks on the right
+ * Controls: HonkHonk honks on the left stick (L3, button bit 0x40, one `test byte [rsp+disp8], 0x40` in its input loop). Forza honks on the right
  * stick and Extra Options' headlights are moved to the left stick by the launcher, so the immediate is changed to 0x80 in memory. That is its own
  * step: it happens whether or not horns can be shared, and only when FH2_ExtraOptions.ini has the headlight/roof toggles off the right stick, so the
  * horn and a toggle never end up on one stick; data\bin\fh2mp-controls.txt tells the launcher where the horn is (launcher/fh2mp_launcher/shim.py).
@@ -15,8 +15,6 @@
  * stops. The network thread never touches FMOD or a car. Needs the lighting hooks (the server address, ticket epoch and car id are theirs). */
 #include "honk_wire.h"
 
-#define HH_REQUEST_RVA 0x6840u        /* fmodhorn::request(int): mov [rip+disp32], ecx ; ret, the horn index or -1 */
-#define HH_BUTTON_RVA 0x222du         /* test byte [rsp+0x2c], 0x40 ; jne +5 : XINPUT_GAMEPAD_LEFT_THUMB */
 #define HH_SYSTEM_RVA 0x10140d0u      /* AudioEngineFmod::vfunc_5 */
 #define HH_STUDIO_OFFSET 0x7f0u
 #define HH_VOICES 8
@@ -247,15 +245,36 @@ static void honk_audio_tick(void *engine)
 }
 static void honk_audio_update(void *engine)
 {
+#ifdef FH2MP_PERF
+    LONG64 perf_a;
+#endif
     g_honk_update_original(engine);
+#ifdef FH2MP_PERF
+    perf_a=perf_now();
+#endif
     if(g_honk_enabled) honk_audio_tick(engine);
+#ifdef FH2MP_PERF
+    perf_add(PERF_HORN,perf_now()-perf_a);
+#endif
 }
 
-/* ---- HonkHonk.dll: the horn it holds, its button, its bank ---- */
-static const unsigned char honk_request_code[7]={0x89,0x0d,0xfe,0x77,0x00,0x00,0xc3};
-static const unsigned char honk_button_code[7]={0xf6,0x44,0x24,0x2c,0x40,0x75,0x05};
-static const unsigned char honk_moved_code[7]={0xf6,0x44,0x24,0x2c,0x80,0x75,0x05};
-static unsigned char *g_honk_request;                /* HonkHonk's request variable, NULL until the pinned build is recognised */
+/* ---- HonkHonk.dll: the horn it holds, its button, its bank ----
+ * One entry per known build, recognised by its request setter. request: fmodhorn::request(int), `mov [rip+disp32], ecx ; ret` (the horn index or -1;
+ * both builds store to RVA 0xe044). button: the left stick test of the input loop, its immediate (+4) is 0x40 and becomes 0x80 for the right stick.
+ * xinput_redirect: the build polls XInputGetState itself (0.3.4 only; 0.4.0 reads the game's active controller, its PR #1). */
+typedef struct {
+    const char *version;
+    unsigned request_rva; unsigned char request_code[7];
+    unsigned button_rva; unsigned char button_code[7];
+    int xinput_redirect;
+} honk_build;
+static const honk_build honk_builds[]={
+    {"0.4.0",0x68c0u,{0x89,0x0d,0x7e,0x77,0x00,0x00,0xc3},0x2267u,{0xf6,0x44,0x24,0x60,0x40,0x74,0x5e},0},   /* sha256 b42484b7..., test [rsp+0x60] ; je */
+    {"0.3.4",0x6840u,{0x89,0x0d,0xfe,0x77,0x00,0x00,0xc3},0x222du,{0xf6,0x44,0x24,0x2c,0x40,0x75,0x05},1},   /* sha256 4ed6ba03..., test [rsp+0x2c] ; jne */
+};
+#define HH_BUILDS (sizeof honk_builds/sizeof honk_builds[0])
+#define HH_BUTTON_IMM 4u
+static unsigned char *g_honk_request;                /* HonkHonk's request variable, NULL until a known build is recognised */
 
 static int honk_code_is(unsigned char *at, const unsigned char *code, unsigned n)
 {
@@ -264,15 +283,74 @@ static int honk_code_is(unsigned char *at, const unsigned char *code, unsigned n
     for(i=0;i<n;i++) if(now[i]!=code[i]) return 0;
     return 1;
 }
-/* Left stick -> right stick in HonkHonk's input loop (the immediate of the one `test byte [rsp+0x2c], imm8`). */
-static int honk_move_button(unsigned char *hh)
+/* The known build at HonkHonk's image `hh`, NULL for another build. */
+static const honk_build *honk_build_at(unsigned char *hh)
 {
-    unsigned char *imm=hh+HH_BUTTON_RVA+4; DWORD old;
+    unsigned i;
+    for(i=0;i<HH_BUILDS;i++) if(honk_code_is(hh+honk_builds[i].request_rva,honk_builds[i].request_code,7)) return &honk_builds[i];
+    return NULL;
+}
+/* The build's button test with the immediate `imm` (0x40 as built, 0x80 once moved). */
+static int honk_button_is(unsigned char *hh, const honk_build *b, unsigned char imm)
+{
+    unsigned char code[7]; unsigned i;
+    for(i=0;i<7;i++) code[i]=b->button_code[i];
+    code[HH_BUTTON_IMM]=imm;
+    return honk_code_is(hh+b->button_rva,code,7);
+}
+/* Left stick -> right stick in HonkHonk's input loop (the immediate of the one `test byte [rsp+disp8], imm8`). */
+static int honk_move_button(unsigned char *hh, const honk_build *b)
+{
+    unsigned char *imm=hh+b->button_rva+HH_BUTTON_IMM; DWORD old;
     if(!VirtualProtect(imm,1,PAGE_EXECUTE_READWRITE,&old)) return 0;
     *imm=0x80;
     FlushInstructionCache(GetCurrentProcess(),imm,1);
     VirtualProtect(imm,1,old,&old);
     return 1;
+}
+
+/* HonkHonk 0.3.4's worker calls XInputGetState on all four pad slots every 16 ms (0.4.0 reads the game's controller itself, this is not needed there). Under Wine one call costs 0.5-0.8 ms even for an empty slot (measured under
+ * Proton 11 in a scratch prefix: avg 530-825 us, max 3-5 ms): ~240 calls/s, about a sixth of a core and constant wineserver traffic. With HonkHonk off the
+ * lag in a full lobby was gone (issue #354, hand test), and with the pad read from the game it stayed gone. So on Wine its import slot for XInputGetState
+ * (ordinal 2 of XINPUT1_4.dll, IAT slot HonkHonk.dll+0x92b0, the target of the thunk at +0x7678) points at honk_xinput_state: the button mask comes from the
+ * game's own active controller, the way Extra Options reads it (input manager game+0x365d7c8 with vtable game+0x2e7a2e8, active controller at +0xab28 inside
+ * 8 controllers of 0x1300 bytes from +0x10, connected byte +4, buttons u16 +0xc0, triggers +0x70), and the other slots answer "not connected". */
+#define HH_XINPUT_IAT_RVA 0x92b0u
+static const unsigned char honk_xinput_thunk[6]={0xff,0x25,0x32,0x1c,0x00,0x00};      /* +0x7678: jmp [rip+0x1c32] -> +0x92b0 */
+typedef struct { DWORD packet; WORD buttons; BYTE left_trigger, right_trigger; SHORT lx, ly, rx, ry; } honk_xinput_state_t;
+static unsigned char *g_honk_pad_image;
+static DWORD WINAPI honk_xinput_state(DWORD user, honk_xinput_state_t *state)
+{
+    unsigned char *img=g_honk_pad_image, *manager=NULL, *controller=NULL, connected=0, triggers[2]={0,0}; WORD buttons=0; static DWORD packet;
+    if(!state) return ERROR_BAD_ARGUMENTS;
+    if(user!=0 || !img) return ERROR_DEVICE_NOT_CONNECTED;
+    if(!read_game_memory(img+0x365d7c8,&manager,8) || !manager || !honk_code_is(manager,(const unsigned char *)&(void *const){img+0x2e7a2e8},8) ||
+       !read_game_memory(manager+0xab28,&controller,8) || !controller ||
+       (UINT_PTR)controller<(UINT_PTR)manager+0x10 || (UINT_PTR)controller>=(UINT_PTR)manager+0x10+8*0x1300 || ((UINT_PTR)controller-((UINT_PTR)manager+0x10))%0x1300 ||
+       !read_game_memory(controller+4,&connected,1) || connected!=1 || !read_game_memory(controller+0xc0,&buttons,2)) return ERROR_DEVICE_NOT_CONNECTED;
+    read_game_memory(controller+0x70,triggers,2);
+    state->packet=++packet; state->buttons=buttons; state->left_trigger=triggers[0]; state->right_trigger=triggers[1];
+    state->lx=state->ly=state->rx=state->ry=0;
+    return ERROR_SUCCESS;
+}
+static void honk_redirect_pad(unsigned char *hh, const honk_build *b)
+{
+    HMODULE nt=GetModuleHandleW(L"ntdll.dll"); unsigned char *slot=hh+HH_XINPUT_IAT_RVA, *image; DWORD old; void *target=(void *)honk_xinput_state;
+    if(!b || !b->xinput_redirect) return;
+    image=find_fh2_image();
+    if(!nt || !GetProcAddress(nt,"wine_get_version") || !image) return;
+    if(!honk_code_is(hh+0x7678,honk_xinput_thunk,6)) {
+        log_begin();log_raw("honk: pad redirect skipped, HonkHonk.dll+0x7678 is not the 0.3.4 XInputGetState thunk\n");
+        return;
+    }
+    if(!VirtualProtect(slot,8,PAGE_READWRITE,&old)) {
+        log_begin();log_raw("honk: pad redirect failed, VirtualProtect on HonkHonk.dll+0x92b0 error ");log_dec(GetLastError());log_raw("\n");
+        return;
+    }
+    g_honk_pad_image=image;
+    mem_copy(slot,&target,8);
+    VirtualProtect(slot,8,old,&old);
+    log_begin();log_raw("honk: HonkHonk.dll XInputGetState redirected to the game's active controller (Wine)\n");
 }
 
 /* ---- which stick the horn is on: never the one Extra Options' headlight or roof toggle uses ----
@@ -325,18 +403,23 @@ static void honk_write_status(int right, int movable, const char *why)
     CloseHandle(f);
 }
 /* Once per game: puts HonkHonk's horn button on the right stick when Extra Options' toggles are off it. -> 1 the horn is on the right stick. */
-static int honk_place_button(unsigned char *hh)
+static int honk_place_button(unsigned char *hh, const honk_build *b)
 {
     unsigned eo;
-    if(honk_code_is(hh+HH_BUTTON_RVA,honk_moved_code,7)) {
+    if(b && honk_button_is(hh,b,0x80)) {
         honk_write_status(1,1,"already on the right stick");
         return 1;
     }
-    if(!honk_code_is(hh+HH_BUTTON_RVA,honk_button_code,7)) {
+    if(!b || !honk_button_is(hh,b,0x40)) {
         unsigned char now[7];
-        log_begin();log_raw("honk: the horn button stays on the left stick, HonkHonk.dll is not the known 0.3.4 build (at +0x");log_hex(HH_BUTTON_RVA,4);log_raw(" found ");
-        if(read_game_memory(hh+HH_BUTTON_RVA,now,7)) log_hexbytes(now,7); else log_raw("(unreadable)");
-        log_raw("); the launcher puts Extra Options' headlights/roof back on the right stick\n");
+        log_begin();
+        if(!b) log_raw("honk: the horn button stays on the left stick, HonkHonk.dll is not a known build (0.4.0, 0.3.4)");
+        else {
+            log_raw("honk: the horn button stays on the left stick, HonkHonk.dll ");log_raw(b->version);log_raw(" has other bytes at +0x");log_hex(b->button_rva,4);
+            log_raw(": ");
+            if(read_game_memory(hh+b->button_rva,now,7)) log_hexbytes(now,7); else log_raw("(unreadable)");
+        }
+        log_raw("; the launcher puts Extra Options' headlights/roof back on the right stick\n");
         honk_write_status(0,0,"unknown HonkHonk build");
         return 0;
     }
@@ -346,7 +429,7 @@ static int honk_place_button(unsigned char *hh)
         honk_write_status(0,1,"Extra Options uses the right stick");
         return 0;
     }
-    if(!honk_move_button(hh)) {
+    if(!honk_move_button(hh,b)) {
         log_begin();log_raw("honk: could not move HonkHonk's horn button to the right stick (error ");log_dec(GetLastError());
         log_raw("), it stays on the left stick; the launcher puts Extra Options' headlights/roof back on the right stick\n");
         honk_write_status(0,0,"could not change HonkHonk's button");
@@ -364,24 +447,26 @@ static int honk_attach(void)
 {
     static int told_other, attached, placed;
     HMODULE m=GetModuleHandleW(L"HonkHonk.dll"); unsigned char *hh=(unsigned char *)m; wchar_t path[MAX_PATH+40]; DWORD n, i, slash=0;
+    const honk_build *b;
     if(attached) return 1;
     if(!hh) return 0;
-    if(!placed) {placed=1; honk_place_button(hh);}
+    b=honk_build_at(hh);
+    if(!placed) {placed=1; honk_place_button(hh,b); honk_redirect_pad(hh,b);}
     if(!g_honk_enabled) return -1;
-    if(!honk_code_is(hh+HH_REQUEST_RVA,honk_request_code,7)) {
+    if(!b) {
         if(!told_other) {
             unsigned char now[7];
             told_other=1;
-            log_begin();log_raw("honk: unexpected HonkHonk.dll (only 0.3.4 is known), its horn is not shared; at +0x");
-            log_hex(HH_REQUEST_RVA,4);log_raw(" found ");
-            if(read_game_memory(hh+HH_REQUEST_RVA,now,7)) log_hexbytes(now,7); else log_raw("(unreadable)");
+            log_begin();log_raw("honk: unexpected HonkHonk.dll (known builds: 0.4.0, 0.3.4), its horn is not shared; at the 0.4.0 request setter +0x");
+            log_hex(honk_builds[0].request_rva,4);log_raw(" found ");
+            if(read_game_memory(hh+honk_builds[0].request_rva,now,7)) log_hexbytes(now,7); else log_raw("(unreadable)");
             log_raw("\n");
         }
         return -1;
     }
-    g_honk_request=hh+HH_REQUEST_RVA+6+*(const int *)(honk_request_code+2);      /* mov [rip+disp32], ecx: next instruction + disp */
+    g_honk_request=hh+b->request_rva+6+*(const int *)(b->request_code+2);      /* mov [rip+disp32], ecx: next instruction + disp */
     attached=1;
-    log_begin();log_raw("honk: HonkHonk.dll found, its horn is read from its own state\n");
+    log_begin();log_raw("honk: HonkHonk.dll ");log_raw(b->version);log_raw(" found, its horn is read from its own state\n");
     n=GetModuleFileNameW(m,path,MAX_PATH);
     if(n && n<MAX_PATH) {
         wchar_t volume[16]; HANDLE f; wchar_t dir[MAX_PATH+40];

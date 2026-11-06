@@ -3,17 +3,15 @@ import datetime
 import email.utils
 import http.client
 import json
-import os
 import socket
 import ssl
-import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 from . import identity as ident
-from . import paths
+from . import logs
 from .constants import API_BASES, USER_AGENT
 from .version import __version__
 
@@ -55,31 +53,16 @@ def _proxy_host():
 
 
 def log_failure(method, path, exc, detail):
-    """One line per failed call in <cache>/launcher.log, so a player can send it when asked. Best effort, never raises, no secrets."""
-    try:
-        f = os.path.join(paths.cache_dir(), "launcher.log")
-        if os.path.exists(f) and os.path.getsize(f) > 200_000:
-            os.replace(f, f + ".1")
-        line = (f"{time.strftime('%Y-%m-%d %H:%M:%S')} {method} {path.split('?')[0]} failed: {detail} [{type(exc).__name__}] "
-                f"proxy={_proxy_host() or 'none'} {ssl.OPENSSL_VERSION} python={sys.version.split()[0]} launcher={__version__}\n")
-        with open(f, "a", encoding="utf-8") as fh:
-            fh.write(line)
-    except Exception:  # noqa: BLE001
-        pass
+    """One line per failed call or step in launcher.log (logs.py), so a player can send it when asked. Never raises, no secrets."""
+    logs.warn("api", "call.failed", method=method, path=path.split("?")[0], detail=detail, error=type(exc).__name__, proxy=_proxy_host() or "none")
 
 
 def log_note(text):
-    """One informational line in <cache>/launcher.log (what the launcher did before starting the game). Best effort, never raises."""
-    try:
-        f = os.path.join(paths.cache_dir(), "launcher.log")
-        if os.path.exists(f) and os.path.getsize(f) > 200_000:
-            os.replace(f, f + ".1")
-        with open(f, "a", encoding="utf-8") as fh:
-            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {text} launcher={__version__}\n")
-    except Exception:  # noqa: BLE001
-        pass
+    """One informational line in launcher.log (what the launcher did before starting the game). Never raises."""
+    logs.info("play", "note", text=text)
 
 
+SLOW_CALL_S = 5.0
 _USE_BUNDLED = False      # set once the Windows certificate store failed and the bundled roots worked: later calls start with those
 
 
@@ -202,6 +185,8 @@ class Api:
         def make_request():                 # a fresh one per attempt: going through a proxy rewrites the request in place
             req = urllib.request.Request(path if path.startswith("https://") else self.base + path, data=data, method=method)
             req.add_header("User-Agent", f"{USER_AGENT}/{__version__}")
+            if not path.startswith("https://"):      # our own API only: an absolute URL is the website or another host
+                req.add_header("X-FH2MP-Run", logs.run())
             if data is not None:
                 req.add_header("Content-Type", ctype)
             if token:
@@ -215,6 +200,8 @@ class Api:
         proxy = _proxy_host()
         use_bundled = _USE_BUNDLED and _bundled_context() is not None
         fell_back = False
+        t0 = time.monotonic()
+        where = path.split("?")[0]
         for _round in (0, 1):
             ctx = _bundled_context() if use_bundled else self._ctx
             details, last = [], None
@@ -222,14 +209,22 @@ class Api:
                 try:
                     with self._opener(use_proxy, ctx).open(make_request(), timeout=timeout or self.timeout) as r:
                         payload = r.read(limit)
+                    if details:
+                        logs.info("api", "api.recovered", method=method, path=where, how="without the proxy", after=details[-1])
                     break
                 except urllib.error.HTTPError as e:
                     payload = e.read(100_000)
                     try:
                         d = json.loads(payload)
-                        raise ApiError(e.code, d.get("error", "http_error"), d.get("message", "")) from None
+                        code = str(d.get("error", "http_error"))
                     except ValueError:
-                        raise ApiError(e.code, "http_error", f"server answered {e.code}") from None
+                        d, code = None, "http_error"
+                    # The server's line for this refusal carries the same run id. A 404 is an answer (no such account), the rest is a refusal or a failure.
+                    logs.every(60, "INFO" if e.code == 404 else "WARN", "api", "api.http_error", key=(method, where, e.code), method=method, path=where, status=e.code,
+                               error=code, elapsed_ms=int((time.monotonic() - t0) * 1000))
+                    if d is not None:
+                        raise ApiError(e.code, d.get("error", "http_error"), d.get("message", "")) from None
+                    raise ApiError(e.code, "http_error", f"server answered {e.code}") from None
                 except (urllib.error.URLError, OSError, ssl.SSLError) as e:
                     d = describe_error(e) + (f" (through the proxy {proxy})" if use_proxy else "")
                     log_failure(method, path, e, d + (" [bundled roots]" if use_bundled else ""))
@@ -246,7 +241,12 @@ class Api:
                 raise ApiError(0, "unreachable", f"cannot reach the server ({detail})", detail)
             if fell_back:
                 _USE_BUNDLED = True             # the system store was the problem: start with the bundled roots from now on
+                logs.warn("api", "api.recovered", method=method, path=where, how="bundled root certificates", effect="the system certificate store is not used from now on")
             break
+        took = time.monotonic() - t0
+        logs.trace("api", "api.ok", method=method, path=where, bytes=len(payload), elapsed_ms=int(took * 1000))
+        if took >= SLOW_CALL_S:
+            logs.every(60, "WARN", "api", "api.slow", key=where, method=method, path=where, elapsed_ms=int(took * 1000))
         if raw:
             return payload
         try:
@@ -266,6 +266,10 @@ class Api:
 
     def home(self):
         return self._call("GET", "/v1/home")
+
+    def hotfix(self):
+        """The signed hotfix document {"doc", "sig"}, or {} when the server has none (hotfix.py checks it)."""
+        return self._call("GET", "/v1/hotfix")
 
     def asset(self, name):
         return self._call("GET", "/v1/launcher/assets/" + urllib.parse.quote(name), raw=True)

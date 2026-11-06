@@ -20,7 +20,7 @@ import db  # noqa: E402
 import diag  # noqa: E402
 import xls_schema as S  # noqa: E402
 try:
-    from car_policy import KNOWN_CARS  # noqa: E402     # tools/make_car_policy.py
+    from car_policy import KNOWN_CARS  # noqa: E402     # tools/gamedata/make_car_policy.py
 except ImportError:
     KNOWN_CARS = frozenset()
 
@@ -32,6 +32,15 @@ _RATE = diag.RateLimit()
 # The file persists on the client, so each skill keeps a floor of shipped records: a thin or wrong reply cannot leave a skill empty there.
 CACHE_CAPACITY = 120
 CACHE_SHIPPED_PER_SKILL = 12
+
+
+def cache_limit():
+    """FH2MP_DRIVATAR_CACHE_LIMIT: fewer Drivatars than the client's 120 (0 serves none). A test switch for dev: with a bigger car cache on the client, the
+    world's Drivatars take every stand-in car id (0..11) before a player's car can."""
+    try:
+        return min(CACHE_CAPACITY, max(0, int(os.environ["FH2MP_DRIVATAR_CACHE_LIMIT"])))
+    except (KeyError, ValueError):
+        return CACHE_CAPACITY
 SKILLS = range(5)
 CACHE_PLAYERS = os.environ.get("FH2MP_DRIVATAR_CACHE_PLAYERS", "1") != "0"    # 0 serves shipped records only, which replaces the client's saved file
 CARS = os.environ.get("FH2MP_DRIVATAR_CARS", "0") == "1"                      # real cars, tunes and liveries on player Drivatars
@@ -333,7 +342,7 @@ class DrivatarStore:
     def for_cache(self, limit, exclude_xuid=0):
         """The global cache: never more than the client holds, a floor of shipped records per skill, then recent players spread across the skills,
         then more shipped ones."""
-        limit = min(limit, CACHE_CAPACITY)
+        limit = min(limit, cache_limit())
         shipped = []
         for skill in SKILLS:
             of_skill = [t for t in self.templates if t["UserSkillLevel"] == skill]

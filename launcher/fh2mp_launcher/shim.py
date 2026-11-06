@@ -12,7 +12,7 @@ import os
 import re
 import shutil
 
-from . import paths, upstream
+from . import logs, paths, upstream
 from .constants import AZIMUTH_TLS_HELPERS, AZIMUTH_VERSION, BUILTIN_AZIMUTH_BUILDS, UPSTREAM
 from .constants import (EXTRA_OPTIONS_DIR, EXTRA_OPTIONS_DLL, EXTRA_OPTIONS_DLL_SHA256, EXTRA_OPTIONS_VERSION, LEGACY_SHIM_DLL, LSP_FILE,
                         MODS_DIR, PLATFORM_DLL, PLATFORM_DLL_SHA256, PLATFORM_FILES, PLATFORM_LOADERS, PLATFORM_VERSION, SESSION_FILE, SHIM_DLL)
@@ -39,7 +39,8 @@ def inspect_dll(path):
     try:
         with open(path, "rb") as f:
             data = f.read()
-    except OSError:
+    except OSError as e:
+        logs.swallowed("shim", "shim.unreadable", e, effect="counts as not installed")
         return "none", ""
     m = MARKER.search(data)
     return ("ours", m.group(1).decode()) if m else ("foreign", "")
@@ -272,11 +273,14 @@ def bin_dir(folder):
     return d if os.path.isdir(d) else folder
 
 
-def write_session(folder, xuid, token, lsp_url, gamedb=""):
-    """The hand-over to the shim: who signed in, how to reach the server and (gamedb) the car database it synced, relative to the Azimuth
-    folder, which the shim puts in the game's mediaoverride folder and hashes for the server. Private to the user; removed when the game ends."""
+def write_session(folder, xuid, token, lsp_url, gamedb="", run="", switches=()):
+    """The hand-over to the shim: who signed in, how to reach the server, (gamedb) the car database it synced, relative to the Azimuth folder,
+    which the shim puts in the game's mediaoverride folder and hashes for the server, (run) the id that ties the logs of this game start
+    together (logs.py) and (switches) the NO_ kill switches of the hotfix document (hotfix.py, shim/src/session_switches.inc). Private to the
+    user; removed when the game ends."""
     d = bin_dir(folder)
-    text = f"xuid={xuid:x}\ntoken={token}\n" + (f"gamedb={gamedb}\n" if gamedb else "")
+    text = (f"xuid={xuid:x}\ntoken={token}\n" + (f"gamedb={gamedb}\n" if gamedb else "") + (f"run={run}\n" if run else "")
+            + (f"switches={','.join(switches)}\n" if switches else ""))
     paths.atomic_write(os.path.join(d, SESSION_FILE), text.encode(), 0o600)
     paths.atomic_write(os.path.join(d, LSP_FILE), (lsp_url.strip() + "\n").encode(), 0o644)
 
@@ -316,8 +320,10 @@ def online_setup_note_present(folder):
 def clear_session(folder):
     try:
         os.unlink(os.path.join(bin_dir(folder), SESSION_FILE))
-    except OSError:
+    except FileNotFoundError:
         pass
+    except OSError as e:          # the token stays on disk and the next game start may go online without Play, until the 30-minute limit in the shim
+        logs.swallowed("play", "session.not_removed", e)
 
 
 # ---- FH2 Extra Options (RokkuDayo): winmm.dll next to azimuth.exe, where Azimuth loads it and the FH2 Mod Platform recognises it.
@@ -623,16 +629,31 @@ def _honk_path(folder, rel):
     return os.path.join(folder, *rel.split("/"))
 
 
+HONK_LOCAL_MARK = "fh2-mods/HonkHonk.dll.local"
+
+
+def _honk_local_sha(folder):
+    """The SHA-256 the player wrote into fh2-mods\\HonkHonk.dll.local to keep their own HonkHonk build (a fork), "" when there is none."""
+    try:
+        with open(_honk_path(folder, HONK_LOCAL_MARK), encoding="ascii") as f:
+            return f.read().strip().lower()
+    except OSError:
+        return ""
+
+
 def honk_complete(folder):
-    """The pinned HonkHonk DLL and horn bank are in place (the settings file is the player's and only has to exist)."""
+    """The pinned HonkHonk DLL and horn bank are in place (the settings file is the player's and only has to exist). A DLL whose hash is
+    written in fh2-mods\\HonkHonk.dll.local counts as in place too: a local build of HonkHonk the player keeps on purpose."""
     pin = UPSTREAM["honkHonk"]
     if not os.path.isfile(_honk_path(folder, HONK_INI)):
         return False
+    local = _honk_local_sha(folder)
     try:
         for rel, digest in pin["fileSha256"].items():
             with open(_honk_path(folder, rel), "rb") as f:
-                if hashlib.sha256(f.read()).hexdigest() != digest:
-                    return False
+                have = hashlib.sha256(f.read()).hexdigest()
+            if have != digest and not (rel == HONK_DLL and local and have == local):
+                return False
     except OSError:
         return False
     return True

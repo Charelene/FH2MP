@@ -1,7 +1,7 @@
 """PostgreSQL storage for the LSP stand-in (scores, XP, Drivatars, notifications, players, user content).
 
 PostgreSQL is the durable system of record; the game catalog (cars, tracks, strings, schemas) lives in the same database as the schema
-`game` (tools/load_gamedata_pg.py), so state and game data join in one statement. Sessions, tickets and lobbies (xbl.py) and every live
+`game` (tools/gamedata/load_gamedata_pg.py), so state and game data join in one statement. Sessions, tickets and lobbies (xbl.py) and every live
 game world (fh2mp_server.py) stay in process memory on purpose: they are leases that should vanish on restart.
 
 Connection: libpq conninfo in FH2MP_PG_DSN (default `dbname=fh2mp`, i.e. the local socket with peer authentication for the service

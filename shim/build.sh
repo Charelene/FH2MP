@@ -15,9 +15,16 @@ COMMON=(-I ../third_party/fh2-mod-platform -DFH2MOD_PLATFORM_VERSION="\"$PLATFOR
 # its version carries "-debug" so the launcher replaces it with the release shim. Never ship that file.
 if [ "${1:-}" = debug ]; then
   VERSION="$VERSION-debug"; OUT=build/FH2MP-debug.dll; FLAGS=(-DFH2MP_DEBUG_BUILD)
+# `shim/build.sh diag` builds build/FH2MP-diag.dll: the release shim plus the traffic trace of src/diag_trace.inc ("diag:" lines in fh2mp.log), no
+# debugger and no tracer. For one player's own install (docs/diag.md), not for release. It keeps the release version on purpose: a "-debug" version is
+# only left alone by a dev launcher (core.shim_pinned), so on a player's launcher Play would refuse it as outdated. The next launcher release replaces it.
+elif [ "${1:-}" = diag ]; then
+  OUT=build/FH2MP-diag.dll; FLAGS=(-Wno-unused-function -DFH2MP_DIAG_BUILD)
 else
   OUT=build/FH2MP.dll; FLAGS=(-Wno-unused-function)
 fi
+# FH2MP_PERF=1 adds the frame/hook timing of src/perf.inc (one "perf:" log line every 15 s). Not for release; give it a "-debug" FH2MP_SHIM_VERSION so the launcher keeps it.
+if [ "${FH2MP_PERF:-}" = 1 ]; then FLAGS+=(-DFH2MP_PERF); fi
 "$WINDRES" -DFH2MP_V1="$V1" -DFH2MP_V2="$V2" -DFH2MP_V3="$V3" -DFH2MP_VERSION_STR="\\\"$VERSION\\\"" -O coff -o build/version.o src/version.rc
 $CC "${FLAGS[@]}" -DFH2MP_SHIM_VERSION="\"$VERSION\"" -o "$OUT" src/fh2mp_mod.c build/version.o "${COMMON[@]}"
 rm -f build/version.o

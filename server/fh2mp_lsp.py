@@ -13,7 +13,7 @@ Response: 12-byte header (Result u32, ErrorCode u32, DataLength u32; all big end
 
 Usage: python3 -I server/fh2mp_lsp.py [port]
        State and game catalog (cars, tracks, strings, schemas, shipped Drivatars) live in PostgreSQL: FH2MP_PG_DSN (libpq conninfo,
-       default `dbname=fh2mp`); the catalog is loaded once with tools/export_gamedata.py + tools/load_gamedata_pg.py from an install:
+       default `dbname=fh2mp`); the catalog is loaded once with tools/gamedata/export_gamedata.py + tools/gamedata/load_gamedata_pg.py from an install:
        the server itself never reads game files. Also: FH2MP_LSP_BIND (listen address, default 127.0.0.1), FH2MP_PUBLIC_HOST /
        FH2MP_GAME_PORT (the game server address handed to clients).
 """
@@ -29,6 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import threading  # noqa: E402
+import capacity  # noqa: E402
 import xls  # noqa: E402
 import drivatar  # noqa: E402
 import scoreboard  # noqa: E402
@@ -92,7 +93,11 @@ def log(msg, level="INFO", sub=None):
     seq = getattr(CTX, "seq", None)
     if seq and msg.startswith("  ") and not msg.startswith("  #"):
         msg = f"  #{seq}{msg[1:]}"
-    print(f"{time.strftime('%H:%M:%S')} {'' if level == 'INFO' else level + ' '}{diag.scrub(msg)}", flush=True)
+    run = getattr(CTX, "run", "")
+    if run and level in ("WARN", "ERROR") and " run=" not in msg:
+        msg += f" run={run}"                  # a refusal or failure names its game without a search for the "#N POST" line
+    line = f"{time.strftime('%H:%M:%S')} {'' if level == 'INFO' else level + ' '}{diag.scrub(msg)}"
+    diag.write_line(lambda text: print(text, flush=True), line)
 
 
 def warn(msg, sub=None):
@@ -122,6 +127,21 @@ def log_every(key, interval, msg, level="WARN", sub=None):
     ok, skipped = RATE.allow(key, interval)
     if ok:
         log(msg + (f" (and {skipped} more in the last {interval:.0f} s)" if skipped else ""), level, sub)
+
+
+_RUNS = {}                     # run id -> xuid, the runs already introduced to the log and the game server
+
+
+def note_run(run, xuid):
+    """First signed-in request of a game: one line that ties its run id to the player, and the same for the game server, whose lines cannot see the header."""
+    base = run.split(".")[0]
+    if not base or not xuid or _RUNS.get(base) == xuid:
+        return
+    if len(_RUNS) >= 20000:
+        _RUNS.clear()
+    _RUNS[base] = xuid
+    log(f"  run.seen {diag.kv(run=base, xuid=f'{xuid:#x}', shim=getattr(CTX, 'shim', '') or None)}")
+    xbl.announce_run(xuid, base)
 
 
 def call_name(headers):
@@ -813,6 +833,15 @@ def event_cars(event_id):
     """Cars a rival event's restriction allows (the fake rivals drive these, so a D Class Dash rival is in a D class car)."""
     e = event_info(event_id)
     return RIV.cars_for(e["attrs"]) if e else None
+
+
+def event_car_ids(event_id):
+    """Car ids the event's restriction allows whatever their stock class: the event's class limit is checked against the run's PI, so only the
+    other attributes (make, model, year, drive type, country) decide whether a car is on the list."""
+    e = event_info(event_id)
+    if not e:
+        return None
+    return {c[0] for c in RIV.cars_for({k: v for k, v in e["attrs"].items() if k != "CarClassId"})}
 
 
 def _bounty_track(req):
@@ -2313,7 +2342,7 @@ def gsds_variants():
     }).encode()
 
 
-MAX_LOBBY_PLAYERS = 12   # engine ceiling seen so far (traffic server 12 slots); docs/matchmaking.md
+MAX_LOBBY_PLAYERS = capacity.free_roam()   # 12 unless FH2MP_WORLD_CAPACITY says more (capacity.py); docs/matchmaking.md
 
 
 def gsds_qos_servers():
@@ -2491,6 +2520,7 @@ class Handler(BaseHTTPRequestHandler):
                       f"{sorted(set(tools) - {'redline', 'nitrosystem'})}, known are redline and nitrosystem (shim {_shim()})", "WARN")
             self._reply_json(400, {"error": "bad_tool_report"})
             return False
+        tools = tuple(t for t in tools if t != "redline")     # older shims still report Redline.exe; it is not a restricted tool any more (user decision 2026-11-05)
         if not tools:
             return True
         now = time.monotonic()
@@ -2603,6 +2633,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle(self):
         seq = CTX.seq = next(_SEQ)     # log() numbers the indented lines of this request with it
+        CTX.run = diag.run_id(self.headers.get("X-FH2MP-Run", ""))
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -2641,11 +2672,13 @@ class Handler(BaseHTTPRequestHandler):
         if not self._identify():
             return
         social.touch(CTX.xuid or int(xbl_xuid(self.headers) or 0))
+        if CTX.run and CTX.authed:              # only a signed-in caller can put a run id on a player's lines
+            note_run(CTX.run, CTX.xuid)
         if (method == "RetrieveForUser" and cls.startswith("Xls.WebServices.Notifications")) or host in SOCIAL_HOSTS:
             POLLS.note(call_name(self.headers) if method else host, CTX.xuid)       # polls are counted, not listed (see PollShare)
-            log(f"#{seq} {self.command} {host}{self.path} {cls} {method} body={len(body)} user={CTX.xuid:#x}", "DEBUG", "poll")
+            log(f"#{seq} {self.command} {host}{self.path} {cls} {method} body={len(body)} user={CTX.xuid:#x}{' run=' + CTX.run if CTX.run else ''}", "DEBUG", "poll")
         else:
-            log(f"#{seq} {self.command} {host}{self.path} {cls} {method} body={len(body)} user={CTX.xuid:#x}")
+            log(f"#{seq} {self.command} {host}{self.path} {cls} {method} body={len(body)} user={CTX.xuid:#x}{' run=' + CTX.run if CTX.run else ''}")
         if CTX.own_cars and host in MULTIPLAYER_HOSTS:
             mine, theirs = getattr(CTX, "gamedb", ("?", "?"))
             log_every(("mp-refused", CTX.xuid), 120, "  multiplayer refused: this player's car database is not the server's " + diag.kv(
@@ -2860,7 +2893,7 @@ def setup(dsn=None):
     global SC, CARS, DB, NOTIF
     DB = db.open_db(dsn)
     if not DB.one("SELECT 1 FROM information_schema.schemata WHERE schema_name='game'"):
-        sys.exit("the game catalog is not loaded: build the bundle with tools/export_gamedata.py and load it with tools/load_gamedata_pg.py")
+        sys.exit("the game catalog is not loaded: build the bundle with tools/gamedata/export_gamedata.py and load it with tools/gamedata/load_gamedata_pg.py")
     SC = xls.Schema(DB)
     CARS = cardb.CarDb(DB)
     log(f"database {DB.path}: game catalog schema `game` present")
@@ -2892,7 +2925,7 @@ def setup(dsn=None):
     log(f"drivatar store: {len(DRV.templates)} shipped templates, {DRV.count()} stored players")
     global SB
     SB = scoreboard.ScoreStore(DB, [t["GamerTag"] for t in DRV.templates] + DRV.gamertags(), cars=CARS.fake_pool(), route_length=CARS.route_length, event_info=event_info,
-                          event_cars=event_cars)
+                          event_cars=event_cars, event_car_ids=event_car_ids)
     log(f"scoreboards: {SB.count()} stored submissions")
     SOCIAL.bot_name = lambda x: SB.fake_name(x) or DRV.bot_name(x)          # the rivals' ids resolve to their racing-driver names, not Player#
     global RIV

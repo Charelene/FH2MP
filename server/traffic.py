@@ -356,6 +356,10 @@ class TrafficWorld:
         elif kind == S_REQUEST_OWNERSHIP:
             if m.request_ownership(peer, a, now):
                 self.log(f"traffic: car {a} handed to {peer.addr[1]} (RequestOwnership)")
+            elif m.resent:
+                ok, skipped = _RATE.allow(("resent", peer.addr), IGNORED_LOG_SECONDS)
+                if ok:
+                    LOG.debug(f"{peer.addr[1]} asked for car {a}, which the server has as its own: TakeOwnership sent again" + (f" (+{skipped} more since the last line)" if skipped else ""))
         elif kind == S_CAR_MODEL_LOADED:
             m.model_loaded(peer, signed14(s14))
             if s.report_at is None:

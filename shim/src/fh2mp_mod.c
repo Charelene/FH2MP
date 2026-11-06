@@ -102,12 +102,32 @@ const char fh2mp_shim_marker[] __attribute__((used)) = "FH2MP-SHIM-VERSION:" FH2
 static const FH2ModApi *g_api;
 static FH2Mod *g_mod;
 
+/* The platform prints one line per change it makes, with the name we give it ("* FH2MP: patch game+0x80C10F (name)") and keeps the pointer.
+ * Our descriptive names are for the failure lines below; the platform gets only the part before the colon, as a stable interned string. */
+static const char *plat_tag(const char *name)
+{
+    static char tags[64][24];
+    static int used;
+    char tag[24];
+    int n = 0, i;
+    while (name[n] && name[n] != ':' && n < 23) {
+        tag[n] = name[n];
+        n++;
+    }
+    tag[n] = 0;
+    for (i = 0; i < used; ++i)
+        if (!lstrcmpA(tags[i], tag)) return tags[i];
+    if (used == 64) return "fh2mp";
+    lstrcpyA(tags[used], tag);
+    return tags[used++];
+}
+
 /* One line per change the platform did not make: which change, where, and at which step (the platform's own reason is in fh2-mods\platform.log). */
 static void plat_failed(const char *name, const void *at, const char *step);
 
 static int plat_patch(const char *name, void *at, const void *expect, const void *bytes, unsigned n)
 {
-    FH2Hook *h = g_api->patch_bytes(g_mod, name, at, expect, bytes, n);
+    FH2Hook *h = g_api->patch_bytes(g_mod, plat_tag(name), at, expect, bytes, n);
     if (!h) {
         plat_failed(name, at, "refused (overlaps another mod's change, or the bytes differ from the exe on disk)");
         return 0;
@@ -123,7 +143,7 @@ static int plat_patch(const char *name, void *at, const void *expect, const void
 static int plat_hook(const char *name, void *target, void *detour, void **original)
 {
     void *unused;
-    FH2Hook *h = g_api->hook_function(g_mod, name, target, detour, original ? original : &unused);
+    FH2Hook *h = g_api->hook_function(g_mod, plat_tag(name), target, detour, original ? original : &unused);
     if (!h) {
         plat_failed(name, target, "refused (overlaps another hook, or the code is not hookable)");
         return 0;
@@ -138,7 +158,7 @@ static int plat_hook(const char *name, void *target, void *detour, void **origin
 /* Points one `call rel32` at `detour`; `original` gets the function it called. */
 static int plat_hook_call(const char *name, void *site, void *detour, void **original)
 {
-    FH2Hook *h = g_api->hook_call(g_mod, name, site, detour, original);
+    FH2Hook *h = g_api->hook_call(g_mod, plat_tag(name), site, detour, original);
     if (!h) {
         plat_failed(name, site, "refused (not a call rel32, or overlaps another hook)");
         return 0;
@@ -205,6 +225,8 @@ static unsigned char *alloc_near(unsigned char *anchor)
 
 /* Session token of the player signed in through the launcher (see session_load); sent to the stand-in services as X-FH2MP-Token. */
 static char g_token[96];
+/* The id of this game start in every log (launcher, shim, server; server/diag.py), from the session file; made here when a session has none. */
+static char g_run[9];
 static HANDLE g_log = INVALID_HANDLE_VALUE;
 static wchar_t g_args[MAX_ARGS][MAX_ARG_CHARS];
 static wchar_t *g_argv[MAX_ARGS + 1];
@@ -257,6 +279,8 @@ static void log_unlock(void)
 #ifndef FH2MP_DEBUG_BUILD
 static char g_line[1024];
 static int g_ll;
+/* FH2MP_LOG_KEEP: more of the release log without a debug build. "all", or words like the ones below, separated by commas ("xhr#,arg["). */
+static char g_log_keep[128];
 
 static int line_has(const char *l, int n, const char *pat)
 {
@@ -276,14 +300,35 @@ static int line_wanted(const char *l, int n)
     static const char *const keep[] = {"attached", "session:", "identity:", "late:", "not patched", "NOT ", "unexpected", "fail", "error", "could not",
                                        "refus", "crash", "xsbody", "xstoken", "mmtimeout", "mmtoast", "online-setup", "bindfix", "gamedb:", "timelock:", "rivalsleave", "bucketcars", "matchpoll", "sample", "carprobe", "probe:", "lighting:", "honk:", "grid:",
                                        "xhr:", "winsock:", "placement:", "netstrings:", "torqueload:", "nulltorque", "speedpb:", "cinematics:",
-                                       "festivalgrid:", "invitetype:", "ticket:", "tools:", "offline:", "rebound", "redirect:", "serverport:", "secureip:", "hook:", 0};
+                                       "festivalgrid:", "invitetype:", "ticket:", "tools:", "offline:", "rebound", "redirect:", "serverport:", "secureip:", "hook:", "perf:", "health:", "diag:", "partyhud:", "carpool:", 0};
     int i;
+    const char *word;
     for (i = 0; keep[i]; i++) {
         if (line_has(l, n, keep[i])) {
             return 1;
         }
     }
+    for (word = g_log_keep; *word; word += lstrlenA(word) + 1) {
+        if ((word[0] == 'a' && word[1] == 'l' && word[2] == 'l' && !word[3]) || line_has(l, n, word)) {
+            return 1;
+        }
+    }
     return 0;
+}
+
+static void log_keep_load(void)
+{
+    DWORD i, n = GetEnvironmentVariableA("FH2MP_LOG_KEEP", g_log_keep, sizeof g_log_keep - 1);
+
+    if (n >= sizeof g_log_keep - 1) {
+        n = 0;
+    }
+    g_log_keep[n] = g_log_keep[n + 1] = 0;
+    for (i = 0; i < n; i++) {
+        if (g_log_keep[i] == ',') {
+            g_log_keep[i] = 0;
+        }
+    }
 }
 #endif
 
@@ -1218,7 +1263,7 @@ static int patch_traffic_module_offline(void)
     rel32 = (int)(tgt - (fn + 5));
     jmp[0] = 0xE9;
     mem_copy(jmp + 1, &rel32, 4);
-    return plat_patch("traffic: SyncTrafficModule go-online -> go-offline", fn, on_sig, jmp, 5);
+    return plat_patch("traffic: SyncTrafficModule go-online switch", fn, on_sig, jmp, 5);
 }
 
 /*
@@ -1285,8 +1330,8 @@ static int patch_qos_assume_success(void)
     }
     {
         /* both or neither: half of it would skip the association and still report failure */
-        FH2Hook *ha = g_api->patch_bytes(g_mod, "qosok: skip the secure association", a + 3, want_jne + 3, nop2, 2);
-        FH2Hook *hb = ha ? g_api->patch_bytes(g_mod, "qosok: report success", b + 6, want_flag + 6, &one, 1) : NULL;
+        FH2Hook *ha = g_api->patch_bytes(g_mod, plat_tag("qosok: skip the secure association"), a + 3, want_jne + 3, nop2, 2);
+        FH2Hook *hb = ha ? g_api->patch_bytes(g_mod, plat_tag("qosok: report success"), b + 6, want_flag + 6, &one, 1) : NULL;
         if (!hb || !g_api->enable_hooks(g_mod, ha) || !g_api->enable_hooks(g_mod, hb)) {
             if (ha) {
                 g_api->disable_hooks(g_mod, ha);
@@ -1713,12 +1758,12 @@ static int patch_mm_timeouts(void)
     }
     if (memcmp(img + FH2_MMTIMEOUT_A_RVA, a_new, sizeof a_new) == 0 ||
         (code_is("mmtimeout", "the match request tick (first-state limit)", img, FH2_MMTIMEOUT_A_RVA, a_old, sizeof a_old) &&
-         plat_patch("mmtimeout: first-state limit of the match request 10 s -> 3 s", img + FH2_MMTIMEOUT_A_RVA + 1, a_old + 1, a_new + 1, 4))) {
+         plat_patch("mmtimeout: match request, first-state limit", img + FH2_MMTIMEOUT_A_RVA + 1, a_old + 1, a_new + 1, 4))) {
         done++;
     }
     if (memcmp(img + FH2_MMTIMEOUT_B_RVA, b_new, sizeof b_new) == 0 ||
         (code_is("mmtimeout", "the match request tick (second-state limit)", img, FH2_MMTIMEOUT_B_RVA, b_old, sizeof b_old) &&
-         plat_patch("mmtimeout: second-state limit of the match request 30 s -> 3 s", img + FH2_MMTIMEOUT_B_RVA + 1, b_old + 1, b_new + 1, 4))) {
+         plat_patch("mmtimeout: match request, second-state limit", img + FH2_MMTIMEOUT_B_RVA + 1, b_old + 1, b_new + 1, 4))) {
         done++;
     }
     return done == 2;
@@ -2069,7 +2114,7 @@ static int patch_null_torque_curve(void)
         return 0;
     }
     mem_copy(stub, code, sizeof code);
-    h = g_api->hook_function(g_mod, "nulltorque: torque curve reader", site, stub, &original);
+    h = g_api->hook_function(g_mod, plat_tag("nulltorque: torque curve reader"), site, stub, &original);
     if (!h) {
         plat_failed("nulltorque: torque curve reader", site, "refused (overlaps another hook, or the code is not hookable)");
         return 0;
@@ -2375,8 +2420,15 @@ static int patch_online_meet(void)
 #include "xsapi_image.inc"
 #include "net_string_guard.inc"
 #include "grid_trace.inc"
+#include "diag_trace.inc"
+#include "party_hud.inc"
+#include "race_toast.inc"
+#include "car_pool.inc"
 #include "torque_load_guard.inc"
 #include "online_setup.inc"
+#include "hook_guard.inc"
+#include "gameplaylog_guard.inc"
+#include "picker_pi.inc"
 
 static int patch_torque_load(void)
 {
@@ -3217,8 +3269,11 @@ static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *
     lighting_note_ticket(to, tolen, t + 36);
 }
 
+#include "perf.inc"
 #include "lighting_sync.inc"
 #include "honk_sync.inc"
+#include "carsel_sync.inc"
+#include "stall_trace.inc"
 
 /*
  * #64: a Monthly Rival started from the pause menu inside an online session loaded for ever. The menu's launch (RivalsModule
@@ -3351,6 +3406,57 @@ static int stateflow_bucket_cars_online(void)
 }
 
 /*
+ * Race toast layout (src/race_toast.inc): UI.zip's Controls/NotificationPopupControl.xaml lays the toast title (line 1) out as TitlePreGamertag, the
+ * bold gamertag and TitlePostGamertag, and line 2 as 'Press (X) to join'. The shim puts the track's name in TitlePreGamertag (empty for races). For a
+ * race event (IsRaceEvent) line 1 no longer shows it, and line 2 starts with it in the gamertag's bold style: 'Castelletto Meadow Circuit | Press (X) to
+ * join' (user 2026-11-05). Only converters and styles the file already uses. Disable with env FH2MP_NO_RACETOAST.
+ */
+static const char RACE_TOAST_OLD[] =
+    "                                <local:FZTextBlock Text=\"{Binding TitlePreGamertag}\"\r\n"
+    "                                                   Style=\"{StaticResource A_Style_FZTextBlock_Notification_Title}\"/>\r\n"
+    "                                <local:FZTextBlock Text=\"{Binding UserProfile.FormattedGamertag}\"\r\n"
+    "                                                   Style=\"{StaticResource A_Style_FZTextBlock_Notification_Gamertag}\" />\r\n"
+    "                                <local:FZTextBlock Text=\"{Binding TitlePostGamertag}\"\r\n"
+    "                                                   Style=\"{StaticResource A_Style_FZTextBlock_Notification_Title}\"/>\r\n"
+    "                            </StackPanel>\r\n"
+    "                            <Grid Visibility=\"{Binding CanBeActivated, Converter={StaticResource A_FZBooleanToVisibilityConverter}}\">\r\n"
+    "                                <Grid Visibility=\"{Binding PlayerHasAccepted, Converter={StaticResource A_FZBooleanToVisibilityConverter_Inverse}}\">\r\n"
+    "                                    <StackPanel Orientation=\"Horizontal\" \r\n"
+    "                                            Visibility=\"{Binding IsInputBlocked, Converter={StaticResource A_FZBooleanToVisibilityConverter_Inverse}}\">\r\n"
+    "                                        <local:FZTextBlock Text=\"{local:Loc Lobby.IDS_Invite_Join_Prefix}\"\r\n"
+    "                                                       Style=\"{StaticResource A_Style_FZTextBlock_Notification_BodyText}\"/>\r\n";
+static const char RACE_TOAST_NEW[] =
+    "                                <local:FZTextBlock Text=\"{Binding TitlePreGamertag}\"\r\n"
+    "                                                   Visibility=\"{Binding IsRaceEvent, Converter={StaticResource A_FZBooleanToVisibilityConverter_Inverse}}\"\r\n"
+    "                                                   Style=\"{StaticResource A_Style_FZTextBlock_Notification_Title}\"/>\r\n"
+    "                                <local:FZTextBlock Text=\"{Binding UserProfile.FormattedGamertag}\"\r\n"
+    "                                                   Style=\"{StaticResource A_Style_FZTextBlock_Notification_Gamertag}\" />\r\n"
+    "                                <local:FZTextBlock Text=\"{Binding TitlePostGamertag}\"\r\n"
+    "                                                   Style=\"{StaticResource A_Style_FZTextBlock_Notification_Title}\"/>\r\n"
+    "                            </StackPanel>\r\n"
+    "                            <Grid Visibility=\"{Binding CanBeActivated, Converter={StaticResource A_FZBooleanToVisibilityConverter}}\">\r\n"
+    "                                <Grid Visibility=\"{Binding PlayerHasAccepted, Converter={StaticResource A_FZBooleanToVisibilityConverter_Inverse}}\">\r\n"
+    "                                    <StackPanel Orientation=\"Horizontal\" \r\n"
+    "                                            Visibility=\"{Binding IsInputBlocked, Converter={StaticResource A_FZBooleanToVisibilityConverter_Inverse}}\">\r\n"
+    "                                        <local:FZTextBlock Text=\"{Binding TitlePreGamertag}\"\r\n"
+    "                                                   Visibility=\"{Binding IsRaceEvent, Converter={StaticResource A_FZBooleanToVisibilityConverter}}\"\r\n"
+    "                                                   Style=\"{StaticResource A_Style_FZTextBlock_Notification_Gamertag}\"/>\r\n"
+    "                                        <local:FZTextBlock Text=\"{local:Loc Lobby.IDS_Invite_Join_Prefix}\"\r\n"
+    "                                                       Style=\"{StaticResource A_Style_FZTextBlock_Notification_BodyText}\"/>\r\n";
+
+static int ui_race_toast_layout(void)
+{
+    int ok = stateflow_replace(L"\\media\\UI.zip", "Controls/NotificationPopupControl.xaml", "UI/Controls/NotificationPopupControl.xaml", RACE_TOAST_OLD,
+                               sizeof RACE_TOAST_OLD - 1, RACE_TOAST_NEW, sizeof RACE_TOAST_NEW - 1, "racetoast layout");
+    if (ok) {
+        InterlockedExchange(&g_rt_layout, 1);
+        log_begin();
+        log_raw("racetoast layout: Controls/NotificationPopupControl.xaml handed to the platform, race toasts show the event name in bold at the start of line 2\n");
+    }
+    return ok;
+}
+
+/*
  * The car database the game runs with (the mediaoverride copy gamedb_place keeps equal to the launcher's, session line gamedb=). Its SHA-256 goes
  * with every request as X-FH2MP-GameDb, so the server can refuse a game that runs with another database (a car pack the others do not
  * have crashes them). Hashed again only when the file's size or write time changes. "missing" when it cannot be read.
@@ -3429,6 +3535,7 @@ static void gamedb_hash(char out[65])
 
 #include "restricted_tools.inc"
 #include "xhr2.inc"
+#include "health.inc"
 #ifdef FH2MP_DEBUG_BUILD
 #include "dbg.inc"
 #endif
@@ -3893,23 +4000,6 @@ static DWORD WINAPI option_monitor(LPVOID unused)
                 log_raw("speedpb: switched itself off, the thread-local slot could not be written (error ");
                 log_dec((unsigned long)(pb - 1));
                 log_raw("); speed notifications use the online result only\n");
-            }
-        }
-        {
-            static LONG tools_seen;
-            LONG fault = g_tools_scan_fault;
-            if (fault != tools_seen) {
-                tools_seen = fault;
-                log_begin();
-                if (fault) {
-                    log_raw("tools: the process scan failed (");
-                    log_raw(fault == 1 ? "ProcessIdToSessionId" : "CreateToolhelp32Snapshot");
-                    log_raw(" error ");
-                    log_dec((unsigned long)g_tools_scan_error);
-                    log_raw("), requests report no restricted tools until it works again\n");
-                } else {
-                    log_raw("tools: the process scan works again\n");
-                }
             }
         }
         Sleep(1000);
@@ -5187,7 +5277,7 @@ static DWORD WINAPI gamedb_thread(LPVOID unused)
  * builds a joiner's player object, the weather, the console ...) is hooked through the platform; before it runs, the bytes it is about to parse
  * (the datagram from the reader's position on, up to PROBE_BYTES) go into a ring of the last PROBE_ENTRIES calls. The ring lives in a file
  * mapping, data\bin\fh2mp-creates.ring, so it survives a crash; the one of the session before is kept as fh2mp-creates.prev (attach it to a
- * crash report; tools/decode_creates.py reads it). Nothing is sent anywhere. BitReader fields (FUN_141767100 / FUN_141767940): +4 size of the
+ * crash report; tools/analysis/decode_creates.py reads it). Nothing is sent anywhere. BitReader fields (FUN_141767100 / FUN_141767940): +4 size of the
  * buffer in bits, +8 byte index, +0xc bit position, +0x18 -> buffer object whose data pointer is at +0x10. Disable with env FH2MP_NO_PROBE.
  */
 #define FH2_RVA_OBJECT_CREATE_RECV 0x17ab160u
@@ -5425,6 +5515,7 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_LIGHTING", env, 8) == 0) patch_lighting();
             if (GetEnvironmentVariableW(L"FH2MP_NO_HONK", env, 8) == 0) patch_honk(g_exe_dir, g_dir);
             else honk_switched_off(g_exe_dir, g_dir);
+            if (GetEnvironmentVariableW(L"FH2MP_NO_CARSELECT_HOLD", env, 8) == 0) patch_carsel();
         }
         {
             wchar_t env[8];
@@ -5434,6 +5525,21 @@ static DWORD WINAPI late_init(LPVOID unused)
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_GRIDTRACE", env, 8) == 0) patch_grid_trace();
         }
+#ifdef FH2MP_DIAG_BUILD
+        {
+            wchar_t env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_DIAG", env, 8) == 0) patch_diag_trace();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_STALLTRACE", env, 8) == 0) patch_stall_trace();
+        }
+#endif
+        {
+            wchar_t env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_PARTYHUD", env, 8) == 0) patch_party_hud();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_RACETOAST", env, 8) == 0) patch_race_toast();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_HOOKGUARD", env, 8) == 0) patch_hook_guard();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_LOGGUARD", env, 8) == 0) patch_gameplaylog_guard();
+        }
+        patch_car_pool();
         {
             wchar_t it_env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_INVITETYPE", it_env, 8) == 0) {
@@ -5469,6 +5575,12 @@ static DWORD WINAPI late_init(LPVOID unused)
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_TORQUELOAD", env, 8) == 0) {
                 patch_torque_load();
+            }
+        }
+        {
+            wchar_t env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_PICKERPI", env, 8) == 0) {
+                patch_picker_pi();
             }
         }
         {
@@ -5561,6 +5673,7 @@ static DWORD WINAPI late_init(LPVOID unused)
 }
 
 #include "session_age.inc"
+#include "session_switches.inc"
 
 /*
  * Session handed over by the launcher: fh2mp-session.txt next to the log, "key=value" lines:
@@ -5688,6 +5801,10 @@ static int session_load(void)
                         g_token[n] = eq[n];
                     }
                     g_token[n] = 0;
+                } else if (lstrcmpA(line, "run") == 0 && run_id_ok(eq)) {
+                    lstrcpynA(g_run, eq, sizeof g_run);
+                } else if (lstrcmpA(line, "switches") == 0) {
+                    session_switches(eq);
                 } else if (lstrcmpA(line, "gamedb") == 0 && eq[0]) {
                     WCHAR rel[MAX_PATH];
                     int absolute = eq[0] == '\\' || (eq[0] && eq[1] == ':');
@@ -5718,8 +5835,17 @@ static int session_load(void)
         CloseHandle(f);
     }
     udp_ticket_key();
+    if (!g_run[0]) {
+        DWORD v = GetTickCount() ^ (GetCurrentProcessId() << 16);
+        for (i = 0; i < 8; i++) {
+            g_run[i] = "0123456789abcdef"[(v >> (28 - 4 * i)) & 0xf];
+        }
+        g_run[8] = 0;
+    }
     log_begin();
-    log_raw("session: ");
+    log_raw("session: run=");
+    log_raw(g_run);
+    log_raw(", ");
     log_raw(g_token[0] ? "token present" : "no token");
     log_raw(g_gamedb_path[0] ? ", car database set" : "");
     log_raw(have_xuid ? ", xuid from the launcher" : "");
@@ -5943,11 +6069,20 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
     }
     g_log = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                         OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+#ifndef FH2MP_DEBUG_BUILD
+    log_keep_load();
+#endif
     log_begin();
     log_raw("--- fh2mp shim " FH2MP_SHIM_VERSION " attached (FH2 Mod Platform ");
     log_raw(api->platform_version);
     log_raw("), tid=");
     log_dec(GetCurrentThreadId());
+    {   /* the stamps of this log are GetTickCount: this pairs one with the clock the launcher's and the server's logs use */
+        char utc[32];
+        grid_utc(utc);
+        log_raw(", ");
+        log_raw(utc);
+    }
     log_raw("\n");
 
     /* Solo play keeps the same XboxUserId/save, without session loading, network hooks or worker threads. */
@@ -5992,6 +6127,9 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
         if (GetEnvironmentVariableW(L"FH2MP_BUCKETCARS", tmp, 8) != 0) {    /* opt-in: retail online Free Roam parks no bucket-list cars */
             stateflow_bucket_cars_online();
         }
+        if (GetEnvironmentVariableW(L"FH2MP_NO_RACETOAST", tmp, 8) == 0) {
+            ui_race_toast_layout();    /* now: the game reads its UI files when the first screen loads */
+        }
     }
     {
         wchar_t cp_env[8];
@@ -6009,6 +6147,9 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
         t = g_gamedb_src[0] ? CreateThread(NULL, 0, gamedb_thread, NULL, 0, NULL) : NULL;
         if (t) {
             CloseHandle(t);
+        }
+        if (g_token[0]) {
+            health_start();
         }
     }
     return 0;

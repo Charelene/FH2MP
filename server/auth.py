@@ -49,6 +49,7 @@ POW_BASE_BITS = 18
 POW_MAX_BITS = 24
 SIGN_PREFIX = b"FH2MP-AUTH-v1\0"
 LOG = diag.get("auth")
+SESSION_LIVE_S = 120          # a session used this recently when a sign-in replaces it was probably a running game
 _RATE = diag.RateLimit()
 
 # The tables are migration 6 in db.py (accounts, auth_sessions, auth_nonces, auth_events, invites).
@@ -371,12 +372,23 @@ class AuthService:
         token = "fh2." + b64u(secrets.token_bytes(32))
         now = self.clock()
         with self.db.tx() as c:
-            old = [bytes(r[0]) for r in c.execute("SELECT token_hash FROM auth_sessions WHERE xuid=?", (row["xuid"],)).fetchall()]
+            rows = c.execute("SELECT token_hash, client, last_used FROM auth_sessions WHERE xuid=?", (row["xuid"],)).fetchall()
+            old = [bytes(r[0]) for r in rows]
             c.execute("DELETE FROM auth_sessions WHERE xuid=?", (row["xuid"],))              # one active session per account
             c.execute("INSERT INTO auth_sessions (token_hash, xuid, ip, client, created, last_used, expires, hard_expires) VALUES (?,?,?,?,?,?,?,?)",
                       (self._hash(token), row["xuid"], ip, client[:120], now, now, now + SESSION_IDLE, now + SESSION_MAX))
             c.execute("UPDATE accounts SET last_login=? WHERE xuid=?", (now, row["xuid"]))
         self._forget(old)
+        if rows:
+            # One session per account: a sign-in ends the token a running game may hold, and that game then gets 401 on every call (dev 2026-11-01).
+            newest = max(rows, key=lambda r: r[2] or 0)
+            idle = int(now - (newest[2] or 0))
+            text = ("auth.session_replaced " + diag.kv(xuid=f"{row['xuid']:#x}", replaced=len(rows), old_client=(newest[1] or "")[:80] or None, old_idle_s=idle,
+                                                       new_client=client[:80] or None))
+            if idle < SESSION_LIVE_S:
+                LOG.warn(text + ": the old token was in use moments ago, whoever holds it now gets 401")
+            else:
+                LOG.info(text)
         self._event("login", ip, row["xuid"], client[:80])
         return token, Account(row["xuid"], row["gamertag"], pubkey), SESSION_IDLE
 

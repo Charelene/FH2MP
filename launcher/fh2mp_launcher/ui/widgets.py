@@ -216,7 +216,14 @@ class Tween:
 
 
 def fade_in(w, ms=220):
-    """Fades a widget in (then drops the effect, which would otherwise render it off-screen on every paint)."""
+    """Fades a widget in (then drops the effect, which would otherwise render it off-screen on every paint). A second fade on the same
+    widget replaces the first: the old one's end must not strip the new one's effect half way."""
+    old = getattr(w, "_fade_anim", None)
+    if old is not None:
+        try:
+            old.stop()
+        except RuntimeError:                   # already deleted
+            pass
     eff = QGraphicsOpacityEffect(w)
     eff.setOpacity(0.0)
     w.setGraphicsEffect(eff)
@@ -225,7 +232,8 @@ def fade_in(w, ms=220):
     a.setStartValue(0.0)
     a.setEndValue(1.0)
     a.setEasingCurve(QEasingCurve.Type.OutCubic)
-    a.finished.connect(lambda: w.setGraphicsEffect(None))
+    a.finished.connect(lambda: w.graphicsEffect() is eff and w.setGraphicsEffect(None))
+    w._fade_anim = a
     a.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
 

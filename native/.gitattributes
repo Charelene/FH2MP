@@ -1,0 +1,5 @@
+* text eol=lf
+# compressed fixtures are binary: a text conversion corrupts them (testdata/ghost.json.gz lost 21 bytes on a Windows commit)
+*.gz binary
+*.xz binary
+*.png binary

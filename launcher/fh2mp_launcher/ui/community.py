@@ -211,6 +211,7 @@ class CommunityController(QObject):
     def show_dialog(self, name, factory):
         old = self._dialogs.get(name)
         if old and isValid(old):
+            old.reopen()
             old.show()
             old.raise_()
             old.activateWindow()

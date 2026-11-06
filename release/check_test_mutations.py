@@ -38,6 +38,10 @@ CASES = {
                        'fh2mp_server.Server.go_race', lambda *args: None),
     'unverified-update': ('launcher', ['test_core.UpdaterTests.test_tampered_or_foreign_manifest_rejected'],
                            'fh2mp_launcher.updater.verify_manifest', lambda raw, *args: json.loads(raw)),
+    'shim-hotfix-ignored': ('launcher', ['test_shim_hotfix.LauncherShimTargetTests.test_a_shim_hotfix_makes_the_release_shim_outdated'],
+                            'fh2mp_launcher.updater.shim_entry', lambda *args, **kw: None),
+    'manifest-replay-accepted': ('launcher', ['test_shim_hotfix.ReplayTests.test_an_older_manifest_than_one_seen_is_refused'],
+                                 'fh2mp_launcher.core.Launcher._refuse_replay', lambda self, m: None),
     'save-verification-disabled': ('launcher', ['test_saves.SaveTests.test_corrupt_copy_is_detected_before_replacement'],
                                     'fh2mp_launcher.saves._manifest', lambda path: {}),
     'xp-cheats-counted': ('server', ['test_xp_audit.Judge.test_impossible_awards_are_rejected'],
@@ -51,7 +55,9 @@ CASES = {
 
 def child(name, baseline=None, control=False):
     area, names, target, replacement = CASES[name]
-    sys.path.insert(0, str(ROOT / ('launcher/tests' if area == 'launcher' else 'server')))
+    sys.path.insert(0, str(ROOT / ('launcher/tests' if area == 'launcher' else 'server/tests')))
+    if area != 'launcher':
+        sys.path.insert(0, str(ROOT / 'server'))
     if area == 'launcher':
         sys.path.insert(0, str(ROOT / 'launcher'))
     if baseline:

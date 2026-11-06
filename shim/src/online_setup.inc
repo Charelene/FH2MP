@@ -102,8 +102,8 @@ static int patch_qos_timeout(void)
     if (!code_is("mmtimeout", "the QoS measurement start (FUN_1417b1b30)", img, FH2_QOS_TIMEOUT_RVA, want, sizeof want)) {
         return 0;
     }
-    done += plat_patch("mmtimeout: QoS measurement timeout of later searches 30 s -> 1 s", img + FH2_QOS_TIMEOUT_RVA + 7, want + 7, one_s, 4);
-    done += plat_patch("mmtimeout: QoS measurement timeout of the first search 10 s -> 1 s", img + FH2_QOS_TIMEOUT_RVA + 12, want + 12, one_s, 4);
+    done += plat_patch("mmtimeout: QoS measurement timeout, later searches", img + FH2_QOS_TIMEOUT_RVA + 7, want + 7, one_s, 4);
+    done += plat_patch("mmtimeout: QoS measurement timeout, first search", img + FH2_QOS_TIMEOUT_RVA + 12, want + 12, one_s, 4);
     return done == 2;
 }
 

@@ -130,6 +130,43 @@ class LauncherConfig:
             return None
 
 
+class HotfixFile:
+    """The signed hotfix document (path in FH2MP_HOTFIX_FILE, made with release/hotfix.py): {"doc": base64 JSON, "sig": base64}. Served as it is
+    at /v1/hotfix; the launcher checks the signature (launcher/fh2mp_launcher/hotfix.py), so this only checks the shape. Re-read when the file
+    changes; a broken file keeps the last good one in force. No file: {}."""
+
+    def __init__(self, path=None):
+        self.path = path if path is not None else os.environ.get("FH2MP_HOTFIX_FILE", "")
+        self._mtime = None
+        self._data = {}
+
+    def get(self):
+        if not self.path:
+            return {}
+        try:
+            m = os.stat(self.path).st_mtime
+        except OSError:
+            if self._data:
+                LOG.warn(f"hotfix: {self.path} is gone, so no hotfix document is served now")
+            self._data, self._mtime = {}, None
+            return {}
+        if m != self._mtime:
+            self._mtime = m
+            try:
+                with open(self.path, encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if not (isinstance(loaded, dict) and isinstance(loaded.get("doc"), str) and isinstance(loaded.get("sig"), str)):
+                    raise ValueError("not {\"doc\": ..., \"sig\": ...}")
+                self._data = {"doc": loaded["doc"], "sig": loaded["sig"]}
+                LOG.info(f"hotfix: serving {self.path} ({len(self._data['doc'])} bytes of document)")
+            except (OSError, ValueError) as e:
+                LOG.exc(f"hotfix: {self.path} not reloaded, the last good document stays in force", e, level="WARN")
+        return self._data
+
+
+HOTFIX = HotfixFile()
+
+
 class Ctx:
     def __init__(self, auth_service, social_store, config, online_count, log=lambda m: None, on_login=None, on_logout=None, lsp_public=None,
                  game_public=None,
@@ -278,6 +315,8 @@ def _route(ctx, method, path, headers, body, ip):
                      "latestAzimuth": c["latestAzimuth"], "supportedAzimuth": c["supportedAzimuth"], "maintenance": c["maintenance"],
                      "online": ctx.online_count(), "registration": a.registration, "auth": a.mode,
                      "lsp": ctx.lsp_public, "game": ctx.game_public, "time": int(time.time())}, ok
+    if p == "/v1/hotfix" and method == "GET":
+        return 200, HOTFIX.get(), ok
     if p == "/v1/challenges" and method == "GET":
         return 200, _boards(ctx, "challenges", _qint(u, "top", 3, 0, 10)), ok
     if p == "/v1/leaderboards" and method == "GET":
@@ -301,7 +340,8 @@ def _route(ctx, method, path, headers, body, ip):
         _require_launcher(ctx, str(d.get("client", "")))
         token, acct, ttl = a.login(ip, str(d.get("challenge", "")), str(d.get("pubkey", "")), str(d.get("sig", "")), str(d.get("client", "")))
         ctx.on_login(acct.xuid, ip, token)
-        ctx.log((f"  v1 login {acct.xuid:#x} {acct.gamertag!r} " + diag.kv(client=str(d.get("client", ""))[:80] or None)).rstrip())
+        ctx.log((f"  v1 login {acct.xuid:#x} {acct.gamertag!r} " + diag.kv(client=str(d.get("client", ""))[:80] or None,
+                                                                          run=diag.run_id(headers.get("X-FH2MP-Run", "")) or None)).rstrip())
         return 200, {"token": token, "idleSeconds": int(ttl), "account": _account_json(acct), "lsp": ctx.lsp_public,
                      "game": ctx.game_public}, ok
     if p == "/v1/gamertags/check" and method == "GET":

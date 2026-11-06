@@ -16,6 +16,8 @@ AZIMUTH_PAGE = "https://almost-there-games.itch.io/azimuth"
 # Ed25519 public key (base64) whose signature every downloaded manifest must carry. The private half lives only with the maintainer
 # (release/keygen.py); a compromised GitHub account alone therefore cannot push code to players.
 RELEASE_PUBKEY_B64 = os.environ.get("FH2MP_RELEASE_PUBKEY") or "zo6hBWSZYaeL9YsZOC03kHJ8MR9f4awtgndgWR9h0Ic="
+# signs the hotfix document (hotfix.py, release/hotfix.py); its own key, so a hotfix can be signed without the release key
+HOTFIX_PUBKEY_B64 = os.environ.get("FH2MP_HOTFIX_PUBKEY") or "Lm0aUDJtUtC/upbOQOduZj5IGs3mWAyM0ix1BJpIZEs="
 
 # One supplied compatibility set per launcher release. Server metadata cannot broaden it.
 AZIMUTH_VERSION = "1.0.4"
@@ -113,18 +115,18 @@ UPSTREAM = {
         },
     },
     "honkHonk": {
-        "name": "HonkHonk", "author": "suderek22", "license": "GPL-3.0", "version": "0.3.4",
-        "url": "https://github.com/suderek22/FH2_HonkHonk/releases/download/v0.3.4/HonkHonk_v0.3.4.zip",
-        "mirror": MIRROR_BASE + "HonkHonk_v0.3.4.zip",
-        "sha256": "50368e9ac257c858b75b863e8ada55116367feb98c01fad416120177d4a49fd3", "size": 5716563,
-        "dll": "HonkHonk_v0.3.4/fh2-mods/HonkHonk.dll", "dllSha256": "4ed6ba03ec271e525f13cf8a24917b97fc2cfcb689cff55768dd1431238113f0",
+        "name": "HonkHonk", "author": "suderek22", "license": "GPL-3.0", "version": "0.4.0",
+        "url": "https://github.com/suderek22/FH2_HonkHonk/releases/download/v0.4.0-online/HonkHonk_v0.4.0.zip",
+        "mirror": MIRROR_BASE + "HonkHonk_v0.4.0.zip",
+        "sha256": "bb2897d600b1e9f1c27a0d5e6ea51cbd39cf5cefb18bd55aa5f72b368e535338", "size": 5716949,
+        "dll": "HonkHonk_v0.4.0/fh2-mods/HonkHonk.dll", "dllSha256": "b42484b7f70f46d5e92b3c53194c856d1d09aefb81223d55eee1701b0f182bf4",
         "files": {
-            "HonkHonk_v0.3.4/fh2-mods/HonkHonk.dll": "fh2-mods/HonkHonk.dll",
-            "HonkHonk_v0.3.4/fh2-mods/HonkHonk.ini": "fh2-mods/HonkHonk.ini",
-            "HonkHonk_v0.3.4/fh2-mods/HonkHonk/HZ2_SFX_HonkHonk.bank": "fh2-mods/HonkHonk/HZ2_SFX_HonkHonk.bank",
+            "HonkHonk_v0.4.0/fh2-mods/HonkHonk.dll": "fh2-mods/HonkHonk.dll",
+            "HonkHonk_v0.4.0/fh2-mods/HonkHonk.ini": "fh2-mods/HonkHonk.ini",
+            "HonkHonk_v0.4.0/fh2-mods/HonkHonk/HZ2_SFX_HonkHonk.bank": "fh2-mods/HonkHonk/HZ2_SFX_HonkHonk.bank",
         },
         "fileSha256": {
-            "fh2-mods/HonkHonk.dll": "4ed6ba03ec271e525f13cf8a24917b97fc2cfcb689cff55768dd1431238113f0",
+            "fh2-mods/HonkHonk.dll": "b42484b7f70f46d5e92b3c53194c856d1d09aefb81223d55eee1701b0f182bf4",
             "fh2-mods/HonkHonk/HZ2_SFX_HonkHonk.bank": "6f657bf3258670838bdaef1d1b18dfa198d11e39efa961d1fb2f036fce501063",
         },
     },

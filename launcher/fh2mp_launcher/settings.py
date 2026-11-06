@@ -2,7 +2,7 @@
 import json
 import os
 
-from . import buildcfg, paths
+from . import buildcfg, logs, paths
 from .constants import API_BASES
 
 DEFAULTS = {
@@ -17,6 +17,8 @@ DEFAULTS = {
     "prefix": "",                   # Proton prefix directory = STEAM_COMPAT_DATA_PATH (Linux)
     "custom_command": "",           # e.g. steam steam://rungameid/1234567890 ; {exe} {dir} are replaced
     "check_updates": True,
+    "seen_release": {},             # channel -> newest signed manifest tag seen: an older one served later (a replay) is refused
+    "shim_signed": {},              # {launcher, version, tag}: the shim this launcher last installed from a signed manifest (without a manifest it is the one to keep)
     "offline_mode": False,          # solo play without sign-in, server checks or downloads
     "gamertag": "",                 # last known, for display before the server answers
     "xuid": 0,
@@ -49,8 +51,11 @@ class Settings:
             with open(self.path, encoding="utf-8") as f:
                 loaded = json.load(f)
             self.data.update({k: v for k, v in loaded.items() if k in DEFAULTS})
-        except (OSError, ValueError):
+        except FileNotFoundError:
             loaded = {}
+        except (OSError, ValueError) as e:
+            loaded = {}                 # every setting falls back to its default, the folders too: the setup wizard then looks like a lost install
+            logs.error("settings", "settings.unreadable", path=self.path, error=f"{type(e).__name__}: {e}", effect="defaults used")
         if paths.is_dev() and buildcfg.get("migrate_legacy_dev_api", False):
             if (loaded.get("dev_api_revision", 0) < 1
                     and self.data["api_base"] == "http://127.0.0.1:5180"):
