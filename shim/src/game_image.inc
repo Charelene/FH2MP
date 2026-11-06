@@ -24,22 +24,21 @@ static int readable_game_range(const void *address, SIZE_T size)
     return 1;
 }
 
-#ifdef FH2MP_PERF
-static volatile LONG g_perf_reads;      /* read_game_memory calls, each is 2x VirtualQuery + ReadProcessMemory (perf.inc) */
-#endif
-/* The two VirtualQuery walks below are for Wine (see above). On Windows they are the most expensive thing the shim does: every VirtualQuery scans the pages
- * of the region it describes, and the hooks on the remote cars' predictions and lighting read 7+ fields per car per frame through here. Profile of the game's
- * App Thread with 29 cars (dev 2026-11-03, 25 fps, one core at 97%): 73% of its time in these VirtualQuery calls, 0.6% in ReadProcessMemory. Windows'
- * ReadProcessMemory already fails (ERROR_PARTIAL_COPY, fewer bytes copied) for uncommitted, reserved and PAGE_NOACCESS memory, so the copy alone gives the
- * same answer there. */
-static int running_under_wine(void)
+/* VirtualQuery is slow on Windows inside large committed blocks: it works out RegionSize by walking the page tables from
+ * the address to the end of the run of pages with the same state, so in the game's memory under Azimuth (GBs committed)
+ * one call can take milliseconds (11 ms for an address in a 1 GB block on a test PC, against 0.5 us for
+ * ReadProcessMemory). read_game_memory runs per car and per frame in the lighting sync, so two of those calls per read
+ * stalled the game's main thread online (free-roam lag with many players). On Windows, ReadProcessMemory already fails
+ * cleanly on pages that are not committed or not readable, so the range checks are only made under Wine.
+ */
+static int game_reads_need_range_check(void)
 {
-    static volatile LONG state;         /* 0 unknown, 1 Windows, 2 Wine; every thread that races here finds the same answer */
+    static volatile LONG state; /* 0 unknown, 1 Windows, 2 Wine */
     LONG s = state;
     if (!s) {
-        HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
         s = ntdll && GetProcAddress(ntdll, "wine_get_version") ? 2 : 1;
-        state = s;
+        InterlockedExchange(&state, s);
     }
     return s == 2;
 }
@@ -47,10 +46,7 @@ static int running_under_wine(void)
 static int read_game_memory(const void *address, void *out, SIZE_T size)
 {
     SIZE_T got = 0;
-#ifdef FH2MP_PERF
-    InterlockedIncrement(&g_perf_reads);
-#endif
-    if (!running_under_wine()) {
+    if (!game_reads_need_range_check()) {
         return ReadProcessMemory(GetCurrentProcess(), address, out, size, &got) && got == size;
     }
     /* Wine 6 can also copy a page revoked after the initial range check.
