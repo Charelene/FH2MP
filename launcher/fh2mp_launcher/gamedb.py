@@ -1,4 +1,4 @@
-"""The car database the server plays with (server/gamedb_sync.py): checked at every start, downloaded when the player's copy differs.
+"""The car database the server plays with (native/internal/gamedbsync): checked at every start, downloaded when the player's copy differs.
 
 The launcher keeps it in <Azimuth>/fh2mp/gamedbRC.slt. The shim copies it to <Mount>/mediaoverride/Stripped/gamedbRC.slt once every
 FH2 Mod Platform mod has started (the platform writes the database it builds from other mods' SQL to the same file, or deletes it), so

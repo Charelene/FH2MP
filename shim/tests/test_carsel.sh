@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Car select hold and group deadline (src/carsel_wire.h, src/carsel_sync.inc): the wire format against server/carsel.py, the hold decision and the deadline
+# Car select hold and group deadline (src/carsel_wire.h, src/carsel_sync.inc): the wire format against frozen server vectors, the hold decision and the deadline
 # rules with a faked game, without the game. Runs the test executable directly on Windows, under Wine elsewhere.
 set -euo pipefail
 cd "$(dirname "$0")/.."

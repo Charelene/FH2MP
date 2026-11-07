@@ -34,8 +34,8 @@ node_modules/
 *.log
 *.dmp
 
-# LSP stand-in runtime state
-/server/data/
+# local server data (game catalog, traffic car list, old databases): never committed
+/data/
 .venv-pg/
 
 # server ops: database backup / restore tooling (local only)

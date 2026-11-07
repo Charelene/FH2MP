@@ -77,11 +77,12 @@ func runTraceN(t *testing.T, name string, seed uint64, workers int) {
 	if err := json.Unmarshal(raw, &tr); err != nil {
 		t.Fatal(err)
 	}
-	// The traces were recorded with the local data files (server/data is not in the public repository): without them the comparison is skipped.
-	need := []string{filepath.Join("..", "..", "..", "server", "data", "trafficcars.txt")}
+	// The traces were recorded with the local data files (<repo>/data, not in the public repository): without them the comparison is skipped.
+	data := filepath.Join("..", "..", "..", "data")
+	need := []string{filepath.Join(data, "trafficcars.txt")}
 	for _, v := range tr.Env {
 		if v == "@gamedata" {
-			need = append(need, filepath.Join("..", "..", "..", "server", "data", "gamedata.sqlite"))
+			need = append(need, filepath.Join(data, "gamedata.sqlite"))
 		}
 	}
 	for _, f := range need {
@@ -94,11 +95,11 @@ func runTraceN(t *testing.T, name string, seed uint64, workers int) {
 	t.Setenv("FH2MP_UDP_AUTH", "off")
 	for k, v := range tr.Env {
 		if v == "@gamedata" {
-			v = filepath.Join("..", "..", "..", "server", "data", "gamedata.sqlite")
+			v = filepath.Join(data, "gamedata.sqlite")
 		}
 		t.Setenv(k, v)
 	}
-	t.Setenv("FH2MP_TRAFFIC_CARS", filepath.Join("..", "..", "..", "server", "data", "trafficcars.txt"))
+	t.Setenv("FH2MP_TRAFFIC_CARS", filepath.Join(data, "trafficcars.txt"))
 	diag.ResetRateLimits()
 	clk := &fakeClock{t: 1000.0}
 	sock := &fakeSock{clk: clk}

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The watcher's decisions and the run id text (src/health.inc, the part without Windows calls): runs natively. The run ids it writes must pass the server's own
-# check (server/diag.py run_id), or the server would drop them from its lines without a word.
+# check (native/internal/diag RunID), or the server would drop them from its lines without a word.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 tmp=$(mktemp -d)

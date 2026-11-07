@@ -40,7 +40,7 @@ class IdentityTests(unittest.TestCase):
         chal = os.urandom(41)
         n = identity.solve_pow(chal, i.pubkey, 10)
         self.assertTrue(identity.pow_ok(chal, i.pubkey, n, 10))
-        # known-answer test shared with server/auth.py: a fixed seed must sign a fixed message identically
+        # known-answer test shared with the LSP (native/internal/auth): a fixed seed must sign a fixed message identically
         j = identity.Identity(bytes(range(32)))
         msg = identity.sign_message("test", "login", b"\x01" * 41, j.pubkey)
         self.assertEqual(hashlib.sha256(msg).hexdigest(), hashlib.sha256(
@@ -162,7 +162,7 @@ class TcpFallbackTests(unittest.TestCase):
         def serve():
             try:
                 data, addr = echo.recvfrom(256)
-                echo.sendto(data, addr)             # what server/probe.py does
+                echo.sendto(data, addr)             # what the game server's probe does (native/internal/game/side.go)
             except OSError:
                 pass
         threading.Thread(target=serve, daemon=True).start()

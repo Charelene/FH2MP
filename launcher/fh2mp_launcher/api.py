@@ -1,4 +1,4 @@
-"""Client for the server's /v1 API (server/launcher_api.py). Standard library only; certificates are always verified."""
+"""Client for the server's /v1 API (native/internal/lsp/launcher.go). Standard library only; certificates are always verified."""
 import datetime
 import email.utils
 import http.client

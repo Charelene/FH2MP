@@ -8,7 +8,7 @@ import (
 
 // Prod 2026-11-06 22:20-22:22 UTC: a player reserved a seat in a friend's lobby, the game left that lobby and searched again, and the left-lobby rule ate
 // the held seat, twice (the second time 100 s after the leave): a random lobby. The seat now survives the rule and wins once the leave is old.
-// Same cases as HeldSeatAgainstTheLeftLobbyRule in server/tests/test_lobby_packing.py.
+// Same cases as HeldSeatAgainstTheLeftLobbyRule in server/tests/test_lobby_packing.py (the Python servers were removed on 2026-11-07).
 type heldSeatRig struct {
 	t     *testing.T
 	s     *Server

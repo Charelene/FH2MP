@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Horn side channel (src/honk_wire.h, src/honk_sync.inc): the wire format against server/honk.py, the bank reader, the remote voices with a
+# Horn side channel (src/honk_wire.h, src/honk_sync.inc): the wire format against frozen server vectors, the bank reader, the remote voices with a
 # recording FMOD fake and the left->right stick change of HonkHonk's button, all without the game.
 set -euo pipefail
 cd "$(dirname "$0")/.."

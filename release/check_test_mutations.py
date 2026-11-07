@@ -4,10 +4,10 @@
 Each mutation runs the unmodified tests against one deliberately broken function
 in a fresh process. A passing mutant is a failure of this check. Assertion
 failures count as detection; import/setup errors do not count as useful evidence.
+The server cases went with the Python servers (2026-11-07); only launcher cases remain.
 """
 import argparse
 import contextlib
-import importlib.util
 import io
 import json
 from pathlib import Path
@@ -18,24 +18,6 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 CASES = {
-    'lost-host-settings': ('server', ['test_race_flow.RaceFlow.test_returning_host_snapshot_is_delivered_before_invite'],
-                           'fh2mp_server.Server.accept_requested_options', lambda self, peer: None),
-    'no-options-delivery': ('server', ['test_race_flow.RaceFlow.test_invite_carries_host_class_and_both_clients_reach_go'],
-                            'fh2mp_server.Server.send_game_options', lambda *args, **kw: None),
-    'no-class-enforcement': ('server', ['test_race_flow.RaceFlow.test_wrong_class_is_refused_then_a_valid_selection_can_join'],
-                             'gameopts.accepts_car', lambda *args: True),
-    'ignored-sparse-car-pick': ('server', ['test_race_flow.RaceFlow.test_car_choice_in_a_mixed_delta_is_used_for_admission'],
-                                'fh2mp_server.Server.note_typed_choices', lambda self, peer, size, payload: payload),
-    'car-packs-reach-multiplayer': ('server', ['test_lsp.LayerCountTests.test_a_marked_request_may_not_reach_multiplayer_or_the_boards'],
-                                   'fh2mp_lsp.MULTIPLAYER_HOSTS', ()),
-    'owned-car-taken-for-rental': ('server', ['test_parts.RentalChoices.test_an_owned_upgraded_car_of_a_rentable_model_keeps_its_class'],
-                                   'fh2mp_server.Server.rented', lambda *args: True),
-    'bucket-list-partners-never-paired': ('server', ['test_bucketlist.BucketListCoop.test_two_players_at_the_same_challenge_are_paired_and_started_when_both_are_ready'],
-                                          'fh2mp_server.Server.bl_key', lambda self, subject, receiver: None),
-    'no-grid-delivery':('server', ['test_race_flow.RaceFlow.test_invite_carries_host_class_and_both_clients_reach_go'],
-                         'fh2mp_server.Server.maybe_begin_race', lambda *args: None),
-    'no-go-delivery': ('server', ['test_race_flow.RaceFlow.test_invite_carries_host_class_and_both_clients_reach_go'],
-                       'fh2mp_server.Server.go_race', lambda *args: None),
     'unverified-update': ('launcher', ['test_core.UpdaterTests.test_tampered_or_foreign_manifest_rejected'],
                            'fh2mp_launcher.updater.verify_manifest', lambda raw, *args: json.loads(raw)),
     'shim-hotfix-ignored': ('launcher', ['test_shim_hotfix.LauncherShimTargetTests.test_a_shim_hotfix_makes_the_release_shim_outdated'],
@@ -44,32 +26,18 @@ CASES = {
                                  'fh2mp_launcher.core.Launcher._refuse_replay', lambda self, m: None),
     'save-verification-disabled': ('launcher', ['test_saves.SaveTests.test_corrupt_copy_is_detected_before_replacement'],
                                     'fh2mp_launcher.saves._manifest', lambda path: {}),
-    'xp-cheats-counted': ('server', ['test_xp_audit.Judge.test_impossible_awards_are_rejected'],
-                           'xp_audit.judge', lambda xp: ('ok', '')),
-    'speed-enforcement-disabled': ('server', ['test_speedcheck.SpeedCheck.test_climbing_for_three_seconds_is_flying'],
-                                    'fh2mp_server.Server.track_speed', lambda *args: None),
-    'logout-not-revoked': ('postgres', ['test_auth.HttpTests.test_actual_launcher_registration_login_recovery_and_logout'],
-                            'auth.AuthService.logout', lambda *args: None),
 }
 
 
-def child(name, baseline=None, control=False):
-    area, names, target, replacement = CASES[name]
-    sys.path.insert(0, str(ROOT / ('launcher/tests' if area == 'launcher' else 'server/tests')))
-    if area != 'launcher':
-        sys.path.insert(0, str(ROOT / 'server'))
-    if area == 'launcher':
-        sys.path.insert(0, str(ROOT / 'launcher'))
-    if baseline:
-        spec = importlib.util.spec_from_file_location('fh2mp_server', baseline)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
+def child(name, control=False):
+    _area, names, target, replacement = CASES[name]
+    sys.path.insert(0, str(ROOT / 'launcher/tests'))
+    sys.path.insert(0, str(ROOT / 'launcher'))
     suite = unittest.defaultTestLoader.loadTestsFromNames(names)
     if unittest.defaultTestLoader.errors:
         raise RuntimeError('\n'.join(unittest.defaultTestLoader.errors))
     output = io.StringIO()
-    context = mock.patch(target, replacement) if not baseline and not control else contextlib.nullcontext()
+    context = mock.patch(target, replacement) if not control else contextlib.nullcontext()
     with contextlib.redirect_stdout(output), context:
         result = unittest.TextTestRunner(stream=output).run(suite)
     if control:
@@ -88,15 +56,12 @@ def child(name, baseline=None, control=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--area', choices=('server', 'launcher', 'postgres'), required=True)
+    parser.add_argument('--area', choices=('launcher',), required=True)
     parser.add_argument('--child', choices=CASES)
     parser.add_argument('--control', action='store_true', help=argparse.SUPPRESS)
-    parser.add_argument('--baseline', type=Path, help='optional prior server source for a local regression check')
     args = parser.parse_args()
-    if args.baseline and (args.area != 'server' or not args.child):
-        parser.error('--baseline requires --area server and one --child regression')
     if args.child:
-        return child(args.child, args.baseline, args.control)
+        return child(args.child, args.control)
     failed = False
     for name, (area, _names, _target, _replacement) in CASES.items():
         if area != args.area:

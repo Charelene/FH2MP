@@ -39,7 +39,7 @@ func (c *Core) Setup(dsn string) error {
 		return err
 	}
 	if has == nil {
-		return fmt.Errorf("the game catalog is not loaded: build the bundle with tools/export_gamedata.py and load it with tools/load_gamedata_pg.py")
+		return fmt.Errorf("the game catalog is not loaded: build the bundle with tools/gamedata/export_gamedata.py and load it with tools/gamedata/load_gamedata_pg.py")
 	}
 	if c.SC, err = xls.LoadSchema(d); err != nil {
 		return err

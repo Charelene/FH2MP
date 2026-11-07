@@ -562,7 +562,8 @@ func (s *Server) shutdown() error {
 	return nil
 }
 
-// dataDir finds the folder with the server's data files: FH2MP_DATA_DIR, else the Python layout next to the binary (../server/data), else ./data.
+// dataDir finds the folder with the server's data files: FH2MP_DATA_DIR, else the host layout of the units made from the Python units
+// (<exe>/../server/data, until ops/migrate-go-units.sh has run), else data next to the binary, else ./data.
 func dataDir() string {
 	if v := os.Getenv("FH2MP_DATA_DIR"); v != "" {
 		return v
@@ -572,7 +573,7 @@ func dataDir() string {
 		d := filepath.Dir(exe)
 		cands = append(cands, filepath.Join(d, "..", "server", "data"), filepath.Join(d, "data"))
 	}
-	cands = append(cands, "server/data", "data")
+	cands = append(cands, "data")
 	for _, c := range cands {
 		if st, err := os.Stat(filepath.Join(c, "trafficcars.txt")); err == nil && !st.IsDir() {
 			return c

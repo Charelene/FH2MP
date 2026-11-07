@@ -15,7 +15,7 @@
  * it ends with are whatever the simulation left; a NaN PI passes IsCarAllowed's range tests (both are `<` / `<=` comparisons that NaN fails).
  *
  * This hooks QueryCarAttributes itself, so the picker, the choices and everything else that asks get the same answer. It lets the game fill the
- * attributes, then looks at the car: when one of its 43 part ids is in no part table of the game database (the same rule as server/parts.py
+ * attributes, then looks at the car: when one of its 43 part ids is in no part table of the game database (the same rule as native/internal/parts
  * must_replace: the camshaft and tire slots must hold a row of their own table, any other slot a row of any table; slot 0 may hold an electric
  * car's Motor row), or its PI is not a usable number (NaN, negative, huge), it replaces class and PI in the attributes by the stock car's, the
  * Data_Car row of the car id (ClassID, PerformanceIndex), which is what the server's repaired car starts from. Everything else about the car, and every
@@ -28,7 +28,7 @@
  * FH2MP_NO_PICKERPI=1 turns it off.
  * Evidence level: the data flow above is confirmed from the decompile; that a real car with an unknown part is rejected by the picker after this is
  * NOT verified in a running game, and the PI scale and class numbering of Data_Car equal the car's (inferred: PlayerChoices fills both from the Data_Car
- * row, +2a1010 InitFromCarRow, and server/car_policy.py relies on it). */
+ * row, +2a1010 InitFromCarRow, and native/internal/catalog relies on it). */
 #define PPI_FN_RVA 0x2db240u
 #define PPI_VTABLE_RVA 0x2c5f818u       /* CCarInGarage::vftable */
 #define PPI_HOLDER_RVA 0x354f4f8u       /* g_GameDatabaseHolder: +0x40 the database (as torque_load_guard.inc) */
@@ -91,7 +91,7 @@ static int ppi_elsewhere(const ppi_ops *ops, int k, unsigned w)
     return r;
 }
 
-/* The first of the 43 part ids no part table accepts (server/parts.py must_replace): a slot holds -1, or a row of its own table, or (all slots but
+/* The first of the 43 part ids no part table accepts (native/internal/parts MustReplace): a slot holds -1, or a row of its own table, or (all slots but
  * the camshaft 12 and the tire 8) a row of another table, which the server only reports. PPI_UNKNOWN_PART: in no table at all. PPI_WRONG_TABLE: a
  * camshaft or tire slot holding another table's row. PPI_NO_ANSWER: the database could not say. Else PPI_CLEAN. */
 static ppi_verdict ppi_check_parts(const unsigned *parts, const ppi_ops *ops)

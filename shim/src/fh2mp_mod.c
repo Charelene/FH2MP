@@ -225,7 +225,7 @@ static unsigned char *alloc_near(unsigned char *anchor)
 
 /* Session token of the player signed in through the launcher (see session_load); sent to the stand-in services as X-FH2MP-Token. */
 static char g_token[96];
-/* The id of this game start in every log (launcher, shim, server; server/diag.py), from the session file; made here when a session has none. */
+/* The id of this game start in every log (launcher, shim, server; native/internal/diag), from the session file; made here when a session has none. */
 static char g_run[9];
 static HANDLE g_log = INVALID_HANDLE_VALUE;
 static wchar_t g_args[MAX_ARGS][MAX_ARG_CHARS];
@@ -2180,7 +2180,7 @@ static int patch_festival_grid(void)
  * to Xbox Live" popup. That function begins with the same CLobby+0xf0 test as the Live gates above:
  *     cmp byte [rax+0xf0], 0 ; jne +7 ; xor al,al ; ret      (80 B8 F0 00 00 00 00 75 07 32 C0 ...)
  * then checks the Live sign-in state (FUN_140a42090) and the permissions 0x56..0x58 and the user flag mask 0x80. Those pass once the
- * Logon response carries the permission table (server/fh2mp_lsp.py), so only the byte test is removed: jne (75 07) becomes jmp (EB 07).
+ * Logon response carries the permission table (native/internal/lsp/notif.go), so only the byte test is removed: jne (75 07) becomes jmp (EB 07).
  * Setting the byte to 1 at runtime made "Setting Up Rivals Event" start (2026-10-18). Disable with env FH2MP_NO_RIVALGATE.
  */
 static int patch_rival_gate(void)

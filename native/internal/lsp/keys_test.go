@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// TestHandlerKeys: every call the Python server answers has a handler here (and the other way round). The list is made by reading the HANDLERS table of
-// server/fh2mp_lsp.py (tools/golden/vectors_lsp_keys.py).
+// TestHandlerKeys: every call the Python server answered has a handler here (and the other way round). The list was made from the HANDLERS table of
+// server/fh2mp_lsp.py (tools/golden/vectors_lsp_keys.py) and is frozen since that server was removed (2026-11-07).
 func TestHandlerKeys(t *testing.T) {
 	raw, err := os.ReadFile("../../testdata/lsp_handler_keys.txt")
 	if err != nil {
