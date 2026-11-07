@@ -90,8 +90,9 @@ type tconn struct {
 	born    float64
 	lastRx  float64
 	out     chan []byte
+	done    chan struct{} // closed by tunnelClose; the writer goroutine leaves on it, so out is never closed under a sender
 	pending atomic.Int64
-	dead    bool
+	dead    atomic.Bool // set by tunnelClose on the hub goroutine, read by send on the workers
 	why     string
 	rx      int
 	dropped atomic.Int64
@@ -116,7 +117,7 @@ func (t *tunnel) send(data []byte, a game.Addr) bool {
 	t.mu.RLock()
 	c := t.conns[a]
 	t.mu.RUnlock()
-	if c == nil || c.dead {
+	if c == nil || c.dead.Load() {
 		return false
 	}
 	if len(data) > maxFrame || c.pending.Load() > sendBacklog {
@@ -332,8 +333,14 @@ func (s *Server) acceptTCP() {
 }
 
 func (s *Server) serveConn(tc *tconn) {
-	go func() { // writer
-		for f := range tc.out {
+	go func() { // writer: leaves when the connection is closed (done), out itself is never closed
+		for {
+			var f []byte
+			select {
+			case <-tc.done:
+				return
+			case f = <-tc.out:
+			}
 			tc.c.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if _, err := tc.c.Write(f); err != nil {
 				s.events <- event{kind: 4, tc: tc, why: fmt.Sprintf("send error %v", err)}
@@ -406,7 +413,7 @@ func (s *Server) tunnelAccept(c net.Conn) {
 	if tcp, ok := c.(*net.TCPConn); ok {
 		tcp.SetNoDelay(true)
 	}
-	tc := &tconn{c: c, addr: game.Addr{IP: ip, Port: ra.Port}, born: now, lastRx: now, out: make(chan []byte, 4096)}
+	tc := &tconn{c: c, addr: game.Addr{IP: ip, Port: ra.Port}, born: now, lastRx: now, out: make(chan []byte, 4096), done: make(chan struct{})}
 	s.tun.mu.Lock()
 	s.tun.conns[tc.addr] = tc
 	s.tun.mu.Unlock()
@@ -426,11 +433,11 @@ func (s *Server) tunnelClose(tc *tconn, why string) {
 	if tc.why == "" {
 		tc.why = why
 	}
-	tc.dead = true
+	tc.dead.Store(true)
 	diag.Get("tunnel").Info(fmt.Sprintf("TCP connection closed: port=%d %s %s", tc.addr.Port, tc.why,
 		diag.KV(diag.KVP{K: "lived_s", V: int(s.clk.Mono() - tc.born)}, diag.KVP{K: "rx_bytes", V: tc.rx})))
 	tc.c.Close()
-	close(tc.out)
+	close(tc.done) // not close(tc.out): a worker's send may be in flight, and a send on a closed channel would end the process
 	s.hub.Stop(func() { s.hub.TunnelClosed(tc.addr) })
 }
 
@@ -530,11 +537,7 @@ func (s *Server) Run() error {
 	}
 }
 
-func (s *Server) opened(a game.Addr) bool {
-	var ok bool
-	s.hub.Stop(func() { ok = s.hub.Opened(a) })
-	return ok
-}
+func (s *Server) opened(a game.Addr) bool { return s.hub.Opened(a) } // a hub-table read on the hub goroutine: no worker pause
 
 // workerCount is FH2MP_WORKERS, default one fewer than the cores (one core keeps the hub and the sockets), at least 1.
 func workerCount() int {

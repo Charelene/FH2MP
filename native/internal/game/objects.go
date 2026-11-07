@@ -522,7 +522,7 @@ func (w *World) SendSessionHostVars(values []shVar) {
 // NoteProgress handles the MsgInProgressScoreUpdate of a racer.
 func (w *World) NoteProgress(peer *Peer, raw uint64) {
 	ev := w.Event
-	if w.Roadtrip || ev == nil || !ev.Racing || ev.Tag != nil || ev.NumLaps == nil || *ev.NumLaps == 0 || !inList(ev.People, peer) {
+	if w.Roadtrip || ev == nil || !ev.Racing || ev.Tag != nil || ev.NumLaps == nil || *ev.NumLaps == 0 || !ev.has(peer) {
 		return
 	}
 	progress := math.Abs(float64(math.Float32frombits(uint32(raw))))

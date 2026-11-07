@@ -9,6 +9,7 @@ package xbl
 import (
 	"encoding/base64"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"regexp"
@@ -36,6 +37,7 @@ const (
 	ControlLogSeconds       = 60.0
 	TargetTemplate          = "defaultTemplate"
 	LeftAvoidSeconds        = 120.0 // a search started in, or right after leaving, a lobby is never matched back into it
+	HeldRejoinSeconds       = 20.0  // a seat reserved on purpose beats that rule once the leave is this old (prod 2026-11-06, see heldSeatVsAvoid)
 	ReserveSeconds          = 30.0  // a matched player that has not connected after this long no longer holds a seat
 	MemberIdleSeconds       = 60.0  // a matched player that never joins the session drops out of it
 	// ActiveMemberIdleSeconds: a player that joined (active) is in the game world and does not poll the session there.
@@ -1175,6 +1177,53 @@ func (s *Server) avoided(xuid string, pops map[string][]string) map[string]bool 
 	return out
 }
 
+// heldSeatVsAvoid: a seat the player reserved on purpose (launcher "join a friend") must not be thrown away by avoided. Prod 2026-11-06 22:20-22:22 UTC:
+// the game left the friend's lobby, searched again a second later, and the held seat was used up and dropped by the left-lobby rule, twice (the second
+// time 100 s after the leave): the player landed in a random lobby. Now: still connected to the held lobby, or left it less than HeldRejoinSeconds ago
+// (the immediate re-join that stalled the client on dev 2026-11-01) -> the hold stays unused and this ticket gets another lobby; an older leave -> the
+// held seat wins and the lobby is taken off avoid. Returns true when the hold must stay unused for this ticket. Called under the matchmaking lock.
+func (s *Server) heldSeatVsAvoid(xuid string, avoid map[string]bool, pops map[string][]string) bool {
+	if xuid == "" || !isDigits(xuid) {
+		return false
+	}
+	s.pruneHolds(s.Now())
+	h := s.holds[xuid]
+	if h == nil || !avoid[strings.ToLower(h.ID)] {
+		return false
+	}
+	name := strings.ToLower(h.ID)
+	n, _ := strconv.ParseInt(xuid, 10, 64)
+	me := fmt.Sprintf("%x", n)
+	inside := false
+	for pn, xs := range pops {
+		if strings.ToLower(pn) != name {
+			continue
+		}
+		for _, x := range xs {
+			if lstrip0(x) == me {
+				inside = true
+			}
+		}
+	}
+	var leftS any
+	age, hasAge := 0.0, false
+	if l, ok := s.left[xuid]; ok && l.name == name {
+		age, hasAge = s.Now()-l.at, true
+		leftS = math.Round(age*10) / 10
+	}
+	if inside || (hasAge && age < HeldRejoinSeconds) {
+		why := "it left that lobby a moment ago"
+		if inside {
+			why = "the player is connected to it"
+		}
+		s.pickLog("held-wait/"+xuid, "reservation kept for a later ticket: this ticket gets another lobby "+kv(f("xuid", xuid), f("lobby", trunc(name, 8)), f("why", why), f("left_s", leftS), f("rejoin_after_s", HeldRejoinSeconds)))
+		return true
+	}
+	delete(avoid, name)
+	s.pickLog("held-beats-left/"+xuid, "reservation beats the left-lobby rule "+kv(f("xuid", xuid), f("lobby", trunc(name, 8)), f("left_s", leftS)))
+	return false
+}
+
 func (s *Server) lookup(scid, name string) *Session {
 	return s.sessions[[3]string{strings.ToLower(scid), strings.ToLower(TargetTemplate), strings.ToLower(name)}]
 }
@@ -1208,7 +1257,7 @@ func (s *Server) lobbyFor(scid, hopper string, attrs *Dict, ref *Dict, xuid stri
 	names := s.lobbies[key]
 	avoid := s.avoided(xuid, pops)
 	var preferred string
-	if xuid != "" {
+	if xuid != "" && !s.heldSeatVsAvoid(xuid, avoid, pops) {
 		var err error
 		if preferred, err = s.pick(xuid, key, attrs, ref, pops, havePops); err != nil {
 			return "", err

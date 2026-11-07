@@ -1777,7 +1777,7 @@ class Server:
         if not peer.xuid or (last is not None and now - last < NOTICE_REPAIR_SECONDS):
             return
         peer.repair_notified[car] = now
-        text = (f"FH2MP: some parts on your car {car} are not in the server's car database (a car pack or a tuning tool), so other players "
+        text = (f"FH2MP: some parts on your car {{car:{car}}} are not in the server's car database (a car pack or a tuning tool), so other players "
                 f"see it with stock parts.")
         threading.Thread(target=NOTICE_SINK, args=(peer.xuid, text, self.log), name="player-notice", daemon=True).start()
 

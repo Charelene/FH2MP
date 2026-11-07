@@ -413,7 +413,7 @@ func (w *World) consoleUpdate(peer *Peer, addr Addr, size int, payload bits.Int)
 		}
 	}
 	v3, has3 := peer.ConsoleVars[3]
-	if w.Event != nil && inList(w.Event.People, peer) && has3 && !v3 && containsStr(seen, "RaceInProgress=0") {
+	if w.Event != nil && w.Event.has(peer) && has3 && !v3 && containsStr(seen, "RaceInProgress=0") {
 		w.ParticipantLeft(peer)
 	}
 	w.MaybeBeginRace()

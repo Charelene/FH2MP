@@ -31,18 +31,6 @@ func owners(l []*Peer) string {
 	return "[" + strings.Join(parts, ", ") + "]"
 }
 
-func (e *Event) stage() string {
-	switch {
-	case e.Racing:
-		return "racing"
-	case e.Over:
-		return "results"
-	case e.Begun:
-		return "grid"
-	}
-	return "loading"
-}
-
 // EndEvent goes back to the idle lobby: clear the SessionHost race flags so the next event starts clean.
 func (w *World) EndEvent(why string, keepLeader bool) {
 	ev := w.Event
@@ -254,7 +242,7 @@ func (w *World) TagCollision(peer *Peer, k1, k2 carKey, oldA, newA, oldB, newB i
 		return nil
 	}
 	a, b := car(k1), car(k2)
-	if a == nil || b == nil || a == b || !inList(ev.People, a) || !inList(ev.People, b) {
+	if a == nil || b == nil || a == b || !ev.has(a) || !ev.has(b) {
 		w.LogEvery([2]any{"tag-unknown", peer.Owner}, 10.0, fmt.Sprintf("tag: collision from %d names unknown cars %s %s", peer.Addr.Port, k1.repr(), k2.repr()), diag.Info)
 		return
 	}
@@ -579,19 +567,14 @@ func (w *World) ParticipantLeft(peer *Peer) {
 	ev := w.Event
 	_, finished := ev.Finished.Get(peer)
 	leftEarly := !finished
-	ev.People = removeFrom(ev.People, peer)
+	ev.remove(peer)
 	when := "before finishing"
 	if !leftEarly {
 		when = "after finishing"
 	}
-	stage := "loading"
-	switch {
-	case ev.Racing:
-		stage = "racing"
-	case ev.Over:
+	stage := ev.Stage.String()
+	if ev.Stage >= StageResults {
 		stage = "results screen"
-	case ev.Begun:
-		stage = "grid"
 	}
 	w.Logf("%d owner %d left the event (RaceInProgress=0): %s, %d participant(s) remain, %s", peer.Addr.Port, peer.Owner, when, len(ev.People), stage)
 	w.RefreshCarPhasing()
@@ -745,7 +728,7 @@ func (w *World) DropUnloaded(now float64) {
 		return
 	}
 	for _, q := range drop {
-		ev.People = removeFrom(ev.People, q)
+		ev.remove(q)
 		if q.Connected {
 			w.SetConsoleBool(q, ConsoleVarParticipatingInRace, 0, why)
 		}
@@ -835,7 +818,7 @@ func (w *World) ValidateEventCars() bool {
 		return true
 	}
 	for _, q := range wrong {
-		ev.People = removeFrom(ev.People, q)
+		ev.remove(q)
 		if q.Connected {
 			w.SetConsoleBool(q, ConsoleVarParticipatingInRace, 0, "car does not meet the event restrictions")
 			q.ConsoleVars[ConsoleVarParticipatingInRace] = false
@@ -933,7 +916,7 @@ func (w *World) StartEvent(leader *Peer) {
 		laps = &l
 	}
 	now := w.Mono()
-	ev := &Event{People: people, Started: now, NumLaps: laps, Finished: omap.New[*Peer, float64](), Quit: map[*Peer]bool{}}
+	ev := &Event{People: people, Members: membersOf(people), Started: now, NumLaps: laps, Finished: omap.New[*Peer, float64](), Quit: map[*Peer]bool{}}
 	w.Event = ev
 	if !w.Roadtrip {
 		rule, _ := gameopts.CarRule(w.GameOptions)
@@ -1060,7 +1043,7 @@ func (w *World) NotePlayerStatus(peer *Peer, size int, payload bits.Int) {
 	before, had := peer.PlayerStatus, peer.HasPlayerStatus
 	peer.PlayerStatus, peer.HasPlayerStatus = int(f.Value.Uint64()), true
 	ev := w.Event
-	if had && before == peer.PlayerStatus || w.Roadtrip || ev == nil || ev.Begun || !inList(ev.People, peer) {
+	if had && before == peer.PlayerStatus || w.Roadtrip || ev == nil || ev.Begun || !ev.has(peer) {
 		return
 	}
 	if peer.PlayerStatus == PlayerStatusCarSelect {
@@ -1098,7 +1081,7 @@ func (w *World) NotePlayerStatus(peer *Peer, size int, payload bits.Int) {
 // NoteLoaded notes how long after the event start a participant's HasLoadedCarsForAllParticipants went to 1.
 func (w *World) NoteLoaded(peer *Peer) {
 	ev := w.Event
-	if ev != nil && inList(ev.People, peer) && !ev.Begun {
+	if ev != nil && ev.has(peer) && !ev.Begun {
 		if ev.LoadedAfter == nil {
 			ev.LoadedAfter = omap.New[*Peer, float64]()
 		}
@@ -1114,6 +1097,10 @@ func (w *World) MaybeBeginRace() {
 	if ev == nil || ev.Begun {
 		return
 	}
+	if len(ev.People) == 0 {
+		w.Warnf("event with no participant left cannot begin: nobody to send the grid to (the event ends when the setup check runs)")
+		return
+	}
 	for _, q := range ev.People {
 		if !(q.Connected && q.ConsoleVars[5]) {
 			return
@@ -1122,7 +1109,7 @@ func (w *World) MaybeBeginRace() {
 	if !w.ValidateEventCars() {
 		return
 	}
-	ev.Begun = true
+	w.advanceEvent(ev, StageGrid, "every participant loaded its cars")
 	var loaded []string
 	if ev.LoadedAfter != nil {
 		for _, q := range ev.LoadedAfter.Keys() {
@@ -1137,7 +1124,7 @@ func (w *World) MaybeBeginRace() {
 	w.Logf("all %d participant(s) loaded cars -> starting grid; loaded after %s", len(ev.People), la)
 	var order []*Peer
 	for _, q := range ev.Order {
-		if inList(ev.People, q) {
+		if ev.has(q) {
 			order = append(order, q)
 		}
 	}
@@ -1195,7 +1182,7 @@ func (w *World) MaybeGoRace() {
 // NoteRenderReady notes a participant's Console.RenderReady change.
 func (w *World) NoteRenderReady(peer *Peer, value int) {
 	ev, now := w.Event, w.Mono()
-	if ev == nil || !inList(ev.People, peer) || ev.GridAt == 0 {
+	if ev == nil || !ev.has(peer) || ev.GridAt == 0 {
 		return
 	}
 	if ev.GoAt != nil {
@@ -1274,7 +1261,7 @@ func (w *World) GridWaitReport(now float64) {
 // NoteLapScore handles a LapScore: elapsed time, lap timings and lap number.
 func (w *World) NoteLapScore(peer *Peer, lap int, blobs []uint64) {
 	ev := w.Event
-	if ev != nil && ev.Racing && inList(ev.People, peer) {
+	if ev != nil && ev.Racing && ev.has(peer) {
 		if ev.Laps == nil {
 			ev.Laps = omap.New[*Peer, int]()
 		}
@@ -1282,7 +1269,7 @@ func (w *World) NoteLapScore(peer *Peer, lap int, blobs []uint64) {
 		ev.Laps.Set(peer, maxInt(cur, lap))
 		w.PublishProgress()
 	}
-	if ev == nil || !ev.Racing || !inList(ev.People, peer) || ev.Finished.Has(peer) {
+	if ev == nil || !ev.Racing || !ev.has(peer) || ev.Finished.Has(peer) {
 		return
 	}
 	totalT := math.Float64frombits(blobs[0])
@@ -1301,7 +1288,7 @@ func (w *World) NoteLapScore(peer *Peer, lap int, blobs []uint64) {
 // NoteScoreKeyframe handles a player's final score keyframe.
 func (w *World) NoteScoreKeyframe(peer *Peer) {
 	ev := w.Event
-	if ev == nil || !ev.Racing || (ev.NumLaps != nil && *ev.NumLaps != 0) || !inList(ev.People, peer) || ev.Finished.Has(peer) {
+	if ev == nil || !ev.Racing || (ev.NumLaps != nil && *ev.NumLaps != 0) || !ev.has(peer) || ev.Finished.Has(peer) {
 		return
 	}
 	if ev.Tag != nil && w.Mono()-orNow(ev.RacingSince, w.Mono()) < TagKeyframeMinSecs {
@@ -1342,6 +1329,7 @@ func (w *World) CheckRaceEnd(now float64) {
 	}
 	if ev != nil && ev.ClearAt != nil && now >= *ev.ClearAt {
 		ev.ClearAt = nil
+		w.advanceEvent(ev, StageClearing, "race over: lobby flags cleared")
 		for _, v := range []int{SHRaceParticipantsSelected, SHRaceReady} {
 			w.SetSessionHostBool(v, 0, "race over: lobby flags cleared")
 		}
@@ -1352,6 +1340,11 @@ func (w *World) CheckRaceEnd(now float64) {
 		return
 	}
 	if ev == nil || !ev.Racing || ev.Over {
+		return
+	}
+	if noneConnected(ev.People) {
+		// nobody left to finish: without this the race stayed InRace forever (and a Road Trip InEvent)
+		w.EndRace("every participant left during the race")
 		return
 	}
 	if ev.Tag != nil {
@@ -1449,8 +1442,7 @@ func (w *World) EndRace(why string) {
 		msg += fmt.Sprintf("; %.0f s after GO", w.Mono()-t0)
 	}
 	w.Log(msg)
-	ev.Over = true
-	ev.Racing = false
+	w.advanceEvent(ev, StageResults, why)
 	c := w.Mono() + RaceFlagsClearSecs
 	ev.ClearAt = &c
 	w.SetSessionHostBool(SHInRace, 0, "race over: "+why)
@@ -1512,7 +1504,7 @@ func (w *World) GoRace(why string) {
 		}
 	}
 	ev.GoAt = nil
-	ev.Racing = true
+	w.advanceEvent(ev, StageRacing, why)
 	if w.Roadtrip && w.RtState != RTInEvent {
 		w.RtState = RTInEvent
 		w.RtBroadcast(rtv("State", RTInEvent), rtv("StateEndTime", 0))

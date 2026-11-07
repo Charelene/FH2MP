@@ -20,6 +20,7 @@ static unsigned char *g_img;
 static int g_hooks;
 static unsigned g_hook_rva[8];
 static volatile DWORD g_grid_tick0;
+static volatile LONG g_grid_ready_value = -1, g_grid_epoch = 1;
 static volatile LONG g_place_logged;
 
 static int g_echo;
@@ -368,12 +369,28 @@ int main(int argc, char **argv)
     stl_tick();
     assert(find_line(0, "the state flow is being stepped again") >= 0);
 
-    /* the grid message ends the trace */
+    /* the grid message starts the grid phase, the trace goes on until RenderReady */
     g_nlines = 0;
     g_grid_tick0 = 12345;
     stl_tick();
-    a = find_line(0, "event load finished: the starting grid message arrived");
-    assert(a >= 0 && has(g_lines[a], "12 snapshot(s) written") && !g_stl_ev.active);
+    a = find_line(0, "the starting grid message arrived +");
+    assert(a >= 0 && has(g_lines[a], "tracing the grid phase") && g_stl_ev.active && g_stl_ev.grid_phase && g_stl_ev.snaps == 0);
+    assert(find_line(0, "event load finished") < 0);
+    /* its first snapshot comes STL_GRID_QUIET_MS after the grid message and says it is the grid phase */
+    g_nlines = 0;
+    stl_tick();
+    assert(g_nlines == 0 || find_line(0, "snapshot #1") < 0);
+    g_stl_ev.next_snap = GetTickCount() - 1;
+    stl_tick();
+    a = find_line(0, "snapshot #1 +");
+    assert(a >= 0 && has(g_lines[a], "ms after the starting grid message, local RenderReady not set yet; state flow"));
+    /* RenderReady ends the grid phase */
+    g_nlines = 0;
+    g_grid_ready_value = 1;
+    stl_tick();
+    a = find_line(0, "event load finished: local RenderReady is set");
+    assert(a >= 0 && has(g_lines[a], "1 snapshot(s) written") && !g_stl_ev.active);
+    g_grid_ready_value = -1;
     /* after the end a path change is not logged, and the marker alone does not begin an event within the cool-down */
     g_nlines = 0;
     e4 = make_element(b3, 1);

@@ -125,6 +125,43 @@ func (h *Hub) whyUnmatched(xuid uint64, data []byte, now float64) (string, bool)
 	return "no game connection of this player is bound to a ticket", false
 }
 
+// sideSignatureOK says whether one of the player's live ticket keys signed this side-channel request (the MAC is its last sideMacSize bytes). It reads
+// only hub tables, so the hub goroutine runs it before pausing the workers for a request it cannot route.
+func (h *Hub) sideSignatureOK(xuid uint64, data []byte, now float64) bool {
+	if len(data) <= sideMacSize {
+		return false
+	}
+	for k, until := range h.Keys[xuid] {
+		if until <= now {
+			continue
+		}
+		m := hmac.New(sha256.New, []byte(k))
+		m.Write(data[:len(data)-sideMacSize])
+		if hmac.Equal(m.Sum(nil), data[len(data)-sideMacSize:]) {
+			return true
+		}
+	}
+	return false
+}
+
+// sideForged counts a side-channel request that no live key of its player signed; one DEBUG line per player per minute.
+func (h *Hub) sideForged(kind jobKind, xuid uint64) {
+	lg, name := lightLog, "lighting"
+	switch kind {
+	case jobHonk:
+		lg, name = honkLog, "horn"
+	case jobCarsel:
+		lg, name = carselLog, "car select"
+	}
+	if ok, skipped := sideRate.Allow([2]any{"side-forged", xuid}, rejectLogSeconds); ok {
+		extra := ""
+		if skipped > 0 {
+			extra = fmt.Sprintf(" (+%d more since the last line)", skipped)
+		}
+		lg.Debug(fmt.Sprintf("%s request from xuid %d ignored: no live ticket key of that player signed it (dropped before the workers were paused)%s", name, xuid, extra))
+	}
+}
+
 // findAuthed matches a side-channel request to the live, ticket-bound game connection of its xuid.
 func (h *Hub) findAuthed(only *World, routes map[uint64]Addr, xuid uint64, data []byte, now float64) (*World, *Peer, []byte) {
 	return h.findAuthedCar(only, routes, xuid, data, now, true)

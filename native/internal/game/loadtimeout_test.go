@@ -39,6 +39,7 @@ func newLoadRig(t *testing.T, n int) *loadRig {
 	for i := 0; i < n; i++ {
 		p := NewPeer(Addr{"127.0.0.1", 40000 + i}, 1000)
 		p.Owner, p.Xuid, p.Connected, p.ConnectedAt = i+1, uint64(100+i), true, 900
+		p.State, p.OpenedAt = PeerConnected, 900 // the rig skips the handshake: say so to the state, not only to the mirror
 		w.Peers.Set(p.Addr, p)
 		ev.People = append(ev.People, p)
 		r.peers = append(r.peers, p)

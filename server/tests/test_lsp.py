@@ -84,6 +84,25 @@ class StringValidationTests(unittest.TestCase):
             self.assertEqual(status, 400, body)
 
 
+class CarTokenTests(unittest.TestCase):
+    """The game server's notices carry `{car:ID}`; the LSP names the car."""
+
+    def expand(self, text, rows):
+        db = mock.Mock()
+        db.one.side_effect = lambda sql, args: rows.get(args[0])
+        with mock.patch.object(L, "DB", db):
+            return L.expand_car_tokens(text)
+
+    def test_a_known_car_is_named_with_its_id(self):
+        self.assertEqual(self.expand("on your car {car:2101} are", {2101: {"make": "Porsche", "name": "911 GT3"}}), "on your car Porsche 911 GT3 (2101) are")
+
+    def test_a_car_the_catalog_lacks_stays_its_id(self):
+        self.assertEqual(self.expand("on your car {car:9999} are", {}), "on your car 9999 are")
+
+    def test_text_without_a_token_is_untouched(self):
+        self.assertEqual(self.expand("hello {car:x} {cars}", {}), "hello {car:x} {cars}")
+
+
 class GiftingFailsSafelyTests(unittest.TestCase):
     def test_sending_a_car_is_refused_so_the_game_puts_it_back(self):
         for cls, method in (("Forza.WebServices.Gifting, Forza.WebServices", "SendCarGift"),

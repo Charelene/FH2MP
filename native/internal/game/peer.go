@@ -149,6 +149,8 @@ type Peer struct {
 	Due                                   float64
 	Hold                                  float64
 	AckCache                              *[2]int
+	State                                 PeerState   // half-open / connected / entered / leaving / removed (peerstate.go)
+	Refused                               map[int]int // messages not acted on because of the state, per type
 
 	// attributes Python sets dynamically (getattr / setattr in lighting.py, honk.py and the world)
 	Lighting         *LightState
@@ -171,7 +173,7 @@ func NewPeer(addr Addr, now float64) *Peer {
 		RelayNext: map[ObjKey]int{}, SeqShift: map[OwnerObj]int{}, CompactAt: map[ObjKey]int{}, ConsoleVars: map[int]bool{},
 		CmSeq: 1, UnknownLogged: map[int]struct{}{}, UnmappedLogged: map[[2]int]struct{}{}, MaxY: math.Inf(-1),
 		RepairNotified: map[int64]float64{}, SpeedFlagged: map[string]struct{}{}, RxSeq: map[ObjKey]int{}, Due: math.Inf(1),
-		Extra: map[string]any{},
+		Extra: map[string]any{}, Refused: map[int]int{},
 	}
 }
 

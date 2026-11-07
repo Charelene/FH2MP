@@ -174,6 +174,7 @@ func (h *Hub) stop(fn func()) {
 		fn()
 		return
 	}
+	h.stopCalls.Add(1)
 	var wg sync.WaitGroup
 	resume := make(chan struct{})
 	wg.Add(len(h.workers))
@@ -250,10 +251,20 @@ func (h *Hub) HandleDatagram(data []byte, addr Addr) {
 		h.probeHandle(data, addr)
 		return
 	case len(data) == TicketLen && string(data[11:19]) == TicketMagic:
+		// The hub goroutine is the only writer of the auth tables, so it checks the ticket without a pause: a bad one (any 84-byte datagram with the
+		// magic, from anyone) costs nothing but the check; only an accepted ticket pauses the workers to bind the address.
+		now := h.Clk.Mono()
+		if _, why := h.ticketCheck(data, addr, now); why != "" {
+			h.ticketRefused(data, addr, now, why)
+			return
+		}
 		h.stop(func() { h.Handle(data, addr) })
 		return
 	}
-	if _, _, opened := h.OpenConnectionFields(data); opened {
+	if player, _, opened := h.OpenConnectionFields(data); opened {
+		if !h.OpenAllowed(player, addr) { // hub tables only; Handle repeats the check inside the pause with the same answer
+			return
+		}
 		h.stop(func() { h.Handle(data, addr) })
 		return
 	}
@@ -285,6 +296,10 @@ func (h *Hub) sideDispatch(data []byte, addr Addr, kind jobKind) {
 		}
 	}
 	if world == nil || multiple || world.worker == nil {
+		if !h.sideSignatureOK(xuid, data, h.Clk.Mono()) {
+			h.sideForged(kind, xuid) // no live key of the player signed it: dropped here; the handlers' explanation of an unmatched request reads world state
+			return
+		}
 		h.stop(func() {
 			switch kind {
 			case jobLight:

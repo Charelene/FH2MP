@@ -201,32 +201,23 @@ class TcpFallbackTests(unittest.TestCase):
             self.assertEqual(core.Launcher.start_tunnel(me, {"host": "h", "port": 5000, "tcp": 5000, "probe": 1}), "")
 
     def test_the_probe_helper_matches_the_servers_framing(self):
+        """The game server (native/internal/game/side.go probeHandle) answers a probe only when it is exactly 11 + 8 + 8 bytes with the magic at
+        bytes 11..19, and answers with the same bytes. This stand-in applies that rule, so the helper's framing stays pinned to the server's."""
         import socket
         import threading
         from fh2mp_launcher import tunnel
-        sys_path = os.path.join(os.path.dirname(__file__), "..", "..", "server")
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("server_probe", os.path.join(sys_path, "probe.py"))
-        probe = importlib.util.module_from_spec(spec)
-        sys.path.insert(0, sys_path)                # probe.py imports the server's diag module
-        try:
-            spec.loader.exec_module(probe)
-        finally:
-            sys.path.remove(sys_path)
-        self.assertEqual(tunnel.PROBE_MAGIC, probe.MAGIC)
+        SERVER_MAGIC, SERVER_LENGTH = b"FH2MPPN1", 11 + 8 + 8        # side.go: probeMagic, probeLength
+        self.assertEqual(tunnel.PROBE_MAGIC, SERVER_MAGIC)
         srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         srv.bind(("127.0.0.1", 0))
         srv.settimeout(5)
         self.addCleanup(srv.close)
 
-        class Hub:
-            tunnel = None
-            sock = srv
-
         def serve():
             try:
                 data, addr = srv.recvfrom(256)
-                probe.handle(Hub, data, addr)       # the real responder, answering the real client helper
+                if len(data) == SERVER_LENGTH and data[11:19] == SERVER_MAGIC:
+                    srv.sendto(data, addr)           # the server's rule: the same bytes back, nothing else
             except OSError:
                 pass
         threading.Thread(target=serve, daemon=True).start()

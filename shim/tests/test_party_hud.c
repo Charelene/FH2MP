@@ -122,7 +122,8 @@ int main(void)
     assert(patch_party_hud() == 1);
     /* fake_item stands in for the factory the installer points at game+0x7389d0 */
     g_party_new_item = fake_item;
-    assert(g_hooks == 1 && g_call_hooks == 2 && has(g_raw, "party list guarded, up to 36 rows"));
+    assert(g_hooks == 1 && g_call_hooks == 2 && has(g_raw, "party list guarded, up to 75 rows"));
+    g_party_max = 36;                                                 /* the stand-ins below hold 64 rows; the default is 75 (checked above) */
 
     /* up to 12 members: the native function gets the native slot, untouched */
     memset(component, 0, sizeof component);

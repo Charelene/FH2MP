@@ -118,7 +118,7 @@ func (w *World) CarModelSeen(peer *Peer, mid int64) bool {
 			tag, peer.Owner, peer.Xuid, mid, tail)
 		if UnknownCarPolicy == "kick" && peer.KickReason == nil {
 			r := fmt.Sprintf("car id %d is not in the game", mid)
-			peer.KickReason = &r
+			peer.leaving(&r)
 		}
 	}
 	if unknown && UnknownCarPolicy == "kick" {
@@ -131,7 +131,7 @@ func (w *World) CarModelSeen(peer *Peer, mid int64) bool {
 		if peer.KickReason == nil {
 			w.Logf("CAR POLICY: owner %d xuid %#x uses car %d (%s), which players cannot get: ending the connection", peer.Owner, peer.Xuid, mid, name)
 			r := fmt.Sprintf("car %d (%s)", mid, name)
-			peer.KickReason = &r
+			peer.leaving(&r)
 		}
 		return true
 	}
@@ -205,7 +205,7 @@ func (w *World) TrackSpeed(peer *Peer, pos [3]float64, stamp *uint64, scene *int
 			peer.Owner, peer.Xuid, modelStr(peer), climb, peer.ClimbS, pos[1], tail)
 		if SpeedPolicy == "kick" && peer.KickReason == nil {
 			r := fmt.Sprintf("flying (%.0f km/h climb)", climb)
-			peer.KickReason = &r
+			peer.leaving(&r)
 		}
 	}
 	if CarCapture {
@@ -239,7 +239,7 @@ func (w *World) TrackSpeed(peer *Peer, pos [3]float64, stamp *uint64, scene *int
 		w.Logf("SPEED: owner %d xuid %#x car %s drove %.0f km/h for %.0f s (hard cap %.0f)%s", peer.Owner, peer.Xuid, modelStr(peer), kmh, peer.HardS, HardCapKmh, tail)
 		if SpeedPolicy == "kick" && peer.KickReason == nil {
 			r := fmt.Sprintf("speed %.0f km/h", kmh)
-			peer.KickReason = &r
+			peer.leaving(&r)
 		}
 	}
 	if peer.SoftS >= SpeedSeconds && !peer.Flagged("soft") {
@@ -414,7 +414,7 @@ func (w *World) CheckParts(peer *Peer, size int, payload bits.Int, oid int) (boo
 			}
 			if PartPolicy == "kick" || PartPolicy == "fix+kick" {
 				r := fmt.Sprintf("invalid parts for car %d (slot %d)", car, errs[0].Slot)
-				peer.KickReason = &r
+				peer.leaving(&r)
 			}
 			if PartPolicy == "fix" || PartPolicy == "fix+kick" {
 				stock, ok := parts.StockList(tables, car)
@@ -502,7 +502,7 @@ func (w *World) NotifyRepair(peer *Peer, car int64) {
 		return
 	}
 	peer.RepairNotified[car] = now
-	text := fmt.Sprintf("FH2MP: some parts on your car %d are not in the server's car database (a car pack or a tuning tool), so other players see it with stock parts.", car)
+	text := fmt.Sprintf("FH2MP: some parts on your car {car:%d} are not in the server's car database (a car pack or a tuning tool), so other players see it with stock parts.", car)
 	if w.Sinks != nil && w.Sinks.Notice != nil {
 		go w.Sinks.Notice(peer.Xuid, text, w.Log)
 	}
@@ -754,7 +754,7 @@ func (w *World) UnknownCar(peer *Peer, payload bits.Int, offset int, words []uin
 	if UnknownCarPolicy == "kick" {
 		if peer.KickReason == nil {
 			r := fmt.Sprintf("car %d is not in the game", car)
-			peer.KickReason = &r
+			peer.leaving(&r)
 		}
 		return true, true, payload
 	}

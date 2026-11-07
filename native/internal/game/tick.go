@@ -44,7 +44,13 @@ func (w *World) HandleFailed(rec any, data []byte, addr Addr) {
 }
 
 // DropPeer removes a client and tells the others its objects are gone.
-func (w *World) DropPeer(peer *Peer, why string) {
+// DropPeer removes a connection from the world: every removal path (CloseConnection, stale, kick, reconnect, moved, revoked, tunnel closed,
+// abandoned handshake) ends here, so nothing a peer took part in outlives it.
+func (w *World) DropPeer(peer *Peer, why string) { w.dropPeer(peer, why, false) }
+
+// dropPeer is DropPeer; quiet (an abandoned handshake) skips the removal line, the session summary and the wipe accounting, which only
+// make sense for a connection that was one.
+func (w *World) dropPeer(peer *Peer, why string, quiet bool) {
 	wasConnected := peer.Connected
 	if w.GameOptionsOwner == peer {
 		w.GameOptionsOwner = nil
@@ -56,7 +62,7 @@ func (w *World) DropPeer(peer *Peer, why string) {
 	if w.Dirty.Has(peer) {
 		w.FlushPeer(peer)
 	}
-	peer.Connected = false
+	w.setPeerState(peer, PeerRemoved, why)
 	w.Traffic.Leave(peer)
 	other := w.Coop.Leave(peer)
 	w.BlSlotsSync()
@@ -70,13 +76,62 @@ func (w *World) DropPeer(peer *Peer, why string) {
 		w.RtPendingDrive, w.RtDriveWait, w.RtConfigured = false, false, false
 		w.RtIdx = 0
 	}
+	if !quiet {
+		w.dropLog(peer, why, wasConnected)
+	}
+	if w.PendingRace != nil && w.PendingRace.Leader == peer {
+		w.EndEvent("the event leader left before it started", false)
+	}
+	if ev := w.Event; ev != nil && ev.has(peer) && !ev.Racing && !ev.Over {
+		ev.remove(peer)
+		w.Logf("event setup: participant %d is gone, %d participant(s) remain", peer.Owner, len(ev.People))
+		any := false
+		for _, q := range ev.People {
+			any = any || q.Connected
+		}
+		if !any {
+			w.EndEvent("every participant left during setup", false)
+		} else {
+			w.MaybeBeginRace()
+			w.MaybeGoRace()
+		}
+	}
+	if Reliable && peer.Owner != 0 {
+		for _, q := range w.Peers.Values() {
+			q.Window.ForgetOwner(peer.Owner, netv2.RouterBits)
+		}
+	}
+	if peer.Owner != 0 {
+		for _, key := range peer.Objs.Keys() {
+			rb := netv2.RouterBits[key.Router]
+			idBits := rb[0]
+			n := peer.RelayNext[key]
+			owner := peer.Owner
+			k := key
+			w.RelayNumbered(peer, key, n, func(sq int) netv2.Msg {
+				return netv2.RelayDelete(uint64(k.Router), uint64(k.ID), uint64(owner), idBits, uint64(sq))
+			})
+		}
+		w.OwnerQuarantine[peer.Owner] = w.Mono() + OwnerQuarantineS
+		for _, q := range w.Peers.Values() {
+			for k := range q.SeqShift {
+				if k.Owner == peer.Owner {
+					delete(q.SeqShift, k)
+				}
+			}
+		}
+	}
+}
+
+// dropLog writes what a removed connection leaves in the log and in the wipe accounting: the removal line, the session summary, the delivery line.
+func (w *World) dropLog(peer *Peer, why string, wasConnected bool) {
 	mono := w.Mono()
 	ev0 := w.Event
 	state := "road trip"
 	switch {
 	case !wasConnected:
 		state = "not connected yet"
-	case ev0 != nil && inList(ev0.People, peer):
+	case ev0 != nil && ev0.has(peer):
 		state = "in the event"
 	case !w.Roadtrip:
 		state = "free roam"
@@ -102,6 +157,9 @@ func (w *World) DropPeer(peer *Peer, why string) {
 	}
 	if peer.MalformedCount != 0 {
 		line += fmt.Sprintf(", %d malformed message(s)", peer.MalformedCount)
+	}
+	if n := refusedTotal(peer); n != 0 {
+		line += fmt.Sprintf(", %d message(s) not handled before the handshake ended", n)
 	}
 	if strings.HasPrefix(why, "no packets") || strings.HasPrefix(why, "car policy") {
 		w.Warn(line)
@@ -156,48 +214,6 @@ func (w *World) DropPeer(peer *Peer, why string) {
 		}
 		if n >= WipeMinDrops {
 			w.WipeAt = nowM + 1.0
-		}
-	}
-	if w.PendingRace != nil && w.PendingRace.Leader == peer {
-		w.EndEvent("the event leader left before it started", false)
-	}
-	if ev := w.Event; ev != nil && inList(ev.People, peer) && !ev.Racing && !ev.Over {
-		ev.People = removeFrom(ev.People, peer)
-		w.Logf("event setup: participant %d is gone, %d participant(s) remain", peer.Owner, len(ev.People))
-		any := false
-		for _, q := range ev.People {
-			any = any || q.Connected
-		}
-		if !any {
-			w.EndEvent("every participant left during setup", false)
-		} else {
-			w.MaybeBeginRace()
-			w.MaybeGoRace()
-		}
-	}
-	if Reliable && peer.Owner != 0 {
-		for _, q := range w.Peers.Values() {
-			q.Window.ForgetOwner(peer.Owner, netv2.RouterBits)
-		}
-	}
-	if peer.Owner != 0 {
-		for _, key := range peer.Objs.Keys() {
-			rb := netv2.RouterBits[key.Router]
-			idBits := rb[0]
-			n := peer.RelayNext[key]
-			owner := peer.Owner
-			k := key
-			w.RelayNumbered(peer, key, n, func(sq int) netv2.Msg {
-				return netv2.RelayDelete(uint64(k.Router), uint64(k.ID), uint64(owner), idBits, uint64(sq))
-			})
-		}
-		w.OwnerQuarantine[peer.Owner] = w.Mono() + OwnerQuarantineS
-		for _, q := range w.Peers.Values() {
-			for k := range q.SeqShift {
-				if k.Owner == peer.Owner {
-					delete(q.SeqShift, k)
-				}
-			}
 		}
 	}
 }
@@ -352,14 +368,20 @@ func (w *World) Tick() {
 		w.MtSeen = map[int]int{}
 	}
 	for _, peer := range w.Peers.Values() {
-		if !peer.Connected && now-peer.LastRx > PendingSeconds {
-			w.Peers.Delete(peer.Addr)
+		if peer.State == PeerHalfOpen && (now-peer.LastRx > PendingSeconds || now-peer.OpenedAt > HalfOpenMaxSeconds) {
 			res := "None"
 			if peer.OpenResult != nil {
 				res = fmt.Sprint(*peer.OpenResult)
 			}
-			w.LogEvery("handshake-abandoned", 10.0, fmt.Sprintf("%d handshake abandoned: xuid %#x opened a connection %.0f s ago (answered with result %s) and has been silent for %.0f s (limit %.0f s); never sent the third leg",
-				peer.Addr.Port, peer.Xuid, now-peer.OpenedAt, res, now-peer.LastRx, PendingSeconds), diag.Warn)
+			if now-peer.LastRx > PendingSeconds {
+				w.LogEvery("handshake-abandoned", 10.0, fmt.Sprintf("%d handshake abandoned: xuid %#x opened a connection %.0f s ago (answered with result %s) and has been silent for %.0f s (limit %.0f s); never sent the third leg",
+					peer.Addr.Port, peer.Xuid, now-peer.OpenedAt, res, now-peer.LastRx, PendingSeconds), diag.Warn)
+			} else {
+				w.LogEvery("handshake-timeout", 10.0, fmt.Sprintf("%d handshake not finished within %.0f s: xuid %#x opened a connection (answered with result %s) and kept sending (last packet %.1f s ago) without the third leg; dropped",
+					peer.Addr.Port, HalfOpenMaxSeconds, peer.Xuid, res, now-peer.LastRx), diag.Warn)
+			}
+			// the same cleanup as every removal (traffic, co-op, votes, a pending race it leads), without the removal line of a connection that never was one
+			w.dropPeer(peer, "handshake abandoned", true)
 			continue
 		}
 		if peer.Connected && now-peer.LastRx > StaleSeconds {

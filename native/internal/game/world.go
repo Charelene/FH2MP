@@ -175,6 +175,8 @@ type Tag struct {
 // Event is the online event being set up or raced (the Python dict `event`).
 type Event struct {
 	People               []*Peer
+	Members              map[*Peer]struct{} // the set behind People (eventstage.go)
+	Stage                EventStage         // loading / grid / racing / results / clearing; Begun, Racing and Over mirror it
 	Begun                bool
 	StartAt              *float64
 	Started              float64
@@ -699,13 +701,9 @@ func removeFrom(l []*Peer, p *Peer) []*Peer {
 func (w *World) Relay(sender *Peer, msg netv2.Msg, sameEvent bool) {
 	baked := netv2.Bake(msg)
 	due := w.Mono() + RelayFlushSecs
-	var people []*Peer
-	if sameEvent && w.Event != nil {
-		people = w.Event.People
-	}
-	inside := inList(people, sender)
+	inside := sameEvent && w.inEvent(sender)
 	for _, q := range w.Others(sender) {
-		if inList(people, q) != inside {
+		if sameEvent && w.inEvent(q) != inside {
 			continue
 		}
 		q.Outbox = append(q.Outbox, baked)
@@ -717,10 +715,7 @@ func (w *World) Relay(sender *Peer, msg netv2.Msg, sameEvent bool) {
 }
 
 // SameEvent says whether two peers are on the same side of the event boundary.
-func (w *World) SameEvent(a, b *Peer) bool {
-	people := w.people()
-	return inList(people, a) == inList(people, b)
-}
+func (w *World) SameEvent(a, b *Peer) bool { return w.inEvent(a) == w.inEvent(b) }
 
 // RelayPrediction relays a client's cached (or given) car prediction to the others, phasing it across the event boundary.
 func (w *World) RelayPrediction(sender *Peer, refresh bool, pred *Prediction) {
@@ -751,11 +746,10 @@ func (w *World) RelayPrediction(sender *Peer, refresh bool, pred *Prediction) {
 	visible := netv2.Bake(netv2.RelayCarPrediction(uint64(cid), uint64(sender.Owner), body, size))
 	var hidden *netv2.Baked
 	due := w.Mono() + RelayFlushSecs
-	people := w.people()
-	inside := inList(people, sender)
+	inside := w.inEvent(sender)
 	for _, q := range w.Others(sender) {
 		msg := visible
-		if inList(people, q) != inside {
+		if w.inEvent(q) != inside {
 			if sender.PrivateUniverse == nil {
 				continue
 			}
@@ -971,7 +965,7 @@ func (w *World) Malformed(peer *Peer, what string) {
 
 // TrafficUniverse keeps traffic on its side of an event boundary.
 func (w *World) trafficUniverse(peer *Peer) int {
-	if w.Event != nil && inList(w.Event.People, peer) {
+	if w.Event != nil && w.Event.has(peer) {
 		return 1
 	}
 	return 0

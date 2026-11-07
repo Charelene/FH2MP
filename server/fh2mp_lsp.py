@@ -299,6 +299,19 @@ def notif_fields(ntype):
     return SC.fields(s) if isinstance(s, int) else SC.call_struct(s)
 
 
+_CAR_TOKEN = re.compile(r"\{car:(\d+)\}")
+
+
+def expand_car_tokens(text):
+    """`{car:2101}` in an /admin/send text (the game server only knows car ids) -> "Make Model (2101)", or just "2101" for a car the catalog lacks."""
+    def label(m):
+        car_id = int(m.group(1))
+        r = DB.one("SELECT make, name FROM game.v_cars WHERE id=?", (car_id,))
+        name = f"{r['make'] or ''} {r['name'] or ''}".strip() if r else ""
+        return f"{name} ({car_id})" if name else str(car_id)
+    return _CAR_TOKEN.sub(label, text)
+
+
 def add_notification(message, sra="", ntype=None, params=None, xuid=0, car_id=None, gift_id=False):
     n = NOTIF.add(message, sra, MSG_TYPE if ntype is None else ntype, params, xuid, car_id, gift_id)
     log(f"  + notification #{n['id']} type={n['type']:#x}: {message!r}")
@@ -2849,7 +2862,7 @@ class Handler(BaseHTTPRequestHandler):
             log(f"  game-mode session created: {name} ({template}) type {q.get('type', '1')}")
         elif u.path == "/admin/send":
             fixed = {"text", "sra", "type", "xuid"}
-            n = add_notification(q.get("text", ""), q.get("sra", ""), int(q["type"], 0) if "type" in q else None,
+            n = add_notification(expand_car_tokens(q.get("text", "")), q.get("sra", ""), int(q["type"], 0) if "type" in q else None,
                                  notif_params(int(q["type"], 0) if "type" in q else MSG_TYPE,
                                               {k: v for k, v in q.items() if k not in fixed}),
                                  xuid=int(q["xuid"], 0) if "xuid" in q else 0)       # xuid: that player only (the game server's notices)

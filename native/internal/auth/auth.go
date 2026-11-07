@@ -281,6 +281,24 @@ func (r *RateLimiter) Hit(key any, limit int, window float64) bool {
 	} else {
 		delete(r.hits, key)
 	}
+	if len(r.keys) > 2*len(r.hits)+1024 { // keys holds a duplicate for every key that expired and came back: compact it to the live keys, oldest first
+		seen := make(map[any]struct{}, len(r.hits))
+		kept := r.keys[:0]
+		for _, k := range r.keys {
+			if _, live := r.hits[k]; !live {
+				continue
+			}
+			if _, dup := seen[k]; dup {
+				continue
+			}
+			seen[k] = struct{}{}
+			kept = append(kept, k)
+		}
+		for i := len(kept); i < len(r.keys); i++ {
+			r.keys[i] = nil
+		}
+		r.keys = kept
+	}
 	if len(r.hits) > 50000 {
 		for _, k := range r.keys[:minInt(10000, len(r.keys))] {
 			delete(r.hits, k)
@@ -852,28 +870,33 @@ func (s *Service) Authenticate(token, ip string) (*Account, error) {
 		s.cache[string(h)] = ent
 		s.cacheMu.Unlock()
 	}
-	if BanActive(ent.banned, ent.until, now) {
-		return nil, aerr(403, "banned", BanMessage(ent.reason, ent.until)).withXuid(ent.xuid)
+	s.cacheMu.Lock()
+	e := *ent // a snapshot: Rename and other requests write the shared entry under cacheMu
+	s.cacheMu.Unlock()
+	if BanActive(e.banned, e.until, now) {
+		return nil, aerr(403, "banned", BanMessage(e.reason, e.until)).withXuid(e.xuid)
 	}
-	if now > ent.expires || now > ent.hard {
+	if now > e.expires || now > e.hard {
 		d := ""
-		if now > ent.expires {
-			d += fmt.Sprintf("idle limit passed %.0f s ago", now-ent.expires)
+		if now > e.expires {
+			d += fmt.Sprintf("idle limit passed %.0f s ago", now-e.expires)
 		}
-		if now > ent.expires && now > ent.hard {
+		if now > e.expires && now > e.hard {
 			d += " and "
 		}
-		if now > ent.hard {
-			d += fmt.Sprintf("72 h hard limit passed %.0f s ago", now-ent.hard)
+		if now > e.hard {
+			d += fmt.Sprintf("72 h hard limit passed %.0f s ago", now-e.hard)
 		}
-		return nil, aerr(401, "token_expired", "the session expired: sign in again from the launcher").withXuid(ent.xuid).withDetail(d)
+		return nil, aerr(401, "token_expired", "the session expired: sign in again from the launcher").withXuid(e.xuid).withDetail(d)
 	}
-	if s.TokenIP == "exact" && ip != "" && ent.ip != ip {
-		return nil, aerr(401, "ip_changed", "your address changed: start the game from the launcher again").withXuid(ent.xuid).withDetail("the request comes from another address than the sign-in (FH2MP_TOKEN_IP=exact)")
+	if s.TokenIP == "exact" && ip != "" && e.ip != ip {
+		return nil, aerr(401, "ip_changed", "your address changed: start the game from the launcher again").withXuid(e.xuid).withDetail("the request comes from another address than the sign-in (FH2MP_TOKEN_IP=exact)")
 	}
-	if now-ent.written > TouchEvery {
+	if now-e.written > TouchEvery {
+		s.cacheMu.Lock()
 		ent.written, ent.expires = now, math.Min(now+SessionIdle, ent.hard)
 		exp := ent.expires
+		s.cacheMu.Unlock()
 		if err := s.DB.Do(func(t *db.Tx) error {
 			_, err := t.Exec("UPDATE auth_sessions SET last_used=?, expires=? WHERE token_hash=?", now, exp, h)
 			return err
@@ -881,7 +904,7 @@ func (s *Service) Authenticate(token, ip string) (*Account, error) {
 			return nil, err
 		}
 	}
-	return &Account{Xuid: ent.xuid, Gamertag: ent.tag}, nil
+	return &Account{Xuid: e.xuid, Gamertag: e.tag}, nil
 }
 
 // Logout ends a session.

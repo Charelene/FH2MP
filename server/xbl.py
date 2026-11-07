@@ -648,6 +648,35 @@ def _avoided(xuid, pops, now=None):
     return out
 
 
+HELD_REJOIN_SECONDS = 20.0   # a seat reserved on purpose beats the left-lobby rule once the leave is this old (prod 2026-11-06, see _held_seat_vs_avoid)
+
+
+def _held_seat_vs_avoid(xuid, avoid, pops, now=None):
+    """A seat the player reserved on purpose (launcher "join a friend") must not be thrown away by _avoided. Prod 2026-11-06 22:20-22:22 UTC: the game
+    left the friend's lobby, searched again a second later, and the held seat was used up and dropped by the left-lobby rule, twice (the second time 100 s
+    after the leave): the player landed in a random lobby. Now: still connected to the held lobby, or left it less than HELD_REJOIN_SECONDS ago (the
+    immediate re-join that stalled the client on dev 2026-11-01) -> the hold stays unused and this ticket gets another lobby; an older leave -> the held
+    seat wins and the lobby is taken off `avoid`. Returns True when the hold must stay unused for this ticket."""
+    import launcher_lobbies
+    now = time.time() if now is None else now
+    launcher_lobbies.prune()
+    h = launcher_lobbies.HOLDS.get(str(xuid)) if xuid else None
+    if not h or str(h["id"]).lower() not in avoid:
+        return False
+    name, me = str(h["id"]).lower(), "%x" % int(xuid)
+    inside = any(n.lower() == name and any(x.lstrip("0") == me for x in xs) for n, xs in (pops or {}).items())
+    left = _LEFT.get(str(xuid))
+    age = now - left[1] if left is not None and left[0] == name else None
+    if inside or (age is not None and age < HELD_REJOIN_SECONDS):
+        launcher_lobbies._every(("held-wait", xuid), "reservation kept for a later ticket: this ticket gets another lobby " + diag.kv(
+            xuid=xuid, lobby=name[:8], why="the player is connected to it" if inside else "it left that lobby a moment ago", left_s=None if age is None else round(age, 1),
+            rejoin_after_s=HELD_REJOIN_SECONDS))
+        return True
+    avoid.discard(name)
+    launcher_lobbies._every(("held-beats-left", xuid), "reservation beats the left-lobby rule " + diag.kv(xuid=xuid, lobby=name[:8], left_s=None if age is None else round(age, 1)))
+    return False
+
+
 def _lobby_for(scid, hopper, attrs, ref, xuid=None):
     """The lobby a ticket is matched into: of the hopper's lobbies the one with the most players that still has room (12 per lobby), so
     that players arriving one after another fill lobbies up (12, 12, 1) instead of leaving every lobby partly empty (8, 10, 6, 1).
@@ -658,7 +687,8 @@ def _lobby_for(scid, hopper, attrs, ref, xuid=None):
         names = _LOBBIES.setdefault(key, [])
         import launcher_lobbies
         avoid = _avoided(xuid, pops)
-        preferred = launcher_lobbies.pick(xuid, key, attrs, ref, pops) if xuid else None
+        keep_hold = _held_seat_vs_avoid(xuid, avoid, pops) if xuid else False
+        preferred = launcher_lobbies.pick(xuid, key, attrs, ref, pops) if xuid and not keep_hold else None
         if preferred and preferred.lower() in avoid:
             preferred = None
         lobby_max = capacity.for_hopper(hopper)

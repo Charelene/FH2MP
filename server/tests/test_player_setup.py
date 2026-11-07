@@ -149,7 +149,7 @@ class Policies(unittest.TestCase):
             self.assertTrue(done.wait(5))
             self.assertEqual(len(sent), 1)
             self.assertEqual(sent[0][0], 0x9000000000a01)
-            self.assertIn("car 368", sent[0][1])
+            self.assertIn("your car {car:368} ", sent[0][1])       # the LSP turns the token into the car's name
             self.a.parts_repair_car = None
             self.w.check_parts(self.a, *wire(words))                      # the same car again right away: not a second notice
             time.sleep(0.05)

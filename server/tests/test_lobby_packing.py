@@ -216,6 +216,78 @@ class NeverBackIntoTheLobbyBeingLeft(unittest.TestCase):
         self.assertNotIn("1002", xbl._LEFT)
 
 
+class HeldSeatAgainstTheLeftLobbyRule(unittest.TestCase):
+    """Prod 2026-11-06 22:20-22:22 UTC: a player reserved a seat in a friend's lobby, the game left that lobby and searched again, and the left-lobby rule
+    ate the held seat, twice (the second time 100 s after the leave): a random lobby. The seat now survives the rule and wins once the leave is old."""
+    HOPPER = "FreeRoam_qos"
+
+    def setUp(self):
+        import launcher_lobbies
+        self.ll = launcher_lobbies
+        for d in (xbl._SESSIONS, xbl._LOBBIES, xbl._RESERVED, xbl._LEFT, self.ll.HOLDS):
+            d.clear()
+            self.addCleanup(d.clear)
+        self.present = {}
+        orig = xbl.hub_populations
+        xbl.hub_populations = lambda: {n: ["%x" % x for x in xs] for n, xs in self.present.items()}
+        self.addCleanup(setattr, xbl, "hub_populations", orig)
+
+    def match(self, xuid, connect=True):
+        name = xbl._lobby_for("s", self.HOPPER, {}, None, str(xuid))
+        if connect:
+            for xs in self.present.values():
+                xs.discard(xuid)
+            self.present.setdefault(name, set()).add(xuid)
+        return name
+
+    def session(self, name):
+        return "/serviceconfigs/s/sessionTemplates/%s/sessions/%s" % (xbl.TARGET_TEMPLATE, name)
+
+    def friend_lobby_and_a_player_who_left_it(self):
+        a = self.match(1001)                                    # the friend's lobby
+        self.assertEqual(self.match(1002), a)                   # the first ticket of the player happens to land there too
+        body = b'{"members": {"me": {"properties": {"system": {"active": true}}}}}'
+        self.assertEqual(xbl.put_session(self.session(a), body, xuid="1002")[0], 200)
+        self.ll.reserve("1002", lobby=a)                        # "join" in the launcher
+        self.assertEqual(xbl.put_session(self.session(a), b'{"members": {"me": null}}', xuid="1002")[0], 200)
+        self.present[a].discard(1002)                           # the game left the lobby and searches again
+        return a
+
+    def test_a_search_a_second_after_leaving_gets_another_lobby_and_keeps_the_seat(self):
+        a = self.friend_lobby_and_a_player_who_left_it()
+        b = xbl._lobby_for("s", self.HOPPER, {}, None, "1002")
+        self.assertNotEqual(b, a)
+        self.assertIn("1002", self.ll.HOLDS, "the held seat is not used up")
+        self.assertEqual(self.ll.HOLDS["1002"]["id"], a)
+
+    def test_the_held_seat_wins_once_the_leave_is_old(self):
+        a = self.friend_lobby_and_a_player_who_left_it()
+        self.assertNotEqual(xbl._lobby_for("s", self.HOPPER, {}, None, "1002"), a)
+        lobby, t = xbl._LEFT["1002"]
+        xbl._LEFT["1002"] = (lobby, t - 100)                    # 22:22:35 in the log: 100 s after the leave, inside LEFT_AVOID_SECONDS
+        self.assertEqual(xbl._lobby_for("s", self.HOPPER, {}, None, "1002"), a)
+        self.assertNotIn("1002", self.ll.HOLDS, "now it is used")
+
+    def test_a_player_still_connected_to_the_held_lobby_is_not_matched_into_it(self):
+        a = self.match(1001)
+        self.match(1002, connect=False)
+        self.ll.reserve("1002", lobby=a)
+        self.present[a].add(1002)                               # connected to a and searching from inside it
+        self.assertNotEqual(xbl._lobby_for("s", self.HOPPER, {}, None, "1002"), a)
+        self.assertIn("1002", self.ll.HOLDS)
+
+    def test_without_a_reservation_the_rule_is_unchanged(self):
+        a = self.match(1001)
+        self.match(1002)
+        body = b'{"members": {"me": {"properties": {"system": {"active": true}}}}}'
+        self.assertEqual(xbl.put_session(self.session(a), body, xuid="1002")[0], 200)
+        self.assertEqual(xbl.put_session(self.session(a), b'{"members": {"me": null}}', xuid="1002")[0], 200)
+        self.present[a].discard(1002)
+        lobby, t = xbl._LEFT["1002"]
+        xbl._LEFT["1002"] = (lobby, t - 100)
+        self.assertNotEqual(xbl._lobby_for("s", self.HOPPER, {}, None, "1002"), a)
+
+
 class HubReport(unittest.TestCase):
     def test_populations_name_the_players_of_each_lobby(self):
         hub = S.Hub(0, None)

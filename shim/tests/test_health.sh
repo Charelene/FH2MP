@@ -75,11 +75,9 @@ int main(void)
 EOT
 ${HOSTCC:-cc} -O2 -Wall -I src -o "$tmp/t" "$tmp/t.c"
 "$tmp/t" > "$tmp/ids"
-python3 -I - "$tmp/ids" "$PWD/../server" <<'EOT'
-import sys
-sys.path.insert(0, sys.argv[2])
-import diag
-for line in open(sys.argv[1]):
-    assert diag.run_id(line.strip()) == line.strip(), line
-EOT
+# the server's rule for a run id (native/internal/diag RunID, formerly server/diag.py run_id): 8 hex digits, optionally .<request number>
+while IFS= read -r line; do
+    line=${line%$'\r'}
+    [[ "$line" =~ ^[0-9a-f]{8}(\.[0-9]{1,10})?$ ]] || { echo "run id the server would not accept: $line"; exit 1; }
+done < "$tmp/ids"
 echo "health: all checks pass"

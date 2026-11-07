@@ -125,6 +125,7 @@ func (w *World) BotAdd(n, limit int) (int, string) {
 		bot.Xuid, bot.Owner = BotXuidBase+uint64(w.BotSerial), owner
 		bot.World, bot.LobbyType = src.World, src.LobbyType
 		bot.Connected, bot.Entered, bot.Introduced = true, true, true
+		bot.State = PeerEntered
 		bot.CarID, bot.ModelID = src.CarID, src.ModelID
 		bot.ConnectedAt, bot.LastRx = w.Mono(), w.Mono()
 		dx, dz := ringOffset(k)
@@ -166,7 +167,7 @@ func (w *World) BotRemove(bot *Peer, why string) {
 		})
 	}
 	w.OwnerQuarantine[bot.Owner] = w.Mono() + OwnerQuarantineS
-	bot.Connected = false
+	bot.State, bot.Connected = PeerRemoved, false
 	w.Logf("bots: bot %#x (owner %d) %s; %d bot(s) left", bot.Xuid, bot.Owner, why, len(w.Bots))
 }
 

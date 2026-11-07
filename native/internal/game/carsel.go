@@ -112,7 +112,7 @@ func (ev *Event) carselDeadline() float64 {
 // CarselHoldGraceSeconds has not passed.
 func (w *World) CarselAnswer(peer *Peer) (bool, uint32, bool) {
 	ev := w.Event
-	if w.Roadtrip || ev == nil || ev.Begun || !inList(ev.People, peer) {
+	if w.Roadtrip || ev == nil || ev.Begun || !ev.has(peer) {
 		return false, 0, false
 	}
 	now := w.Mono()

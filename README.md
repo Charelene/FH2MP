@@ -1,6 +1,6 @@
 # FH2MP: Forza Horizon 2 online, back from the dead (sort of)
 
-> **v1.1.0.** It works and it is young: expect crashes, desyncs and rough edges.
+> **v1.2.0.** It works and it is young: expect crashes, desyncs and rough edges.
 > Known problems: [open issues](https://github.com/Charelene/FH2MP/issues) and the [help pages](https://forza.scuffed.af/help/). Changes per version: [Releases](https://github.com/Charelene/FH2MP/releases).
 
 [![Patreon](https://img.shields.io/badge/Patreon-Support%20FH2MP-FF424D?logo=patreon&logoColor=white)](https://www.patreon.com/fh2mp)
@@ -17,8 +17,9 @@ online call as "offline"). FH2MP puts the online half back with three pieces:
 - a **shim** (`fh2-mods\FH2MP.dll`, a mod for the [FH2 Mod Platform](https://github.com/Trinculo54/fh2-mod-platform)) that runs inside the
   game and re-enables real sockets, gives each install its own identity and redirects the game's web-service calls to our server. It works
   next to the other FH2 mods: the platform checks its changes to the game against theirs;
-- a **server** that speaks the game's UDP protocol (lobbies, worlds, relay) and stands in for the Turn 10 and Xbox Live HTTP services. The Python
-  version in `server/` is the reference; a Go port in `native/` runs the same protocol, with busy worlds spread over several CPU cores (in testing).
+- a **server** that speaks the game's UDP protocol (lobbies, worlds, relay) and stands in for the Turn 10 and Xbox Live HTTP services. It is
+  written in Go (`native/`) and spreads busy worlds over several CPU cores; the earlier Python version in `server/` was the reference it was
+  checked against, byte for byte, and is being retired.
 
 The protocol was recovered from the game client itself, not from captured Microsoft traffic. No Microsoft or Xbox Live service is ever
 contacted. There was nothing left to sniff.
@@ -53,7 +54,7 @@ Open bugs are in the [issue tracker](https://github.com/Charelene/FH2MP/issues).
 
 ## Install (players)
 
-**You need:** a legitimately owned copy of Forza Horizon 2 (Xbox One build **1.0.0.64**) and [Azimuth **0.9.10**](https://almost-there-games.itch.io/azimuth),
+**You need:** a legitimately owned copy of Forza Horizon 2 (Xbox One build **1.0.0.64**) and [Azimuth **1.0.4**](https://almost-there-games.itch.io/azimuth),
 set up so the game starts in Azimuth. No game files are in this repo or the launcher.
 
 1. Download the launcher from the [latest release](https://github.com/Charelene/FH2MP/releases/latest):
