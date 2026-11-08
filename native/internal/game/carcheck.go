@@ -12,6 +12,7 @@ import (
 	"fh2mp/internal/bits"
 	"fh2mp/internal/catalog"
 	"fh2mp/internal/diag"
+	"fh2mp/internal/gameopts"
 	"fh2mp/internal/netv2"
 	"fh2mp/internal/parts"
 	"fh2mp/internal/playersetup"
@@ -814,3 +815,44 @@ func (w *World) KickForCars() {
 }
 
 var _ = time.Now
+
+// NotifyPlayer sends a Message Center notice, at most once per key every interval seconds. No xuid or no notice sink: nothing is sent.
+func (w *World) NotifyPlayer(peer *Peer, key string, interval float64, text string) {
+	now := w.Mono()
+	if peer.Xuid == 0 || w.Sinks == nil || w.Sinks.Notice == nil {
+		return
+	}
+	if last, seen := peer.NoticedAt[key]; seen && now-last < interval {
+		return
+	}
+	peer.NoticedAt[key] = now
+	go w.Sinks.Notice(peer.Xuid, text, w.Log)
+}
+
+// classLetter is the class a car shows in the game (0 D ... 6 X); other values print as numbers.
+func classLetter(c uint64) string {
+	letters := []string{"D", "C", "B", "A", "S", "R", "X"}
+	if c < uint64(len(letters)) {
+		return letters[c]
+	}
+	return fmt.Sprint(c)
+}
+
+// refusalText tells a player why its car does not fit the event: its own class and PI against the rule.
+func refusalText(r gameopts.Rule, c *Choices) string {
+	own := "class unknown"
+	if c != nil && c.HasClass {
+		own = fmt.Sprintf("class %s", classLetter(uint64(c.Class)))
+		if !math.IsNaN(c.PI) {
+			own += fmt.Sprintf(" %d", int(c.PI*1000+0.5))
+		}
+	}
+	need := "any class"
+	if r.Class != 255 {
+		need = "class " + classLetter(r.Class)
+	}
+	if r.Min != 0 || r.Max != 0 {
+		need += fmt.Sprintf(" with PI %d-%d", r.Min, r.Max)
+	}
+	return fmt.Sprintf("FH2MP: you were not let into the event: your car is %s, the event needs %s. Pick a car that fits and try again.", own, need)
+}

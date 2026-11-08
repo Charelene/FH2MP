@@ -601,6 +601,7 @@ func (w *World) loadState(q *Peer, now float64) string {
 	if q.CarDoubtAt != 0 {
 		s += fmt.Sprintf(" (failed a check %.0f s ago)", now-q.CarDoubtAt)
 	}
+	s += q.lastReport(now, 120)
 	return s
 }
 
@@ -731,6 +732,7 @@ func (w *World) DropUnloaded(now float64) {
 		ev.remove(q)
 		if q.Connected {
 			w.SetConsoleBool(q, ConsoleVarParticipatingInRace, 0, why)
+			w.NotifyPlayer(q, "dropped", NoticeRefusedSeconds, "FH2MP: you were taken out of the event: your game had not finished loading the cars in time ("+why+"). Go back to Free Roam and try the next one; if it keeps happening, send the crash report or your log.")
 		}
 	}
 	w.RefreshCarPhasing()
@@ -799,6 +801,7 @@ func (w *World) EligibleForEvent(peer *Peer, rule *gameopts.Rule) bool {
 		msg += fmt.Sprintf(", repaired to stock car %d", *peer.PartsRepairCar)
 	}
 	w.Log(msg)
+	w.NotifyPlayer(peer, "refused", NoticeRefusedSeconds, refusalText(r, peer.Choices))
 	return false
 }
 

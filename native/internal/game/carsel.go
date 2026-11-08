@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"strings"
 
 	"fh2mp/internal/diag"
 )
@@ -21,6 +22,13 @@ const (
 	CarselSelectSeconds        = 20.0
 	CarselEntryFallbackSeconds = 3.0
 	CarselHoldGraceSeconds     = 3.0
+
+	// Client reports (type 3): the shim says why its game sits where it sits (carsel_wire.h). Signed like a request, never answered.
+	carselTypeReport    = 3
+	carselReportMaxText = 200
+	reportWindow        = 60.0 // seconds
+	reportPerWindow     = 8    // reports accepted from one player per window
+	reportSeenSeqs      = 8    // sequence numbers remembered for the shim's repeats
 )
 
 var carselLog = diag.Get("carsel")
@@ -44,6 +52,10 @@ func (h *Hub) carselRoutes(only *World) map[uint64]Addr {
 
 // carselHandle consumes a car select request: the signed answer says whether the shim's cars-loaded wait keeps waiting. Never forwarded.
 func (h *Hub) carselHandle(data []byte, addr Addr, only *World) {
+	if len(data) >= 20 && data[19] == carselTypeReport && bytes.Equal(data[:9], sideHeader[:9]) && string(data[11:19]) == carselMagic && envStr("FH2MP_NO_CARSEL", "") == "" {
+		h.carselReport(data, addr, only)
+		return
+	}
 	if len(data) != carselRequest || !bytes.Equal(data[:9], sideHeader[:9]) || string(data[11:19]) != carselMagic || envStr("FH2MP_NO_CARSEL", "") != "" {
 		return
 	}
@@ -133,7 +145,7 @@ func (w *World) CarselAnswer(peer *Peer) (bool, uint32, bool) {
 	if now >= deadline+CarselHoldGraceSeconds {
 		if !ev.HoldLimitLogged {
 			ev.HoldLimitLogged = true
-			w.Logf("carsel: hold ends %.0f s after the group's deadline, still in the car select: %s", now-deadline, ownersList(waiting))
+			w.Logf("carsel: hold ends %.0f s after the group's deadline, still in the car select: %s", now-deadline, w.carselStates(waiting, now))
 		}
 		return false, left, true
 	}
@@ -163,4 +175,167 @@ func ownersList(ps []*Peer) string {
 		fmt.Fprintf(&b, "owner%d", q.Owner)
 	}
 	return b.String()
+}
+
+// ClientReports is a player's reports: the repeats of one report (same sequence number) are dropped, and a player that sends more than
+// reportPerWindow in reportWindow seconds is ignored until the window ends.
+type ClientReports struct {
+	Epoch    []byte
+	Seen     [reportSeenSeqs]uint64
+	SeenNext int
+	WinStart float64
+	InWin    int
+	Dropped  int
+	Last     *ClientReport
+}
+
+// ClientReport is one accepted report.
+type ClientReport struct {
+	At     float64
+	Code   uint8
+	Detail uint32
+	Text   string
+}
+
+// reportCodeName names the codes of carsel_wire.h.
+func reportCodeName(code uint8) string {
+	switch code {
+	case 1:
+		return "cars-loaded wait"
+	case 2:
+		return "car cache wait"
+	case 3:
+		return "stall trace"
+	case 4:
+		return "stall trace end"
+	case 5:
+		return "other"
+	}
+	return "unknown"
+}
+
+// Accept says whether a report of this epoch and sequence number is new and within the player's budget; it records it when so. dropped is how many
+// reports the budget refused since the last accepted one (0 normally).
+func (r *ClientReports) Accept(epoch []byte, seq uint64, now float64) (ok bool, dropped int) {
+	if !bytes.Equal(r.Epoch, epoch) {
+		*r = ClientReports{Epoch: append([]byte(nil), epoch...)}
+	}
+	for _, s := range r.Seen {
+		if s == seq {
+			return false, 0
+		}
+	}
+	if r.WinStart == 0 || now-r.WinStart >= reportWindow {
+		r.WinStart, r.InWin = now, 0
+	}
+	if r.InWin >= reportPerWindow {
+		r.Dropped++
+		return false, 0
+	}
+	r.InWin++
+	r.Seen[r.SeenNext%reportSeenSeqs] = seq
+	r.SeenNext++
+	dropped = r.Dropped
+	r.Dropped = 0
+	return true, dropped
+}
+
+// carselReport consumes a client report: signed by the player's ticket key like every side-channel request, matched to its live game connection,
+// then logged next to what the server knows. Nothing is sent back.
+func (h *Hub) carselReport(data []byte, addr Addr, only *World) {
+	n := len(data) - carselBase - sideMacSize
+	lenField := int(binary.LittleEndian.Uint16(data[9:11]))
+	bad := ""
+	switch {
+	case n < 0 || n > carselReportMaxText:
+		bad = fmt.Sprintf("%d bytes (text %d, max %d)", len(data), n, carselReportMaxText)
+	case lenField != len(data):
+		bad = fmt.Sprintf("length field %d of %d bytes", lenField, len(data))
+	case data[53] != 0:
+		bad = fmt.Sprintf("reserved byte %d", data[53])
+	default:
+		for _, c := range data[carselBase : len(data)-sideMacSize] {
+			if c < 0x20 || c >= 0x7f {
+				bad = "text with a byte that is not printable ASCII"
+				break
+			}
+		}
+	}
+	if bad != "" {
+		if ok, skipped := sideRate.Allow("csr-malformed", rejectLogSeconds); ok {
+			extra := ""
+			if skipped > 0 {
+				extra = fmt.Sprintf(" (+%d more since the last line)", skipped)
+			}
+			carselLog.Warn(fmt.Sprintf("client report is malformed and ignored: %s%s", bad, extra))
+		}
+		return
+	}
+	xuid := binary.LittleEndian.Uint64(data[20:])
+	seq := binary.LittleEndian.Uint64(data[28:])
+	now := h.Clk.Mono()
+	if seq == 0 || h.isRevoked(xuid) {
+		return
+	}
+	world, peer, _ := h.findAuthedCar(only, h.carselRoutes(only), xuid, data, now, false)
+	if world == nil {
+		if ok, skipped := sideRate.Allow([2]any{"csr-unmatched", xuid}, rejectLogSeconds); ok {
+			extra := ""
+			if skipped > 0 {
+				extra = fmt.Sprintf(" (+%d more since the last line)", skipped)
+			}
+			carselLog.Debug(fmt.Sprintf("client report from xuid %d ignored: no live game connection of that player matches its address binding, ticket epoch and signature%s", xuid, extra))
+		}
+		return
+	}
+	ok, dropped := peer.ClientReports.Accept(data[36:52], seq, now)
+	if !ok {
+		return
+	}
+	world.ClientReport(peer, data[52], binary.LittleEndian.Uint32(data[54:]), string(data[carselBase:len(data)-sideMacSize]), dropped)
+}
+
+// ClientReport logs what a player's shim said about why its game waits, with the server's view of the same moment, and keeps it for the event's
+// load timeout lines.
+func (w *World) ClientReport(peer *Peer, code uint8, detail uint32, text string, dropped int) {
+	now := w.Mono()
+	peer.ClientReports.Last = &ClientReport{At: now, Code: code, Detail: detail, Text: text}
+	state := "no event"
+	if ev := w.Event; ev != nil {
+		in := "not a participant"
+		if ev.has(peer) {
+			in = "a participant"
+		}
+		state = fmt.Sprintf("event %.0f s after its start, %s, begun=%v", now-ev.Started, in, ev.Begun)
+	}
+	extra := ""
+	if dropped > 0 {
+		extra = fmt.Sprintf(" (%d report(s) over the budget were not logged)", dropped)
+	}
+	w.Warnf("client report: owner %d xuid %#x, %s [code %d, detail %d]: %s (server: %s, last packet %.1f s ago, car %s)%s",
+		peer.Owner, peer.Xuid, reportCodeName(code), code, detail, text, state, now-peer.LastRx, modelStr(peer), extra)
+	w.ev("client_report", kv("xuid", fmt.Sprintf("%#x", peer.Xuid)), kv("code", int64(code)), kv("name", reportCodeName(code)), kv("detail", int64(detail)), kv("text", text))
+}
+
+// lastReport is the player's latest report when it is not older than window seconds, as a tail for a log line ("" = none).
+func (p *Peer) lastReport(now, window float64) string {
+	r := p.ClientReports.Last
+	if r == nil || now-r.At > window {
+		return ""
+	}
+	return fmt.Sprintf("; its game said %.0f s ago (%s): %s", now-r.At, reportCodeName(r.Code), r.Text)
+}
+
+// carselStates is the list of owners the hold waited for, each with what the server knows of it: the PlayerStatus its game last wrote (1 car select,
+// 3 pre-race, none = it never wrote one), how long ago it did, and how long ago its last packet came.
+func (w *World) carselStates(ps []*Peer, now float64) string {
+	parts := make([]string, len(ps))
+	for i, q := range ps {
+		status := "no status written"
+		if q.HasPlayerStatus {
+			status = fmt.Sprintf("status %d", q.PlayerStatus)
+		}
+		parts[i] = fmt.Sprintf("owner%d (%s, last packet %.1f s ago)", q.Owner, status, now-q.LastRx)
+	}
+	return strings.Join(parts, " ")
 }

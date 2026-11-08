@@ -697,6 +697,19 @@ static void stl_snapshot(int n, DWORD ms)
     } else {
         int from = 0;
         for (i = 0; i < npl; i++) loading += pl[i].counted;
+        if (n == 1 || n == 3) {          /* the server's log gets the gist: where the state flow sits, who the game still waits for, the local console */
+            stl_buf r;
+            int listed = 0;
+            r.n = 0; r.s[0] = 0;
+            stl_s(&r, "stall snapshot #"); stl_u(&r, (unsigned)n); stl_s(&r, " +"); stl_u(&r, ms); stl_s(&r, " ms: still loading "); stl_u(&r, (unsigned)loading); stl_s(&r, " of "); stl_u(&r, (unsigned)npl);
+            for (i = 0; i < npl && listed < 4; i++) {
+                if (pl[i].counted) { stl_s(&r, listed ? "," : " ["); stl_h(&r, pl[i].id); listed++; }
+            }
+            if (listed) stl_s(&r, "]");
+            stl_s(&r, "; flow "); stl_s(&r, ncopy > 0 ? copy[0].sig : "none");
+            if (lc_ok) { stl_s(&r, "; local "); stl_console_vars(&r, &lc, 0); }
+            carsel_report_post(CS_RPT_STALL, (unsigned)n, r.s);
+        }
         while (from < npl) {
             b.n = 0; b.s[0] = 0;
             stl_s(&b, "snapshot #"); stl_u(&b, (unsigned)n); stl_s(&b, " players "); stl_u(&b, (unsigned)(from + 1)); stl_s(&b, "-");
@@ -852,6 +865,7 @@ static void stl_end(const char *why, int arrived)
     stl_s(&b, " +"); stl_u(&b, ms); stl_s(&b, " ms after the begin, "); stl_u(&b, (unsigned)snaps); stl_s(&b, " snapshot(s) written");
     if (dropped) { stl_s(&b, ", "); stl_u(&b, (unsigned)dropped); stl_s(&b, " timeline line(s) over the limit of 90 were not written"); }
     stl_emit(&b);
+    if (snaps > 0) carsel_report_post(CS_RPT_STALL_END, (unsigned)(ms / 1000), b.s);     /* only a trace that had stalled long enough for a snapshot */
 }
 
 /* One pass of the watcher (every 100 ms): the local console's vars, the event's begin, its end, the 10 s / 5 s snapshots. */

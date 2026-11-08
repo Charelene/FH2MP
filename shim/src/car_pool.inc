@@ -877,11 +877,13 @@ static int patch_car_pool(void)
 #define CAR_WAIT_FULL_MS 1500
 #define CAR_WAIT_STALL_MS 20000
 #define CAR_WAIT_GAP_MS 2000                /* a call after this long a pause starts a new wait */
+#define CAR_WAIT_REPORT_MS 20000            /* a wait this long is reported to the server once (carsel_sync.inc, defined further down) */
+static int carsel_report_post(unsigned char code, unsigned detail, const char *text);
 typedef unsigned long long (*car_wait_fn)(void *);
 static car_wait_fn g_car_wait_orig;
 static ULONGLONG g_car_wait_start, g_car_wait_last, g_car_wait_changed;
 static unsigned g_car_wait_sig[4];
-static int g_car_wait_full_logged;
+static int g_car_wait_full_logged, g_car_wait_reported;
 static unsigned g_car_wait_passed;
 static ULONGLONG (*g_car_wait_clock)(void);      /* tests; NULL = GetTickCount64 */
 
@@ -930,13 +932,13 @@ static unsigned long long car_wait(void *module)
 
     if (answer) {
         g_car_wait_start = 0;
-        g_car_wait_full_logged = 0;
+        g_car_wait_full_logged = g_car_wait_reported = 0;
         return answer;
     }
     if (!g_car_wait_start || now - g_car_wait_last > CAR_WAIT_GAP_MS) {
         g_car_wait_start = g_car_wait_changed = now;
         memset(g_car_wait_sig, 0xff, sizeof g_car_wait_sig);
-        g_car_wait_full_logged = 0;
+        g_car_wait_full_logged = g_car_wait_reported = 0;
     }
     g_car_wait_last = now;
     if (!car_wait_group(now_sig)) {
@@ -945,6 +947,24 @@ static unsigned long long car_wait(void *module)
     if (memcmp(now_sig, g_car_wait_sig, sizeof now_sig)) {
         memcpy(g_car_wait_sig, now_sig, sizeof now_sig);
         g_car_wait_changed = now;
+    }
+    if (!g_car_wait_reported && now - g_car_wait_start >= CAR_WAIT_REPORT_MS) {
+        char text[160];
+        const char *label[4] = {"; free slots ", ", cars waiting for a slot ", ", loading ", ", loaded "};
+        unsigned i, n = 0;
+        const char *head = "the wait for every player's car has lasted 20 s";
+        g_car_wait_reported = 1;
+        for (i = 0; head[i]; i++) text[n++] = head[i];
+        for (i = 0; i < 4; i++) {
+            char digits[12];
+            unsigned d = 0, v = now_sig[i], j;
+            const char *l;
+            do {digits[d++] = (char)('0' + v % 10); v /= 10;} while (v);
+            for (l = label[i]; *l && n < sizeof text - 12; l++) text[n++] = *l;
+            for (j = d; j > 0 && n < sizeof text - 1; j--) text[n++] = digits[j - 1];
+        }
+        text[n] = 0;
+        carsel_report_post(2, 20, text);
     }
     if (now_sig[0] == 0 && now_sig[2] == 0 && now - g_car_wait_changed >= CAR_WAIT_FULL_MS) {
         why = 1;

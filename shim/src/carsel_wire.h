@@ -23,6 +23,30 @@ static void carsel_request(unsigned char out[CARSEL_REQUEST], const unsigned cha
     out[52]=state&3; out[53]=0; carsel_put32(out+54,0);
     hmac_sha256(key,32,out,CARSEL_BASE,out+CARSEL_BASE);
 }
+/* Client report (type 3, client -> server, never answered): why this game sits where it sits (a long wait for cars, a stall). Same header, xuid, seq and epoch
+ * as a request; code u8 @52 (1 cars-loaded wait, 2 car cache wait, 3 stall trace snapshot, 4 stall trace end, 5 other), reserved @53 = 0, u32 LE detail @54 (what
+ * the code says it is, e.g. milliseconds waited), plain printable ASCII text from @58 up to CARSEL_REPORT_TEXT, then the HMAC-SHA256 over everything before it. The length
+ * field @9 is the whole datagram. A server without reports ignores it (it only accepts the 90-byte request). */
+#define CARSEL_REPORT_TEXT 200u
+#define CARSEL_REPORT_MAX (CARSEL_BASE + CARSEL_REPORT_TEXT + CARSEL_MAC)
+static unsigned carsel_report(unsigned char out[CARSEL_REPORT_MAX], const unsigned char key[32], unsigned long long xuid, unsigned long long seq,
+                              const unsigned char epoch[16], unsigned char code, unsigned detail, const char *text)
+{
+    unsigned i, n = 0, total;
+    for(i=0;i<19;i++) out[i]=carsel_header[i];
+    out[19]=3;
+    light_put64(out+20,xuid); light_put64(out+28,seq);
+    for(i=0;i<16;i++) out[36+i]=epoch[i];
+    out[52]=code; out[53]=0; carsel_put32(out+54,detail);
+    for(i=0;text && text[i] && n<CARSEL_REPORT_TEXT;i++) {
+        unsigned char c=(unsigned char)text[i];
+        out[CARSEL_BASE+n++]=(c>=0x20 && c<0x7f) ? c : '?';
+    }
+    total=CARSEL_BASE+n+CARSEL_MAC;
+    out[9]=(unsigned char)total; out[10]=(unsigned char)(total>>8);
+    hmac_sha256(key,32,out,CARSEL_BASE+n,out+CARSEL_BASE+n);
+    return total;
+}
 /* Checks a reply (this player's xuid and epoch, a sequence number that is new and recent, the signature); returns 1 with *hold (0 or 1) and
  * *remaining (ms to the group's deadline, CARSEL_NO_DEADLINE = none), or 0 for anything else. */
 static int carsel_response(const unsigned char *data, unsigned n, const unsigned char key[32], unsigned long long xuid, unsigned long long sent,

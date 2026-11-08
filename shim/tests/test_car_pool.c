@@ -94,6 +94,9 @@ static int plat_patch(const char *name, void *at, const void *expect, const void
     return 1;
 }
 
+static int g_reports; static unsigned char g_report_code; static char g_report_text[256];
+static int carsel_report_post(unsigned char code, unsigned detail, const char *text) { (void)detail; g_reports++; g_report_code = code; strncpy(g_report_text, text, sizeof g_report_text - 1); return 1; }
+
 #include "src/car_pool.inc"
 
 static void bind_cur_type(void) { g_cur_type_ptr = &g_car_pool_cur_type; }
@@ -154,6 +157,8 @@ static void fresh(void)
     g_car_pool_tick_orig = NULL;
     g_car_wait_orig = NULL;
     g_car_cache_self = NULL;
+    g_reports = 0;
+    g_car_wait_reported = 0;
     memcpy(g_img + CAR_POOL_FIND_RVA, FIND_HEAD, sizeof FIND_HEAD);
     memcpy(g_img + CAR_POOL_IDS_RVA, IDS_HEAD, sizeof IDS_HEAD);
     memcpy(g_img + CAR_POOL_AICTL_RVA, AICTL_HEAD, sizeof AICTL_HEAD);
@@ -898,6 +903,7 @@ int main(void)
         assert(wait_for(module, CAR_WAIT_STALL_MS) == 0);
         g_raw[0] = 0;
         assert(wait_for(module, 500) == 1 && g_car_wait_passed == 3 && strstr(g_raw, "nothing in the car cache changed"));
+        assert(g_reports == 1 && g_report_code == 2 && strstr(g_report_text, "lasted 20 s; free slots 1, cars waiting for a slot 1, loading 1, loaded 2"));   /* told to the server once per wait */
 
         g_now = 500000;                                                   /* an unsane group (slots not a whole number): the game's no stands */
         *(unsigned long long *)(group + 0x68) += 5;

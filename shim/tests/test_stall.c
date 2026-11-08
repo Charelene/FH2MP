@@ -69,6 +69,18 @@ static volatile LONG g_cs_enabled;
 static volatile LONG64 g_cs_armed_at;
 #endif
 
+/* the server report (carsel_sync.inc, not part of this test): recorded */
+#define CS_RPT_STALL 3
+#define CS_RPT_STALL_END 4
+static int g_reports; static unsigned char g_report_code[16]; static char g_report_text[16][256];
+static int carsel_report_post(unsigned char code, unsigned detail, const char *text)
+{
+    (void)detail;
+    if (g_reports < 16) {g_report_code[g_reports] = code; strncpy(g_report_text[g_reports], text, 255); g_report_text[g_reports][255] = 0;}
+    g_reports++;
+    return 1;
+}
+
 #include "src/stall_trace.inc"
 
 static int has(const char *line, const char *part) { return strstr(line, part) != NULL; }
@@ -338,6 +350,7 @@ int main(int argc, char **argv)
     }
 #endif
     assert(g_stl_ev.snaps == 1);
+    assert(g_reports == 1 && g_report_code[0] == CS_RPT_STALL && has(g_report_text[0], "stall snapshot #1 +") && has(g_report_text[0], "still loading 1 of 3 [0x21]; flow Nerd::ConsoleSynced > NetworkSetInitialCarLoading+ShowUIScreen > NetworkWaitForCarsLoaded; local RenderReady=0 SessionEntryFinalised=1 ParticipatingInRace=1") && 1);   /* the first snapshot goes to the server */
 
     /* 5 s apart, at most 12 */
     g_nlines = 0;

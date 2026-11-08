@@ -64,6 +64,7 @@ const (
 	RaceLastFinisherSecs   = 30.0
 	ProgressSendSeconds    = 1.0
 	NoticeRepairSeconds    = 600.0
+	NoticeRefusedSeconds   = 60.0
 	ClockSamples           = 30
 	SpinLimit              = 6.0
 	HardCapKmh             = 451.0

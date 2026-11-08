@@ -138,6 +138,7 @@ type Peer struct {
 	SpeedRef                              *SpeedRef
 	InvisibleLogged                       bool
 	RepairNotified                        map[int64]float64
+	NoticedAt                             map[string]float64 // Message Center notices sent to this player by key (NotifyPlayer)
 	TopKmh                                float64
 	HardS, SoftS                          float64
 	SpeedFlagged                          map[string]struct{}
@@ -159,6 +160,7 @@ type Peer struct {
 	Honk             *HonkState
 	HonkLoggedAt     float64
 	Carsel           *CarselState
+	ClientReports    ClientReports // what this client's shim told the server about why it waits (carsel.go)
 	Extra            map[string]any
 	TeamID           int
 	RtPstate         int
@@ -172,7 +174,7 @@ func NewPeer(addr Addr, now float64) *Peer {
 		BlState: map[string]float64{}, Objs: omap.New[ObjKey, []replay.Entry](), HostSeq: 2,
 		RelayNext: map[ObjKey]int{}, SeqShift: map[OwnerObj]int{}, CompactAt: map[ObjKey]int{}, ConsoleVars: map[int]bool{},
 		CmSeq: 1, UnknownLogged: map[int]struct{}{}, UnmappedLogged: map[[2]int]struct{}{}, MaxY: math.Inf(-1),
-		RepairNotified: map[int64]float64{}, SpeedFlagged: map[string]struct{}{}, RxSeq: map[ObjKey]int{}, Due: math.Inf(1),
+		RepairNotified: map[int64]float64{}, NoticedAt: map[string]float64{}, SpeedFlagged: map[string]struct{}{}, RxSeq: map[ObjKey]int{}, Due: math.Inf(1),
 		Extra: map[string]any{}, Refused: map[int]int{},
 	}
 }
