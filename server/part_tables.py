@@ -28,9 +28,23 @@ def open_ro(path):
     return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
 
 
+def read_bodies(c):
+    """-> {List_UpgradeCarBody id: the car whose body it installs (CarBodyID / 1000)}. Every stock car's body row installs its own body
+    (CarBodyID = Ordinal x 1000), but a car pack's car (make_car_pack.py) gets body rows of its own that install its base car's body, so its
+    bumpers, hood, side skirts and chassis rows are the base car's. Empty when the table has no CarBodyID column."""
+    try:
+        cols = [r[1] for r in c.execute('pragma table_info("List_UpgradeCarBody")')]
+        if "CarBodyID" not in cols:
+            return {}
+        return {i: b // 1000 for i, b in c.execute('select Id, CarBodyID from List_UpgradeCarBody') if b is not None}
+    except sqlite3.Error as e:
+        LOG.warn(f"List_UpgradeCarBody's CarBodyID could not be read, so body parts are checked against the car's own id: {diag.where(e)}")
+        return {}
+
+
 def read_parts(c):
     """-> dict(ids={table: sorted ids}, kind={table: owner kind}, owner={table: {id: owner}}, stock={table: {owner: stock id}},
-    installs={"Engine"|"Drivetrain"|"Motor": {row: engine / drivetrain / motor id}})."""
+    installs={"Engine"|"Drivetrain"|"Motor": {row: engine / drivetrain / motor id}}, bodies=read_bodies(c))."""
     ids, kind, owner, stock = {}, {}, {}, {}
     for (t,) in c.execute("select name from sqlite_master where type='table' and name like 'List_Upgrade%'").fetchall():
         cols = [r[1] for r in c.execute(f'pragma table_info("{t}")')]
@@ -52,7 +66,7 @@ def read_parts(c):
         stock[name] = st
     installs = {t: {i: o for i, o in c.execute(f'select Id, "{col}" from "List_Upgrade{t}"')}
                 for t, col in (("Engine", "EngineID"), ("Drivetrain", "DrivetrainID"), ("Motor", "MotorID"))}
-    return {"ids": ids, "kind": kind, "owner": owner, "stock": stock, "installs": installs}
+    return {"ids": ids, "kind": kind, "owner": owner, "stock": stock, "installs": installs, "bodies": read_bodies(c)}
 
 
 def read_cars(c):
