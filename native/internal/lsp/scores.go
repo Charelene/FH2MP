@@ -105,11 +105,6 @@ func sbSubmitScore(c *Core, r *Req, req *xls.Struct) (*xls.Struct, error) {
 	if v, ok := d.Vals["score"].(uint64); ok {
 		sub.Score = v
 	}
-	if r.Nitro && scoreboard.CarBoards[sub.ScoreboardType] {
-		c.LogEvery(r, fmt.Sprintf("score-nitro/%d", xuid), 60, fmt.Sprintf("  SubmitScore board=(%d,%d) track=%d car=%d: not stored, the game reports NitroSystem in X-FH2MP-Tools (user %#x, shim %s)",
-			sub.ScoreboardType, typ, sub.TrackID, sub.CarID, xuid, c.shimOrNone(r)), diag.Warn, "")
-		return nil, nil
-	}
 	s, err := c.Sb.Submit(xuid, tag, typ, sub)
 	if err != nil {
 		return nil, err

@@ -795,23 +795,6 @@ func (c *Core) gamedbOK(rw respWriter, r *Req, req *http.Request, acct *auth.Acc
 	return true
 }
 
-// reportsNitro: the X-FH2MP-Tools value ("v1,tool,...") names NitroSystem. Read on every request, whatever FH2MP_RESTRICTED_TOOLS says.
-func reportsNitro(value string) bool {
-	if len(value) > 80 {
-		return false
-	}
-	tokens := strings.Split(value, ",")
-	if tokens[0] != "v1" {
-		return false
-	}
-	for _, t := range tokens[1:] {
-		if t == "nitrosystem" {
-			return true
-		}
-	}
-	return false
-}
-
 func (c *Core) restrictedToolsOK(rw respWriter, r *Req, req *http.Request, acct *auth.Account) bool {
 	value := req.Header.Get("X-FH2MP-Tools")
 	var tokens []string
@@ -857,10 +840,11 @@ func (c *Core) restrictedToolsOK(rw respWriter, r *Req, req *http.Request, acct 
 		rw.json(400, pyjson.Obj{{K: "error", V: "bad_tool_report"}}, "")
 		return false
 	}
-	// Older shims still report Redline.exe; it is not a restricted tool any more (user decision 2026-11-05).
+	// Older shims still report Redline.exe and NitroSystem; neither is a restricted tool any more (user decisions 2026-11-05 and
+	// 2026-11-07: NitroSystem is offline-only on FH2 Mod Platform 2.8.0, and the shim saw its DLL loaded although the platform held it back).
 	kept := tools[:0]
 	for _, t := range tools {
-		if t != "redline" {
+		if t != "redline" && t != "nitrosystem" {
 			kept = append(kept, t)
 		}
 	}
@@ -902,7 +886,6 @@ func (c *Core) restrictedToolsOK(rw respWriter, r *Req, req *http.Request, acct 
 func (c *Core) identify(rw respWriter, r *Req, req *http.Request) bool {
 	h := req.Header
 	r.Authed, r.Tag, r.OwnCars = false, "", false
-	r.Nitro = reportsNitro(h.Get("X-FH2MP-Tools"))
 	r.Shim = h.Get("X-FH2MP-Shim") // the client's shim version ("1.0.0-rc2"); empty for clients that do not send it
 	need := "0.0.0"
 	if c.Launcher != nil {

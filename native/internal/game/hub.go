@@ -95,6 +95,7 @@ type Hub struct {
 	Authed         map[uint64]authEnt
 	Flagged        *omap.Map[uint64, flagEnt]
 	FlagsError     string
+	FlagsReleased  int // entries of a restricted-tools report dropped by loadFlags (NitroSystem stopped being one 2026-11-07)
 	FlagFile       string
 	Revoked        map[uint64]float64
 	UDPAuth        string
@@ -176,6 +177,10 @@ func NewHub(cfg HubConfig) (*Hub, error) {
 	}
 	if h.FlagsError != "" {
 		idle.Warnf("cheater pool file %s not read (%s): the pool starts empty", h.FlagFile, h.FlagsError)
+	}
+	if h.FlagsReleased > 0 {
+		h.saveFlags()
+		idle.Logf("cheater pool: %d player(s) flagged only for a restricted-tools report released (no tool report flags a player any more); %d remain flagged", h.FlagsReleased, h.Flagged.Len())
 	}
 	return h, nil
 }
@@ -647,6 +652,10 @@ func (h *Hub) loadFlags() {
 		var reason string
 		_ = json.Unmarshal(v[0], &until)
 		_ = json.Unmarshal(v[1], &reason)
+		if strings.HasPrefix(reason, "restricted tools") {
+			h.FlagsReleased++
+			continue
+		}
 		h.Flagged.Set(x, flagEnt{until, reason})
 	}
 }
