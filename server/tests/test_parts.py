@@ -410,10 +410,13 @@ class CarPacks(unittest.TestCase):
         self.S = S
         saved = {n: copy.deepcopy(getattr(P, n)) for n in ("TABLE_IDS", "ALL_IDS", "OWNER_KIND", "ROW_OWNER", "STOCK", "INSTALLS")}
         saved_s = (S.KNOWN_CARS, dict(S.TOP_SPEED_KMH), S.UNKNOWN_CAR_POLICY, S.SYNC_GAMEDB, dict(S._sync), dict(S.CAR_CHOICES), S.RENTAL_CARS)
+        saved_bodies = dict(parts.BODY_OF)
 
         def restore():
             for n, v in saved.items():
                 setattr(P, n, v)
+            parts.BODY_OF.clear()
+            parts.BODY_OF.update(saved_bodies)
             S.KNOWN_CARS, top, S.UNKNOWN_CAR_POLICY, S.SYNC_GAMEDB, sync, choices, S.RENTAL_CARS = saved_s
             S.CAR_CHOICES.clear()
             S.CAR_CHOICES.update(choices)
@@ -482,6 +485,47 @@ class CarPacks(unittest.TestCase):
         self.assertEqual(self.S.CAR_CHOICES[self.PACK], (3, 0.7))              # a pack car's class and PI, and its rental flag, come from the synced database
         self.assertIn(self.PACK, self.S.RENTAL_CARS)
         self.assertFalse(self.S.load_sync_catalog(every=0))                     # unchanged file: not read again
+
+    def test_a_pack_car_on_its_base_cars_body_is_a_normal_car(self):
+        """make_car_pack.py gives a pack car rows of its own (car id x 1000) for the tables keyed by Ordinal, but its body row installs the base
+        car's body (CarBodyID 368000), so its bumpers, hood, side skirts and chassis rows are the base car's own. Before, those were taken to
+        belong to the pack car (body row // 1000) and every such car was "repaired" to a list without them."""
+        import sqlite3
+        import tempfile
+        path = os.path.join(tempfile.mkdtemp(), "gamedbRC.slt")
+        c = sqlite3.connect(path)
+        c.execute('CREATE TABLE Data_Car (Id INTEGER, MediaName TEXT, "TopSpeed-mph" REAL, ClassID INTEGER, PerformanceIndex REAL)')
+        c.execute("INSERT INTO Data_Car VALUES (?, 'ABC_Pack_20', 150, 3, 0.7)", (self.PACK,))
+        for t, extra in (("Engine", "EngineID"), ("Drivetrain", "DrivetrainID"), ("Motor", "MotorID"), ("CarBody", "CarBodyID")):
+            c.execute(f"CREATE TABLE List_Upgrade{t} (Id INTEGER, Ordinal INTEGER, {extra} INTEGER, IsStock INTEGER)")
+        own = [t for t in P.TABLE_IDS if P.OWNER_KIND.get(t) == "car" and t not in ("Engine", "Drivetrain", "Motor", "CarBody")
+               and t not in parts.BODY_TABLES]
+        for t in own:
+            c.execute(f"CREATE TABLE List_Upgrade{t} (Id INTEGER, Ordinal INTEGER, IsStock INTEGER)")
+            c.execute(f"INSERT INTO List_Upgrade{t} VALUES (?, ?, 1)", (self.PACK * 1000, self.PACK))
+        c.execute("INSERT INTO List_UpgradeEngine VALUES (?, ?, ?, 1)", (self.PACK * 1000, self.PACK, P.INSTALLS["Engine"][368000]))
+        c.execute("INSERT INTO List_UpgradeDrivetrain VALUES (?, ?, ?, 1)", (self.PACK * 1000, self.PACK, P.INSTALLS["Drivetrain"][368000]))
+        c.execute("INSERT INTO List_UpgradeCarBody VALUES (?, ?, 368000, 1)", (self.PACK * 1000, self.PACK))
+        c.commit()
+        c.close()
+        words = stock_car(368)
+        for k, t in P.SLOT_TABLE.items():
+            if t in own or t in ("Engine", "Drivetrain", "CarBody"):
+                if words[k] != P.PART_NONE:
+                    words[k] = self.PACK * 1000
+        self.assertEqual(words[34], 368000)                                     # the Integra's front bumper row
+        self.S.SYNC_GAMEDB, self.S._sync["checked"] = path, -1e9
+        w, (a, b) = self.world()
+        size, v = serialized_object(words)
+        bad, hide, size, v2 = w.check_parts(a, size, v)
+        self.assertEqual(parts.integrity_errors(words), [])
+        self.assertEqual((bad, hide, v2, a.model_id, a.kick_reason), (False, False, v, self.PACK, None))
+        self.assertEqual(parts.stock_list(self.PACK), words)                    # its stock list has the base car's body parts
+        self.assertEqual(parts.integrity_errors(stock_car(368)), [])            # the base car itself is unchanged
+
+    def test_a_stock_car_needs_no_body_entry(self):
+        added = parts.extend({"ids": {}, "kind": {}, "owner": {}, "stock": {}, "installs": {}, "bodies": {368000: 368}})
+        self.assertEqual((added, parts.BODY_OF.get(368000)), (0, None))
 
 
 class ChoicesSanity(unittest.TestCase):

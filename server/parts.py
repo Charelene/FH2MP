@@ -32,13 +32,22 @@ def must_replace(slot, word):
     return text is not None and P.SLOT_TABLE.get(slot) is not None and slot != 2 and ("no such id" in text or slot in (8, 12))
 
 
+# Tables whose rows belong to a car body (their CarBodyID), not to a car (Ordinal). Their owner is the body the car's slot 2 row installs:
+# the car itself for every stock car, the base car for a car pack's car, which shares its base car's body (part_tables.read_bodies).
+BODY_TABLES = frozenset({"CarBodyChassisStiffness", "CarBodyFrontBumper", "CarBodyHood", "CarBodyRearBumper", "CarBodySideSkirt"})
+BODY_OF = {}        # List_UpgradeCarBody id -> the car whose body it installs, where that isn't the row's own car (extend)
+
+
 def _expected_owner(table, words):
-    """Who a row in `table` must belong to for this car: its car id, or the engine / drivetrain its slot 0 / 1 row installs.
-    None when it cannot be told (no valid car body, electric car, an engine row the game does not have)."""
+    """Who a row in `table` must belong to for this car: its car id (or for body parts, the car whose body its body row installs), or
+    the engine / drivetrain its slot 0 / 1 row installs. None when it cannot be told (no valid car body, electric car, an engine row the
+    game does not have)."""
     kind = P.OWNER_KIND.get(table)
     body = words[2]
     if kind == "car":
-        return body // 1000 if body in P.TABLE_IDS["CarBody"] else None
+        if body not in P.TABLE_IDS["CarBody"]:
+            return None
+        return BODY_OF.get(body, body // 1000) if table in BODY_TABLES else body // 1000
     if kind == "engine":
         return P.INSTALLS["Engine"].get(words[0])
     if kind == "drivetrain":
@@ -154,6 +163,9 @@ def extend(tables):
             d = dst.setdefault(name, {})
             for key, v in m.items():
                 d.setdefault(key, v)
+    for row, car in tables.get("bodies", {}).items():
+        if car != row // 1000:                      # a stock car's own body needs no entry
+            BODY_OF.setdefault(row, car)
     return added
 
 
