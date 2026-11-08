@@ -1374,6 +1374,11 @@ static int patch_xsapi_body(void)
         }
     }
     g_xs_mkstr = (LONG(*)(const WCHAR *, unsigned, void **))xs_find_import(img, "WindowsCreateString");
+    if (site && g_xs_mkstr && !xs_bound(img, (void *)g_xs_mkstr)) {
+        static DWORD since;
+        g_xs_mkstr = NULL;
+        return xs_unbound_wait("xsbody", "its WindowsCreateString import", &since);
+    }
     if (!site || !g_xs_mkstr || site - ctor_site > 0x100) {
         log_begin();
         log_raw("xsbody: not patched, in Microsoft.Xbox.Services.dll +0x378b0..+0x37d50 the RestCallResponse constructor call (to +0x35d70) is ");

@@ -2393,6 +2393,30 @@ static void *xs_find_import(unsigned char *img, const char *want)
     return slot ? *slot : NULL;
 }
 
+/* Retry verdict for a patch whose imports of img are not bound yet: 0 (retry) for up to 60 s from the first miss, then 2
+ * (give up). Logs the wait once and the give-up once. *since is the patch's own first-miss tick (0 = none yet). */
+static int xs_unbound_wait(const char *tag, const char *what, DWORD *since)
+{
+    if (!*since) {
+        *since = GetTickCount() | 1;
+        log_begin();
+        log_raw(tag);
+        log_raw(": waiting, Microsoft.Xbox.Services.dll is mapped but ");
+        log_raw(what);
+        log_raw(" is not bound yet\n");
+        return 0;
+    }
+    if (GetTickCount() - *since < 60000) {
+        return 0;
+    }
+    log_begin();
+    log_raw(tag);
+    log_raw(": not patched, ");
+    log_raw(what);
+    log_raw(" was still not bound 60 s after Microsoft.Xbox.Services.dll was mapped\n");
+    return 2;
+}
+
 static void *g_xs_auth; /* the shared Authentication object returned by the stub */
 
 /* How many token requests XSAPI made through the stub, and when the first came (diagnostics for "the online setup after Logon never ran":
@@ -2479,7 +2503,18 @@ static int patch_xsapi_token(void)
     }
     mem_copy(&rel, call + 7, 4);
     alloc = *(void *(**)(ULONGLONG))(call + 11 + rel);
+    if (!xs_find_import_slot(img, "WindowsCreateString")) {
+        log_begin();
+        log_raw("xstoken: not patched, WindowsCreateString is not in the XSAPI import table\n");
+        return 2;
+    }
     mkstr = (LONG(*)(const WCHAR *, unsigned, void **))xs_find_import(img, "WindowsCreateString");
+    {
+        static DWORD since;
+        if (!xs_bound(img, (void *)alloc) || !xs_bound(img, (void *)mkstr)) {
+            return xs_unbound_wait("xstoken", !xs_bound(img, (void *)alloc) ? "its allocator import" : "its WindowsCreateString import", &since);
+        }
+    }
     ctor = (void *(*)(void *))(img + XS_AUTH_CTOR_RVA);
     if (!alloc || !mkstr) {
         log_begin();
@@ -2578,8 +2613,12 @@ static int patch_sda_string(void)
         return 2;
     }
     mk = xs_find_import(img, "WindowsCreateString");
-    if (!mk) {
+    if (!mk && xs_find_import_slot(xs, "WindowsCreateString")) {
+        static DWORD since;
         mk = xs_find_import(xs, "WindowsCreateString");
+        if (!xs_bound(xs, mk)) {
+            return xs_unbound_wait("sdastr", "its WindowsCreateString import", &since);
+        }
     }
     if (!mk) {
         log_begin();
