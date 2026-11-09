@@ -15,15 +15,22 @@
 #define CAR_POOL_NATIVE 11
 #define CAR_POOL_MAX 75
 
-/* Default profile (every player, no env needed): the setup that held 72 cars on a real client (dev 2026-11-03, 71 bots + 1 player, all loaded, 60 fps):
- * FH2MP_CAR_SLOTS=75, FH2MP_CAR_NODRIVATARS=x, FH2MP_CAR_NOAICTL=1, FH2MP_CAR_IDS=1, FH2MP_CAR_VIEWLOD=1. A world of 12 players or fewer is not changed by it
- * (the slots are only filled by cars that exist). Each of those variables still wins when it is set; FH2MP_NO_CARSLOTS=1 turns the whole profile off and
- * leaves the game's 11 remote cars. Not measured: memory with 75 slots in a small world. */
+/* Profile, opt-in with FH2MP_CARSLOTS=1: the setup that held 72 cars on a real client (dev 2026-11-03, 71 bots + 1 player, all loaded, 60 fps):
+ * FH2MP_CAR_SLOTS=75, FH2MP_CAR_NODRIVATARS=x, FH2MP_CAR_NOAICTL=1, FH2MP_CAR_IDS=1, FH2MP_CAR_VIEWLOD=1. Each of those variables still wins when it is set;
+ * FH2MP_NO_CARSLOTS=1 keeps the profile off even with FH2MP_CARSLOTS=1.
+ * It was every player's default in 1.3.0 and is off again since the hotfix after it (2026-11-09, the user's decision: worlds of 12, the game's own Drivatars):
+ * solo events stuck at "Synchronizing Drivatars... 10/11", offline too (players' logs 2026-11-09: one free-roam Drivatar left by the Drivatar-maximum part held
+ * stand-in id 1 when the event's eleven asked for theirs, and a far-away online player's car can hold another), and FH2MP_CAR_NOAICTL also matched the game's
+ * own AI cars ("no AI controller for remote network car" right after Drivatars loaded, offline), so Drivatars likely lost their RacingAI controller (inferred).
+ * Not measured: memory with 75 slots in a small world. */
 static int car_pool_profile_off(void)
 {
     char v[8];
 
-    return GetEnvironmentVariableA("FH2MP_NO_CARSLOTS", v, sizeof v) && v[0] == '1';
+    if (GetEnvironmentVariableA("FH2MP_NO_CARSLOTS", v, sizeof v) && v[0] == '1') {
+        return 1;
+    }
+    return !(GetEnvironmentVariableA("FH2MP_CARSLOTS", v, sizeof v) && v[0] == '1');
 }
 
 static int car_pool_unset(const char *name)

@@ -870,13 +870,21 @@ int main(void)
 
 
 
-    /* the default profile: no variable set, 75 slots, the working set of switches (dev 2026-11-03: 72 cars on a real client) */
+    /* no variable set: the game as it is, 11 remote cars and its own Drivatars (the profile was the 1.3.0 default; off since the hotfix, 2026-11-09:
+       solo events stuck at "Synchronizing Drivatars... 10/11") */
     SetEnvironmentVariableA("FH2MP_NO_CARSLOTS", NULL);
+    SetEnvironmentVariableA("FH2MP_CARSLOTS", NULL);
     SetEnvironmentVariableA("FH2MP_CAR_SLOTS", NULL);
     SetEnvironmentVariableA("FH2MP_CAR_NODRIVATARS", NULL);
     SetEnvironmentVariableA("FH2MP_CAR_IDS", NULL);
     SetEnvironmentVariableA("FH2MP_CAR_NOAICTL", NULL);
     SetEnvironmentVariableA("FH2MP_CAR_VIEWLOD", NULL);
+    fresh();
+    assert(patch_car_pool() == 0 && g_patches == 0 && g_hooks == 0 && !memcmp(g_img + CAR_POOL_RVA, VFUNC2, sizeof VFUNC2));
+    assert(g_img[0x5430d0] == 0x44 && g_img[0x653780] == 0x44);              /* the Drivatar setters are left alone */
+    assert(g_car_pool_share_ids == 0 && !strstr(g_raw, "view LOD table"));
+    /* the profile, opt-in: 75 slots, the working set of switches (dev 2026-11-03: 72 cars on a real client) */
+    SetEnvironmentVariableA("FH2MP_CARSLOTS", "1");
     fresh();
     assert(patch_car_pool() == 1);
     assert(g_img[CAR_POOL_RVA + 0x28] == 75);                             /* slots 11 -> 75 */
@@ -896,10 +904,14 @@ int main(void)
     fresh();
     assert(patch_car_pool() == 1 && g_img[CAR_POOL_RVA + 0x28] == 30);
     SetEnvironmentVariableA("FH2MP_CAR_SLOTS", NULL);
-    SetEnvironmentVariableA("FH2MP_NO_CARSLOTS", "1");                    /* the off switch: the game's own 11 */
+    SetEnvironmentVariableA("FH2MP_NO_CARSLOTS", "1");                    /* the off switch wins over the opt-in: the game's own 11 */
     fresh();
     assert(patch_car_pool() == 0 && g_patches == 0 && g_hooks == 0 && !memcmp(g_img + CAR_POOL_RVA, VFUNC2, sizeof VFUNC2));
     SetEnvironmentVariableA("FH2MP_NO_CARSLOTS", NULL);
+    SetEnvironmentVariableA("FH2MP_CARSLOTS", "0");                       /* anything but 1 is off */
+    fresh();
+    assert(patch_car_pool() == 0 && g_hooks == 0);
+    SetEnvironmentVariableA("FH2MP_CARSLOTS", NULL);
 
     /* the wait for every player's car: let through when the cache is full and idle, or stalled; never while it is still working */
     {
