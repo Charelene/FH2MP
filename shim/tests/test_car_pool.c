@@ -428,7 +428,7 @@ int main(void)
       g_ids_result = 7;                                                       /* an id was free: used as it is */
       assert(car_pool_ids(NULL, 0, 0x0b, NULL) == 7);
       g_ids_result = 0xffff;
-      g_car_pool_cur_type = 1;                                                /* a Drivatar: the range stays full for it */
+      g_car_pool_cur_type = 1;                                                /* a Drivatar with no player-held id to share (no lists given): the range stays full for it */
       assert(car_pool_ids(NULL, 0, 0x0b, NULL) == 0xffff);
       g_car_pool_cur_type = 0;
       assert(car_pool_ids(NULL, 0, 0x0b, NULL) == 0xffff);
@@ -453,6 +453,70 @@ int main(void)
       car_pool_find(NULL, &out, &vehicle_ref, NULL, NULL, 1);
       assert(g_type_seen_in_find == 3 && g_car_pool_cur_type == -1);
       g_car_pool_find_lines = 0;
+    }
+    /* a Drivatar that finds 0..11 full shares an id that only network player cars hold (the solo event with a far-away player, 1.3.0 "Synchronizing Drivatars 10/11") */
+    { static unsigned char cars[13][0x600], extra[0x300], manager[0x20], requests[4][0x1d0];
+      static unsigned long long listed[13], pending[4];
+      unsigned char player[12] = {0}, other[12] = {0};
+      int i;
+      fresh();
+      g_car_pool_ids_orig = (car_pool_ids_fn)fake_ids;
+      g_car_pool_share_ids = 1;
+      g_ids_result = 0xffff;
+      for (i = 0; i < 13; i++) {                                              /* car 0 local (type 0, id 0), car 1 a remote player (type 3, id 1), cars 2..11 Drivatars */
+          *(short *)(cars[i] + 0x110 + 0x234) = (short)i;
+          *(int *)(cars[i] + 0x110 + 0x488) = i == 0 ? 0 : i == 1 ? 3 : 1;
+      }
+      for (i = 0; i < 9; i++) {                                               /* cars 0..8 loaded (the vector at extra+0x2b0) */
+          listed[i] = (unsigned long long)(ULONG_PTR)cars[i];
+      }
+      *(unsigned long long *)(extra + 0x2b0) = (unsigned long long)(ULONG_PTR)&listed[0];
+      *(unsigned long long *)(extra + 0x2b8) = (unsigned long long)(ULONG_PTR)&listed[9];
+      for (i = 0; i < 4; i++) {                                               /* cars 9..11 pending in the manager; request 3 is someone else's and busy */
+          *(unsigned long long *)(requests[i] + 0x28) = (unsigned long long)(ULONG_PTR)cars[9 + (i < 3 ? i : 3)];
+          *(unsigned long long *)(requests[i] + 0x38) = (unsigned long long)(ULONG_PTR)(i < 3 ? extra : manager);
+          requests[i][0x1c0] = (unsigned char)(i == 3);
+          pending[i] = (unsigned long long)(ULONG_PTR)requests[i];
+      }
+      *(short *)(cars[12] + 0x110 + 0x234) = 1;                               /* request 3's car claims id 1, but that request does not count */
+      *(int *)(cars[12] + 0x110 + 0x488) = 1;
+      *(unsigned long long *)(requests[3] + 0x28) = (unsigned long long)(ULONG_PTR)cars[12];
+      *(unsigned long long *)(manager + 0x8) = (unsigned long long)(ULONG_PTR)&pending[0];
+      *(unsigned long long *)(manager + 0x10) = (unsigned long long)(ULONG_PTR)&pending[4];
+      g_car_pool_cur_type = 1;
+      g_car_pool_shared_now = 0;
+      assert(car_pool_ids(manager, 0, 0x0b, extra) == 1 && g_car_pool_shared_now == 1);
+      assert(strstr(g_raw, "a type 1 car (1 = Drivatar) shares id 1 with a network player's car (FH2MP_CAR_IDS)"));
+      listed[9] = (unsigned long long)(ULONG_PTR)cars[12];                    /* that Drivatar is loaded and holds id 1 too: nothing is left to share */
+      *(unsigned long long *)(extra + 0x2b8) = (unsigned long long)(ULONG_PTR)&listed[10];
+      g_car_pool_shared_now = 0;
+      assert(car_pool_ids(manager, 0, 0x0b, extra) == 0xffff && g_car_pool_shared_now == 0);
+      assert(strstr(g_raw, "stand-in ids full for a type 1 car and no id is held by player cars only"));
+      *(unsigned long long *)(extra + 0x2b8) = (unsigned long long)(ULONG_PTR)&listed[9];
+      requests[3][0x1c0] = 0;                                                 /* a pending request of this manager counts too */
+      *(unsigned long long *)(requests[3] + 0x38) = (unsigned long long)(ULONG_PTR)extra;
+      assert(car_pool_ids(manager, 0, 0x0b, extra) == 0xffff);
+      requests[3][0x1c0] = 1;                                                 /* busy: not counted */
+      assert(car_pool_ids(manager, 0, 0x0b, extra) == 1);
+      assert(car_pool_ids(manager, 0x0c, 0x1d, extra) == 0xffff);             /* the AI range is left alone */
+      g_car_pool_cur_type = -1;
+      assert(car_pool_ids(manager, 0, 0x0b, extra) == 0xffff);                /* outside FindOrQueue */
+      g_car_pool_cur_type = 1;
+      g_car_pool_share_ids = 0;
+      assert(car_pool_ids(manager, 0, 0x0b, extra) == 0xffff);                /* not configured */
+      g_car_pool_share_ids = 1;
+      g_ids_result = 4;
+      assert(car_pool_ids(manager, 0, 0x0b, extra) == 4);                     /* a free id is used as it is */
+      g_ids_result = 0xffff;
+      g_car_pool_cur_type = -1;
+      /* the choice: the lowest id held by player cars and nothing else, never 0 */
+      assert(car_pool_pick_player_id(player, other) == 0xffff);
+      player[0] = 1;
+      assert(car_pool_pick_player_id(player, other) == 0xffff);
+      player[3] = player[5] = 1;
+      other[3] = 1;
+      assert(car_pool_pick_player_id(player, other) == 5);
+      g_car_pool_share_next = 0;
     }
     /* a shared id gets its own second half in the car's key (+0x236), an ordinary one is left alone */
     { static unsigned char vehicle[0x700];
