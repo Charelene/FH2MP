@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 
-from . import azimuth, logs, paths, shim
+from . import azimuth, crashreport, logs, paths, shim
 from .constants import WINE_DLL_OVERRIDES
 
 WIN = sys.platform == "win32"
@@ -71,10 +71,9 @@ def gpu_check_failure(folder, since=0.0):
     try:
         if os.path.getmtime(log) < since:
             return False
-        with open(log, encoding="utf-8", errors="replace") as f:
-            lines = f.read().splitlines()[-200:]
     except OSError:
         return False
+    lines = crashreport._read_tail(log, 256 * 1024).splitlines()[-200:]     # the log is never trimmed; only its end belongs to this run
     start = max((i for i, ln in enumerate(lines) if " session " in ln and " began " in ln), default=0)
     return any("STOPPED CreateDXGIFactory2" in ln for ln in lines[start:])
 
@@ -141,6 +140,29 @@ def detect_prefix(folder):
     return ""
 
 
+def cache_sizes(folder):
+    """-> {"pipelines_mb", "pipelines_files", "translated_mb"} for Azimuth's caches in data/cache (None for a missing folder). Azimuth's D3D12
+    pipeline library (pipelines-<vendor>-<device>-<driver>-<hash>.bin, and .bin.next while it saves) is read whole at start and serialised
+    whole into one buffer at each save (azimuth.exe 1.0.4 +0x207960): prod crash reports stop there with "out of memory: 92 MB .. 886 MB"
+    (#378), so its size goes into launcher.log at every start, and with it into every crash report."""
+    cache = os.path.join(folder, "data", "cache")
+    if not os.path.isdir(cache):
+        return None
+    pipelines = translated = files = 0
+    for path in glob.glob(os.path.join(cache, "*")):
+        name = os.path.basename(path).lower()
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            continue
+        if name.startswith("pipelines-") and ".bin" in name:
+            pipelines += size
+            files += 1
+        elif name.startswith("translated-"):
+            translated += size
+    return {"pipelines_mb": round(pipelines / (1 << 20)), "pipelines_files": files, "translated_mb": round(translated / (1 << 20))}
+
+
 def build_command(settings, folder, extra_args=(), skip_launcher=True):
     """-> (argv, env additions, cwd). Raises LaunchError with something the player can act on."""
     exe = os.path.join(folder, "azimuth.exe")
@@ -197,6 +219,9 @@ def start(settings, folder, extra_args=(), skip_launcher=True, extra_env=None):
             env["FH2MP_XUID"] = extra_env["FH2MP_XUID"]
     # the shim must find the session in its own folder, never in the environment of an unrelated process
     env.pop("FH2MP_TOKEN", None)
+    caches = cache_sizes(folder)
+    if caches is not None:
+        logs.info("game", "game.caches", **caches)
     try:
         with open(os.path.join(paths.cache_dir(), "game-launch.log"), "ab") as log:
             log.write(("\n--- " + " ".join(shlex.quote(a) for a in argv) + "\n").encode())
