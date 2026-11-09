@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -313,6 +314,34 @@ func toIntErr(v any) (n int64, err error) {
 
 // ---------------------------------------------------------------- /admin/*
 
+var carToken = regexp.MustCompile(`\{car:(\d+)\}`)
+
+// expandCarTokens is expand_car_tokens: "{car:2101}" in an /admin/send text (the game server only knows car ids) becomes "Make Model (2101)",
+// or just "2101" for a car the catalog lacks.
+func (c *Core) expandCarTokens(text string) (string, error) {
+	var ferr error
+	out := carToken.ReplaceAllStringFunc(text, func(tok string) string {
+		id, err := strconv.ParseInt(carToken.FindStringSubmatch(tok)[1], 10, 64)
+		if err != nil {
+			return tok
+		}
+		row, err := c.DB.One("SELECT make, name FROM game.v_cars WHERE id=?", id)
+		if err != nil {
+			ferr = err
+			return tok
+		}
+		name := ""
+		if row != nil {
+			name = strings.TrimSpace(row.Str("make") + " " + row.Str("name"))
+		}
+		if name == "" {
+			return strconv.FormatInt(id, 10)
+		}
+		return fmt.Sprintf("%s (%d)", name, id)
+	})
+	return out, ferr
+}
+
 // Admin serves GET /admin/send, /admin/gamemode, /admin/drivatar, /admin/rotate, /admin/rivals and POST /admin/result: the text answered (200,
 // text/plain), or found=false for a path that is not an admin endpoint.
 func (c *Core) Admin(r *Req, method, rawurl string, body []byte) (out string, found bool, err error) {
@@ -387,7 +416,11 @@ func (c *Core) Admin(r *Req, method, rawurl string, body []byte) (out string, fo
 		if has("xuid") {
 			xuid = p0("xuid", "")
 		}
-		n, e := c.AddNotification(r, q["text"], q["sra"], ntype, params, xuid, nil, false)
+		text, e := c.expandCarTokens(q["text"])
+		if e != nil {
+			return "", true, e
+		}
+		n, e := c.AddNotification(r, text, q["sra"], ntype, params, xuid, nil, false)
 		if e != nil {
 			return "", true, e
 		}
@@ -571,6 +604,21 @@ func gsmsCluster() []byte {
 		{K: "portMappings", V: []any{pyjson.Obj{{K: "Key", V: "NetV2"}, {K: "Value", V: pyjson.Obj{{K: "external", V: port}, {K: "internal", V: port}}}}}}}
 	s, _ := pyjson.Dumps(doc, pyjson.Opts{})
 	return []byte(s)
+}
+
+// clusterSessionID is the session a GSMS AllocateCluster request names: {"sessionId": "/serviceconfigs/<scid>/sessionTemplates/<template>/sessions/<name>"}.
+func clusterSessionID(body []byte) string {
+	v, err := pyjson.Parse(string(body))
+	if err != nil {
+		return ""
+	}
+	o, ok := v.(pyjson.Obj)
+	if !ok {
+		return ""
+	}
+	id, _ := o.Get("sessionId")
+	s, _ := id.(string)
+	return s
 }
 
 // verifyStrings: XSAPI uses `stringstoVerify` (lower-case t), with one result per input; the old spelling stays accepted.

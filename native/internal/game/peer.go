@@ -90,6 +90,7 @@ type Peer struct {
 	BlCheckAt                             float64
 	BlSlotSeq                             int
 	Objs                                  *omap.Map[ObjKey, []replay.Entry]
+	RealObjs                              map[ObjKey][]replay.Entry // the real version of objects relayed with a stand-in car, numbered like Objs
 	HostSeq                               int
 	RelayNext                             map[ObjKey]int
 	SeqShift                              map[OwnerObj]int
@@ -136,8 +137,10 @@ type Peer struct {
 	PartNotes                             int
 	PartLogged                            string
 	SpeedRef                              *SpeedRef
+	Push                                  PushState
 	InvisibleLogged                       bool
 	RepairNotified                        map[int64]float64
+	NoticedAt                             map[string]float64 // Message Center notices sent to this player by key (NotifyPlayer)
 	TopKmh                                float64
 	HardS, SoftS                          float64
 	SpeedFlagged                          map[string]struct{}
@@ -149,6 +152,8 @@ type Peer struct {
 	Due                                   float64
 	Hold                                  float64
 	AckCache                              *[2]int
+	State                                 PeerState   // half-open / connected / entered / leaving / removed (peerstate.go)
+	Refused                               map[int]int // messages not acted on because of the state, per type
 
 	// attributes Python sets dynamically (getattr / setattr in lighting.py, honk.py and the world)
 	Lighting         *LightState
@@ -157,6 +162,7 @@ type Peer struct {
 	Honk             *HonkState
 	HonkLoggedAt     float64
 	Carsel           *CarselState
+	ClientReports    ClientReports // what this client's shim told the server about why it waits (carsel.go)
 	Extra            map[string]any
 	TeamID           int
 	RtPstate         int
@@ -170,8 +176,8 @@ func NewPeer(addr Addr, now float64) *Peer {
 		BlState: map[string]float64{}, Objs: omap.New[ObjKey, []replay.Entry](), HostSeq: 2,
 		RelayNext: map[ObjKey]int{}, SeqShift: map[OwnerObj]int{}, CompactAt: map[ObjKey]int{}, ConsoleVars: map[int]bool{},
 		CmSeq: 1, UnknownLogged: map[int]struct{}{}, UnmappedLogged: map[[2]int]struct{}{}, MaxY: math.Inf(-1),
-		RepairNotified: map[int64]float64{}, SpeedFlagged: map[string]struct{}{}, RxSeq: map[ObjKey]int{}, Due: math.Inf(1),
-		Extra: map[string]any{},
+		RepairNotified: map[int64]float64{}, NoticedAt: map[string]float64{}, SpeedFlagged: map[string]struct{}{}, RxSeq: map[ObjKey]int{}, Due: math.Inf(1),
+		Extra: map[string]any{}, Refused: map[int]int{},
 	}
 }
 

@@ -277,7 +277,7 @@ class Wizard(AccountWizard):
         self.az_path = lc.settings['azimuth_dir']
         self.archive = ''
         self._validated_archive = ''
-        self._dep_ready = {'platform': False, 'extra': False, 'honk': False}
+        self._dep_ready = {'platform': False, 'extra': False, 'honk': False, 'anna': False}
         self.update_folder = ''
         self.butler = None
         self.itch_profile = None
@@ -571,7 +571,8 @@ class Wizard(AccountWizard):
         self.lc.settings.save()
         self.packages.dependencies.clear()
         self.packages.shim_package = None
-        self._dep_ready = {'platform': shim.platform_ok(folder), 'extra': shim.extra_options_complete(folder), 'honk': shim.honk_complete(folder)}
+        self._dep_ready = {'platform': shim.platform_ok(folder), 'extra': shim.extra_options_complete(folder), 'honk': shim.honk_complete(folder),
+                           'anna': shim.anna_complete(folder)}
         for kind, button in self.dep_get.items():
             button.setEnabled(True)
             button.setVisible(not self._dep_ready[kind])
@@ -781,11 +782,13 @@ class Wizard(AccountWizard):
         self.dep_get, self.dep_status = {}, {}
         for kind, pin, url in [('platform', UPSTREAM['platform'], 'https://github.com/Trinculo54/fh2-mod-platform'),
                                ('extra', UPSTREAM['extraOptions'], 'https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions'),
-                               ('honk', UPSTREAM['honkHonk'], 'https://github.com/suderek22/FH2_HonkHonk')]:
+                               ('honk', UPSTREAM['honkHonk'], 'https://github.com/suderek22/FH2_HonkHonk'),
+                               ('anna', UPSTREAM['anna'], 'https://github.com/qiangqiang101/FH2_ANNA')]:
             button, status = self._package_card(lay, pin['name'], pin['version'], pin['author'], url)
             button.clicked.connect(lambda _checked=False, k=kind: self._get_dependency(k))
             self.dep_get[kind], self.dep_status[kind] = button, status
-        note = self._text(lay, 'Press the right stick to honk. Extra Options\' headlight and roof buttons move to the left stick.')
+        note = self._text(lay, 'Press the right stick to honk. Extra Options\' headlight and roof buttons move to the left stick. '
+                               'Tap D-pad down while driving to open ANNA.')
         note.setObjectName('setup-credit')
         self.dep_bar = QProgressBar()
         self.dep_bar.hide()

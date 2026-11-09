@@ -119,7 +119,7 @@ int main(int argc,char **argv)
     honk_request(packet,g_ticket_key,g_xuid,7,epoch,5,HONK_OFF,0);
     if(argc>1 && !strcmp(argv[1],"--vector")) {for(i=0;i<HONK_REQUEST;i++)printf("%02x",packet[i]);puts("");return 0;}
     if(argc>2 && !strcmp(argv[1],"--reply")) {
-        /* a reply built by server/honk.py to the request above: the other player (owner 10, car 6) holds horn 7, press 300, at (10, 20, -30) */
+        /* a reply the server built to the request above (tests/vectors): the other player (owner 10, car 6) holds horn 7, press 300, at (10, 20, -30) */
         n=read_hex(argv[2],packet,sizeof packet);
         assert(honk_response(packet,n,g_ticket_key,g_xuid,7,0,epoch,out,&count));
         assert(count==1 && out[0].owner==10 && out[0].car==6 && out[0].horn==7 && out[0].flags==1 && out[0].press==300 && out[0].age<=0xffff);

@@ -128,7 +128,7 @@ func (w *World) Handle(data []byte, addr Addr) {
 	w.rx = rxState{peer, len(data), types}
 	broke := false
 loop:
-	for n := 0; n < int(hdr.Count); n++ {
+	for n := 0; n < int(hdr.Count) && peer.State != PeerRemoved; n++ { // a removed peer handles nothing further from this datagram
 		mt, err := br.Bits(7)
 		if err != nil {
 			w.LogEvery([2]any{"short-count", addr}, 60.0, fmt.Sprintf("packet.short %s: the header announces more messages than the datagram holds, the rest is skipped",
@@ -150,6 +150,9 @@ loop:
 				restBits = netv2.CarPredictionBodyBits
 			}
 			rest := r.intv(restBits)
+			if !w.admit(peer, mtype) {
+				continue
+			}
 			if restBits != netv2.CarPredictionBodyBits {
 				w.LogEvery([2]any{"short-prediction", addr}, 60.0, fmt.Sprintf("%d car prediction body of %d bits (a whole one is %d): not relayed (owner %d xuid %#x, %d bytes)",
 					addr.Port, restBits, netv2.CarPredictionBodyBits, peer.Owner, peer.Xuid, len(data)), diag.Warn)
@@ -208,6 +211,7 @@ loop:
 				w.TrackSpeed(peer, *pos, stamp, scene)
 				if whole {
 					w.TrackSpin(peer, rest)
+					w.TrackPush(peer, rest, *pos, *stamp, *scene)
 				}
 			}
 			if peer.CarsRelayed%20 == 1 && pos != nil {
@@ -293,6 +297,12 @@ loop:
 			w.Logf("%d OpenConnectionResponse code=%d echo=%d counter=%d", addr.Port, code, echo, theirs)
 			if code == ResponseAck && !peer.Connected && echo != w.ServerCounter {
 				w.Noise(fmt.Sprintf("%d OpenConnectionResponse with echo %d, expected %d: ignored (xuid %#x, handshake open %.1f s)", addr.Port, echo, w.ServerCounter, peer.Xuid, w.Mono()-peer.OpenedAt), diag.Warn)
+			} else if code == ResponseAck && !peer.Connected && (peer.OpenResult == nil || *peer.OpenResult != ResultOK) {
+				res := "none"
+				if peer.OpenResult != nil {
+					res = fmt.Sprint(*peer.OpenResult)
+				}
+				w.Noise(fmt.Sprintf("%d OpenConnectionResponse ack after an OpenConnection answered with result %s: ignored (xuid %#x)", addr.Port, res, peer.Xuid), diag.Warn)
 			} else if code == ResponseAck && !peer.Connected {
 				owner := w.FreeOwner()
 				if owner == 0 {
@@ -302,9 +312,9 @@ loop:
 					w.DropPeer(peer, "no relay owner id free")
 					continue
 				}
-				peer.Connected = true
-				peer.ConnectedAt = w.Mono()
 				peer.Owner = owner
+				w.setPeerState(peer, PeerConnected, "handshake ack")
+				peer.ConnectedAt = w.Mono()
 				run := w.runOf(peer.Xuid)
 				runS := ""
 				if run != "" {
@@ -359,6 +369,9 @@ loop:
 			replies = append(replies, netv2.Pong(value, uint64(w.NowMs())))
 		case mtype == netv2.MsgPong:
 			echo, _ := r.bits(32), r.bits(32)
+			if !w.admit(peer, mtype) {
+				continue
+			}
 			if echo != 0 && peer.Connected {
 				w.ClockSample(peer, echo)
 			}
@@ -366,12 +379,18 @@ loop:
 			kind := int(r.bits(4))
 			a, s14, u5, b, flag := int(r.bits(8)), int(r.bits(14)), int(r.bits(5)), int(r.bits(8)), int(r.bits(1))
 			seq := r.bits(32)
+			if !w.admit(peer, mtype) {
+				continue
+			}
 			w.Traffic.OnMessage(peer, kind, a, s14, u5, b, flag, seq)
 		case traffic.Layouts()[mtype] != nil:
 			if err := w.Traffic.OnUpdate(peer, mtype, br); err != nil {
 				panic(err)
 			}
 		case mtype == netv2.MsgFinaliseSessionEntry:
+			if !w.admit(peer, mtype) {
+				continue
+			}
 			desc := "BEFORE the handshake completed"
 			if peer.Connected {
 				desc = fmt.Sprintf("%.0f ms after connect", (w.Mono()-peer.ConnectedAt)*1000)
@@ -383,7 +402,7 @@ loop:
 			w.Logf("%d FinaliseSessionEntry %s%s", addr.Port, desc, rep)
 			replies = append(replies, netv2.FinaliseSessionEntry())
 			if !peer.Entered {
-				peer.Entered = true
+				w.setPeerState(peer, PeerEntered, "FinaliseSessionEntry")
 				w.Introduce(peer, "finalise")
 				w.SendGameOptions(peer, nil)
 				w.Traffic.Join(peer, false)
@@ -424,6 +443,9 @@ loop:
 			}
 			a, b := r.bits(1), r.bits(1)
 			oid := int(r.bits(idBits))
+			if !w.admit(peer, mtype) {
+				continue
+			}
 			if router == bucketlist.Router {
 				w.Logf("%d RequestOwnership router=%d type=%d key=%d%d id=%d -> ignored", addr.Port, router, tid, a, b, oid)
 				continue
@@ -431,6 +453,9 @@ loop:
 			w.Logf("%d RequestOwnership router=%d type=%d key=%d%d id=%d -> grant", addr.Port, router, tid, a, b, oid)
 			replies = append(replies, w.OwnershipGrant(peer, router, tid, oid, idBits))
 		case mtype == netv2.MsgRequestRace && w.RequestRaceBlocked(peer):
+			if !w.admit(peer, mtype) {
+				continue
+			}
 			ev := w.Event
 			pr := w.PendingRace
 			var parts string
@@ -446,6 +471,9 @@ loop:
 			}
 			w.Logf("%d MsgRequestRace (owner %d) ignored: an event is already being set up or running in this lobby (%s)", addr.Port, peer.Owner, parts)
 		case mtype == netv2.MsgRequestRace:
+			if !w.admit(peer, mtype) {
+				continue
+			}
 			if w.PendingRace != nil && w.PendingRace.Leader == peer {
 				peer.DupRequests++
 			}
@@ -477,6 +505,9 @@ loop:
 				r.bits(8)
 			}
 			ready := r.bits(1)
+			if !w.admit(peer, mtype) {
+				continue
+			}
 			accepted := ready == 0 || w.EligibleForEvent(peer, nil)
 			full := accepted && ready != 0 && w.PendingRace != nil && peer != w.PendingRace.Leader && w.Event == nil && w.EventSeatsFull(peer)
 			tail := ""
@@ -538,10 +569,17 @@ loop:
 				break loop
 			}
 		case mtype == netv2.MsgRTSelectedNextEvent:
-			w.Logf("%d SelectedNextRoadTripEvent ok=%d", addr.Port, r.bits(1))
+			ok := r.bits(1)
+			if !w.admit(peer, mtype) {
+				continue
+			}
+			w.Logf("%d SelectedNextRoadTripEvent ok=%d", addr.Port, ok)
 		case mtype == netv2.MsgRTConfiguredGameOptions:
 			a := r.bits(32)
 			b := r.bits(16)
+			if !w.admit(peer, mtype) {
+				continue
+			}
 			w.Logf("%d ConfiguredGameOptionsForRoadTripEvent a=%d b=%d", addr.Port, a, b)
 			w.RtConfigured = true
 		case mtype == netv2.MsgVoteForTrack:
@@ -550,7 +588,11 @@ loop:
 			if a == 0 && b == 1 {
 				r.bits(8)
 			}
-			w.RtVote(peer, int(r.bits(32)))
+			track := int(r.bits(32))
+			if !w.admit(peer, mtype) {
+				continue
+			}
+			w.RtVote(peer, track)
 		case mtype == netv2.MsgInProgressScoreUpdate || mtype == netv2.MsgLapScore || mtype == netv2.MsgScoreKeyframe:
 			a, b := r.bits(1), r.bits(1)
 			cid := r.bits(netv2.CarKeyIDBits)
@@ -589,6 +631,9 @@ loop:
 				r.bits(32 + 24 + 3)
 			}
 			end := br.Pos
+			if !w.admit(peer, mtype) {
+				continue
+			}
 			br.Pos = start
 			rest := r.intv(end - start)
 			w.Relay(peer, netv2.RelayScore(uint64(mtype), cid, uint64(peer.Owner), rest, end-start), true)
@@ -607,13 +652,22 @@ loop:
 			for i := range v {
 				v[i] = int(r.bits(3))
 			}
+			if !w.admit(peer, mtype) {
+				continue
+			}
 			w.TagCollision(peer, k1, k2, v[0], v[1], v[2], v[3])
 		case mtype == netv2.MsgCarMeetInviteRequest:
 			inviteType, value := r.bits(2), r.bits(32)
+			if !w.admit(peer, mtype) {
+				continue
+			}
 			w.Logf("%d CarMeet InviteRequest type=%d value=%#x (owner %d)", addr.Port, inviteType, value, peer.Owner)
 			w.CmInvite(peer, int(inviteType))
 		case mtype == netv2.MsgCarMeetJoinOrCancel:
 			join, joinType, value := r.bits(1), r.bits(2), r.bits(32)
+			if !w.admit(peer, mtype) {
+				continue
+			}
 			w.Logf("%d CarMeet JoinOrCancel join=%d joinType=%d value=%#x (owner %d)", addr.Port, join, joinType, value, peer.Owner)
 			w.CmJoin(peer, int(join), int(joinType))
 		case mtype == netv2.MsgCarMeetSessionReady:
@@ -628,14 +682,23 @@ loop:
 			raw, _ := tailv.Bytes((take + 7) / 8)
 			w.Logf("%d CarMeet SessionReady raw: %d bits left, %x", addr.Port, bitsLeft, raw)
 			name, template := r.str(), r.str()
+			if !w.admit(peer, mtype) {
+				continue
+			}
 			w.CmSessionReady(peer, name, template)
 		case mtype == netv2.MsgCarMeetConfiguredWager:
 			w.Logf("%d CarMeet ConfiguredGameOptionsForWagerRace value=%#x", addr.Port, r.bits(32))
 		case mtype == bucketlist.MsgSync:
 			slot, challenge := bucketlist.S32(r.bits(32)), bucketlist.S32(r.bits(32))
+			if !w.admit(peer, mtype) {
+				continue
+			}
 			sends, text := w.Coop.Request(peer, slot, challenge, w.blWorld(peer), memberName)
 			w.blApply(peer, "RequestSynchronize", sends, text)
 		case mtype == bucketlist.MsgDesync:
+			if !w.admit(peer, mtype) {
+				continue
+			}
 			dropped := w.Coop.Cancel(peer)
 			w.BlSlotsSync()
 			tail := ""
@@ -645,6 +708,9 @@ loop:
 			w.Logf("%d BucketList RequestDesynchronize (owner %d)%s", addr.Port, peer.Owner, tail)
 		case mtype == bucketlist.MsgEnded:
 			ok := r.bits(1)
+			if !w.admit(peer, mtype) {
+				continue
+			}
 			out, other := w.Coop.Ended(peer, ok != 0, w.blWorld(peer))
 			partner := "none"
 			var partnerV any
@@ -655,6 +721,9 @@ loop:
 			w.blApply(peer, fmt.Sprintf("ChallengeEnded ok=%d", ok), out, "partner "+partner)
 			w.ev("bucketlist_end", kv("owner", peer.Owner), kv("ok", ok != 0), kv("partner", partnerV))
 		case mtype == netv2.MsgDropLeadership:
+			if !w.admit(peer, mtype) {
+				continue
+			}
 			if w.Leader == peer && w.Event == nil {
 				w.SetLeader(nil, "dropped leadership")
 				w.ReleaseOptions(peer, "dropped leadership")

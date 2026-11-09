@@ -1,4 +1,4 @@
-/* FH2MP horn v1 (server/honk.py). Include after sha256.inc and lighting_wire.h; no game or OS dependencies. */
+/* FH2MP horn v1 (native/internal/game/side.go). Include after sha256.inc and lighting_wire.h; no game or OS dependencies. */
 #ifndef FH2MP_HONK_WIRE_H
 #define FH2MP_HONK_WIRE_H
 #define HONK_BASE 57u

@@ -53,6 +53,9 @@ func CacheLimit() int {
 var (
 	CachePlayers = os.Getenv("FH2MP_DRIVATAR_CACHE_PLAYERS") != "0" // 0 serves shipped records only, which replaces the client's saved file
 	Cars         = os.Getenv("FH2MP_DRIVATAR_CARS") == "1"          // real cars, tunes and liveries on player Drivatars
+	// Bots puts the shipped Drivatars (named after real racing drivers) into races and the cache, as before 2026-11-08. Off: only players'
+	// Drivatars are served, and the shipped records stay templates for new players' records; a store without any usable player still gets them.
+	Bots = os.Getenv("FH2MP_DRIVATAR_BOTS") == "1"
 )
 
 // Record is one Drivatar as the wire shows it.
@@ -305,6 +308,8 @@ func (s *Store) forPlayer(t *db.Tx, xuid int64, gamertag string) (Record, error)
 	}
 	if gamertag != "" {
 		rec.Set("GamerTag", gamertag)
+	} else if !Bots && rec != nil && before == "null" {
+		rec.Set("GamerTag", "") // a template's driver name is not the player's; a nameless record is left out of every reply
 	}
 	rec.Set("Xuid", xuid)
 	if car, ok := s.CarOverride[strconv.FormatInt(xuid, 10)]; ok {
@@ -556,6 +561,27 @@ func (s *Store) Pool(limit int, skill, nearWristband *int64, excludeXuid int64, 
 		}
 	}
 	noteSkipped(len(recs)-len(players), "pool")
+	if !Bots {
+		named := players[:0]
+		for _, r := range players {
+			if tag, _ := get(r, "GamerTag").(string); tag != "" {
+				named = append(named, r)
+			}
+		}
+		if players = named; len(players) > 0 {
+			if len(players) > limit {
+				players = players[:max(0, limit)]
+			}
+			out, err := s.withCars(players)
+			if err != nil {
+				return nil, err
+			}
+			s.mu.Lock()
+			pyrand.Shuffle(s.rng, out)
+			s.mu.Unlock()
+			return out, nil
+		}
+	}
 	var tpl []Record
 	for _, t := range s.Templates {
 		if (skill == nil || asInt(get(t, "UserSkillLevel")) == *skill) && !skipSet[asInt(get(t, "Xuid"))] {
@@ -604,6 +630,12 @@ func (s *Store) sample(pop []Record, k int) []Record {
 // then more shipped ones.
 func (s *Store) ForCache(limit int, excludeXuid int64) ([]Record, error) {
 	limit = min(limit, CacheLimit())
+	if !Bots && CachePlayers {
+		recs, err := s.playersOnlyCache(limit, excludeXuid)
+		if err != nil || len(recs) > 0 || limit <= 0 {
+			return recs, err
+		}
+	}
 	var shipped []Record
 	for skill := int64(0); skill < NumSkills; skill++ {
 		var ofSkill []Record
@@ -673,6 +705,52 @@ func (s *Store) ForCache(limit int, excludeXuid int64) ([]Record, error) {
 	}
 	fill := s.sample(rest, max(0, min(limit-len(shipped)-len(players), len(rest))))
 	return s.withCars(append(append(append([]Record{}, shipped...), players...), fill...))
+}
+
+// playersOnlyCache is the cache without shipped Drivatars: the most recently updated named players, CacheShippedPerSkill of them labelled with
+// each skill level first (the client keeps a floor per skill; players' records are all one level), then the rest at their own level. Empty when the
+// store has no usable player.
+func (s *Store) playersOnlyCache(limit int, excludeXuid int64) ([]Record, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.DB.Query("SELECT record, locked FROM drivatars WHERE xuid <> ? ORDER BY updated DESC LIMIT ?", excludeXuid, limit*4)
+	if err != nil {
+		return nil, err
+	}
+	var recs []Record
+	for i := range rows {
+		rec, err := recOf(&rows[i])
+		if err != nil {
+			return nil, err
+		}
+		if tag, _ := get(rec, "GamerTag").(string); tag != "" && SaneInfo(get(rec, "UserInfo")) {
+			recs = append(recs, s.spreadWristband(rec))
+		}
+	}
+	noteSkipped(len(rows)-len(recs), "cache")
+	if len(recs) > limit {
+		recs = recs[:limit]
+	}
+	out := make([]Record, 0, len(recs))
+	next := 0
+	for skill := int64(0); skill < NumSkills && next < len(recs); skill++ {
+		for k := 0; k < CacheShippedPerSkill && next < len(recs); k++ {
+			r := recs[next]
+			next++
+			if asInt(get(r, "UserSkillLevel")) != skill {
+				c, err := copyRecord(r)
+				if err != nil {
+					return nil, err
+				}
+				c.Set("UserSkillLevel", skill)
+				r = c
+			}
+			out = append(out, r)
+		}
+	}
+	out = append(out, recs[next:]...)
+	return s.withCars(out)
 }
 
 // noteSkipped: stored Drivatars left out of a reply because their numbers fail SaneInfo (or they have no name): the client reads them without checking.

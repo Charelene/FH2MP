@@ -1,6 +1,6 @@
 /* Horns of other players (issue 293). HonkHonk (suderek22, fh2-mods\HonkHonk.dll 0.4.0 pinned, 0.3.4 still known, a required add-on) plays the local
  * horn through the game's own FMOD; this file reads which horn the player is holding out of HonkHonk's memory, tells the server (a side channel like
- * lighting, server/honk.py, its own magic FH2MPHN1) and plays the horns the server lists at those cars with the same FMOD calls and the same bank.
+ * lighting, native/internal/game/side.go, its own magic FH2MPHN1) and plays the horns the server lists at those cars with the same FMOD calls and the same bank.
  * HonkHonk itself is not changed on disk; the addresses in honk_builds are per known DLL build and are checked byte for byte, another build is left alone.
  *
  * Controls: HonkHonk honks on the left stick (L3, button bit 0x40, one `test byte [rsp+disp8], 0x40` in its input loop). Forza honks on the right

@@ -131,11 +131,16 @@ int main(void)
     assert(revoked == 4 && !revoke_at);
     assert(VirtualProtect(p, 8192, PAGE_READWRITE, &old));
     assert(read_xsapi_headers(p));
+    /* #305: an import slot that still holds its hint/name RVA (loader not done) is not bound; data is not code. */
+    assert(!xs_bound(p, (void *)(UINT_PTR)0x4223d0));
+    assert(!xs_bound(p, NULL));
+    assert(!xs_bound(p, p + 16));
+    assert(xs_bound(p, (void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetTickCount")));
     assert(VirtualFree(p, 0, MEM_RELEASE));
     assert(!read_xsapi_headers(p));
     assert(!read_xsapi_headers(NULL));
     puts("game_image: valid, invalid, inaccessible and unmapped headers checked");
-    puts("xsapi_image: valid identity, mismatches, bounds, partial copies and revoked DOS/NT mappings checked");
+    puts("xsapi_image: valid identity, mismatches, bounds, partial copies, revoked DOS/NT mappings and unbound import slots checked");
     return 0;
 }
 C

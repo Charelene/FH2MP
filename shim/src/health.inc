@@ -55,7 +55,7 @@ static int health_step(health_state *h, unsigned long long now, unsigned long lo
     return out;
 }
 
-/* Exactly 8 lowercase hex digits (what the launcher writes and server/diag.py run_id accepts). */
+/* Exactly 8 lowercase hex digits (what the launcher writes and native/internal/diag RunID accepts). */
 static int run_id_ok(const char *s)
 {
     int i;

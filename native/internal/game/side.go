@@ -17,9 +17,15 @@ const (
 	honkMagic     = "FH2MPHN1"
 	probeMagic    = "FH2MPPN1"
 
-	sideMacSize      = 32
-	lightingBase     = 55
-	lightingRequest  = lightingBase + sideMacSize
+	sideMacSize     = 32
+	lightingBase    = 55
+	lightingRequest = lightingBase + sideMacSize
+	// v2 (request type 3, reply type 4): the request also carries the car's open parts (bytes 55-56, lightingDoorBits bits: roof, hood, trunk,
+	// the four doors, storage, storageM, active_aero), the reply 6-byte records (owner, car, flags, parts lo, parts hi, 0). A v1 request still
+	// gets a v1 reply, so released shims keep working.
+	lighting2Base    = 57
+	lighting2Request = lighting2Base + sideMacSize
+	lightingDoorBits = 10
 	lightingMaxRecs  = 12
 	lightingLease    = 2.0
 	lightingMinInt   = 0.08
@@ -62,6 +68,7 @@ type LightState struct {
 	At    float64
 	Flags byte
 	Car   int
+	Doors uint16 // open parts (v2 requests; 0 from a v1 shim)
 }
 
 // HonkState is a player's horn state.
@@ -125,6 +132,43 @@ func (h *Hub) whyUnmatched(xuid uint64, data []byte, now float64) (string, bool)
 	return "no game connection of this player is bound to a ticket", false
 }
 
+// sideSignatureOK says whether one of the player's live ticket keys signed this side-channel request (the MAC is its last sideMacSize bytes). It reads
+// only hub tables, so the hub goroutine runs it before pausing the workers for a request it cannot route.
+func (h *Hub) sideSignatureOK(xuid uint64, data []byte, now float64) bool {
+	if len(data) <= sideMacSize {
+		return false
+	}
+	for k, until := range h.Keys[xuid] {
+		if until <= now {
+			continue
+		}
+		m := hmac.New(sha256.New, []byte(k))
+		m.Write(data[:len(data)-sideMacSize])
+		if hmac.Equal(m.Sum(nil), data[len(data)-sideMacSize:]) {
+			return true
+		}
+	}
+	return false
+}
+
+// sideForged counts a side-channel request that no live key of its player signed; one DEBUG line per player per minute.
+func (h *Hub) sideForged(kind jobKind, xuid uint64) {
+	lg, name := lightLog, "lighting"
+	switch kind {
+	case jobHonk:
+		lg, name = honkLog, "horn"
+	case jobCarsel:
+		lg, name = carselLog, "car select"
+	}
+	if ok, skipped := sideRate.Allow([2]any{"side-forged", xuid}, rejectLogSeconds); ok {
+		extra := ""
+		if skipped > 0 {
+			extra = fmt.Sprintf(" (+%d more since the last line)", skipped)
+		}
+		lg.Debug(fmt.Sprintf("%s request from xuid %d ignored: no live ticket key of that player signed it (dropped before the workers were paused)%s", name, xuid, extra))
+	}
+}
+
 // findAuthed matches a side-channel request to the live, ticket-bound game connection of its xuid.
 func (h *Hub) findAuthed(only *World, routes map[uint64]Addr, xuid uint64, data []byte, now float64) (*World, *Peer, []byte) {
 	return h.findAuthedCar(only, routes, xuid, data, now, true)
@@ -173,19 +217,40 @@ func (h *Hub) findAuthedCar(only *World, routes map[uint64]Addr, xuid uint64, da
 	return nil, nil, nil
 }
 
+// lightingParse checks a lighting request's fields (its length and header are checked by the caller): -> v2, the open parts, the type the
+// length asks for, and whether it is well formed.
+func lightingParse(data []byte) (v2 bool, doors uint16, want byte, ok bool) {
+	v2, want = len(data) == lighting2Request, 1
+	if v2 {
+		want, doors = 3, binary.LittleEndian.Uint16(data[55:57])
+	}
+	ok = int(binary.LittleEndian.Uint16(data[9:11])) == len(data) && data[19] == want && data[54] == 0 && data[52] <= 127 && data[53] <= 7 &&
+		doors < 1<<lightingDoorBits
+	return
+}
+
+// lightingRecord is one other player's record in a reply: 4 bytes in v1, 6 with the open parts in v2.
+func lightingRecord(v2 bool, owner int, st *LightState) []byte {
+	if v2 {
+		return []byte{byte(owner), byte(st.Car), st.Flags, byte(st.Doors), byte(st.Doors >> 8), 0}
+	}
+	return []byte{byte(owner), byte(st.Car), st.Flags, 0}
+}
+
 func (h *Hub) lightingHandle(data []byte, addr Addr, only *World) {
-	if len(data) != lightingRequest || !bytes.Equal(data[:9], sideHeader[:9]) || string(data[11:19]) != lightingMagic {
+	if (len(data) != lightingRequest && len(data) != lighting2Request) || !bytes.Equal(data[:9], sideHeader[:9]) || string(data[11:19]) != lightingMagic {
 		return
 	}
+	v2, doors, want, ok := lightingParse(data)
 	lenField := int(binary.LittleEndian.Uint16(data[9:11]))
-	if lenField != len(data) || data[19] != 1 || data[54] != 0 || data[52] > 127 || data[53] > 7 {
+	if !ok {
 		if ok, skipped := sideRate.Allow("lt-malformed", rejectLogSeconds); ok {
 			extra := ""
 			if skipped > 0 {
 				extra = fmt.Sprintf(" (+%d more since the last line)", skipped)
 			}
-			lightLog.Warn(fmt.Sprintf("request with the lighting magic is malformed and ignored: length field %d of %d bytes, type %d (expected 1), reserved byte %d (expected 0), car %d (max 127), flags %d (max 7)%s",
-				lenField, len(data), data[19], data[54], data[52], data[53], extra))
+			lightLog.Warn(fmt.Sprintf("request with the lighting magic is malformed and ignored: length field %d of %d bytes, type %d (expected %d), reserved byte %d (expected 0), car %d (max 127), flags %d (max 7), open parts %#x (max %#x)%s",
+				lenField, len(data), data[19], want, data[54], data[52], data[53], doors, 1<<lightingDoorBits-1, extra))
 		}
 		return
 	}
@@ -221,11 +286,15 @@ func (h *Hub) lightingHandle(data []byte, addr Addr, only *World) {
 	if peer.CarID != nil {
 		carID = *peer.CarID
 	}
-	peer.Lighting = &LightState{epoch, seq, now, data[53], carID}
-	if old == nil || old.Flags != data[53] || old.Car != carID {
+	peer.Lighting = &LightState{epoch, seq, now, data[53], carID, doors}
+	if old == nil || old.Flags != data[53] || old.Car != carID || old.Doors != doors {
 		peer.LightingChanges++
 		if now-peer.LightingLoggedAt >= lightingLogEvery || peer.LightingLoggedAt == 0 {
-			h.Idle.Logf("lighting: owner %d car %d headlights=%d signal=%d (%d change(s) in the last minute)", peer.Owner, carID, data[53]&1, data[53]>>1, peer.LightingChanges)
+			parts := ""
+			if v2 {
+				parts = fmt.Sprintf(" open parts=%#x", doors)
+			}
+			h.Idle.Logf("lighting: owner %d car %d headlights=%d signal=%d%s (%d change(s) in the last minute)", peer.Owner, carID, data[53]&1, data[53]>>1, parts, peer.LightingChanges)
 			peer.LightingLoggedAt, peer.LightingChanges = now, 0
 		}
 	}
@@ -243,14 +312,21 @@ func (h *Hub) lightingHandle(data []byte, addr Addr, only *World) {
 			!bytes.Equal(h.TicketEpochs[other.Addr], st.Epoch) {
 			continue
 		}
-		records = append(records, byte(other.Owner), byte(st.Car), st.Flags, 0)
+		records = append(records, lightingRecord(v2, other.Owner, st)...)
 		n++
 		if n == lightingMaxRecs {
 			break
 		}
 	}
-	reply := append([]byte(nil), data[:lightingBase]...)
-	reply[19], reply[54] = 2, byte(n)
+	base, kind := lightingBase, byte(2)
+	if v2 {
+		base, kind = lighting2Base, 4
+	}
+	reply := append([]byte(nil), data[:base]...)
+	reply[19], reply[54] = kind, byte(n)
+	if v2 {
+		reply[55], reply[56] = 0, 0
+	}
 	reply = append(reply, records...)
 	binary.LittleEndian.PutUint16(reply[9:], uint16(len(reply)+sideMacSize))
 	h.Sock.SendTo(signed(reply, key), addr)

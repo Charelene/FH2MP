@@ -44,7 +44,13 @@ func (w *World) HandleFailed(rec any, data []byte, addr Addr) {
 }
 
 // DropPeer removes a client and tells the others its objects are gone.
-func (w *World) DropPeer(peer *Peer, why string) {
+// DropPeer removes a connection from the world: every removal path (CloseConnection, stale, kick, reconnect, moved, revoked, tunnel closed,
+// abandoned handshake) ends here, so nothing a peer took part in outlives it.
+func (w *World) DropPeer(peer *Peer, why string) { w.dropPeer(peer, why, false) }
+
+// dropPeer is DropPeer; quiet (an abandoned handshake) skips the removal line, the session summary and the wipe accounting, which only
+// make sense for a connection that was one.
+func (w *World) dropPeer(peer *Peer, why string, quiet bool) {
 	wasConnected := peer.Connected
 	if w.GameOptionsOwner == peer {
 		w.GameOptionsOwner = nil
@@ -56,7 +62,7 @@ func (w *World) DropPeer(peer *Peer, why string) {
 	if w.Dirty.Has(peer) {
 		w.FlushPeer(peer)
 	}
-	peer.Connected = false
+	w.setPeerState(peer, PeerRemoved, why)
 	w.Traffic.Leave(peer)
 	other := w.Coop.Leave(peer)
 	w.BlSlotsSync()
@@ -70,99 +76,14 @@ func (w *World) DropPeer(peer *Peer, why string) {
 		w.RtPendingDrive, w.RtDriveWait, w.RtConfigured = false, false, false
 		w.RtIdx = 0
 	}
-	mono := w.Mono()
-	ev0 := w.Event
-	state := "road trip"
-	switch {
-	case !wasConnected:
-		state = "not connected yet"
-	case ev0 != nil && inList(ev0.People, peer):
-		state = "in the event"
-	case !w.Roadtrip:
-		state = "free roam"
-	}
-	run := w.runOf(peer.Xuid)
-	runS := ""
-	if run != "" {
-		runS = " run=" + run
-	}
-	var conn string
-	switch {
-	case wasConnected && peer.ConnectedAt != 0:
-		conn = fmt.Sprintf("connected %.0f s", mono-peer.ConnectedAt)
-	case peer.OpenedAt != 0:
-		conn = fmt.Sprintf("handshake open %.1f s", mono-peer.OpenedAt)
-	default:
-		conn = "never connected"
-	}
-	line := fmt.Sprintf("%d removed (%s); owner %d had %d objects; xuid %#x%s, %s, last packet %.1f s ago, %s, entered=%s",
-		peer.Addr.Port, why, peer.Owner, peer.Objs.Len(), peer.Xuid, runS, conn, mono-peer.LastRx, state, pyBool(peer.Entered))
-	if peer.KickReason != nil {
-		line += ", kick pending: " + *peer.KickReason
-	}
-	if peer.MalformedCount != 0 {
-		line += fmt.Sprintf(", %d malformed message(s)", peer.MalformedCount)
-	}
-	if strings.HasPrefix(why, "no packets") || strings.HasPrefix(why, "car policy") {
-		w.Warn(line)
-	} else {
-		w.Log(line)
-	}
-	var secs any
-	if peer.ConnectedAt != 0 {
-		secs = math.RoundToEven((w.Mono()-peer.ConnectedAt)*10) / 10
-	}
-	var car any
-	if peer.ModelID != nil {
-		car = *peer.ModelID
-	}
-	var kicked any
-	if peer.KickReason != nil {
-		kicked = *peer.KickReason
-	}
-	w.ev("session_end", kv("xuid", fmt.Sprintf("%#x", peer.Xuid)), kv("owner", peer.Owner), kv("why", why), kv("entered", peer.Entered), kv("seconds", secs),
-		kv("car", car), kv("top_kmh", math.RoundToEven(peer.TopKmh)), kv("predictions", peer.CarsRelayed), kv("kicked", kicked))
-	if peer.CarsRelayed != 0 {
-		stock := "None"
-		if peer.ModelID != nil {
-			if s, ok := w.cat().TopSpeed[int(*peer.ModelID)]; ok {
-				stock = fmt.Sprint(s)
-			}
-		}
-		w.Logf("%d session summary: xuid %#x car %s (stock %s km/h), top measured speed %.0f km/h, farthest position %.0f, highest point %.0f, fastest climb %.0f km/h",
-			peer.Addr.Port, peer.Xuid, modelStr(peer), stock, peer.TopKmh, peer.MaxAbs, peer.MaxY, peer.TopClimb)
-	}
-	win := &peer.Window
-	if win.Sent != 0 || peer.DupObjects != 0 || peer.DupRequests != 0 {
-		msg := fmt.Sprintf("%d delivery: %d reliable packets, %d messages resent (%d creates), peak %d waiting, %d given up, unacked at the end %d; client resends seen: %d objects, %d race requests",
-			peer.Addr.Port, win.Sent, win.Resent, win.ResentCreates, win.Peak, win.Lost, len(win.Pending), peer.DupObjects, peer.DupRequests)
-		if win.Lost != 0 {
-			w.Warn(msg)
-		} else {
-			w.Log(msg)
-		}
-	}
-	nowM := w.Mono()
-	w.drops = append(w.drops, dropRow{nowM, peer.Owner, peer.Xuid, peer.LastRx, peer.Pos, peer.CarID, why})
-	if len(w.drops) > 64 {
-		w.drops = w.drops[len(w.drops)-64:]
-	}
-	if w.WipeAt == 0 && nowM-w.WipeLast > 30.0 {
-		n := 0
-		for _, d := range w.drops {
-			if nowM-d.t <= WipeWindowS {
-				n++
-			}
-		}
-		if n >= WipeMinDrops {
-			w.WipeAt = nowM + 1.0
-		}
+	if !quiet {
+		w.dropLog(peer, why, wasConnected)
 	}
 	if w.PendingRace != nil && w.PendingRace.Leader == peer {
 		w.EndEvent("the event leader left before it started", false)
 	}
-	if ev := w.Event; ev != nil && inList(ev.People, peer) && !ev.Racing && !ev.Over {
-		ev.People = removeFrom(ev.People, peer)
+	if ev := w.Event; ev != nil && ev.has(peer) && !ev.Racing && !ev.Over {
+		ev.remove(peer)
 		w.Logf("event setup: participant %d is gone, %d participant(s) remain", peer.Owner, len(ev.People))
 		any := false
 		for _, q := range ev.People {
@@ -198,6 +119,102 @@ func (w *World) DropPeer(peer *Peer, why string) {
 					delete(q.SeqShift, k)
 				}
 			}
+		}
+	}
+}
+
+// dropLog writes what a removed connection leaves in the log and in the wipe accounting: the removal line, the session summary, the delivery line.
+func (w *World) dropLog(peer *Peer, why string, wasConnected bool) {
+	mono := w.Mono()
+	ev0 := w.Event
+	state := "road trip"
+	switch {
+	case !wasConnected:
+		state = "not connected yet"
+	case ev0 != nil && ev0.has(peer):
+		state = "in the event"
+	case !w.Roadtrip:
+		state = "free roam"
+	}
+	run := w.runOf(peer.Xuid)
+	runS := ""
+	if run != "" {
+		runS = " run=" + run
+	}
+	var conn string
+	switch {
+	case wasConnected && peer.ConnectedAt != 0:
+		conn = fmt.Sprintf("connected %.0f s", mono-peer.ConnectedAt)
+	case peer.OpenedAt != 0:
+		conn = fmt.Sprintf("handshake open %.1f s", mono-peer.OpenedAt)
+	default:
+		conn = "never connected"
+	}
+	line := fmt.Sprintf("%d removed (%s); owner %d had %d objects; xuid %#x%s, %s, last packet %.1f s ago, %s, entered=%s",
+		peer.Addr.Port, why, peer.Owner, peer.Objs.Len(), peer.Xuid, runS, conn, mono-peer.LastRx, state, pyBool(peer.Entered))
+	if peer.KickReason != nil {
+		line += ", kick pending: " + *peer.KickReason
+	}
+	if peer.MalformedCount != 0 {
+		line += fmt.Sprintf(", %d malformed message(s)", peer.MalformedCount)
+	}
+	if n := refusedTotal(peer); n != 0 {
+		line += fmt.Sprintf(", %d message(s) not handled before the handshake ended", n)
+	}
+	if strings.HasPrefix(why, "no packets") || strings.HasPrefix(why, "car policy") {
+		w.Warn(line)
+	} else {
+		w.Log(line)
+	}
+	var secs any
+	if peer.ConnectedAt != 0 {
+		secs = math.RoundToEven((w.Mono()-peer.ConnectedAt)*10) / 10
+	}
+	var car any
+	if peer.ModelID != nil {
+		car = *peer.ModelID
+	}
+	var kicked any
+	if peer.KickReason != nil {
+		kicked = *peer.KickReason
+	}
+	w.ev("session_end", kv("xuid", fmt.Sprintf("%#x", peer.Xuid)), kv("owner", peer.Owner), kv("why", why), kv("entered", peer.Entered), kv("seconds", secs),
+		kv("car", car), kv("top_kmh", math.RoundToEven(peer.TopKmh)), kv("predictions", peer.CarsRelayed), kv("kicked", kicked))
+	if peer.CarsRelayed != 0 {
+		stock := "None"
+		if peer.ModelID != nil {
+			if s, ok := w.cat().TopSpeed[int(*peer.ModelID)]; ok {
+				stock = fmt.Sprint(s)
+			}
+		}
+		w.Logf("%d session summary: xuid %#x car %s (stock %s km/h), top measured speed %.0f km/h, farthest position %.0f, highest point %.0f, fastest climb %.0f km/h",
+			peer.Addr.Port, peer.Xuid, modelStr(peer), stock, peer.TopKmh, peer.MaxAbs, peer.MaxY, peer.TopClimb)
+	}
+	w.pushSummary(peer)
+	win := &peer.Window
+	if win.Sent != 0 || peer.DupObjects != 0 || peer.DupRequests != 0 {
+		msg := fmt.Sprintf("%d delivery: %d reliable packets, %d messages resent (%d creates), peak %d waiting, %d given up, unacked at the end %d; client resends seen: %d objects, %d race requests",
+			peer.Addr.Port, win.Sent, win.Resent, win.ResentCreates, win.Peak, win.Lost, len(win.Pending), peer.DupObjects, peer.DupRequests)
+		if win.Lost != 0 {
+			w.Warn(msg)
+		} else {
+			w.Log(msg)
+		}
+	}
+	nowM := w.Mono()
+	w.drops = append(w.drops, dropRow{nowM, peer.Owner, peer.Xuid, peer.LastRx, peer.Pos, peer.CarID, why})
+	if len(w.drops) > 64 {
+		w.drops = w.drops[len(w.drops)-64:]
+	}
+	if w.WipeAt == 0 && nowM-w.WipeLast > 30.0 {
+		n := 0
+		for _, d := range w.drops {
+			if nowM-d.t <= WipeWindowS {
+				n++
+			}
+		}
+		if n >= WipeMinDrops {
+			w.WipeAt = nowM + 1.0
 		}
 	}
 }
@@ -352,14 +369,20 @@ func (w *World) Tick() {
 		w.MtSeen = map[int]int{}
 	}
 	for _, peer := range w.Peers.Values() {
-		if !peer.Connected && now-peer.LastRx > PendingSeconds {
-			w.Peers.Delete(peer.Addr)
+		if peer.State == PeerHalfOpen && (now-peer.LastRx > PendingSeconds || now-peer.OpenedAt > HalfOpenMaxSeconds) {
 			res := "None"
 			if peer.OpenResult != nil {
 				res = fmt.Sprint(*peer.OpenResult)
 			}
-			w.LogEvery("handshake-abandoned", 10.0, fmt.Sprintf("%d handshake abandoned: xuid %#x opened a connection %.0f s ago (answered with result %s) and has been silent for %.0f s (limit %.0f s); never sent the third leg",
-				peer.Addr.Port, peer.Xuid, now-peer.OpenedAt, res, now-peer.LastRx, PendingSeconds), diag.Warn)
+			if now-peer.LastRx > PendingSeconds {
+				w.LogEvery("handshake-abandoned", 10.0, fmt.Sprintf("%d handshake abandoned: xuid %#x opened a connection %.0f s ago (answered with result %s) and has been silent for %.0f s (limit %.0f s); never sent the third leg",
+					peer.Addr.Port, peer.Xuid, now-peer.OpenedAt, res, now-peer.LastRx, PendingSeconds), diag.Warn)
+			} else {
+				w.LogEvery("handshake-timeout", 10.0, fmt.Sprintf("%d handshake not finished within %.0f s: xuid %#x opened a connection (answered with result %s) and kept sending (last packet %.1f s ago) without the third leg; dropped",
+					peer.Addr.Port, HalfOpenMaxSeconds, peer.Xuid, res, now-peer.LastRx), diag.Warn)
+			}
+			// the same cleanup as every removal (traffic, co-op, votes, a pending race it leads), without the removal line of a connection that never was one
+			w.dropPeer(peer, "handshake abandoned", true)
 			continue
 		}
 		if peer.Connected && now-peer.LastRx > StaleSeconds {

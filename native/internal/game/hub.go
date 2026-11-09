@@ -91,10 +91,13 @@ type Hub struct {
 	CtlSend        func(data []byte, to Addr)
 	DefaultType    int
 	Assign         map[uint64]string
+	Standins       map[uint64]map[int64]int64 // a car-pack player's custom car -> the stock car the others see (control "standins")
+	CustomCars     map[uint64]map[int64]bool  // every custom car a player's launcher listed (control "standins"), with or without a stand-in
 	Runs           map[uint64]string
 	Authed         map[uint64]authEnt
 	Flagged        *omap.Map[uint64, flagEnt]
 	FlagsError     string
+	FlagsReleased  int // entries of a restricted-tools report dropped by loadFlags (NitroSystem stopped being one 2026-11-07)
 	FlagFile       string
 	Revoked        map[uint64]float64
 	UDPAuth        string
@@ -102,7 +105,9 @@ type Hub struct {
 	TicketEpochs   map[Addr][]byte
 	Bound          map[Addr]boundEnt
 	Nonces         *omap.Map[nonceKey, float64]
+	NonceCount     map[uint64]int // live nonces per xuid (MaxTicketNoncesPerXuid)
 	AuthLog        map[any]float64
+	stopCalls      atomic.Int64 // worker pauses so far (tests check that unauthenticated datagrams cause none)
 	Worlds         *omap.Map[WorldKey, *World]
 	Route          *omap.Map[Addr, *World]
 	EmptySince     map[WorldKey]float64
@@ -131,8 +136,8 @@ func NewHub(cfg HubConfig) (*Hub, error) {
 		return nil, err
 	}
 	h := &Hub{cfg: cfg, Clk: cfg.Clock, Rng: cfg.Rng, Sock: cfg.Sock, Out: cfg.Out, Sinks: cfg.Sinks, CtlSend: cfg.CtlSend,
-		Assign: map[uint64]string{}, Runs: map[uint64]string{}, Authed: map[uint64]authEnt{}, Flagged: omap.New[uint64, flagEnt](), Revoked: map[uint64]float64{},
-		Keys: map[uint64]map[string]float64{}, TicketEpochs: map[Addr][]byte{}, Bound: map[Addr]boundEnt{}, Nonces: omap.New[nonceKey, float64](),
+		Assign: map[uint64]string{}, Standins: map[uint64]map[int64]int64{}, CustomCars: map[uint64]map[int64]bool{}, Runs: map[uint64]string{}, Authed: map[uint64]authEnt{}, Flagged: omap.New[uint64, flagEnt](), Revoked: map[uint64]float64{},
+		Keys: map[uint64]map[string]float64{}, TicketEpochs: map[Addr][]byte{}, Bound: map[Addr]boundEnt{}, Nonces: omap.New[nonceKey, float64](), NonceCount: map[uint64]int{},
 		AuthLog: map[any]float64{}, Worlds: omap.New[WorldKey, *World](), Route: omap.New[Addr, *World](), EmptySince: map[WorldKey]float64{},
 		LightingRoutes: map[uint64]Addr{}, HonkRoutes: map[uint64]Addr{}, CarselRoutes: map[uint64]Addr{}, probeSeen: map[Addr]probeEnt{}, nxt: math.Inf(1)}
 	h.catalogPtr.Store(cfg.Catalog)
@@ -174,6 +179,10 @@ func NewHub(cfg HubConfig) (*Hub, error) {
 	}
 	if h.FlagsError != "" {
 		idle.Warnf("cheater pool file %s not read (%s): the pool starts empty", h.FlagFile, h.FlagsError)
+	}
+	if h.FlagsReleased > 0 {
+		h.saveFlags()
+		idle.Logf("cheater pool: %d player(s) flagged only for a restricted-tools report released (no tool report flags a player any more); %d remain flagged", h.FlagsReleased, h.Flagged.Len())
 	}
 	return h, nil
 }
@@ -425,6 +434,31 @@ func (h *Hub) ControlText(text string, replyTo *Addr) {
 			h.Runs = map[uint64]string{}
 		}
 		h.Runs[xuid] = diag.RunID(parts[2])
+	case n == 3 && parts[0] == "standins":
+		xuid, err := parseHex(parts[1])
+		if err != nil {
+			h.ctlIgnored(parts, fmt.Sprintf("standins message unreadable (%v)", err))
+			return
+		}
+		if parts[2] == "-" {
+			_, had := h.CustomCars[xuid]
+			delete(h.Standins, xuid)
+			delete(h.CustomCars, xuid)
+			if had {
+				h.Log(fmt.Sprintf("control: stand-ins for %s forgotten: its game runs the server's car database (no custom cars)", parts[1]))
+			}
+			return
+		}
+		got, owned, notes := h.parseStandins(parts[2])
+		if len(h.Standins) >= 20000 {
+			h.Standins, h.CustomCars = map[uint64]map[int64]int64{}, map[uint64]map[int64]bool{}
+		}
+		h.Standins[xuid] = got
+		if h.CustomCars == nil {
+			h.CustomCars = map[uint64]map[int64]bool{}
+		}
+		h.CustomCars[xuid] = owned
+		h.Log(fmt.Sprintf("control: stand-ins for %s: %s", parts[1], strings.Join(notes, "; ")))
 	case n == 3 && parts[0] == "assign":
 		xuid, err := parseHex(parts[1])
 		if err != nil {
@@ -645,6 +679,10 @@ func (h *Hub) loadFlags() {
 		var reason string
 		_ = json.Unmarshal(v[0], &until)
 		_ = json.Unmarshal(v[1], &reason)
+		if strings.HasPrefix(reason, "restricted tools") {
+			h.FlagsReleased++
+			continue
+		}
 		h.Flagged.Set(x, flagEnt{until, reason})
 	}
 }
@@ -761,12 +799,21 @@ func (h *Hub) revokeTables(xuid uint64) {
 
 // Ticket handles a UDP connection ticket: binds addr to its xuid when the MAC is right under one of the player's announced keys.
 func (h *Hub) Ticket(data []byte, addr Addr) {
+	now := h.Clk.Mono()
+	key, why := h.ticketCheck(data, addr, now)
+	if why != "" {
+		h.ticketRefused(data, addr, now, why)
+		return
+	}
+	h.ticketBind(data, addr, key, now)
+}
+
+// ticketCheck is the part of Ticket that only reads hub tables, so the hub goroutine (their only writer) may run it without pausing the workers:
+// the signing key when the ticket is good, else why it is refused.
+func (h *Hub) ticketCheck(data []byte, addr Addr, now float64) (key, why string) {
 	xuid := binary.LittleEndian.Uint64(data[20:])
 	ts := binary.LittleEndian.Uint64(data[28:])
 	nonce, mac := data[36:52], data[52:84]
-	now := h.Clk.Mono()
-	why := ""
-	var key string
 	haveKey := false
 	switch {
 	case data[19] != 1:
@@ -779,6 +826,8 @@ func (h *Hub) Ticket(data []byte, addr Addr) {
 		why = "replayed"
 	case h.Nonces.Len() >= MaxTicketNonces:
 		why = "replay protection full"
+	case h.NonceCount[xuid] >= MaxTicketNoncesPerXuid:
+		why = "replay protection full for this player"
 	default:
 		for k, until := range h.Keys[xuid] {
 			if until > now {
@@ -794,14 +843,26 @@ func (h *Hub) Ticket(data []byte, addr Addr) {
 			why = "bad signature or no session"
 		}
 	}
-	if why != "" {
-		if len(h.AuthLog) < 5000 && now-h.authLogGet([2]string{"t", addr.IP}) > 10 {
-			h.AuthLog[[2]string{"t", addr.IP}] = now
-			h.Log(fmt.Sprintf("auth: ticket for %#x from %s:%d refused (%s)", xuid, addr.IP, addr.Port, why))
-		}
-		return
+	return key, why
+}
+
+// ticketRefused logs a refused ticket, one line per address per 10 s. It may run beside the workers (refusedOpen does), hence authMu.
+func (h *Hub) ticketRefused(data []byte, addr Addr, now float64, why string) {
+	xuid := binary.LittleEndian.Uint64(data[20:])
+	h.authMu.Lock()
+	defer h.authMu.Unlock()
+	if now-h.authLogGet([2]string{"t", addr.IP}) > 10 {
+		h.AuthLog[[2]string{"t", addr.IP}] = now
+		h.Log(fmt.Sprintf("auth: ticket for %#x from %s:%d refused (%s)", xuid, addr.IP, addr.Port, why))
 	}
+}
+
+// ticketBind records an accepted ticket: the nonce, the address binding and the ticket epoch (writes: under the pause, like every hub-table write).
+func (h *Hub) ticketBind(data []byte, addr Addr, key string, now float64) {
+	xuid := binary.LittleEndian.Uint64(data[20:])
+	nonce := data[36:52]
 	h.Nonces.Set(nonceKey{xuid, string(nonce)}, now+2*TicketSkewSeconds)
+	h.NonceCount[xuid]++
 	held, has := h.Bound[addr]
 	if has && held.xuid != xuid && held.until > now {
 		h.Log(fmt.Sprintf("auth: ticket for %#x from %s:%d refused (address bound to %#x)", xuid, addr.IP, addr.Port, held.xuid))
@@ -1001,7 +1062,7 @@ func (h *Hub) OpenAllowed(playerID uint64, addr Addr) bool {
 func (h *Hub) refusedOpen(playerID uint64, addr Addr, now float64, why string) {
 	h.authMu.Lock()
 	defer h.authMu.Unlock()
-	if len(h.AuthLog) < 5000 && now-h.authLogGet(addr.IP) > 10 {
+	if now-h.authLogGet(addr.IP) > 10 { // the sweep clears the table past 5000 addresses
 		h.AuthLog[addr.IP] = now
 		h.Idle.Warnf("auth: refused OpenConnection of %#x from %s (%s; mode %s)", playerID, addr.IP, why, h.UDPAuth)
 	}
@@ -1138,6 +1199,11 @@ func (h *Hub) Sweep() {
 			break
 		}
 		h.Nonces.Delete(k)
+		if h.NonceCount[k.xuid] > 1 {
+			h.NonceCount[k.xuid]--
+		} else {
+			delete(h.NonceCount, k.xuid)
+		}
 	}
 	for x, until := range h.Revoked {
 		if until < now {
@@ -1220,10 +1286,10 @@ func (h *Hub) TunnelClosed(addr Addr) {
 	}
 }
 
-// Opened reports whether addr has a game connection in a world.
+// Opened reports whether addr has a game connection (half-open or connected) in a world: the route is set at the OpenConnection and dropped by
+// the sweep once the address left its world. Route is a hub table, so the hub goroutine reads it without pausing the workers.
 func (h *Hub) Opened(addr Addr) bool {
-	w, ok := h.Route.Get(addr)
-	return ok && w.Peers.Has(addr)
+	return h.Route.Has(addr)
 }
 
 // Close flushes what must survive a clean exit: the cheater pool file and the event log.

@@ -8,12 +8,9 @@ x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Wno-unused-function -I . tests/test_li
 mkdir -p "$work/prefix"
 WINEPREFIX="$work/prefix" WINEDEBUG=-all wine "$work/test.exe"
 WINEPREFIX="$work/prefix" WINEDEBUG=-all wine "$work/test.exe" --vector > "$work/vector"
-python3 -I - "$work/vector" <<'PY'
-import sys, pathlib,struct
-sys.path.insert(0,str(pathlib.Path.cwd().parent/'server'))
-import lighting
-payload=bytearray(lighting.HEADER)+bytes([1])+struct.pack('<QQ',0x9000123456789,7)+bytes(range(16,32))+bytes([5,7,0])
-struct.pack_into('<H',payload,9,lighting.REQUEST_SIZE)
-assert pathlib.Path(sys.argv[1]).read_text().strip()==lighting.signed(payload,bytes(range(32))).hex()
-print('C/Python authenticated wire format: PASS')
-PY
+# the request the shim builds is the one the server accepts: the frozen server vector (tests/vectors/make_vectors.py, server/lighting.py 2026-11-07;
+# the Go server keeps the format in native/internal/game/side.go)
+[ "$(tr -d '
+' < "$work/vector")" = "$(tr -d '
+' < tests/vectors/lighting_request.hex)" ] || { echo 'the request differs from the server wire format (tests/vectors/lighting_request.hex)'; exit 1; }
+echo 'C/server authenticated wire format: PASS'

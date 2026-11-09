@@ -70,7 +70,7 @@ static ULONGLONG g_cs_comp_at;
 
 enum { CS_NONE = 0, CS_STARTED, CS_RELEASED, CS_NO_ANSWER, CS_LIMIT };
 /* What one wait has seen; only the game thread touches it. */
-typedef struct { ULONGLONG last_call, wait_first, hold_since; int holding, expired; } carsel_wait;
+typedef struct { ULONGLONG last_call, wait_first, hold_since; int holding, expired, reported; } carsel_wait;
 
 /* One call of the hooked update at `now`, with the newest valid answer (hold flag and its tick, 0 = none yet). Returns 1 to skip the game's update;
  * *event says what changed (CS_STARTED / CS_RELEASED / CS_NO_ANSWER / CS_LIMIT) so the caller can log it once. */
@@ -79,7 +79,7 @@ static int carsel_decide(carsel_wait *w, ULONGLONG now, int enabled, unsigned ch
     int answered, want, pending;
     *event = CS_NONE;
     if (!w->last_call || now - w->last_call > CS_NEW_WAIT_MS) {          /* a new wait began */
-        w->wait_first = now; w->holding = 0; w->expired = 0;
+        w->wait_first = now; w->holding = 0; w->expired = 0; w->reported = 0;
     }
     w->last_call = now;
     answered = answer_at && now - answer_at <= CS_ANSWER_MS;
@@ -157,6 +157,84 @@ static int carsel_comp_ok(void *comp, ULONGLONG seen_at, ULONGLONG wait_first, U
 static unsigned char carsel_state_bits(ULONGLONG now, ULONGLONG armed_a, ULONGLONG armed_c)
 {
     return (unsigned char)(((armed_a && now - armed_a <= CS_ARMED_MS) ? 1u : 0u) | ((armed_c && now - armed_c <= CS_ARMED_MS) ? 2u : 0u));
+}
+
+/* ---- reports to the server (carsel_wire.h, type 3) ----
+ * Why this game sits where it sits, in the server's log next to what the server knows: a long cars-loaded wait, a car cache that does not change, a stall trace
+ * (diag build). Posted from any thread, sent by the poll thread (CS_REPORT_SENDS times, 400 ms apart, the same sequence number; the server drops repeats), never
+ * answered, never waited for. At most one per code every CS_REPORT_SAME_MS and CS_REPORT_MAX_TOTAL in a session, so a loop cannot flood the server. */
+#define CS_REPORT_SLOTS 4
+#define CS_REPORT_SENDS 3
+#define CS_REPORT_RESEND_MS 400u
+#define CS_REPORT_SAME_MS 8000u
+#define CS_REPORT_MAX_TOTAL 60u
+#define CS_REPORT_EXPIRE_MS 60000u
+#define CS_REPORT_WAIT_MS 20000u      /* a cars-loaded wait this long is reported once */
+enum { CS_RPT_CARS_LOADED = 1, CS_RPT_CAR_CACHE = 2, CS_RPT_STALL = 3, CS_RPT_STALL_END = 4, CS_RPT_OTHER = 5 };
+typedef struct { int used; unsigned char code; unsigned detail, sends; ULONGLONG seq, posted_at, next_at; char text[CARSEL_REPORT_TEXT + 1]; } carsel_report_slot;
+static carsel_report_slot g_cs_reports[CS_REPORT_SLOTS];
+static SRWLOCK g_cs_report_lock = SRWLOCK_INIT;
+static ULONGLONG g_cs_report_last[8];
+static unsigned g_cs_report_total;
+
+/* A small text builder for the report body (plain ASCII, cut at the report's limit). */
+typedef struct { char s[CARSEL_REPORT_TEXT + 1]; unsigned n; } cs_text;
+static void cs_t(cs_text *b, const char *t)
+{
+    while (*t && b->n < CARSEL_REPORT_TEXT) b->s[b->n++] = *t++;
+    b->s[b->n] = 0;
+}
+static void cs_u(cs_text *b, unsigned long long v)
+{
+    char t[24]; int i = 23;
+    t[i] = 0;
+    do {t[--i] = (char)('0' + v % 10); v /= 10;} while (v);
+    cs_t(b, t + i);
+}
+
+/* Queues one report. Returns 1 when it was queued, 0 when dropped (off, rate limit, queue full). Logs one line when queued. */
+static int carsel_report_post(unsigned char code, unsigned detail, const char *text)
+{
+    ULONGLONG now = CARSEL_NOW(); int i, slot = -1;
+    if (!g_cs_enabled || !text) return 0;
+    AcquireSRWLockExclusive(&g_cs_report_lock);
+    if (g_cs_report_total >= CS_REPORT_MAX_TOTAL || (g_cs_report_last[code & 7] && now - g_cs_report_last[code & 7] < CS_REPORT_SAME_MS)) {
+        ReleaseSRWLockExclusive(&g_cs_report_lock);
+        return 0;
+    }
+    for (i = 0; i < CS_REPORT_SLOTS; i++) {
+        if (!g_cs_reports[i].used) {slot = i; break;}
+    }
+    if (slot < 0) {
+        ReleaseSRWLockExclusive(&g_cs_report_lock);
+        return 0;
+    }
+    g_cs_report_last[code & 7] = now; g_cs_report_total++;
+    memset(&g_cs_reports[slot], 0, sizeof g_cs_reports[slot]);
+    g_cs_reports[slot].used = 1; g_cs_reports[slot].code = code; g_cs_reports[slot].detail = detail; g_cs_reports[slot].posted_at = now;
+    for (i = 0; text[i] && (unsigned)i < CARSEL_REPORT_TEXT; i++) g_cs_reports[slot].text[i] = text[i];
+    ReleaseSRWLockExclusive(&g_cs_report_lock);
+    log_begin(); log_raw("report: sent to the server, code "); log_dec(code); log_raw(": "); log_raw(text); log_raw("\n");
+    return 1;
+}
+
+/* The next report that is due, copied out (and its send counted) under the lock; 0 when none. Reports older than CS_REPORT_EXPIRE_MS are dropped unsent. */
+static int carsel_report_take(ULONGLONG now, ULONGLONG *seq, carsel_report_slot *out)
+{
+    int i, found = 0;
+    AcquireSRWLockExclusive(&g_cs_report_lock);
+    for (i = 0; i < CS_REPORT_SLOTS && !found; i++) {
+        carsel_report_slot *r = &g_cs_reports[i];
+        if (!r->used) continue;
+        if (now - r->posted_at > CS_REPORT_EXPIRE_MS) {r->used = 0; continue;}
+        if (now < r->next_at) continue;
+        if (!r->seq) r->seq = ++*seq;
+        *out = *r; found = 1;
+        r->next_at = now + CS_REPORT_RESEND_MS;
+        if (++r->sends >= CS_REPORT_SENDS) r->used = 0;
+    }
+    ReleaseSRWLockExclusive(&g_cs_report_lock);
+    return found;
 }
 
 /* ---- the game's memory (game thread only; every pointer is read through read_game_memory first) ---- */
@@ -252,6 +330,19 @@ static void carsel_update(void *self, ULONGLONG a, ULONGLONG b, ULONGLONG c)
         log_raw("\n");
     }
     carsel_hold_screen(now, g_cs_wait.holding, event, remaining, answer_at);
+    if (!g_cs_wait.reported && now - g_cs_wait.wait_first >= CS_REPORT_WAIT_MS) {
+        cs_text t;
+        g_cs_wait.reported = 1;
+        t.n = 0; t.s[0] = 0;
+        cs_t(&t, "the cars-loaded wait of this event has lasted "); cs_u(&t, (now - g_cs_wait.wait_first) / 1000); cs_t(&t, " s; ");
+        if (g_cs_wait.holding) {cs_t(&t, "held by the server for "); cs_u(&t, (now - g_cs_wait.hold_since) / 1000); cs_t(&t, " s");}
+        else cs_t(&t, g_cs_wait.expired ? "the server's hold gave up (30 s limit)" : "not held by the server");
+        if (answer_at) {
+            cs_t(&t, "; last answer "); cs_u(&t, now - answer_at); cs_t(&t, " ms ago, hold="); cs_u(&t, (unsigned)hold_flag);
+            if (remaining != CARSEL_NO_DEADLINE) {cs_t(&t, ", group deadline in "); cs_u(&t, remaining); cs_t(&t, " ms at that answer");}
+        } else cs_t(&t, "; the server never answered");
+        carsel_report_post(CS_RPT_CARS_LOADED, (unsigned)((now - g_cs_wait.wait_first) / 1000), t.s);
+    }
     if (skip) return;
     if (g_cs_original) g_cs_original(self, a, b, c);
 }
@@ -371,6 +462,16 @@ static DWORD WINAPI carsel_worker(void *unused)
                     log_begin(); log_raw("carsel: "); log_dec(rejected); log_raw(" reply datagram(s) refused (not a valid, authentic, in-sequence reply for this session)\n");
                     rejected = 0;
                 }
+            }
+        }
+        {
+            carsel_report_slot due; ULONGLONG report_seq = seq;
+            if (carsel_report_take(now, &report_seq, &due)) {
+                unsigned char datagram[CARSEL_REPORT_MAX]; WSABUF rb; DWORD rsent = 0; unsigned total;
+                if (report_seq > seq) seq = report_seq;
+                total = carsel_report(datagram, g_ticket_key, g_xuid, due.seq, epoch, due.code, due.detail, due.text);
+                rb.len = total; rb.buf = (char *)datagram;
+                g_r_wsasendto(s, &rb, 1, &rsent, 0, address, length, NULL, NULL);
             }
         }
         Sleep(20);

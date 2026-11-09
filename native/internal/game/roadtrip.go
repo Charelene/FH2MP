@@ -9,8 +9,10 @@ import (
 	"strconv"
 	"strings"
 
+	"fh2mp/internal/bits"
 	"fh2mp/internal/catalog"
 	"fh2mp/internal/diag"
+	"fh2mp/internal/gameopts"
 	"fh2mp/internal/netv2"
 	"fh2mp/internal/omap"
 )
@@ -493,7 +495,7 @@ func (w *World) RtSendConfigure() {
 func (w *World) RtCheckReady(force bool) {
 	var peers, ready []*Peer
 	for _, q := range w.Peers.Values() {
-		if q.Connected && q.RtStarted {
+		if q.Connected && q.RtStarted && !w.NotForEvents(q) { // a custom or traffic car is refused at Ready: the others do not wait for it
 			peers = append(peers, q)
 			if q.ConsoleVars[4] {
 				ready = append(ready, q)
@@ -706,3 +708,83 @@ func (w *World) pickRng() Rand {
 }
 
 func roadTripDBPath() string { return DataDir + "/roadtrip.sqlite" }
+
+// logRoadTripLaps says what lap total the host's game put into the options of this road trip event next to what the game database says, so an event whose
+// lap counter reads "n/-" (no total) can be matched to its options. Only with the client's game database known (without it there is nothing to compare).
+func (w *World) logRoadTripLaps(port int, size int, payload bits.Int) {
+	if w.RtGamedb == "" || w.RtWinner < 0 || w.RtCandidates == nil {
+		return
+	}
+	race := w.rtRace()
+	end, laps := "absent", "absent"
+	if f, err := gameopts.Fields(size, payload); err != nil {
+		end, laps = "unreadable ("+err.Error()+")", "unreadable"
+	} else {
+		if v, ok := f[gameopts.EndConditionID]; ok {
+			end = strconv.FormatUint(v.Value.Uint64(), 10)
+		}
+		if v, ok := f[gameopts.NumLapsID]; ok {
+			laps = strconv.FormatUint(v.Value.Uint64(), 10)
+		}
+	}
+	w.Logf("%d road trip: the options of event %d carry end condition %s (1 = laps) and NumLaps %s; the game database says %d lap(s), race mode %s", port, race, end, laps,
+		w.rtNumLaps(race), w.rtModeText(race))
+}
+
+func (w *World) rtModeText(race int64) string {
+	if m, ok := w.rtRaceMode(race); ok {
+		return strconv.Itoa(m)
+	}
+	return "unknown"
+}
+
+// rtFixLaps corrects the lap count of a Road Trip event's options. The host's game fills them with its stock default (3 laps for every event, circuit or
+// sprint: reported 2026-11-08, and the game's own lap counter then reads "n/-" on events that are not a circuit); an event's real lap count is in the game
+// database (AnthemOnlineEvents.NumLaps, 1 for a sprint). Like Free Roam it writes that count with the NumLaps end condition (gameopts.BoundedLaps). Tag modes
+// keep theirs. Returns the corrected options and the delta for the host (end condition and NumLaps), or nil when nothing changes: no game database or event,
+// a tag or unknown mode, options that cannot be read (said once), or options that already say it.
+func (w *World) rtFixLaps(port int, size int, payload bits.Int) (int, bits.Int, *gameopts.Options) {
+	if w.RtGamedb == "" || w.RtWinner < 0 || w.RtCandidates == nil {
+		return size, payload, nil
+	}
+	race := w.rtRace()
+	mode, ok := w.rtRaceMode(race)
+	if !ok || TagModes[mode] != nil {
+		return size, payload, nil
+	}
+	laps := w.rtNumLaps(race)
+	nsize, npayload, _, err := gameopts.BoundedLaps(size, payload, laps, &laps, 1)
+	if err != nil {
+		w.LogEvery([2]any{"rt-laps-unreadable", race}, 300.0, fmt.Sprintf("%d road trip: the options of event %d cannot be read to set its %d lap(s) (%v); they are relayed as the game wrote them", port, race, laps, err), diag.Warn)
+		return size, payload, nil
+	}
+	before, err1 := gameopts.Fields(size, payload)
+	after, err2 := gameopts.Fields(nsize, npayload)
+	if err1 != nil || err2 != nil {
+		return size, payload, nil
+	}
+	changed := map[int]gameopts.Field{}
+	said := [2]string{"absent", "absent"}
+	for i, vid := range []int{gameopts.EndConditionID, gameopts.NumLapsID} {
+		c, ok := after[vid]
+		if !ok {
+			continue
+		}
+		in, inOk := before[vid]
+		if inOk {
+			said[i] = strconv.FormatUint(in.Value.Uint64(), 10)
+		}
+		if !inOk || !(in.Width == c.Width && in.Value.Equal(c.Value)) {
+			changed[vid] = c
+		}
+	}
+	if len(changed) == 0 {
+		return size, payload, nil
+	}
+	cs, cp, err := gameopts.EncodeFields(changed)
+	if err != nil {
+		return size, payload, nil
+	}
+	w.Logf("%d road trip: the options of event %d said end condition %s and NumLaps %s; the game database says %d lap(s), set to that with the laps end condition", port, race, said[0], said[1], laps)
+	return nsize, npayload, &gameopts.Options{Size: cs, Payload: cp}
+}

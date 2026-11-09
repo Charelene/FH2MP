@@ -56,6 +56,7 @@ type Ghost struct {
 	Keyframes []Keyframe
 	LastT     float64
 	Counts    map[int]int
+	Collision []float64 // times of the CMsgCarCollision records (any car)
 }
 
 // Error is a ghost that does not walk cleanly.
@@ -228,6 +229,7 @@ func Parse(blob []byte) (*Ghost, error) {
 	keys := map[int][]Keyframe{}
 	var order []int
 	counts := map[int]int{}
+	var hits []float64
 	o, lastT := 0, -1.0
 	take := func(t float64, at int) error {
 		msg, obj, p, err := update(s, at)
@@ -243,6 +245,8 @@ func Parse(blob []byte) (*Ghost, error) {
 			per[obj] = append(per[obj], pos(t, p))
 		case MsgCarKeyframe:
 			keys[obj] = append(keys[obj], Keyframe{t, f32(p, 0), f32(p, 4), f32(p, 8), f32(p, 16), f32(p, 20), f32(p, 24)})
+		case MsgCarCollision:
+			hits = append(hits, t)
 		}
 		return nil
 	}
@@ -295,5 +299,5 @@ func Parse(blob []byte) (*Ghost, error) {
 			car = k
 		}
 	}
-	return &Ghost{header, per[car], keys[car], lastT, counts}, nil
+	return &Ghost{header, per[car], keys[car], lastT, counts, hits}, nil
 }

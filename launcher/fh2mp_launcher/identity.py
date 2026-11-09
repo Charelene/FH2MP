@@ -10,7 +10,7 @@ import struct
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-SIGN_PREFIX = b"FH2MP-AUTH-v1\0"          # keep identical to server/auth.py
+SIGN_PREFIX = b"FH2MP-AUTH-v1\0"          # keep identical to native/internal/auth
 RECOVERY_PREFIX = "FH2R1"
 
 

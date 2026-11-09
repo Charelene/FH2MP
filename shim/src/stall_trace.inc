@@ -53,6 +53,8 @@
 #define STL_SNAP_MAX 12
 #define STL_TIMELINE_MAX 90            /* timeline lines per event */
 #define STL_GIVEUP_MS 300000u          /* the trace of one event ends after this long */
+#define STL_GRID_QUIET_MS 8000u        /* the grid phase (after the starting grid message): the first snapshot when RenderReady is still not set this long after it */
+#define STL_GRID_GIVEUP_MS 240000u     /* the grid phase ends after this long (the server's own backstop is 240 s) */
 #define STL_SILENT_MS 3000u            /* the state flow was not stepped this long while an event is traced */
 #define STL_COOLDOWN_MS 15000u         /* after an event's trace ended, a state flow marker alone does not start another this soon */
 #define STL_INST_MAX 12
@@ -329,8 +331,8 @@ static unsigned g_stl_ring_n;
 
 /* ---- the event ------------------------------------------------------------------------------------------------------------------ */
 static struct {
-    int active, snaps, timeline, timeline_dropped, limit_told, silent_told, ever_ended;
-    DWORD tick0, next_snap, grid_base, ended_at;
+    int active, snaps, timeline, timeline_dropped, limit_told, silent_told, ever_ended, grid_phase;
+    DWORD tick0, next_snap, grid_base, ended_at, grid_at;
     LONG place_base;
     LONG steps_at_snap;
     char cause[96];
@@ -618,7 +620,12 @@ static void stl_snapshot(int n, DWORD ms)
 
     b.n = 0; b.s[0] = 0;
     stl_s(&b, "snapshot #"); stl_u(&b, (unsigned)n); stl_s(&b, " +"); stl_u(&b, ms);
-    stl_s(&b, " ms after the event began, no starting grid message yet; state flow ");
+    if (g_stl_ev.grid_phase) {
+        stl_s(&b, " ms after the event began, +"); stl_u(&b, (unsigned)(now - g_stl_ev.grid_at));
+        stl_s(&b, " ms after the starting grid message, local RenderReady not set yet; state flow ");
+    } else {
+        stl_s(&b, " ms after the event began, no starting grid message yet; state flow ");
+    }
     if (g_stl_step_hooked) {
         stl_s(&b, "last stepped "); stl_u(&b, last_step ? (unsigned)(now - last_step) : 0); stl_s(&b, " ms ago, ");
         stl_u(&b, (unsigned)steps); stl_s(&b, " steps in all, "); stl_u(&b, steps_since); stl_s(&b, " since the last snapshot");
@@ -690,6 +697,19 @@ static void stl_snapshot(int n, DWORD ms)
     } else {
         int from = 0;
         for (i = 0; i < npl; i++) loading += pl[i].counted;
+        if (n == 1 || n == 3) {          /* the server's log gets the gist: where the state flow sits, who the game still waits for, the local console */
+            stl_buf r;
+            int listed = 0;
+            r.n = 0; r.s[0] = 0;
+            stl_s(&r, "stall snapshot #"); stl_u(&r, (unsigned)n); stl_s(&r, " +"); stl_u(&r, ms); stl_s(&r, " ms: still loading "); stl_u(&r, (unsigned)loading); stl_s(&r, " of "); stl_u(&r, (unsigned)npl);
+            for (i = 0; i < npl && listed < 4; i++) {
+                if (pl[i].counted) { stl_s(&r, listed ? "," : " ["); stl_h(&r, pl[i].id); listed++; }
+            }
+            if (listed) stl_s(&r, "]");
+            stl_s(&r, "; flow "); stl_s(&r, ncopy > 0 ? copy[0].sig : "none");
+            if (lc_ok) { stl_s(&r, "; local "); stl_console_vars(&r, &lc, 0); }
+            carsel_report_post(CS_RPT_STALL, (unsigned)n, r.s);
+        }
         while (from < npl) {
             b.n = 0; b.s[0] = 0;
             stl_s(&b, "snapshot #"); stl_u(&b, (unsigned)n); stl_s(&b, " players "); stl_u(&b, (unsigned)(from + 1)); stl_s(&b, "-");
@@ -845,6 +865,7 @@ static void stl_end(const char *why, int arrived)
     stl_s(&b, " +"); stl_u(&b, ms); stl_s(&b, " ms after the begin, "); stl_u(&b, (unsigned)snaps); stl_s(&b, " snapshot(s) written");
     if (dropped) { stl_s(&b, ", "); stl_u(&b, (unsigned)dropped); stl_s(&b, " timeline line(s) over the limit of 90 were not written"); }
     stl_emit(&b);
+    if (snaps > 0) carsel_report_post(CS_RPT_STALL_END, (unsigned)(ms / 1000), b.s);     /* only a trace that had stalled long enough for a snapshot */
 }
 
 /* One pass of the watcher (every 100 ms): the local console's vars, the event's begin, its end, the 10 s / 5 s snapshots. */
@@ -913,11 +934,36 @@ static void stl_tick(void)
         g_stl_vars_valid = 1;
     }
 
-    if (g_grid_tick0 != g_stl_ev.grid_base) {
-        stl_end("the starting grid message arrived (grid_trace.inc)", 1);
+    if (!g_stl_ev.grid_phase && g_grid_tick0 != g_stl_ev.grid_base) {
+        /* The load is over, the grid phase begins: RenderReady comes only after the cars are placed and the scene is built. On prod 2026-11-01 a client took
+         * 83 s for it and on 2026-11-06 82 s (others 20 to 24 s) with the game running at full speed, and the trace had stopped at the grid message. It goes on
+         * until RenderReady is set (the grid_trace.inc hook or the local console var), the race starts, the event is left, or 240 s. */
+        stl_buf b;
+        g_stl_ev.grid_phase = 1;
+        g_stl_ev.grid_at = now;
+        g_stl_ev.snaps = 0;
+        g_stl_ev.limit_told = 0;
+        g_stl_ev.next_snap = now + STL_GRID_QUIET_MS;
+        b.n = 0; b.s[0] = 0;
+        stl_s(&b, "the starting grid message arrived +"); stl_u(&b, now - g_stl_ev.tick0);
+        stl_s(&b, " ms after the begin; tracing the grid phase until RenderReady is set (a snapshot every 5 s from +8 s)");
+        stl_emit(&b);
         return;
     }
-    if (now - g_stl_ev.tick0 > STL_GIVEUP_MS) {
+    if (g_stl_ev.grid_phase) {
+        if (g_grid_ready_value == 1 || (have && lc.v[0] == 1)) {
+            stl_end("local RenderReady is set (the grid phase is over)", 1);
+            return;
+        }
+        if (!g_grid_epoch) {
+            stl_end("the race start message arrived before RenderReady was seen", 1);
+            return;
+        }
+        if (now - g_stl_ev.grid_at > STL_GRID_GIVEUP_MS) {
+            stl_end("giving up, RenderReady was not set in the grid phase", 0);
+            return;
+        }
+    } else if (now - g_stl_ev.tick0 > STL_GIVEUP_MS) {
         stl_end("giving up, the starting grid message never arrived", 0);
         return;
     }

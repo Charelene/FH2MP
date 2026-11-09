@@ -23,6 +23,19 @@ static int code_is(const char *tag, const char *what, const unsigned char *img, 
 }
 static int g_patches, g_hooks;
 static unsigned long long fake_tick(void *a, void *b, void *c, void *d) { (void)a; (void)b; (void)c; (void)d; return 7; }
+static ULONGLONG g_now;
+static ULONGLONG fake_clock(void) { return g_now; }
+static int g_wait_answer;
+static unsigned long long car_wait(void *module);
+/* the game asks every frame: call it every 500 ms of the fake clock for ms, return the first yes or the last answer */
+static unsigned long long wait_for(void *module, unsigned ms)
+{
+    unsigned long long r = 0;
+    unsigned t;
+    for (t = 0; t < ms && !r; t += 500) { g_now += 500; r = car_wait(module); }
+    return r;
+}
+static unsigned long long fake_wait(void *m) { (void)m; return (unsigned long long)g_wait_answer; }
 static unsigned char g_fake_request[0x40];
 static int *g_cur_type_ptr;
 static int g_type_seen_in_find = -2;
@@ -65,7 +78,7 @@ static int plat_hook(const char *name, void *target, void *detour, void **origin
 {
     (void)name; (void)target; (void)detour;
     g_hooks++;
-    *original = target == g_img + 0xfd08b0 ? (void *)fake_find : target == g_img + 0xfceee0 ? (void *)fake_ids : target == g_img + 0x720960 ? (void *)fake_ai : target == g_img + 0xf73e10 ? (void *)fake_aictl : target == g_img + 0x125d850 ? (void *)fake_alloc : target == g_img + 0x1355ad0 ? (void *)fake_view_a : target == g_img + 0x135b640 ? (void *)fake_view_b : target == g_img + 0x1302160 ? (void *)fake_view_new : target == g_img + 0x46df80 ? (void *)fake_label_take : target == g_img + 0x47a830 ? (void *)fake_labels_make : (void *)fake_tick;
+    *original = target == g_img + 0xfd08b0 ? (void *)fake_find : target == g_img + 0xfceee0 ? (void *)fake_ids : target == g_img + 0x720960 ? (void *)fake_ai : target == g_img + 0xf73e10 ? (void *)fake_aictl : target == g_img + 0x125d850 ? (void *)fake_alloc : target == g_img + 0x1355ad0 ? (void *)fake_view_a : target == g_img + 0x135b640 ? (void *)fake_view_b : target == g_img + 0x1302160 ? (void *)fake_view_new : target == g_img + 0x46df80 ? (void *)fake_label_take : target == g_img + 0x47a830 ? (void *)fake_labels_make : target == g_img + 0x7cbf10 ? (void *)fake_wait : (void *)fake_tick;
     return 1;
 }
 static int g_refuse_patch;       /* the platform refuses the n-th patch call (1-based) */
@@ -80,6 +93,9 @@ static int plat_patch(const char *name, void *at, const void *expect, const void
     g_patches++;
     return 1;
 }
+
+static int g_reports; static unsigned char g_report_code; static char g_report_text[256];
+static int carsel_report_post(unsigned char code, unsigned detail, const char *text) { (void)detail; g_reports++; g_report_code = code; strncpy(g_report_text, text, sizeof g_report_text - 1); return 1; }
 
 #include "src/car_pool.inc"
 
@@ -102,6 +118,7 @@ static const unsigned char VFUNC2[] = {
 
 static const unsigned char TICK_HEAD[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57};
 
+static const unsigned char WAIT_HEAD[] = {0x48, 0x89, 0x5c, 0x24, 0x10, 0x57, 0x48, 0x83, 0xec, 0x20, 0x48, 0x8b, 0x81, 0xa8, 0x00, 0x00, 0x00, 0x48, 0x8b, 0xf9, 0x48, 0x8b, 0x18, 0x48};
 static const unsigned char MAX_SETTER[] = {0x44, 0x89, 0x82, 0xf0, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc};
 static const unsigned char MIN_SETTER[] = {0x44, 0x89, 0x82, 0xb0, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc};
 static const unsigned char AI_HEAD[] = {0x40, 0x55, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8d, 0x6c, 0x24, 0xc9, 0x48, 0x81, 0xec, 0xa0, 0x00, 0x00, 0x00};
@@ -136,6 +153,12 @@ static void fresh(void)
     memcpy(g_img + 0x134666c, LOD_LOAD, sizeof LOD_LOAD);
     memcpy(g_img + CAR_POOL_RVA, VFUNC2, sizeof VFUNC2);
     memcpy(g_img + CAR_POOL_TICK_RVA, TICK_HEAD, sizeof TICK_HEAD);
+    memcpy(g_img + CAR_WAIT_RVA, WAIT_HEAD, sizeof WAIT_HEAD);
+    g_car_pool_tick_orig = NULL;
+    g_car_wait_orig = NULL;
+    g_car_cache_self = NULL;
+    g_reports = 0;
+    g_car_wait_reported = 0;
     memcpy(g_img + CAR_POOL_FIND_RVA, FIND_HEAD, sizeof FIND_HEAD);
     memcpy(g_img + CAR_POOL_IDS_RVA, IDS_HEAD, sizeof IDS_HEAD);
     memcpy(g_img + CAR_POOL_AICTL_RVA, AICTL_HEAD, sizeof AICTL_HEAD);
@@ -160,6 +183,7 @@ static void fresh(void)
 int main(void)
 {
     int i;
+    SetEnvironmentVariableA("FH2MP_NO_CARSLOTS", "1");                 /* the cases below are about the switches one by one; the default profile has its own */
     bind_cur_type();
     g_img = VirtualAlloc(NULL, 0x4000000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     assert(g_img);
@@ -779,6 +803,120 @@ int main(void)
     SetEnvironmentVariableA("FH2MP_CAR_NOAICTL", NULL);
     SetEnvironmentVariableA("FH2MP_CAR_NODRIVATARS", NULL);
     SetEnvironmentVariableA("FH2MP_CAR_SLOTS", NULL);
+
+
+
+    /* the default profile: no variable set, 75 slots, the working set of switches (dev 2026-11-03: 72 cars on a real client) */
+    SetEnvironmentVariableA("FH2MP_NO_CARSLOTS", NULL);
+    SetEnvironmentVariableA("FH2MP_CAR_SLOTS", NULL);
+    SetEnvironmentVariableA("FH2MP_CAR_NODRIVATARS", NULL);
+    SetEnvironmentVariableA("FH2MP_CAR_IDS", NULL);
+    SetEnvironmentVariableA("FH2MP_CAR_NOAICTL", NULL);
+    SetEnvironmentVariableA("FH2MP_CAR_VIEWLOD", NULL);
+    fresh();
+    assert(patch_car_pool() == 1);
+    assert(g_img[CAR_POOL_RVA + 0x28] == 75);                             /* slots 11 -> 75 */
+    assert(g_img[0x5430d0] == 0xc7 && g_img[0x653780] == 0x44 && g_img[0x47a570 + 0x2e] == 0x44);    /* only the Drivatar maximum is 0 (parts "x") */
+    assert(g_car_pool_share_ids == 1);                                    /* IDS */
+    assert(strstr(g_raw, "carpool: view LOD table 32 -> 1024 entries"));  /* VIEWLOD */
+    assert(*(unsigned *)(g_img + 0x1302160 + 0x15) == 0x24df0 + 0x1000);
+    { int hooks_default = g_hooks;
+      SetEnvironmentVariableA("FH2MP_CAR_NOAICTL", "0");                  /* an own value wins */
+      SetEnvironmentVariableA("FH2MP_CAR_VIEWLOD", "0");
+      fresh();
+      assert(patch_car_pool() == 1 && g_hooks == hooks_default - 2 && !strstr(g_raw, "view LOD table"));
+      SetEnvironmentVariableA("FH2MP_CAR_NOAICTL", NULL);
+      SetEnvironmentVariableA("FH2MP_CAR_VIEWLOD", NULL);
+    }
+    SetEnvironmentVariableA("FH2MP_CAR_SLOTS", "30");                    /* an own slot count wins */
+    fresh();
+    assert(patch_car_pool() == 1 && g_img[CAR_POOL_RVA + 0x28] == 30);
+    SetEnvironmentVariableA("FH2MP_CAR_SLOTS", NULL);
+    SetEnvironmentVariableA("FH2MP_NO_CARSLOTS", "1");                    /* the off switch: the game's own 11 */
+    fresh();
+    assert(patch_car_pool() == 0 && g_patches == 0 && g_hooks == 0 && !memcmp(g_img + CAR_POOL_RVA, VFUNC2, sizeof VFUNC2));
+    SetEnvironmentVariableA("FH2MP_NO_CARSLOTS", NULL);
+
+    /* the wait for every player's car: let through when the cache is full and idle, or stalled; never while it is still working */
+    {
+        static unsigned char module[0x400], slots[3 * CAR_POOL_SLOT], requests[3][0x600], queue[8];
+        unsigned char *group = module + CAR_POOL_GROUP;
+        unsigned i;
+
+        fresh();
+        assert(patch_car_wait() == 1 && g_hooks == 2 && g_car_pool_tick_orig == fake_tick);      /* its own tick hook, and the wait */
+        fresh();
+        g_img[CAR_WAIT_RVA] = 0x40;
+        assert(patch_car_wait() == 0 && g_hooks == 0 && strstr(g_raw, "mismatch: the player car wait"));
+        fresh();
+        g_img[CAR_POOL_TICK_RVA] = 0x40;
+        assert(patch_car_wait() == 0 && g_hooks == 0);
+        SetEnvironmentVariableA("FH2MP_CAR_DIAG", "1");
+        fresh();
+        patch_car_pool();                                                  /* car_pool's own tick hook is there: not hooked twice */
+        g_hooks = 0;
+        assert(patch_car_wait() == 1 && g_hooks == 1);
+        SetEnvironmentVariableA("FH2MP_CAR_DIAG", NULL);
+
+        fresh();
+        assert(patch_car_wait() == 1);
+        g_car_wait_orig = fake_wait;
+        g_car_wait_clock = fake_clock;
+        g_now = 100000;
+        g_wait_answer = 1;
+        assert(car_wait(module) == 1);                                    /* the game's yes stands */
+        g_wait_answer = 0;
+        assert(car_wait(module) == 0 && g_car_wait_passed == 0);          /* no cache known yet: the game's no stands */
+        car_wait_tick(module, NULL, NULL, NULL);
+        assert(g_car_cache_self == module);
+        assert(car_wait(module) == 0);                                    /* an empty group: the game's no stands */
+
+        *(unsigned long long *)(group + 0x60) = (unsigned long long)(ULONG_PTR)slots;
+        *(unsigned long long *)(group + 0x68) = (unsigned long long)(ULONG_PTR)(slots + sizeof slots);
+        *(unsigned long long *)(group + 0x78) = (unsigned long long)(ULONG_PTR)queue;
+        *(unsigned long long *)(group + 0x80) = (unsigned long long)(ULONG_PTR)(queue + 8);     /* one car waits for a slot */
+        for (i = 0; i < 3; i++) {
+            *(unsigned long long *)(slots + (size_t)i * CAR_POOL_SLOT + 0x558) = (unsigned long long)(ULONG_PTR)requests[i];
+            *(unsigned *)(requests[i] + 0x598) = 2;                       /* loaded */
+        }
+        *(unsigned *)(group + 0x90) = 0;                                  /* no free slot */
+
+        g_now = 200000;
+        assert(car_wait(module) == 0);                                    /* the first look: it may still change */
+        assert(wait_for(module, CAR_WAIT_FULL_MS - 500) == 0);
+        g_raw[0] = 0;
+        assert(wait_for(module, 500) == 1 && g_car_wait_passed == 1 && strstr(g_raw, "all car slots are taken") && strstr(g_raw, "cars waiting for a slot 1"));
+
+        g_now = 300000;                                                   /* a new wait; one slot's car is still loading: it keeps waiting */
+        *(unsigned *)(requests[1] + 0x598) = 1;
+        assert(car_wait(module) == 0);
+        assert(wait_for(module, CAR_WAIT_FULL_MS + 5000) == 0 && g_car_wait_passed == 1);
+        *(unsigned *)(requests[1] + 0x598) = 2;                           /* done loading: counts as a change, then 1.5 s of quiet */
+        assert(wait_for(module, CAR_WAIT_FULL_MS) == 0);                  /* the first look after the change is at +0.5 s */
+        assert(wait_for(module, 500) == 1 && g_car_wait_passed == 2);
+
+        g_now = 400000;                                                   /* a free slot: the game decides, until the 20 s stall */
+        *(unsigned *)(group + 0x90) = 1;
+        assert(car_wait(module) == 0);
+        assert(wait_for(module, 10000) == 0 && g_car_wait_passed == 2);
+        *(unsigned *)(requests[2] + 0x598) = 1;                           /* progress resets the stall timer */
+        assert(wait_for(module, CAR_WAIT_STALL_MS) == 0);
+        g_raw[0] = 0;
+        assert(wait_for(module, 500) == 1 && g_car_wait_passed == 3 && strstr(g_raw, "nothing in the car cache changed"));
+        assert(g_reports == 1 && g_report_code == 2 && strstr(g_report_text, "lasted 20 s; free slots 1, cars waiting for a slot 1, loading 1, loaded 2"));   /* told to the server once per wait */
+
+        g_now = 500000;                                                   /* an unsane group (slots not a whole number): the game's no stands */
+        *(unsigned long long *)(group + 0x68) += 5;
+        assert(car_wait(module) == 0);
+        assert(wait_for(module, CAR_WAIT_STALL_MS * 2) == 0 && g_car_wait_passed == 3);
+
+        g_now = 600000;                                                   /* a pause between two waits starts a new one */
+        *(unsigned long long *)(group + 0x68) -= 5;
+        assert(car_wait(module) == 0);
+        g_now += CAR_WAIT_STALL_MS * 2;
+        assert(car_wait(module) == 0 && g_car_wait_passed == 3);
+        g_car_wait_clock = NULL;
+    }
 
     printf("car pool: ok\n");
     return 0;

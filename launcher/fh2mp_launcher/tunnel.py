@@ -1,6 +1,6 @@
 """UDP-over-TCP proxy for the experimental TCP fallback (Settings: "Connect over TCP").
 
-The game talks UDP to 127.0.0.1:<local port>; each datagram goes to the game server's TCP carrier (server/tunnel.py) as a frame,
+The game talks UDP to 127.0.0.1:<local port>; each datagram goes to the game server's TCP carrier (native/internal/gamenet) as a frame,
 [length: 2 bytes big endian][datagram], and the frames that come back are sent to the game as datagrams. An empty frame is a keep-alive.
 One TCP connection per source address the game sends from. Like the network, the proxy drops datagrams for a connection that cannot keep
 up (SEND_BACKLOG) instead of queueing them: the game's own protocol copes with loss, not with delay.
@@ -207,7 +207,7 @@ PROBE_MAGIC = b"FH2MPPN1"
 
 def probe_udp(host, port, tries=3, wait=1.2):
     """Whether the game server's UDP port answers: one datagram (the game's 11-byte header, the probe magic, 8 random bytes) that the server
-    sends back unchanged (server/probe.py). False after `tries` unanswered tries: a network that drops UDP, or a server that does not
+    sends back unchanged (native/internal/game/side.go). False after `tries` unanswered tries: a network that drops UDP, or a server that does not
     answer probes (the caller only asks one that says it does). Never raises."""
     import os
     for _ in range(tries):

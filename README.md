@@ -1,6 +1,6 @@
 # FH2MP: Forza Horizon 2 online, back from the dead (sort of)
 
-> **v1.1.0.** It works and it is young: expect crashes, desyncs and rough edges.
+> **v1.2.0.** It works and it is young: expect crashes, desyncs and rough edges.
 > Known problems: [open issues](https://github.com/Charelene/FH2MP/issues) and the [help pages](https://forza.scuffed.af/help/). Changes per version: [Releases](https://github.com/Charelene/FH2MP/releases).
 
 [![Patreon](https://img.shields.io/badge/Patreon-Support%20FH2MP-FF424D?logo=patreon&logoColor=white)](https://www.patreon.com/fh2mp)
@@ -17,8 +17,9 @@ online call as "offline"). FH2MP puts the online half back with three pieces:
 - a **shim** (`fh2-mods\FH2MP.dll`, a mod for the [FH2 Mod Platform](https://github.com/Trinculo54/fh2-mod-platform)) that runs inside the
   game and re-enables real sockets, gives each install its own identity and redirects the game's web-service calls to our server. It works
   next to the other FH2 mods: the platform checks its changes to the game against theirs;
-- a **server** that speaks the game's UDP protocol (lobbies, worlds, relay) and stands in for the Turn 10 and Xbox Live HTTP services. The Python
-  version in `server/` is the reference; a Go port in `native/` runs the same protocol, with busy worlds spread over several CPU cores (in testing).
+- a **server** that speaks the game's UDP protocol (lobbies, worlds, relay) and stands in for the Turn 10 and Xbox Live HTTP services. It is
+  written in Go (`native/`) and spreads busy worlds over several CPU cores. It was checked byte for byte against the earlier Python version,
+  which was removed after the 1.2.0 release (it is in the git history up to that point).
 
 The protocol was recovered from the game client itself, not from captured Microsoft traffic. No Microsoft or Xbox Live service is ever
 contacted. There was nothing left to sniff.
@@ -53,7 +54,7 @@ Open bugs are in the [issue tracker](https://github.com/Charelene/FH2MP/issues).
 
 ## Install (players)
 
-**You need:** a legitimately owned copy of Forza Horizon 2 (Xbox One build **1.0.0.64**) and [Azimuth **0.9.10**](https://almost-there-games.itch.io/azimuth),
+**You need:** a legitimately owned copy of Forza Horizon 2 (Xbox One build **1.0.0.64**) and [Azimuth **1.0.4**](https://almost-there-games.itch.io/azimuth),
 set up so the game starts in Azimuth. No game files are in this repo or the launcher.
 
 1. Download the launcher from the [latest release](https://github.com/Charelene/FH2MP/releases/latest):
@@ -102,7 +103,7 @@ these contain passwords or keys.
 
 ## Build from source
 
-Sources: `shim/` (C), `launcher/` (Python, PySide6), `server/` (Python), `native/` (Go port of the server), `release/` (packaging and signing).
+Sources: `shim/` (C), `launcher/` (Python, PySide6), `native/` (the server, Go), `release/` (packaging and signing).
 
 **Shim.** Needs `x86_64-w64-mingw32-gcc` (and `windres`). It compiles against the FH2 Mod Platform's API header in
 `third_party/fh2-mod-platform`.
@@ -115,20 +116,19 @@ release/build_shim_zip.sh   # dist/fh2mp-shim-<version>.zip: fh2-mods/FH2MP.dll 
 
 The version comes from `shim/VERSION`. A `-debug` shim is never replaced by the launcher's updater.
 
-**Server.** The Python server in `server/` needs Python 3.10 or newer and PostgreSQL (`psycopg` 3); the game data is loaded into the `game` schema
-with the tools of an install you own, so it is not in this repository. Run the checks with `python3 -I release/run_server_tests.py`.
-
-The Go port needs Go 1.27 or newer and builds to two programs that take the same environment variables as the Python ones:
+**Server.** Needs Go 1.27 or newer and PostgreSQL; the game data is loaded into the `game` schema with the tools of an install you own, so it
+is not in this repository. It builds to two programs:
 
 ```sh
 cd native
-go build -o fh2mp-lsp ./cmd/fh2mp-lsp        # the web services (python3 server/fh2mp_lsp.py [port])
-go build -o fh2mp-server ./cmd/fh2mp-server   # the game server (python3 server/fh2mp_server.py [port] [logfile])
-go vet ./... && go test ./...
+go build -o fh2mp-lsp ./cmd/fh2mp-lsp        # the web services: fh2mp-lsp [port]
+go build -o fh2mp-server ./cmd/fh2mp-server   # the game server: fh2mp-server [port] [logfile]
+go vet ./... && go test ./...                 # or release/ci.sh go
 ```
 
-`FH2MP_WORKERS` sets how many goroutines run the worlds (default: cores - 1). The Go tests replay recorded Python runs of the same inputs and compare
-every datagram and log line; the ones that need a database make their own scratch databases on the PostgreSQL named by `FH2MP_TEST_PG_ADMIN_DSN` (an account that may create databases).
+`FH2MP_WORKERS` sets how many goroutines run the worlds (default: cores - 1). The game server's tests replay recorded runs of the earlier Python
+server and compare every datagram and log line (`native/testdata`, frozen since that server was removed); the tests that need a database make
+their own scratch databases on the PostgreSQL named by `FH2MP_TEST_PG_ADMIN_DSN` (an account that may create databases).
 
 **Launcher.** Python 3.10 or newer.
 

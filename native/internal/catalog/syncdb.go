@@ -26,6 +26,7 @@ type PartData struct {
 	Owner    map[string]map[uint32]int64
 	Stock    map[string]map[int64]uint32
 	Installs map[string]map[uint32]int64
+	Bodies   map[uint32]int64 // List_UpgradeCarBody id -> the car whose body it installs (CarBodyID / 1000); empty without that column
 }
 
 // OpenRO opens a SQLite file read-only.
@@ -163,7 +164,38 @@ func ReadParts(db *sql.DB) (*PartData, error) {
 		r.Close()
 		pd.Installs[t.Name] = m
 	}
+	bodies, err := readBodies(db)
+	if err != nil {
+		return nil, err
+	}
+	pd.Bodies = bodies
 	return pd, nil
+}
+
+// readBodies: List_UpgradeCarBody's Id -> CarBodyID / 1000, the car whose body each body row installs (read_bodies). A database without the
+// column gives none, and body parts are then checked against the car's own id as before.
+func readBodies(db *sql.DB) (map[uint32]int64, error) {
+	out := map[uint32]int64{}
+	cols, err := columns(db, "List_UpgradeCarBody")
+	if err != nil || !cols["CarBodyID"] {
+		return out, err
+	}
+	r, err := db.Query(`select Id, CarBodyID from List_UpgradeCarBody`)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	for r.Next() {
+		var id int64
+		var body sql.NullInt64
+		if err := r.Scan(&id, &body); err != nil {
+			return nil, err
+		}
+		if body.Valid {
+			out[uint32(id)] = floorDiv(body.Int64, 1000)
+		}
+	}
+	return out, r.Err()
 }
 
 func columns(db *sql.DB, table string) (map[string]bool, error) {
@@ -315,6 +347,17 @@ func (t *Tables) Extend(pd *PartData) int {
 			if _, ok := d[k]; !ok {
 				d[k] = v
 			}
+		}
+	}
+	for row, car := range pd.Bodies {
+		if car == int64(row)/1000 {
+			continue // a stock car's own body needs no entry
+		}
+		if t.BodyOf == nil {
+			t.BodyOf = map[uint32]int64{}
+		}
+		if _, ok := t.BodyOf[row]; !ok {
+			t.BodyOf[row] = car
 		}
 	}
 	return added

@@ -300,11 +300,61 @@ static void test_hook(void)
     free(g_fake_img);
 }
 
+/* the server's part list of a game that keeps its own car packs (fh2mp\base-parts.txt) */
+static void test_base_list(void)
+{
+    const char *why = NULL;
+    unsigned parts[PPI_SLOTS], klass = 0;
+    float pi = 0;
+    ppi_ops ops = {ppi_base_exists, ppi_base_stock, NULL};
+    ppi_verdict v;
+    int k;
+    static const char good[] = "fh2mp-base-parts 1\r\np Engine 5\np Engine 12\np CarBodyWeightPack 3\np TireCompound 900\np Motor 77\n"
+                               "c 1005 3 512000\nc 4242 6 999500\n";
+    static const char *const bad[] = {
+        "", "fh2mp-base-parts 2\np Engine 5\nc 1 1 1\n", "fh2mp-base-parts 1\np Engine 12\np Engine 5\nc 1 1 1\n",
+        "fh2mp-base-parts 1\np Engine 5\np TireCompound 1\np Engine 6\nc 1 1 1\n", "fh2mp-base-parts 1\np Engine 5\nc 1 1 1\np Engine 6\n",
+        "fh2mp-base-parts 1\np Engine 5\nc 2 1 1\nc 1 1 1\n", "fh2mp-base-parts 1\np Engine x\nc 1 1 1\n", "fh2mp-base-parts 1\nc 1 1 1\n",
+        "fh2mp-base-parts 1\np Engine 5\n", "fh2mp-base-parts 1\nq 1\n", "fh2mp-base-parts 1\np Engine 5\nc 1 300 1\n"};
+    unsigned i;
+
+    for (i = 0; i < sizeof bad / sizeof *bad; i++) {
+        why = NULL;
+        assert(!ppi_base_load_text(bad[i], (unsigned)strlen(bad[i]), &why) && why && !g_ppi_base_ready);
+    }
+    assert(ppi_base_load_text(good, (unsigned)strlen(good), &why) && g_ppi_base_ready);
+    assert(g_ppi_base.nids == 4 && g_ppi_base.ncars == 2);              /* CarBodyWeightPack is no slot table: skipped */
+    assert(ppi_base_exists(NULL, "Engine", 5) == 1 && ppi_base_exists(NULL, "Engine", 12) == 1 && ppi_base_exists(NULL, "Engine", 6) == 0);
+    assert(ppi_base_exists(NULL, "Motor", 77) == 1 && ppi_base_exists(NULL, "Brakes", 5) == 0 && ppi_base_exists(NULL, "Nope", 5) == 0);
+    assert(ppi_base_stock(NULL, 4242, &klass, &pi) == 1 && klass == 6 && fabsf(pi - 0.9995f) < 1e-6f);
+    assert(ppi_base_stock(NULL, 4243, &klass, &pi) == 0);
+    assert(!ppi_base_load_text(good, (unsigned)strlen(good), &why));     /* loaded once */
+    /* a car pack's engine (in the player's database, not the server's) is in no part table for the decision */
+    for (k = 0; k < PPI_SLOTS; k++) parts[k] = PPI_NONE;
+    parts[0] = 12; parts[8] = 900;
+    v = ppi_check_parts(parts, &ops);
+    assert(v.kind == PPI_CLEAN);
+    parts[0] = 13;
+    v = ppi_check_parts(parts, &ops);
+    assert(v.kind == PPI_UNKNOWN_PART && v.slot == 0 && v.id == 13);
+    parts[0] = 77;                                                       /* an electric car's Motor row in the engine slot */
+    v = ppi_check_parts(parts, &ops);
+    assert(v.kind == PPI_CLEAN);
+    /* a car the server's list lacks counts as custom for the event check; a car on it does not */
+    { unsigned char attrs[PPI_OUT_SIZE]; short id = 9024;
+      memset(attrs, 0, sizeof attrs); memcpy(attrs + PPI_OUT_ID, &id, 2);
+      assert(ppi_custom_car(attrs) == 1);
+      id = 1005; memcpy(attrs + PPI_OUT_ID, &id, 2);
+      assert(ppi_custom_car(attrs) == 0);
+      assert(ppi_custom_car(NULL) == 0); }
+}
+
 int main(int argc, char **argv)
 {
     (void)argc; (void)argv;
     test_decision();
     test_hook();
+    test_base_list();
     puts("picker_pi: ok");
     return 0;
 }

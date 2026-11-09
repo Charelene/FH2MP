@@ -10,7 +10,7 @@
  *   - the call to +abf2d0 gets an array assembled from the 12 native rows and ours (the list collection is resized to the count it is given),
  *   - the per-frame helper sees the count held at 12 while it runs, so the extra rows are not refreshed every frame (they keep what the rebuild wrote).
  * Hooked at the two call sites, not at the functions, because +abf2d0 serves the other mini leaderboards too. With 12 members or fewer nothing is
- * changed. The maximum is 36 rows; env FH2MP_PARTY_MAX sets it (12 to 75), FH2MP_NO_PARTYHUD turns the patch off. Not verified in a running game: whether
+ * changed. The maximum is 75 rows (every player of the biggest world); env FH2MP_PARTY_MAX sets it (12 to 75), FH2MP_NO_PARTYHUD turns the patch off. Not verified in a running game: whether
  * the HUD template shows more than 12 rows, and what MemberDisplayCount (set from the member vectors, not from this count) does above 12. */
 #define PARTY_NATIVE_ROWS 12
 #define PARTY_ROWS_OFFSET 0x130
@@ -27,7 +27,7 @@ static party_row_fn g_party_row_orig;
 static party_board_fn g_party_board_orig;
 static party_frame_fn g_party_frame_orig;
 static party_item_fn g_party_new_item;
-static int g_party_max = PARTY_NATIVE_ROWS + 24;
+static int g_party_max = PARTY_NATIVE_ROWS + PARTY_EXTRA_MAX;
 static struct { void *component; void *rows[PARTY_EXTRA_MAX]; } g_party_ext[PARTY_COMPONENTS];
 static int g_party_next_table;
 static volatile LONG g_party_logged;

@@ -36,7 +36,7 @@ jobs:
       # The same checks and image as ci.yml (release/ci.sh); publish.sh only tags commits whose ci.yml run passed, so this is the last word,
       # not the first.
       - uses: ./.github/actions/ci-image
-      - run: release/ci.sh --container server pg mutations
+      - run: release/ci.sh --container go unit mutations
 
   shim:
     needs: check

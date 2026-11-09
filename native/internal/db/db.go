@@ -486,6 +486,12 @@ func (d *DB) Do(fn func(*Tx) error) error {
 		return err
 	}
 	got = time.Now()
+	defer func() { // a panic in fn (the LSP uses panics for control flow) must not keep the write lock: roll back, then let it travel on
+		if r := recover(); r != nil {
+			tx.Rollback(ctx)
+			panic(r)
+		}
+	}()
 	if got.Sub(asked).Seconds() > SlowLockSeconds {
 		if ok, skipped := rate.Allow("lock-wait", DBLogSeconds); ok {
 			extra := ""

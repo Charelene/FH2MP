@@ -673,10 +673,10 @@ class SettingsDialog(QDialog):
                                    "The pinned build already there is left alone; another winmm.dll is kept in the fh2extra folder.")
         self.extra_opts.setChecked(s["extra_options"])
         lay.addWidget(self.extra_opts)
-        self.packs = QCheckBox("Keep my car packs (no online play with other people)")
-        self.packs.setToolTip("Tunes, liveries, photos and your progress work as usual, with your own car database and the car packs in it. "
-                              "Free Roam, Road Trip and other games with other players are off, because a car the others do not have "
-                              "would crash them. Turn this off and press Play to play with everyone on the server's car database.")
+        self.packs = QCheckBox("Keep my car packs (custom cars stay out of online events)")
+        self.packs.setToolTip("You play online with your own car database and the car packs in it. In Free Roam the others see your custom "
+                              "cars as a stand-in car. Online events and Road Trip take only cars from the game, and parts from outside the "
+                              "game are put back to stock there. Your times and scores do not go on the leaderboards.")
         self.packs.setChecked(s["keep_car_packs"])
         lay.addWidget(self.packs)
         self.tcp = QCheckBox("Connect over TCP (experimental, for networks that block UDP)")

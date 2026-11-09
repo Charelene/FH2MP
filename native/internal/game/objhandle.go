@@ -87,11 +87,16 @@ func (w *World) handleObject(peer *Peer, r rd, br *bits.Reader, mtype int, data 
 	if router == 1 && a == 0 && b == 0 && size != 0 && os.Getenv("FH2MP_KEEP_VIP") == "" {
 		size, payload = w.HideVIP(peer, oid, size, payload)
 	}
+	var real *relayVariant // the object as the player sent it, for those whose games have the same custom cars (RealCarsFor)
 	if router == 1 && a == 0 && b == 0 {
 		var sup bool
+		rs, rp := size, payload
 		_, sup, size, payload = w.CheckParts(peer, size, payload, oid)
 		if sup {
 			return handleContinue
+		}
+		if w.standinApplied && w.HasCustomCars(peer) {
+			real = &relayVariant{rs, rp}
 		}
 		if size >= 240 {
 			payload = w.NoteChoices(peer, size, payload)
@@ -117,7 +122,10 @@ func (w *World) handleObject(peer *Peer, r rd, br *bits.Reader, mtype int, data 
 			_, dlc := DlcCars[mid]
 			_, blocked := c.Blocked[int(mid)]
 			if !suppress && UnknownCarPolicy == "standin" && len(c.KnownCars) > 0 && !known && !dlc && !blocked {
-				payload = replaceBits(payload, 5, 32, bits.FromUint64(uint64(StandinCar)))
+				if w.HasCustomCars(peer) {
+					real = &relayVariant{size, payload}
+				}
+				payload = replaceBits(payload, 5, 32, bits.FromUint64(uint64(w.standinFor(peer, mid))))
 			}
 		}
 	}
@@ -135,7 +143,7 @@ func (w *World) handleObject(peer *Peer, r rd, br *bits.Reader, mtype int, data 
 			return handleContinue
 		}
 	} else if isRelayRouter(router) && a == 0 && b == 0 && !suppress && peer.KickReason == nil {
-		w.RememberAndRelay(peer, mtype, router, oid, tid, seq, size, payload)
+		w.rememberAndRelay(peer, mtype, router, oid, tid, seq, size, payload, real)
 	}
 	if router == 3 && mtype == netv2.MsgObjectUpdate && size != 0 {
 		w.consoleUpdate(peer, addr, size, payload)
@@ -348,6 +356,12 @@ func (w *World) handleGameOptions(peer *Peer, addr Addr, mtype, router, oid, seq
 		if rawSize != size || !rawPayload.Equal(payload) {
 			w.Logf("%d GameOptions NumLaps corrected to %d (maximum %d)", addr.Port, w.FreeRoamLaps, gameopts.MaxLaps)
 		}
+	} else {
+		var fixed *gameopts.Options
+		if s, p, c := w.rtFixLaps(addr.Port, size, payload); c != nil {
+			size, payload, fixed = s, p, c
+		}
+		correction = fixed
 	}
 	kind := "update"
 	if first {
@@ -356,6 +370,9 @@ func (w *World) handleGameOptions(peer *Peer, addr Addr, mtype, router, oid, seq
 	w.Logf("%d GameOptions %s relayed (%d bits, own seq %d, mtype %d)", addr.Port, kind, size, seq, mtype)
 	if CarCapture {
 		w.Logf("  GameOptions payload hex=%s", hexOf(payload, size))
+	}
+	if w.Roadtrip {
+		w.logRoadTripLaps(addr.Port, rawSize, rawPayload)
 	}
 	unchanged := w.GameOptions != nil && w.GameOptions.Size == size && w.GameOptions.Payload.Equal(payload)
 	w.GameOptions = &gameopts.Options{Size: size, Payload: payload}
@@ -413,7 +430,7 @@ func (w *World) consoleUpdate(peer *Peer, addr Addr, size int, payload bits.Int)
 		}
 	}
 	v3, has3 := peer.ConsoleVars[3]
-	if w.Event != nil && inList(w.Event.People, peer) && has3 && !v3 && containsStr(seen, "RaceInProgress=0") {
+	if w.Event != nil && w.Event.has(peer) && has3 && !v3 && containsStr(seen, "RaceInProgress=0") {
 		w.ParticipantLeft(peer)
 	}
 	w.MaybeBeginRace()

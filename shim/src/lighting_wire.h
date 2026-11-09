@@ -54,6 +54,45 @@ static int light_response(const unsigned char *data, unsigned n, const unsigned 
     }
     return 1;
 }
+/* v2 (native/internal/game/side.go): the request also carries the car's open parts (bytes 55-56, LIGHT_DOOR_BITS bits in LIGHT_PARTS order),
+ * type 3; the reply (type 4) has 6-byte records: owner, car, flags, parts lo, parts hi, 0. */
+#define LIGHT2_BASE 57u
+#define LIGHT2_REQUEST (LIGHT2_BASE + LIGHT_MAC)
+#define LIGHT2_LIMIT (LIGHT2_REQUEST + 6u * LIGHT_MAX)
+#define LIGHT_DOOR_BITS 10u
+static void light_request2(unsigned char out[LIGHT2_REQUEST], const unsigned char key[32],
+                           unsigned long long xuid, unsigned long long seq, const unsigned char epoch[16],
+                           unsigned char car, unsigned char flags, unsigned doors)
+{
+    unsigned i;
+    for(i=0;i<19;i++) out[i]=light_header[i];
+    out[9]=LIGHT2_REQUEST; out[10]=0; out[19]=3;
+    light_put64(out+20,xuid); light_put64(out+28,seq);
+    for(i=0;i<16;i++) out[36+i]=epoch[i];
+    out[52]=car; out[53]=flags; out[54]=0;
+    out[55]=(unsigned char)(doors & 0xff); out[56]=(unsigned char)((doors >> 8) & ((1u << (LIGHT_DOOR_BITS - 8)) - 1));
+    hmac_sha256(key,32,out,LIGHT2_BASE,out+LIGHT2_BASE);
+}
+static int light_response2(const unsigned char *data, unsigned n, const unsigned char key[32],
+                            unsigned long long xuid, unsigned long long sent, unsigned long long received,
+                            const unsigned char epoch[16])
+{
+    unsigned i,j,count; unsigned char mac[32]; unsigned long long seq;
+    if(n<LIGHT2_REQUEST || n>LIGHT2_LIMIT || !light_equal(data,light_header,9) ||
+       !light_equal(data+11,light_header+11,8) || (unsigned)(data[9] | data[10]<<8)!=n ||
+       data[19]!=4 || light_u64(data+20)!=xuid || !light_equal(data+36,epoch,16) ||
+       data[52]>127 || data[53]>7 || data[55] || data[56]) return 0;
+    seq=light_u64(data+28); count=data[54];
+    if(seq<=received || seq>sent || sent-seq>20 || count>LIGHT_MAX || n!=LIGHT2_REQUEST+6*count) return 0;
+    hmac_sha256(key,32,data,n-LIGHT_MAC,mac);
+    if(!light_equal(mac,data+n-LIGHT_MAC,LIGHT_MAC)) return 0;
+    for(i=0;i<count;i++) {
+        const unsigned char *r=data+LIGHT2_BASE+6*i;
+        if(!r[0] || r[0]==255 || r[1]>127 || r[2]>7 || (unsigned)(r[3] | r[4]<<8)>=(1u<<LIGHT_DOOR_BITS) || r[5]) return 0;
+        for(j=0;j<i;j++) if(data[LIGHT2_BASE+6*j]==r[0]) return 0;
+    }
+    return 1;
+}
 static unsigned char light_flags(unsigned char manual, unsigned char forced, unsigned char automatic,
                                  unsigned char hazard, unsigned char left, unsigned char right)
 {

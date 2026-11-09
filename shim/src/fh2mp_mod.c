@@ -225,7 +225,7 @@ static unsigned char *alloc_near(unsigned char *anchor)
 
 /* Session token of the player signed in through the launcher (see session_load); sent to the stand-in services as X-FH2MP-Token. */
 static char g_token[96];
-/* The id of this game start in every log (launcher, shim, server; server/diag.py), from the session file; made here when a session has none. */
+/* The id of this game start in every log (launcher, shim, server; native/internal/diag), from the session file; made here when a session has none. */
 static char g_run[9];
 static HANDLE g_log = INVALID_HANDLE_VALUE;
 static wchar_t g_args[MAX_ARGS][MAX_ARG_CHARS];
@@ -251,166 +251,7 @@ static void mem_copy(void *dst, const void *src, SIZE_T n)
     }
 }
 
-static volatile LONG g_log_lock;
-static volatile DWORD g_log_owner;
-
-static void log_lock(void)
-{
-    DWORD me = GetCurrentThreadId();
-
-    if (g_log_owner == me) {
-        return; /* re-entrant on the same thread */
-    }
-    while (InterlockedCompareExchange(&g_log_lock, 1, 0) != 0) {
-        SwitchToThread();
-    }
-    g_log_owner = me;
-}
-
-static void log_unlock(void)
-{
-    if (g_log_owner == GetCurrentThreadId()) {
-        g_log_owner = 0;
-        InterlockedExchange(&g_log_lock, 0);
-    }
-}
-
-/* log_begin() takes the lock; a string ending in '\n' releases it, so each line is atomic */
-#ifndef FH2MP_DEBUG_BUILD
-static char g_line[1024];
-static int g_ll;
-/* FH2MP_LOG_KEEP: more of the release log without a debug build. "all", or words like the ones below, separated by commas ("xhr#,arg["). */
-static char g_log_keep[128];
-
-static int line_has(const char *l, int n, const char *pat)
-{
-    int i, k;
-    for (i = 0; i < n; i++) {
-        for (k = 0; pat[k] && i + k < n && l[i + k] == pat[k]; k++) {
-        }
-        if (!pat[k]) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static int line_wanted(const char *l, int n)
-{
-    static const char *const keep[] = {"attached", "session:", "identity:", "late:", "not patched", "NOT ", "unexpected", "fail", "error", "could not",
-                                       "refus", "crash", "xsbody", "xstoken", "mmtimeout", "mmtoast", "online-setup", "bindfix", "gamedb:", "timelock:", "rivalsleave", "bucketcars", "matchpoll", "sample", "carprobe", "probe:", "lighting:", "honk:", "grid:",
-                                       "xhr:", "winsock:", "placement:", "netstrings:", "torqueload:", "nulltorque", "speedpb:", "cinematics:",
-                                       "festivalgrid:", "invitetype:", "ticket:", "tools:", "offline:", "rebound", "redirect:", "serverport:", "secureip:", "hook:", "perf:", "health:", "diag:", "partyhud:", "carpool:", 0};
-    int i;
-    const char *word;
-    for (i = 0; keep[i]; i++) {
-        if (line_has(l, n, keep[i])) {
-            return 1;
-        }
-    }
-    for (word = g_log_keep; *word; word += lstrlenA(word) + 1) {
-        if ((word[0] == 'a' && word[1] == 'l' && word[2] == 'l' && !word[3]) || line_has(l, n, word)) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static void log_keep_load(void)
-{
-    DWORD i, n = GetEnvironmentVariableA("FH2MP_LOG_KEEP", g_log_keep, sizeof g_log_keep - 1);
-
-    if (n >= sizeof g_log_keep - 1) {
-        n = 0;
-    }
-    g_log_keep[n] = g_log_keep[n + 1] = 0;
-    for (i = 0; i < n; i++) {
-        if (g_log_keep[i] == ',') {
-            g_log_keep[i] = 0;
-        }
-    }
-}
-#endif
-
-static void log_raw(const char *s)
-{
-    DWORD written;
-    DWORD n = 0;
-
-    if (g_log == INVALID_HANDLE_VALUE) {
-        return;
-    }
-    while (s[n]) {
-        n++;
-    }
-#ifndef FH2MP_DEBUG_BUILD
-    /* Release builds keep the log short: lines are assembled here and only the ones that matter to a player are written
-     * (start-up summary, anything that failed). The debug build logs everything. */
-    {
-        DWORD i;
-        for (i = 0; i < n; i++) {
-            if (g_ll < (int)sizeof g_line - 1) {
-                g_line[g_ll++] = s[i];
-            }
-        }
-        if (n > 0 && s[n - 1] == '\n') {
-            g_line[g_ll] = 0;
-            if (line_wanted(g_line, g_ll)) {
-                WriteFile(g_log, g_line, (DWORD)g_ll, &written, NULL);
-            }
-            g_ll = 0;
-            log_unlock();
-        }
-        return;
-    }
-#endif
-    WriteFile(g_log, s, n, &written, NULL);
-    if (n > 0 && s[n - 1] == '\n') {
-        log_unlock();
-    }
-}
-
-static void log_hex(unsigned long long v, int digits)
-{
-    char buf[17];
-    int i;
-
-    for (i = digits - 1; i >= 0; i--) {
-        buf[i] = "0123456789abcdef"[v & 0xf];
-        v >>= 4;
-    }
-    buf[digits] = '\0';
-    log_raw(buf);
-}
-
-static void log_dec(unsigned long v)
-{
-    char buf[12];
-    int i = 11;
-
-    buf[i] = '\0';
-    do {
-        buf[--i] = (char)('0' + v % 10);
-        v /= 10;
-    } while (v);
-    log_raw(buf + i);
-}
-
-static void log_wide(const wchar_t *w)
-{
-    char buf[3 * MAX_ARG_CHARS + 1];
-    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, buf, sizeof buf, NULL, NULL);
-
-    log_raw(n > 0 ? buf : "?");
-}
-
-static void log_begin(void)
-{
-    log_lock();
-    log_raw("[");
-    log_dec(GetTickCount());
-    log_raw("] ");
-}
+#include "log.inc"
 
 /* "48 8b 5c" for n bytes; a game update shows up as a different run of these in a "not patched" line */
 static void log_hexbytes(const unsigned char *p, unsigned n)
@@ -465,9 +306,30 @@ static int log_code_mismatch(const char *tag, const char *what, unsigned rva, co
 }
 
 /* Compares n bytes of game code (at img+rva) with what the patch expects; 1 when equal, else the mismatch is logged and it is 0. */
+/* 1 when `actual` is `expect` with another mod's inline hook at its start: a JMP rel32 (MinHook, as the platform's hook_function writes it, e.g. FH2
+ * ANNA 1.1.0 on game+0xf5c900 / +0xf7bcc0) over the first 5 bytes, the rest the game's own. The platform chains hooks on one function, so ours
+ * goes behind it. */
+static int code_hooked_by_other(const unsigned char *actual, const void *expect, unsigned n)
+{
+    return n > 5 && actual[0] == 0xe9 && bytes_first_diff(actual + 5, (const unsigned char *)expect + 5, n - 5) < 0;
+}
+
 static int code_is(const char *tag, const char *what, const unsigned char *img, unsigned rva, const void *expect, unsigned n)
 {
-    return bytes_first_diff(img + rva, expect, n) < 0 || log_code_mismatch(tag, what, rva, img + rva, expect, n);
+    if (bytes_first_diff(img + rva, expect, n) < 0) {
+        return 1;
+    }
+    if (code_hooked_by_other(img + rva, expect, n)) {
+        log_begin();
+        log_raw(tag);
+        log_raw(": ");
+        log_raw(what);
+        log_raw(" at game+0x");
+        log_hex(rva, 8);
+        log_raw(" starts with another mod's hook, the rest is the game's code: ours goes behind it through the platform\n");
+        return 1;
+    }
+    return log_code_mismatch(tag, what, rva, img + rva, expect, n);
 }
 
 static void plat_failed(const char *name, const void *at, const char *step)
@@ -1309,40 +1171,61 @@ static int patch_matchmaking_allowed(void)
  */
 #define FH2_QOS_JNE_RVA 0x17941dbu
 #define FH2_QOS_FLAG_RVA 0x1794216u
-static int patch_qos_assume_success(void)
+/*
+ * The same lambda for the game's own private session (Free Roam / Road Trip started from the Car Meet, Nerd::CreatePrivateGame;
+ * traced on win1 -> dev 2026-11-08: the continuation FUN_14178f060 throws "wait() cannot be called on a default constructed task",
+ * [manager+0x279] stays 0, MatchRequester::Tick delivers false to FUN_1417ae470 and the request fails with reason 2). It is
+ * FUN_141794840, same layout, flag at +0x279 and the callback slot at +0x1d8:
+ *   test rdi,rdi ; jne                      (RVA 0x1794907)
+ *   mov byte [rax+0x279], 0                 (RVA 0x179493f)
+ * Same switch, FH2MP_NO_QOSOK.
+ */
+#define FH2_QOS_PRIV_JNE_RVA 0x1794907u
+#define FH2_QOS_PRIV_FLAG_RVA 0x179493fu
+
+/* Both changes of one lambda, or neither: half of it would skip the association and still report failure. */
+static int qos_skip_association(const char *what, unsigned jne_rva, const unsigned char *want_jne, unsigned flag_rva,
+                                const unsigned char *want_flag)
 {
-    static const unsigned char want_jne[] = {0x48, 0x85, 0xFF, 0x75, 0x56, 0x48, 0x8B, 0x1E};
-    static const unsigned char want_flag[] = {0xC6, 0x80, 0x78, 0x02, 0x00, 0x00, 0x00};
     static const unsigned char nop2[] = {0x90, 0x90}, one = 0x01;
     unsigned char *img = find_fh2_image();
     unsigned char *a, *b;
-    int i;
 
     if (!img) {
         return 0;
     }
-    a = img + FH2_QOS_JNE_RVA - 3;
-    b = img + FH2_QOS_FLAG_RVA - 6;
-    (void)i;
-    if (!code_is("qosok", "the match-request QoS lambda (test rdi / jne)", img, FH2_QOS_JNE_RVA - 3, want_jne, sizeof want_jne) ||
-        !code_is("qosok", "the match-request QoS lambda (flag store)", img, FH2_QOS_FLAG_RVA - 6, want_flag, sizeof want_flag)) {
+    a = img + jne_rva - 3;
+    b = img + flag_rva - 6;
+    if (!code_is("qosok", what, img, jne_rva - 3, want_jne, 8) || !code_is("qosok", what, img, flag_rva - 6, want_flag, 7)) {
         return 0;
     }
     {
-        /* both or neither: half of it would skip the association and still report failure */
         FH2Hook *ha = g_api->patch_bytes(g_mod, plat_tag("qosok: skip the secure association"), a + 3, want_jne + 3, nop2, 2);
         FH2Hook *hb = ha ? g_api->patch_bytes(g_mod, plat_tag("qosok: report success"), b + 6, want_flag + 6, &one, 1) : NULL;
         if (!hb || !g_api->enable_hooks(g_mod, ha) || !g_api->enable_hooks(g_mod, hb)) {
             if (ha) {
                 g_api->disable_hooks(g_mod, ha);
             }
-            plat_failed("qosok: match-request QoS lambda", ha ? b + 6 : a + 3,
+            plat_failed(what, ha ? b + 6 : a + 3,
                         !ha ? "refused the skip of the secure association" : !hb ? "refused the success flag (the skip is undone)"
                                                                                : "could not switch both changes on (the skip is undone)");
             return 0;
         }
     }
     return 1;
+}
+
+static int patch_qos_assume_success(void)
+{
+    static const unsigned char want_jne[] = {0x48, 0x85, 0xFF, 0x75, 0x56, 0x48, 0x8B, 0x1E};
+    static const unsigned char want_flag[] = {0xC6, 0x80, 0x78, 0x02, 0x00, 0x00, 0x00};
+    static const unsigned char want_jne_priv[] = {0x48, 0x85, 0xFF, 0x75, 0x53, 0x49, 0x8B, 0x1E};
+    static const unsigned char want_flag_priv[] = {0xC6, 0x80, 0x79, 0x02, 0x00, 0x00, 0x00};
+    int public_ok = qos_skip_association("the match-request QoS lambda", FH2_QOS_JNE_RVA, want_jne, FH2_QOS_FLAG_RVA, want_flag);
+    int private_ok = qos_skip_association("the private-game QoS lambda", FH2_QOS_PRIV_JNE_RVA, want_jne_priv, FH2_QOS_PRIV_FLAG_RVA,
+                                          want_flag_priv);
+
+    return public_ok && private_ok;
 }
 
 /*
@@ -2339,7 +2222,7 @@ static int patch_festival_grid(void)
  * to Xbox Live" popup. That function begins with the same CLobby+0xf0 test as the Live gates above:
  *     cmp byte [rax+0xf0], 0 ; jne +7 ; xor al,al ; ret      (80 B8 F0 00 00 00 00 75 07 32 C0 ...)
  * then checks the Live sign-in state (FUN_140a42090) and the permissions 0x56..0x58 and the user flag mask 0x80. Those pass once the
- * Logon response carries the permission table (server/fh2mp_lsp.py), so only the byte test is removed: jne (75 07) becomes jmp (EB 07).
+ * Logon response carries the permission table (native/internal/lsp/notif.go), so only the byte test is removed: jne (75 07) becomes jmp (EB 07).
  * Setting the byte to 1 at runtime made "Setting Up Rivals Event" start (2026-10-18). Disable with env FH2MP_NO_RIVALGATE.
  */
 static int patch_rival_gate(void)
@@ -2428,7 +2311,9 @@ static int patch_online_meet(void)
 #include "online_setup.inc"
 #include "hook_guard.inc"
 #include "gameplaylog_guard.inc"
+#include "remote_prediction_guard.inc"
 #include "picker_pi.inc"
+#include "autodrive_rule.inc"
 
 static int patch_torque_load(void)
 {
@@ -2551,6 +2436,30 @@ static void *xs_find_import(unsigned char *img, const char *want)
     return slot ? *slot : NULL;
 }
 
+/* Retry verdict for a patch whose imports of img are not bound yet: 0 (retry) for up to 60 s from the first miss, then 2
+ * (give up). Logs the wait once and the give-up once. *since is the patch's own first-miss tick (0 = none yet). */
+static int xs_unbound_wait(const char *tag, const char *what, DWORD *since)
+{
+    if (!*since) {
+        *since = GetTickCount() | 1;
+        log_begin();
+        log_raw(tag);
+        log_raw(": waiting, Microsoft.Xbox.Services.dll is mapped but ");
+        log_raw(what);
+        log_raw(" is not bound yet\n");
+        return 0;
+    }
+    if (GetTickCount() - *since < 60000) {
+        return 0;
+    }
+    log_begin();
+    log_raw(tag);
+    log_raw(": not patched, ");
+    log_raw(what);
+    log_raw(" was still not bound 60 s after Microsoft.Xbox.Services.dll was mapped\n");
+    return 2;
+}
+
 static void *g_xs_auth; /* the shared Authentication object returned by the stub */
 
 /* How many token requests XSAPI made through the stub, and when the first came (diagnostics for "the online setup after Logon never ran":
@@ -2637,7 +2546,18 @@ static int patch_xsapi_token(void)
     }
     mem_copy(&rel, call + 7, 4);
     alloc = *(void *(**)(ULONGLONG))(call + 11 + rel);
+    if (!xs_find_import_slot(img, "WindowsCreateString")) {
+        log_begin();
+        log_raw("xstoken: not patched, WindowsCreateString is not in the XSAPI import table\n");
+        return 2;
+    }
     mkstr = (LONG(*)(const WCHAR *, unsigned, void **))xs_find_import(img, "WindowsCreateString");
+    {
+        static DWORD since;
+        if (!xs_bound(img, (void *)alloc) || !xs_bound(img, (void *)mkstr)) {
+            return xs_unbound_wait("xstoken", !xs_bound(img, (void *)alloc) ? "its allocator import" : "its WindowsCreateString import", &since);
+        }
+    }
     ctor = (void *(*)(void *))(img + XS_AUTH_CTOR_RVA);
     if (!alloc || !mkstr) {
         log_begin();
@@ -2736,8 +2656,12 @@ static int patch_sda_string(void)
         return 2;
     }
     mk = xs_find_import(img, "WindowsCreateString");
-    if (!mk) {
+    if (!mk && xs_find_import_slot(xs, "WindowsCreateString")) {
+        static DWORD since;
         mk = xs_find_import(xs, "WindowsCreateString");
+        if (!xs_bound(xs, mk)) {
+            return xs_unbound_wait("sdastr", "its WindowsCreateString import", &since);
+        }
     }
     if (!mk) {
         log_begin();
@@ -3273,6 +3197,7 @@ static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *
 #include "lighting_sync.inc"
 #include "honk_sync.inc"
 #include "carsel_sync.inc"
+#include "event_stock.inc"
 #include "stall_trace.inc"
 
 /*
@@ -3764,7 +3689,8 @@ static DWORD WINAPI option_monitor(LPVOID unused)
     }
     opts = img + FH2_OPTIONS_RVA;
     monitor_start = GetTickCount();
-    for (tick = 0; tick < 24000; tick++) { /* ~3.3 h of 0.5 s ticks */
+    for (tick = 0; ; tick++) { /* for the whole process (2026-11-07): until then it stopped after 24000 ticks = 6.7 h, and with it the EO parking, the gamedb
+                                * retries, the import re-hooking and the online-setup watchdog */
         /* Azimuth binds the game's imports after the helper loads; keep our pointers on top */
         patch_game_winsock(img);
         patch_game_cocreate(img);
@@ -4004,9 +3930,6 @@ static DWORD WINAPI option_monitor(LPVOID unused)
         }
         Sleep(1000);
     }
-    log_begin();
-    log_raw("monitor: stopped after 24000 ticks (about 3 h); the Winsock and request hooks are not re-applied from here on\n");
-    return 0;
 }
 
 #ifdef FH2MP_DEBUG_BUILD
@@ -5538,8 +5461,13 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_RACETOAST", env, 8) == 0) patch_race_toast();
             if (GetEnvironmentVariableW(L"FH2MP_NO_HOOKGUARD", env, 8) == 0) patch_hook_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_LOGGUARD", env, 8) == 0) patch_gameplaylog_guard();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_PREDGUARD", env, 8) == 0) patch_remote_prediction_guard();
         }
         patch_car_pool();
+        {
+            wchar_t env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_CARWAIT", env, 8) == 0) patch_car_wait();
+        }
         {
             wchar_t it_env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_INVITETYPE", it_env, 8) == 0) {
@@ -5581,6 +5509,12 @@ static DWORD WINAPI late_init(LPVOID unused)
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_PICKERPI", env, 8) == 0) {
                 patch_picker_pi();
+                if (GetEnvironmentVariableW(L"FH2MP_NO_EVENTSTOCK", env, 8) == 0) {
+                    patch_event_stock();
+                }
+            }
+            if (GetEnvironmentVariableW(L"FH2MP_NO_AUTODRIVE_RULE", env, 8) == 0) {
+                patch_autodrive_rule();
             }
         }
         {
@@ -5641,6 +5575,12 @@ static DWORD WINAPI late_init(LPVOID unused)
             wchar_t qt_env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_QOSTIMEOUT", qt_env, 8) == 0) {
                 patch_qos_timeout();
+            }
+        }
+        {
+            wchar_t qr_env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_QOSRESULT", qr_env, 8) == 0) {
+                patch_qos_measure_result();
             }
         }
         {
@@ -5983,6 +5923,8 @@ static int patch_identity(void)
 
 /* FH2 was selected but its executable is not the supported build: FH2MP then stays out of the launch (no registration, no files of its own), and this
  * one line is the only trace of why. It goes straight to data\bin\fh2mp.log, which is not open yet. */
+#include "online_api.inc"
+
 static void early_refusal_note(const wchar_t *azimuth_dir, const char *why)
 {
     wchar_t path[MAX_PATH];
@@ -6115,6 +6057,7 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
             patch_identity();
         }
     }
+    online_api_start();
     if (!g_gamedb_src[0]) {
         gamedb_put_back();    /* offline: now, before the platform's database step, which then sees what was put back */
     }

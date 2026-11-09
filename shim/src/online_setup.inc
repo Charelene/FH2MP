@@ -108,6 +108,51 @@ static int patch_qos_timeout(void)
 }
 
 /*
+ * 2b. The QoS measurement itself fails (win1 -> dev 2026-11-08, debug-shim trace, docs/re/online-services.md "Free Roam join stall").
+ *    FUN_1417b1b30 runs Nerd::MultiplayerSession::MeasureQosToSessionPeers (0x179b030, result = {int hr, text}) as a task on a worker thread.
+ *    Under Azimuth the platform's Windows.Xbox.Networking.QualityOfService has nothing to measure with: the call comes back at once with
+ *    hr 0x800704cf (network unreachable), an empty text and no metrics [C: breakpoints at 0x17a3b91 and 0x17a3bf1, 3 of 3 hand-played Free
+ *    Roam joins]. The match request is never built, the server sees only `GET qosservers`, and the game shows "Unable to join session. Please
+ *    check your network connection and try again." (once, the same step let a join through [C]). The measurement only ranks servers and
+ *    nothing in a join here needs it: its answer becomes hr 0 with no metrics [I: that this lets the search go on is what the next hand-played
+ *    join shows]. Any other hr passes untouched. Disable with env FH2MP_NO_QOSRESULT.
+ */
+#define FH2_QOS_MEASURE_RVA 0x179b030u
+#define FH2_QOS_UNREACHABLE ((int)0x800704CF)
+typedef int *(*qos_measure_fn)(int *result, unsigned probes, unsigned timeout_ms, unsigned limit);
+static qos_measure_fn g_qos_measure_original;
+static volatile LONG g_qos_measure_fixed;
+
+static int *qos_measure(int *result, unsigned probes, unsigned timeout_ms, unsigned limit)
+{
+    int *r = g_qos_measure_original(result, probes, timeout_ms, limit);
+
+    if (r && *r == FH2_QOS_UNREACHABLE) {
+        *r = 0;
+        if (InterlockedIncrement(&g_qos_measure_fixed) == 1) {
+            log_begin();
+            log_raw("online-setup: the QoS measurement (MeasureQosToSessionPeers) came back with 0x800704cf, network unreachable, because the platform cannot measure; reported as success with no metrics so the search goes on (first time this run, later ones are not written)\n");
+        }
+    }
+    return r;
+}
+
+static int patch_qos_measure_result(void)
+{
+    static const unsigned char head[] = {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x48, 0x08, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57};
+    unsigned char *img = find_fh2_image();
+
+    if (!img) {
+        return 0;
+    }
+    if (!code_is("qosresult", "the QoS measurement (MeasureQosToSessionPeers)", img, FH2_QOS_MEASURE_RVA, head, sizeof head)) {
+        return 0;
+    }
+    return plat_hook("qosresult: MeasureQosToSessionPeers reports success", img + FH2_QOS_MEASURE_RVA, (void *)qos_measure,
+                     (void **)&g_qos_measure_original);
+}
+
+/*
  * 3. The bad runs after fix 1 (dev 2026-11-01 22:39 and 22:39:53 UTC): the sign-in event came for the active profile, the services and the
  *    cloud configuration hold the player's profile, and the configuration sits in state 1 (0x1837d10: "variants request issued") for the
  *    rest of the run. nginx shows that in such a run not one request of the game's Live REST path (User-Agent ATGHTTP_DURANGO:

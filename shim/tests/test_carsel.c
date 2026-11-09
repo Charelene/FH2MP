@@ -132,6 +132,53 @@ int main(int argc,char **argv)
         memcpy(bad,reply,sizeof bad); bad[18]='1'; resign(bad,CARSEL_REQUEST); REFUSED();                 /* the v1 magic */
         memcpy(bad,reply,sizeof bad); bad[9]=85; resign(bad,CARSEL_REQUEST); REFUSED();                   /* length field */
     }
+    /* ---- client reports (type 3): wire, queue, rate limits, the long-wait report ---- */
+    {
+        unsigned char rep[CARSEL_REPORT_MAX],mac[32],bad[CARSEL_REPORT_MAX]; unsigned n,k; char longtext[400]; carsel_report_slot due; ULONGLONG s,t=900000;
+        n=carsel_report(rep,g_ticket_key,g_xuid,9,epoch,1,25,"waited 25 s");
+        assert(n==CARSEL_BASE+11+CARSEL_MAC && rep[9]==n && rep[10]==0 && rep[19]==3 && rep[52]==1 && rep[53]==0 && carsel_get32(rep+54)==25);
+        assert(light_u64(rep+20)==g_xuid && light_u64(rep+28)==9 && !memcmp(rep+11,"FH2MPCS2",8) && !memcmp(rep+36,epoch,16) && !memcmp(rep+CARSEL_BASE,"waited 25 s",11));
+        hmac_sha256(g_ticket_key,32,rep,n-CARSEL_MAC,mac); assert(!memcmp(mac,rep+n-CARSEL_MAC,CARSEL_MAC));
+        assert(!carsel_response(rep,n,g_ticket_key,g_xuid,9,0,epoch,&hold,&remaining));                      /* a report is not a reply */
+        n=carsel_report(rep,g_ticket_key,g_xuid,9,epoch,5,0,"a\nb\x01\xc3\xa9"); assert(n==CARSEL_BASE+6+CARSEL_MAC && !memcmp(rep+CARSEL_BASE,"a?b???",6));   /* printable ASCII only */
+        for(k=0;k<sizeof longtext-1;k++) longtext[k]=(char)('a'+k%26);
+        longtext[sizeof longtext-1]=0;
+        n=carsel_report(bad,g_ticket_key,g_xuid,9,epoch,5,0,longtext); assert(n==CARSEL_REPORT_MAX && bad[9]==(unsigned char)n && bad[10]==(unsigned char)(n>>8));   /* cut at the limit */
+        n=carsel_report(bad,g_ticket_key,g_xuid,9,epoch,5,0,NULL); assert(n==CARSEL_BASE+CARSEL_MAC);
+        /* the queue */
+        game_reset(); memset(g_cs_reports,0,sizeof g_cs_reports); memset(g_cs_report_last,0,sizeof g_cs_report_last); g_cs_report_total=0; g_fake_now=t; s=100;
+        assert(carsel_report_post(CS_RPT_CARS_LOADED,25,"first") && strstr(g_log,"report: sent to the server, code 1: first"));
+        assert(!carsel_report_post(CS_RPT_CARS_LOADED,26,"again"));                                           /* the same code within 8 s */
+        assert(carsel_report_post(CS_RPT_CAR_CACHE,20,"cache"));
+        InterlockedExchange(&g_cs_enabled,0); assert(!carsel_report_post(CS_RPT_OTHER,0,"off")); InterlockedExchange(&g_cs_enabled,1);   /* feature off: nothing queued */
+        assert(carsel_report_take(t,&s,&due) && due.code==1 && due.seq==101 && due.detail==25 && !strcmp(due.text,"first") && s==101);
+        assert(carsel_report_take(t,&s,&due) && due.code==2 && due.seq==102);                                 /* the second slot, in the same instant */
+        assert(!carsel_report_take(t+399,&s,&due));                                                           /* resent every 400 ms */
+        assert(carsel_report_take(t+400,&s,&due) && due.code==1 && due.seq==101);                             /* the same sequence number again */
+        assert(carsel_report_take(t+400,&s,&due) && due.code==2 && due.seq==102);
+        assert(carsel_report_take(t+800,&s,&due) && due.seq==101 && carsel_report_take(t+800,&s,&due) && due.seq==102);
+        assert(!carsel_report_take(t+1200,&s,&due));                                                          /* three sends, then gone */
+        assert(carsel_report_post(CS_RPT_STALL,0,"x") == 1 && carsel_report_post(CS_RPT_STALL_END,0,"y") && carsel_report_post(CS_RPT_OTHER,0,"z") && carsel_report_post(CS_RPT_CARS_LOADED,1,"q") == 0);   /* too soon for code 1 */
+        g_fake_now=t+CS_REPORT_SAME_MS; assert(carsel_report_post(CS_RPT_CARS_LOADED,1,"later"));
+        assert(!carsel_report_post(CS_RPT_CAR_CACHE,1,"full"));        /* four slots are in use: the fifth waits for a free one */
+        assert(!carsel_report_take(t+CS_REPORT_EXPIRE_MS+CS_REPORT_SAME_MS+1,&s,&due));                      /* old reports are never sent */
+        /* the session limit */
+        memset(g_cs_reports,0,sizeof g_cs_reports); memset(g_cs_report_last,0,sizeof g_cs_report_last); g_cs_report_total=0; g_fake_now=t;
+        for(k=0;k<CS_REPORT_MAX_TOTAL+10;k++) {
+            g_fake_now+=CS_REPORT_SAME_MS; memset(g_cs_reports,0,sizeof g_cs_reports);
+            if(k<CS_REPORT_MAX_TOTAL) assert(carsel_report_post(CS_RPT_OTHER,k,"n")); else assert(!carsel_report_post(CS_RPT_OTHER,k,"n"));
+        }
+        /* a cars-loaded wait that reaches 20 s says so once, with what the hold looked like */
+        game_reset(); memset(g_cs_reports,0,sizeof g_cs_reports); memset(g_cs_report_last,0,sizeof g_cs_report_last); g_cs_report_total=0;
+        g_fake_now=t; answer(1,t,5000); carsel_update(NULL,0,0,0);
+        for(k=1;k*1000<CS_REPORT_WAIT_MS;k++) {g_fake_now=t+k*1000; answer(1,g_fake_now-10,3000); carsel_update(NULL,0,0,0);}
+        assert(!g_cs_report_total);
+        g_fake_now=t+CS_REPORT_WAIT_MS; answer(1,g_fake_now-10,3000); carsel_update(NULL,0,0,0);
+        assert(g_cs_report_total==1 && strstr(g_log,"report: sent to the server, code 1: the cars-loaded wait of this event has lasted 20 s; held by the server for") && strstr(g_log,"hold=1, group deadline in 3000 ms"));
+        g_fake_now+=16; answer(1,g_fake_now-10,2900); carsel_update(NULL,0,0,0); assert(g_cs_report_total==1);   /* once per wait */
+        g_fake_now+=5000; carsel_update(NULL,0,0,0); assert(g_cs_report_total==1);
+        InterlockedExchange(&g_cs_enabled,0);
+    }
     /* ---- the decision ---- */
     {
         carsel_wait w; ULONGLONG t=100000;

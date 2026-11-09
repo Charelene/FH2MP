@@ -1,31 +1,9 @@
-/* Only one tool identifier leaves the client (NitroSystem, which registers this exact platform name). This is a compatibility/pool signal,
- * not tamper-proof attestation. Redline.exe is not reported any more (user decision 2026-11-05): older shims still send "redline" and the
- * servers ignore it. */
-
-static LONG scan_restricted_tools(void)
-{
-    LONG found = 0;
-    if (g_api && g_api->mod_version && g_api->mod_version("NitroSystem")) {
-        found |= 1;
-    }
-    if (GetModuleHandleW(L"FnFNitro.dll")) {
-        found |= 1;
-    }
-    return found;
-}
+/* X-FH2MP-Tools on every web request. No tool is reported any more: Redline.exe stopped being one 2026-11-05, NitroSystem 2026-11-07
+ * (it is offline-only on FH2 Mod Platform 2.8.0, which holds it back online; the old check also saw its DLL loaded on the first online
+ * launch, when the platform had refused to start it, and put the player in the restricted pool). Servers judge driving by the car's own
+ * physics instead. The header stays: a server in FH2MP_RESTRICTED_TOOLS=quarantine refuses a request without "v1". */
 
 static void restricted_tools_header(WCHAR *out)
 {
-    static SRWLOCK lock = SRWLOCK_INIT;
-    static DWORD checked;
-    static LONG tools;
-    DWORD now = GetTickCount();
-    AcquireSRWLockExclusive(&lock);
-    if (!checked || now - checked >= 5000) {
-        tools = scan_restricted_tools();
-        checked = now;
-    }
     lstrcpyW(out, L"X-FH2MP-Tools: v1");
-    if (tools & 1) lstrcatW(out, L",nitrosystem");
-    ReleaseSRWLockExclusive(&lock);
 }

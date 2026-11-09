@@ -15,7 +15,7 @@
  * it ends with are whatever the simulation left; a NaN PI passes IsCarAllowed's range tests (both are `<` / `<=` comparisons that NaN fails).
  *
  * This hooks QueryCarAttributes itself, so the picker, the choices and everything else that asks get the same answer. It lets the game fill the
- * attributes, then looks at the car: when one of its 43 part ids is in no part table of the game database (the same rule as server/parts.py
+ * attributes, then looks at the car: when one of its 43 part ids is in no part table of the game database (the same rule as native/internal/parts
  * must_replace: the camshaft and tire slots must hold a row of their own table, any other slot a row of any table; slot 0 may hold an electric
  * car's Motor row), or its PI is not a usable number (NaN, negative, huge), it replaces class and PI in the attributes by the stock car's, the
  * Data_Car row of the car id (ClassID, PerformanceIndex), which is what the server's repaired car starts from. Everything else about the car, and every
@@ -28,7 +28,7 @@
  * FH2MP_NO_PICKERPI=1 turns it off.
  * Evidence level: the data flow above is confirmed from the decompile; that a real car with an unknown part is rejected by the picker after this is
  * NOT verified in a running game, and the PI scale and class numbering of Data_Car equal the car's (inferred: PlayerChoices fills both from the Data_Car
- * row, +2a1010 InitFromCarRow, and server/car_policy.py relies on it). */
+ * row, +2a1010 InitFromCarRow, and native/internal/catalog relies on it). */
 #define PPI_FN_RVA 0x2db240u
 #define PPI_VTABLE_RVA 0x2c5f818u       /* CCarInGarage::vftable */
 #define PPI_HOLDER_RVA 0x354f4f8u       /* g_GameDatabaseHolder: +0x40 the database (as torque_load_guard.inc) */
@@ -91,7 +91,7 @@ static int ppi_elsewhere(const ppi_ops *ops, int k, unsigned w)
     return r;
 }
 
-/* The first of the 43 part ids no part table accepts (server/parts.py must_replace): a slot holds -1, or a row of its own table, or (all slots but
+/* The first of the 43 part ids no part table accepts (native/internal/parts MustReplace): a slot holds -1, or a row of its own table, or (all slots but
  * the camshaft 12 and the tire 8) a row of another table, which the server only reports. PPI_UNKNOWN_PART: in no table at all. PPI_WRONG_TABLE: a
  * camshaft or tire slot holding another table's row. PPI_NO_ANSWER: the database could not say. Else PPI_CLEAN. */
 static ppi_verdict ppi_check_parts(const unsigned *parts, const ppi_ops *ops)
@@ -241,7 +241,7 @@ static int ppi_fixup(unsigned car, const unsigned *parts, unsigned claimed_class
     unsigned klass = 0;
     float pi = 0;
     double dpi;
-    unsigned hash = ppi_hash(parts);
+    unsigned hash = ppi_hash(parts) ^ (ops->ctx ? 0u : 0x9e3779b9u);   /* the server's list (no context) and the database answer apart */
     short out_id;
     double out_pi;
     int r;
@@ -418,6 +418,264 @@ static int ppi_db_stock(void *ctx, unsigned car, unsigned *klass, float *pi)
     return ok;
 }
 
+/* ---- the server's parts, for a game that keeps its own car packs ----
+ * Such a game reads its own database, in which a car pack's parts are rows like the game's, so the database cannot tell them apart. The launcher
+ * writes the server's part ids and stock cars to fh2mp\base-parts.txt (launcher gamedb.write_base_parts): "fh2mp-base-parts 1", then
+ * "p <table> <id>" (each table's rows together, ascending), then "c <car id> <class id> <PI in millionths>" (ascending). With the list loaded the
+ * decision asks it instead of the database: a part the server does not have is in no part table, and the stock class and PI are the server's. */
+#define PPI_BASE_TABLES (PPI_SLOTS + 1)     /* the slot tables by slot index, then Motor */
+#define PPI_BASE_MAX_FILE (16u * 1024u * 1024u)
+typedef struct { unsigned id, klass; float pi; } ppi_car;
+typedef struct {
+    unsigned *ids, start[PPI_BASE_TABLES], count[PPI_BASE_TABLES], nids;
+    ppi_car *cars;
+    unsigned ncars;
+} ppi_base;
+static ppi_base g_ppi_base;
+static volatile LONG g_ppi_base_ready;      /* 1 once g_ppi_base is filled; it never changes after */
+
+static int ppi_table_index(const char *t, unsigned n)
+{
+    int k;
+    for (k = 0; k < PPI_SLOTS; k++) {
+        if (g_ppi_table[k] && (unsigned)lstrlenA(g_ppi_table[k]) == n && !memcmp(g_ppi_table[k], t, n)) {
+            return k;
+        }
+    }
+    return (unsigned)lstrlenA(g_ppi_motor) == n && !memcmp(g_ppi_motor, t, n) ? PPI_SLOTS : -1;
+}
+
+/* the next space-separated word of [*p, end); -> its length, 0 at the end */
+static unsigned ppi_word(const char **p, const char *end, const char **w)
+{
+    const char *q = *p;
+    while (q < end && *q == ' ') q++;
+    *w = q;
+    while (q < end && *q != ' ') q++;
+    *p = q;
+    return (unsigned)(q - *w);
+}
+
+static int ppi_uint(const char *w, unsigned n, unsigned *out)
+{
+    unsigned long long v = 0;
+    unsigned i;
+    if (n == 0 || n > 10) return 0;
+    for (i = 0; i < n; i++) {
+        if (w[i] < '0' || w[i] > '9') return 0;
+        v = v * 10 + (unsigned)(w[i] - '0');
+    }
+    if (v > 0xffffffffull) return 0;
+    *out = (unsigned)v;
+    return 1;
+}
+
+/* One pass over the list. With b->ids == NULL it only counts (b->nids, b->ncars); otherwise it fills the arrays the counting pass sized and
+ * checks the order. -> 1, or 0 with *why. */
+static int ppi_base_pass(const char *text, unsigned size, ppi_base *b, const char **why)
+{
+    const char *p = text, *end = text + size, *w;
+    unsigned n, nids = 0, ncars = 0, line = 0;
+    int last = -1, k, fill = b->ids != NULL;
+    unsigned char seen[PPI_BASE_TABLES];
+
+    memset(seen, 0, sizeof seen);
+    while (p < end) {
+        const char *eol = p, *lim, *q = p;
+        while (eol < end && *eol != '\n') eol++;
+        lim = eol > p && eol[-1] == '\r' ? eol - 1 : eol;
+        line++;
+        n = ppi_word(&q, lim, &w);
+        if (line == 1) {
+            if (n != 16 || memcmp(w, "fh2mp-base-parts", 16) || ppi_word(&q, lim, &w) != 1 || *w != '1') {
+                *why = "the first line is not \"fh2mp-base-parts 1\"";
+                return 0;
+            }
+        } else if (n == 1 && *w == 'p') {
+            const char *t;
+            unsigned tn = ppi_word(&q, lim, &t), id;
+            n = ppi_word(&q, lim, &w);
+            if (ncars) {
+                *why = "a part line comes after the car lines";
+                return 0;
+            }
+            if (!ppi_uint(w, n, &id)) {
+                *why = "a part line has no valid id";
+                return 0;
+            }
+            k = tn ? ppi_table_index(t, tn) : -1;
+            if (k >= 0) {                          /* tables the decision never asks are skipped */
+                if (k != last) {
+                    if (seen[k]) {
+                        *why = "a table's rows are not together";
+                        return 0;
+                    }
+                    seen[k] = 1;
+                    last = k;
+                    if (fill) b->start[k] = nids;
+                } else if (fill && b->ids[nids - 1] >= id) {
+                    *why = "a table's ids are not ascending";
+                    return 0;
+                }
+                if (fill) {
+                    b->ids[nids] = id;
+                    b->count[k]++;
+                }
+                nids++;
+            }
+        } else if (n == 1 && *w == 'c') {
+            const char *wc, *wp;
+            unsigned car, klass, pi, nc = ppi_word(&q, lim, &w), nk = ppi_word(&q, lim, &wc), np = ppi_word(&q, lim, &wp);
+            if (!ppi_uint(w, nc, &car) || !ppi_uint(wc, nk, &klass) || !ppi_uint(wp, np, &pi) || klass > 255) {
+                *why = "a car line is not \"c <car> <class> <PI in millionths>\"";
+                return 0;
+            }
+            if (fill) {
+                if (ncars && b->cars[ncars - 1].id >= car) {
+                    *why = "the car ids are not ascending";
+                    return 0;
+                }
+                b->cars[ncars].id = car;
+                b->cars[ncars].klass = klass;
+                b->cars[ncars].pi = (float)((double)pi / 1000000.0);
+            }
+            ncars++;
+        } else if (n != 0) {
+            *why = "a line is neither a part (p) nor a car (c)";
+            return 0;
+        }
+        p = eol < end ? eol + 1 : end;
+    }
+    if (line == 0) {
+        *why = "the file is empty";
+        return 0;
+    }
+    if (!fill) {
+        b->nids = nids;
+        b->ncars = ncars;
+    }
+    return 1;
+}
+
+/* Fills g_ppi_base from the list text. -> 1, or 0 with *why (the database is then asked, as without a list). */
+static int ppi_base_load_text(const char *text, unsigned size, const char **why)
+{
+    ppi_base b;
+    memset(&b, 0, sizeof b);
+    if (g_ppi_base_ready) {
+        *why = "a list is loaded already";
+        return 0;
+    }
+    if (!ppi_base_pass(text, size, &b, why)) {
+        return 0;
+    }
+    if (!b.nids || !b.ncars) {
+        *why = !b.nids ? "the list has no parts" : "the list has no cars";
+        return 0;
+    }
+    b.ids = (unsigned *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)b.nids * sizeof *b.ids);
+    b.cars = (ppi_car *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)b.ncars * sizeof *b.cars);
+    if (!b.ids || !b.cars || !ppi_base_pass(text, size, &b, why)) {
+        if (!b.ids || !b.cars) *why = "out of memory";
+        if (b.ids) HeapFree(GetProcessHeap(), 0, b.ids);
+        if (b.cars) HeapFree(GetProcessHeap(), 0, b.cars);
+        return 0;
+    }
+    g_ppi_base = b;
+    InterlockedExchange(&g_ppi_base_ready, 1);
+    return 1;
+}
+
+static int ppi_base_exists(void *ctx, const char *table, unsigned id)
+{
+    int k = ppi_table_index(table, (unsigned)lstrlenA(table));
+    const unsigned *a;
+    unsigned lo = 0, hi;
+    (void)ctx;
+    if (k < 0) return 0;
+    a = g_ppi_base.ids + g_ppi_base.start[k];
+    hi = g_ppi_base.count[k];
+    while (lo < hi) {
+        unsigned mid = lo + (hi - lo) / 2;
+        if (a[mid] == id) return 1;
+        if (a[mid] < id) lo = mid + 1; else hi = mid;
+    }
+    return 0;
+}
+
+static int ppi_base_stock(void *ctx, unsigned car, unsigned *klass, float *pi)
+{
+    unsigned lo = 0, hi = g_ppi_base.ncars;
+    (void)ctx;
+    while (lo < hi) {
+        unsigned mid = lo + (hi - lo) / 2;
+        if (g_ppi_base.cars[mid].id == car) {
+            *klass = g_ppi_base.cars[mid].klass;
+            *pi = g_ppi_base.cars[mid].pi;
+            return 1;
+        }
+        if (g_ppi_base.cars[mid].id < car) lo = mid + 1; else hi = mid;
+    }
+    return 0;
+}
+
+/* 1 while this game is in a network session: [g_NetworkGameManager (+34d6348)]+0xd0 set and +0xa8 zero, the test ForzaCar::helper_2a1590 (+2a1590)
+ * makes [inferred from the decompile]. In a session the pickers feed the online events (Free Roam event, Road Trip) and the Free Roam car, which the
+ * server repairs for the others anyway; outside a session (solo, the menus) the game's own database decides as before, so single-player events
+ * are not changed. */
+#define PPI_NETMGR_SLOT_RVA 0x34d6348u
+static int ppi_in_session(const unsigned char *img)
+{
+    const unsigned char *mgr = NULL;
+    void *session = NULL;
+    int busy = 1;
+    if (!img || !read_game_memory(img + PPI_NETMGR_SLOT_RVA, &mgr, sizeof mgr) || !mgr ||
+        !read_game_memory(mgr + 0xd0, &session, sizeof session) || !read_game_memory(mgr + 0xa8, &busy, sizeof busy)) {
+        return 0;
+    }
+    return session != NULL && busy == 0;
+}
+
+/* Reads the list file of a game that keeps its own car packs (the caller decides that: its session names no database). */
+static void ppi_base_load(const wchar_t *path)
+{
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    DWORD size, got = 0;
+    char *buf;
+    const char *why = NULL;
+
+    if (f == INVALID_HANDLE_VALUE) {
+        log_begin();
+        log_raw("pickerpi: this game keeps its own car packs, but fh2mp\\base-parts.txt cannot be opened (error ");
+        log_dec(GetLastError());
+        log_raw("): a car pack's parts count as the game's in the event car pickers\n");
+        return;
+    }
+    size = GetFileSize(f, NULL);
+    buf = size != INVALID_FILE_SIZE && size > 0 && size <= PPI_BASE_MAX_FILE ? (char *)HeapAlloc(GetProcessHeap(), 0, size) : NULL;
+    if (!buf) {
+        why = "its size is not between 1 byte and 16 MB, or out of memory";
+    } else if (!ReadFile(f, buf, size, &got, NULL) || got != size) {
+        why = "it cannot be read";
+    } else {
+        ppi_base_load_text(buf, size, &why);
+    }
+    CloseHandle(f);
+    if (buf) HeapFree(GetProcessHeap(), 0, buf);
+    log_begin();
+    if (why) {
+        log_raw("pickerpi: fh2mp\\base-parts.txt not used: ");
+        log_raw(why);
+        log_raw("; a car pack's parts count as the game's in the event car pickers\n");
+        return;
+    }
+    log_raw("pickerpi: this game keeps its own car packs: ");
+    log_dec(g_ppi_base.nids);
+    log_raw(" part ids and ");
+    log_dec(g_ppi_base.ncars);
+    log_raw(" stock cars of the server's database read from fh2mp\\base-parts.txt; a part the server does not have counts as unknown\n");
+}
+
 /* ---- the hook ---- */
 typedef unsigned char *(*ppi_query_fn)(void *car, unsigned char *out);
 static ppi_query_fn g_ppi_orig;
@@ -452,15 +710,81 @@ static unsigned char *ppi_hook(void *car, unsigned char *out)
         ppi_log_decline("the game database object (game+0x354f4f8, +0x40) is not there", id);
         return ret;
     }
-    ops.exists = ppi_db_exists;
-    ops.stock = ppi_db_stock;
-    ops.ctx = &ctx;
+    if (g_ppi_base_ready && ppi_in_session(g_ppi_img)) {
+        unsigned sk;
+        float sp;
+        if (!ppi_base_stock(NULL, id, &sk, &sp)) {
+            return ret;     /* a car pack's own car: it has no stock car, and online events refuse it (ppi_allowed_hook) */
+        }
+        ops.exists = ppi_base_exists;          /* online with its own car packs: the server's parts decide (see "the server's parts" above) */
+        ops.stock = ppi_base_stock;
+        ops.ctx = NULL;
+    } else {
+        ops.exists = ppi_db_exists;
+        ops.stock = ppi_db_stock;
+        ops.ctx = &ctx;
+    }
     memcpy(attrs, out, sizeof attrs);                  /* ppi_fixup edits a copy; written back below only when it changed it */
     if (ppi_fixup(id, parts, klass, pi, attrs, &ops)) {
         memcpy(out + PPI_OUT_PI, attrs + PPI_OUT_PI, 8);
         out[PPI_OUT_CLASS] = attrs[PPI_OUT_CLASS];
     }
     return ret;
+}
+
+/* ---- custom cars out of online events (a game that keeps its own car packs) ----
+ * CarRestrictions_IsCarAllowed (+996240, FUN_140996240) is the game's "may this car enter" test: the event car selects (CarSelectLobby vfunc_186/187)
+ * grey out a car it refuses and NetworkIsPlayerCarValidForEvent uses it before the race [C: decompile; args (restrictions, attributes), the
+ * attributes being QueryCarAttributes' block, the car id a short at +0x1e]. With the server's list loaded and this game in a network session, a
+ * car the list does not have (a car pack's own car) is refused here as well; the game server refuses it at Ready anyway (game.CustomCar), this
+ * only spares the player picking it. Outside a session nothing changes. */
+#define PPI_ALLOWED_RVA 0x996240u
+typedef unsigned long long (*ppi_allowed_fn)(void *restrictions, const unsigned char *attrs);
+static ppi_allowed_fn g_ppi_allowed_orig;
+static volatile LONG g_ppi_custom_refused;
+
+/* 1 when the car id of the attribute block is a car the server's list lacks (0 also when no list is loaded or the block cannot be read) */
+static int ppi_custom_car(const unsigned char *attrs)
+{
+    unsigned short id = 0;
+    unsigned klass;
+    float pi;
+    if (!g_ppi_base_ready || !attrs || !read_game_memory(attrs + PPI_OUT_ID, &id, sizeof id)) {
+        return 0;
+    }
+    return ppi_base_stock(NULL, id, &klass, &pi) == 0;
+}
+
+static unsigned long long ppi_allowed_hook(void *restrictions, const unsigned char *attrs)
+{
+    unsigned long long ok = g_ppi_allowed_orig(restrictions, attrs);
+    if ((ok & 0xff) && ppi_custom_car(attrs) && ppi_in_session(g_ppi_img)) {
+        LONG n = InterlockedIncrement(&g_ppi_custom_refused);
+        if (n <= 10 || n % 100 == 0) {
+            unsigned short id = 0;
+            read_game_memory(attrs + PPI_OUT_ID, &id, sizeof id);
+            log_begin();
+            log_raw("hook: pickerpi: car ");
+            log_dec(id);
+            log_raw(" is not in the server's car list (a car pack's own car), so online events do not take it (#");
+            log_dec((unsigned long)n);
+            log_raw(")\n");
+        }
+        return ok & ~0xffull;
+    }
+    return ok;
+}
+
+static void patch_picker_custom(unsigned char *img)
+{
+    static const unsigned char prologue[16] = {0x48, 0x89, 0x6c, 0x24, 0x20, 0x56, 0x48, 0x83, 0xec, 0x20, 0x48, 0x8b, 0x01, 0x48, 0x8b, 0xea};
+    if (!g_ppi_base_ready || !code_is("pickerpi", "CarRestrictions_IsCarAllowed", img, PPI_ALLOWED_RVA, prologue, sizeof prologue)) {
+        return;
+    }
+    if (plat_hook("pickerpi: custom cars out of online events", img + PPI_ALLOWED_RVA, (void *)ppi_allowed_hook, (void **)&g_ppi_allowed_orig)) {
+        log_begin();
+        log_raw("hook: pickerpi: online, a car the server's car list does not have is not allowed into events (game+0x996240)\n");
+    }
 }
 
 static int patch_picker_pi(void)
@@ -477,5 +801,6 @@ static int patch_picker_pi(void)
     }
     log_begin();
     log_raw("hook: pickerpi: the garage car's class and PI for the car pickers are the stock car's when a part id is in no part table (game+0x2db240)\n");
+    patch_picker_custom(img);
     return 1;
 }

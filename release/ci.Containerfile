@@ -1,6 +1,6 @@
 # The one test environment, used by GitHub (.github/workflows/ci.yml) and on a developer machine (release/ci.sh --container), so a
 # check that passes in one passes in the other. Python 3.12 as in the release jobs, Debian's Wine and mingw-w64 for the shim checks,
-# PostgreSQL 16 as on the servers, and the hashed test and launcher requirements. Bump the base image or a package on purpose.
+# PostgreSQL 16 as on the servers (the Go tests), and the hashed test and launcher requirements. Bump the base image or a package on purpose.
 FROM docker.io/library/python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
 
 ARG PGDG_FINGERPRINT=B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8

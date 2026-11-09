@@ -15,12 +15,44 @@
 #define CAR_POOL_NATIVE 11
 #define CAR_POOL_MAX 75
 
+/* Default profile (every player, no env needed): the setup that held 72 cars on a real client (dev 2026-11-03, 71 bots + 1 player, all loaded, 60 fps):
+ * FH2MP_CAR_SLOTS=75, FH2MP_CAR_NODRIVATARS=x, FH2MP_CAR_NOAICTL=1, FH2MP_CAR_IDS=1, FH2MP_CAR_VIEWLOD=1. A world of 12 players or fewer is not changed by it
+ * (the slots are only filled by cars that exist). Each of those variables still wins when it is set; FH2MP_NO_CARSLOTS=1 turns the whole profile off and
+ * leaves the game's 11 remote cars. Not measured: memory with 75 slots in a small world. */
+static int car_pool_profile_off(void)
+{
+    char v[8];
+
+    return GetEnvironmentVariableA("FH2MP_NO_CARSLOTS", v, sizeof v) && v[0] == '1';
+}
+
+static int car_pool_unset(const char *name)
+{
+    char v[2];
+
+    return GetEnvironmentVariableA(name, v, sizeof v) == 0 && GetLastError() == ERROR_ENVVAR_NOT_FOUND;
+}
+
+/* a switch the profile turns on: its own variable wins when it is set ('1' on, anything else off) */
+static int car_pool_profile_flag(const char *name)
+{
+    char v[8];
+
+    if (car_pool_unset(name)) {
+        return !car_pool_profile_off();
+    }
+    return GetEnvironmentVariableA(name, v, sizeof v) && v[0] == '1';
+}
+
 static int car_pool_from_env(void)
 {
     char v[16];
     DWORD n = GetEnvironmentVariableA("FH2MP_CAR_SLOTS", v, sizeof v);
     int i, total = 0;
 
+    if (car_pool_unset("FH2MP_CAR_SLOTS")) {
+        return car_pool_profile_off() ? 0 : CAR_POOL_MAX;
+    }
     if (n == 0 || n >= sizeof v) {
         return 0;
     }
@@ -222,6 +254,8 @@ static void car_pool_no_ai(void)
     log_raw(" -> 0 (FH2MP_CAR_NOAI): the game does not load its own festival cars\n");
 }
 
+static void *g_car_cache_self;      /* the CarCacheModule, remembered from its tick (the car wait below reads its Non-LOD0 group) */
+
 static unsigned long long car_pool_tick(void *self, void *a, void *b, void *c)
 {
     unsigned char *img = find_fh2_image();
@@ -231,6 +265,7 @@ static unsigned long long car_pool_tick(void *self, void *a, void *b, void *c)
     unsigned long long result = g_car_pool_tick_orig(self, a, b, c);
     int have_queue = 0, scanned = 0;
 
+    g_car_cache_self = self;
     car_pool_no_ai();
 
     memset(held, 0, sizeof held);
@@ -569,6 +604,10 @@ static int car_pool_parts(void)
     int parts = 0;
     unsigned i;
 
+    if (car_pool_unset("FH2MP_CAR_NODRIVATARS")) {
+        return car_pool_profile_off() ? 0 : CAR_POOL_PART_MAX;
+    }
+
     if (n == 0 || n >= sizeof v) {
         return 0;
     }
@@ -726,7 +765,7 @@ static int patch_car_pool(void)
     unsigned char slots[4] = {0, 0, 0, 0};
     int want = car_pool_from_env(), done = 0, expected = 3;
     unsigned char labels = 0;
-    int parts = car_pool_parts(), ids = car_pool_env_flag("FH2MP_CAR_IDS"), aictl = car_pool_env_flag("FH2MP_CAR_NOAICTL"), budget = car_pool_env_flag("FH2MP_CAR_NOBUDGET");
+    int parts = car_pool_parts(), ids = car_pool_profile_flag("FH2MP_CAR_IDS"), aictl = car_pool_profile_flag("FH2MP_CAR_NOAICTL"), budget = car_pool_env_flag("FH2MP_CAR_NOBUDGET");
 
     if (!img) {
         return 0;
@@ -740,7 +779,7 @@ static int patch_car_pool(void)
             plat_hook("carpool: views without frame data skipped (b)", img + CAR_POOL_VIEW_B_RVA, (void *)car_pool_view_b, (void **)&g_car_pool_view_b_orig);
         }
     }
-    if (car_pool_env_flag("FH2MP_CAR_VIEWLOD")) {
+    if (car_pool_profile_flag("FH2MP_CAR_VIEWLOD")) {
         car_pool_install_viewlod(img);
     }
     if (car_pool_env_flag("FH2MP_CAR_ALLOCDIAG")) {
@@ -823,4 +862,159 @@ static int patch_car_pool(void)
         log_raw(" (FH2MP_CAR_SLOTS)\n");
     }
     return done == expected;
+}
+
+
+/* The wait for every player's car (NetworkWaitForAllPlayerCarsLoaded: 0x8e06b0 asks 0x7cbf10, which walks CarNetworkedModule's players, map at +0xa8, and
+ * answers 0 while one has no car) has no timeout, and a client holds 11 remote cars at most (the cache's Non-LOD0 group). A world of 16 players showed
+ * "SINCRONIZANDO <name> - 11 / 16" with its spinner for good (prod 2026-11-07): the 12th car waits for a slot nobody gives up, so the wait never ends and the
+ * Free Roam flow that follows it ("Syncing traffic", Synchronization Complete, events) never starts. The cars that cannot load stay unloaded either way.
+ * Hook on 0x7cbf10: while the game says 'not yet', the wait passes when (a) the group has no free slot, no assigned slot's car is still loading (request
+ * state 1) and the wait has gone on for CAR_WAIT_FULL_MS: nothing is in flight, the rest can only wait for a leaver; or (b) nothing in the group changed for
+ * CAR_WAIT_STALL_MS (a car that never loads for another reason). One log line per pass. The cache comes from the tick hook (car_pool_tick, or the small
+ * one here when car_pool did not install its own). Without the cache the game's answer stands. Not verified in a running game. */
+#define CAR_WAIT_RVA 0x7cbf10
+#define CAR_WAIT_FULL_MS 1500
+#define CAR_WAIT_STALL_MS 20000
+#define CAR_WAIT_GAP_MS 2000                /* a call after this long a pause starts a new wait */
+#define CAR_WAIT_REPORT_MS 20000            /* a wait this long is reported to the server once (carsel_sync.inc, defined further down) */
+static int carsel_report_post(unsigned char code, unsigned detail, const char *text);
+typedef unsigned long long (*car_wait_fn)(void *);
+static car_wait_fn g_car_wait_orig;
+static ULONGLONG g_car_wait_start, g_car_wait_last, g_car_wait_changed;
+static unsigned g_car_wait_sig[4];
+static int g_car_wait_full_logged, g_car_wait_reported;
+static unsigned g_car_wait_passed;
+static ULONGLONG (*g_car_wait_clock)(void);      /* tests; NULL = GetTickCount64 */
+
+/* free slots, requests waiting for one, assigned slots whose car is loading (request state 1) and loaded (2) */
+static int car_wait_group(unsigned *out)
+{
+    unsigned char group[0xa0];
+    unsigned long long begin, end, rb, re;
+    unsigned i, slots;
+
+    if (!g_car_cache_self || !read_game_memory((unsigned char *)g_car_cache_self + CAR_POOL_GROUP, group, sizeof group)) {
+        return 0;
+    }
+    begin = *(unsigned long long *)(group + 0x60);
+    end = *(unsigned long long *)(group + 0x68);
+    rb = *(unsigned long long *)(group + 0x78);
+    re = *(unsigned long long *)(group + 0x80);
+    if (end <= begin || (end - begin) % CAR_POOL_SLOT || (end - begin) / CAR_POOL_SLOT > CAR_POOL_SLOTS_MAX || re < rb) {
+        return 0;
+    }
+    slots = (unsigned)((end - begin) / CAR_POOL_SLOT);
+    out[0] = *(unsigned *)(group + 0x90);
+    out[1] = (unsigned)((re - rb) / 8);
+    out[2] = out[3] = 0;
+    for (i = 0; i < slots; i++) {
+        unsigned long long request = 0;
+        unsigned state = 0;
+
+        if (!read_game_memory((const void *)(ULONG_PTR)(begin + (unsigned long long)i * CAR_POOL_SLOT + 0x558), &request, sizeof request)) {
+            return 0;
+        }
+        if (request && read_game_memory((const void *)(ULONG_PTR)(request + 0x598), &state, sizeof state)) {
+            out[2] += state == 1;
+            out[3] += state == 2;
+        }
+    }
+    return 1;
+}
+
+static unsigned long long car_wait(void *module)
+{
+    unsigned long long answer = g_car_wait_orig(module);
+    unsigned now_sig[4];
+    ULONGLONG now = g_car_wait_clock ? g_car_wait_clock() : GetTickCount64();
+    int why = 0;
+
+    if (answer) {
+        g_car_wait_start = 0;
+        g_car_wait_full_logged = g_car_wait_reported = 0;
+        return answer;
+    }
+    if (!g_car_wait_start || now - g_car_wait_last > CAR_WAIT_GAP_MS) {
+        g_car_wait_start = g_car_wait_changed = now;
+        memset(g_car_wait_sig, 0xff, sizeof g_car_wait_sig);
+        g_car_wait_full_logged = g_car_wait_reported = 0;
+    }
+    g_car_wait_last = now;
+    if (!car_wait_group(now_sig)) {
+        return answer;
+    }
+    if (memcmp(now_sig, g_car_wait_sig, sizeof now_sig)) {
+        memcpy(g_car_wait_sig, now_sig, sizeof now_sig);
+        g_car_wait_changed = now;
+    }
+    if (!g_car_wait_reported && now - g_car_wait_start >= CAR_WAIT_REPORT_MS) {
+        char text[160];
+        const char *label[4] = {"; free slots ", ", cars waiting for a slot ", ", loading ", ", loaded "};
+        unsigned i, n = 0;
+        const char *head = "the wait for every player's car has lasted 20 s";
+        g_car_wait_reported = 1;
+        for (i = 0; head[i]; i++) text[n++] = head[i];
+        for (i = 0; i < 4; i++) {
+            char digits[12];
+            unsigned d = 0, v = now_sig[i], j;
+            const char *l;
+            do {digits[d++] = (char)('0' + v % 10); v /= 10;} while (v);
+            for (l = label[i]; *l && n < sizeof text - 12; l++) text[n++] = *l;
+            for (j = d; j > 0 && n < sizeof text - 1; j--) text[n++] = digits[j - 1];
+        }
+        text[n] = 0;
+        carsel_report_post(2, 20, text);
+    }
+    if (now_sig[0] == 0 && now_sig[2] == 0 && now - g_car_wait_changed >= CAR_WAIT_FULL_MS) {
+        why = 1;
+    } else if (now - g_car_wait_changed >= CAR_WAIT_STALL_MS) {
+        why = 2;
+    }
+    if (!why) {
+        return answer;
+    }
+    g_car_wait_passed++;
+    log_begin();
+    log_raw("carwait: the wait for every player's car is let through after ");
+    log_dec((unsigned long)((now - g_car_wait_start) / 1000));
+    log_raw(" s: ");
+    log_raw(why == 1 ? "all car slots are taken and none is loading, the other players' cars show once a slot frees up" : "nothing in the car cache changed for 20 s");
+    log_raw(" (free slots ");
+    log_dec(now_sig[0]);
+    log_raw(", cars waiting for a slot ");
+    log_dec(now_sig[1]);
+    log_raw(", loading ");
+    log_dec(now_sig[2]);
+    log_raw(", loaded ");
+    log_dec(now_sig[3]);
+    log_raw(")\n");
+    g_car_wait_start = 0;
+    return 1;
+}
+
+static unsigned long long car_wait_tick(void *self, void *a, void *b, void *c)
+{
+    g_car_cache_self = self;
+    return g_car_pool_tick_orig(self, a, b, c);
+}
+
+static int patch_car_wait(void)
+{
+    static const unsigned char wait_head[] = {0x48, 0x89, 0x5C, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x81, 0xA8, 0x00, 0x00, 0x00, 0x48, 0x8B, 0xF9, 0x48, 0x8B, 0x18, 0x48};
+    static const unsigned char tick_head[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57};
+    unsigned char *img = find_fh2_image();
+
+    if (!img || !code_is("carwait", "the player car wait (0x7cbf10)", img, CAR_WAIT_RVA, wait_head, sizeof wait_head) ||
+        !code_is("carwait", "the car cache's tick", img, CAR_POOL_TICK_RVA, tick_head, sizeof tick_head)) {
+        return 0;
+    }
+    if (!g_car_pool_tick_orig &&
+        !plat_hook("carwait: the car cache is found through its tick", img + CAR_POOL_TICK_RVA, (void *)car_wait_tick, (void **)&g_car_pool_tick_orig)) {
+        return 0;
+    }
+    if (!plat_hook("carwait: the wait for every player's car gives up when no car can load", img + CAR_WAIT_RVA, (void *)car_wait, (void **)&g_car_wait_orig)) {
+        return 0;
+    }
+    return 1;
 }
