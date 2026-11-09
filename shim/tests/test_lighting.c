@@ -34,10 +34,33 @@ static unsigned char receive_observer(void *self,const void *key,const void *sta
 {
     (void)self;(void)key;(void)state;(void)stamp;return 1;
 }
+/* lighting v2: the request carries the open parts, the reply's 6-byte records are checked like v1's; a part event names one synced part */
+static void test_v2(void)
+{
+    unsigned char req[LIGHT2_REQUEST],rep[LIGHT2_LIMIT],epoch[16]; unsigned i,n; int action;
+    for(i=0;i<16;i++) epoch[i]=(unsigned char)(0x40+i);
+    light_request2(req,g_ticket_key,g_xuid,7,epoch,5,3,0x203);
+    assert(req[19]==3 && req[9]==LIGHT2_REQUEST && req[55]==0x03 && req[56]==0x02 && req[54]==0);
+    memcpy(rep,req,LIGHT2_BASE);
+    rep[19]=4;rep[54]=2;rep[55]=rep[56]=0;
+    {static const unsigned char recs[12]={10,5,1,0x01,0x00,0, 11,6,2,0x00,0x02,0};memcpy(rep+LIGHT2_BASE,recs,12);}
+    n=LIGHT2_REQUEST+12;rep[9]=(unsigned char)n;resign(rep,n);
+    assert(light_response2(rep,n,g_ticket_key,g_xuid,7,0,epoch));
+    assert(!light_response(rep,n,g_ticket_key,g_xuid,7,0,epoch));          /* a v2 reply is not a v1 one */
+    rep[LIGHT2_BASE+4]=0x04;resign(rep,n);assert(!light_response2(rep,n,g_ticket_key,g_xuid,7,0,epoch));   /* a bit past the parts */
+    rep[LIGHT2_BASE+4]=0;rep[LIGHT2_BASE+5]=1;resign(rep,n);assert(!light_response2(rep,n,g_ticket_key,g_xuid,7,0,epoch));
+    rep[LIGHT2_BASE+5]=0;rep[19]=2;resign(rep,n);assert(!light_response2(rep,n,g_ticket_key,g_xuid,7,0,epoch));
+    assert(door_parse("hood:open",&action)==1 && action==1);
+    assert(door_parse("doorRR:close",&action)==6 && action==0);
+    assert(door_parse("active_aero:toggle",&action)==9 && action==2);
+    assert(door_parse("headlightL:open",&action)==-1);                       /* pop-ups stay with the headlights */
+    assert(door_parse("hood",&action)==-1 && door_parse("hood:wiggle",&action)==-1 && door_parse("roofx:open",&action)==-1);
+}
 int main(int argc,char **argv)
 {
     unsigned char packet[LIGHT_LIMIT],epoch[16],copy[LIGHT_LIMIT]; unsigned i,n;
     for(i=0;i<32;i++)g_ticket_key[i]=(unsigned char)i;
+    test_v2();
     for(i=0;i<16;i++)epoch[i]=(unsigned char)(16+i);
     g_xuid=0x9000123456789ull;
     light_request(packet,g_ticket_key,g_xuid,7,epoch,5,7);
@@ -83,9 +106,9 @@ int main(int argc,char **argv)
         key.word=0xc0000005u;*(light_car_key *)(object+0x20)=key;lighting_receive(self,opaque_context,NULL,3);
         assert(g_light_cars[0].owner==10); /* a shared traffic key is not a player */
     }
-    g_light_enabled=1;g_light.response_at=GetTickCount64();g_light.count=1;
+    g_light_enabled=1;g_light.response_at=GetTickCount64();g_light.count=1;g_light.record_size=4;
     g_light.records[0]=10;g_light.records[1]=5;g_light.records[2]=7;
-    g_light_cars[0]=(light_remote_car){car_memory,&animation_token,5,10,GetTickCount64()};
+    g_light_cars[0]=(light_remote_car){car_memory,&animation_token,5,10,GetTickCount64(),0};
     g_light_animation_original=animation_observer;
     lighting_animation(car_memory);
     assert(car_memory[0x51a1]==0 && car_memory[0x51a2]==0 && car_memory[0x51bc]==1 && !car_memory[0x51bb]);

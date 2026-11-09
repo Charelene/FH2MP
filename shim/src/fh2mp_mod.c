@@ -306,9 +306,30 @@ static int log_code_mismatch(const char *tag, const char *what, unsigned rva, co
 }
 
 /* Compares n bytes of game code (at img+rva) with what the patch expects; 1 when equal, else the mismatch is logged and it is 0. */
+/* 1 when `actual` is `expect` with another mod's inline hook at its start: a JMP rel32 (MinHook, as the platform's hook_function writes it, e.g. FH2
+ * ANNA 1.1.0 on game+0xf5c900 / +0xf7bcc0) over the first 5 bytes, the rest the game's own. The platform chains hooks on one function, so ours
+ * goes behind it. */
+static int code_hooked_by_other(const unsigned char *actual, const void *expect, unsigned n)
+{
+    return n > 5 && actual[0] == 0xe9 && bytes_first_diff(actual + 5, (const unsigned char *)expect + 5, n - 5) < 0;
+}
+
 static int code_is(const char *tag, const char *what, const unsigned char *img, unsigned rva, const void *expect, unsigned n)
 {
-    return bytes_first_diff(img + rva, expect, n) < 0 || log_code_mismatch(tag, what, rva, img + rva, expect, n);
+    if (bytes_first_diff(img + rva, expect, n) < 0) {
+        return 1;
+    }
+    if (code_hooked_by_other(img + rva, expect, n)) {
+        log_begin();
+        log_raw(tag);
+        log_raw(": ");
+        log_raw(what);
+        log_raw(" at game+0x");
+        log_hex(rva, 8);
+        log_raw(" starts with another mod's hook, the rest is the game's code: ours goes behind it through the platform\n");
+        return 1;
+    }
+    return log_code_mismatch(tag, what, rva, img + rva, expect, n);
 }
 
 static void plat_failed(const char *name, const void *at, const char *step)
