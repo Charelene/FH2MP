@@ -190,6 +190,7 @@ func (w *World) dropLog(peer *Peer, why string, wasConnected bool) {
 		w.Logf("%d session summary: xuid %#x car %s (stock %s km/h), top measured speed %.0f km/h, farthest position %.0f, highest point %.0f, fastest climb %.0f km/h",
 			peer.Addr.Port, peer.Xuid, modelStr(peer), stock, peer.TopKmh, peer.MaxAbs, peer.MaxY, peer.TopClimb)
 	}
+	w.pushSummary(peer)
 	win := &peer.Window
 	if win.Sent != 0 || peer.DupObjects != 0 || peer.DupRequests != 0 {
 		msg := fmt.Sprintf("%d delivery: %d reliable packets, %d messages resent (%d creates), peak %d waiting, %d given up, unacked at the end %d; client resends seen: %d objects, %d race requests",

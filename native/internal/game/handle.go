@@ -211,6 +211,7 @@ loop:
 				w.TrackSpeed(peer, *pos, stamp, scene)
 				if whole {
 					w.TrackSpin(peer, rest)
+					w.TrackPush(peer, rest, *pos, *stamp, *scene)
 				}
 			}
 			if peer.CarsRelayed%20 == 1 && pos != nil {

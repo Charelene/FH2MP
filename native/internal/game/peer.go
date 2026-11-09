@@ -137,6 +137,7 @@ type Peer struct {
 	PartLogged                            string
 	SpeedRef                              *SpeedRef
 	InvisibleLogged                       bool
+	Push                                  PushState
 	RepairNotified                        map[int64]float64
 	NoticedAt                             map[string]float64 // Message Center notices sent to this player by key (NotifyPlayer)
 	TopKmh                                float64
