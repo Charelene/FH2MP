@@ -15,15 +15,22 @@
 #define CAR_POOL_NATIVE 11
 #define CAR_POOL_MAX 75
 
-/* Default profile (every player, no env needed): the setup that held 72 cars on a real client (dev 2026-11-03, 71 bots + 1 player, all loaded, 60 fps):
- * FH2MP_CAR_SLOTS=75, FH2MP_CAR_NODRIVATARS=x, FH2MP_CAR_NOAICTL=1, FH2MP_CAR_IDS=1, FH2MP_CAR_VIEWLOD=1. A world of 12 players or fewer is not changed by it
- * (the slots are only filled by cars that exist). Each of those variables still wins when it is set; FH2MP_NO_CARSLOTS=1 turns the whole profile off and
- * leaves the game's 11 remote cars. Not measured: memory with 75 slots in a small world. */
+/* Profile, opt-in with FH2MP_CARSLOTS=1: the setup that held 72 cars on a real client (dev 2026-11-03, 71 bots + 1 player, all loaded, 60 fps):
+ * FH2MP_CAR_SLOTS=75, FH2MP_CAR_NODRIVATARS=x, FH2MP_CAR_NOAICTL=1, FH2MP_CAR_IDS=1, FH2MP_CAR_VIEWLOD=1. Each of those variables still wins when it is set;
+ * FH2MP_NO_CARSLOTS=1 keeps the profile off even with FH2MP_CARSLOTS=1.
+ * It was every player's default in 1.3.0 and is off again since the hotfix after it (2026-11-09, the user's decision: worlds of 12, the game's own Drivatars):
+ * solo events stuck at "Synchronizing Drivatars... 10/11", offline too (players' logs 2026-11-09: one free-roam Drivatar left by the Drivatar-maximum part held
+ * stand-in id 1 when the event's eleven asked for theirs, and a far-away online player's car can hold another), and FH2MP_CAR_NOAICTL also matched the game's
+ * own AI cars ("no AI controller for remote network car" right after Drivatars loaded, offline), so Drivatars likely lost their RacingAI controller (inferred).
+ * Not measured: memory with 75 slots in a small world. */
 static int car_pool_profile_off(void)
 {
     char v[8];
 
-    return GetEnvironmentVariableA("FH2MP_NO_CARSLOTS", v, sizeof v) && v[0] == '1';
+    if (GetEnvironmentVariableA("FH2MP_NO_CARSLOTS", v, sizeof v) && v[0] == '1') {
+        return 1;
+    }
+    return !(GetEnvironmentVariableA("FH2MP_CARSLOTS", v, sizeof v) && v[0] == '1');
 }
 
 static int car_pool_unset(const char *name)
@@ -368,7 +375,8 @@ static void *car_pool_find(void *self, void *out, void *vehicle_ref, void *manag
  * the range is full, and a vehicle with 0xffff starts its load request invalid (state 12) and is never drawn. Vehicle types 0, 1, 3 and 4 share 0..11. An id
  * past 11 is not an option: the AI simulation indexes arrays of 12 with it (dev 2026-11-02: game+0xf2b32d for the training table, then game+0xf445ec in the AI
  * update loop even with no controller attached). With FH2MP_CAR_IDS=1 a network player's car (type 3) that finds the range full takes an id already in use
- * (1..11 in turn): such cars are driven by the network and, with FH2MP_CAR_NOAICTL, have no controller to share. */
+ * (1..11 in turn): such cars are driven by the network and, with FH2MP_CAR_NOAICTL, have no controller to share. A car of another type (a Drivatar) that finds
+ * it full takes an id that only player cars hold, see car_pool_id_from_player. */
 #define CAR_POOL_IDS_RVA 0xfceee0
 #define CAR_POOL_IDS_PLAYER_TYPE 3
 #define CAR_POOL_IDS_NONE 0xffff
@@ -376,11 +384,78 @@ typedef unsigned short (*car_pool_ids_fn)(void *, unsigned short, unsigned short
 static car_pool_ids_fn g_car_pool_ids_orig;
 static int g_car_pool_share_ids;
 
+/* A car of the other types (0 the local car, 1 a Drivatar, 4) that finds 0..11 full shares an id that only network player cars (type 3) hold: those have no AI
+ * controller (FH2MP_CAR_NOAICTL), so the id's controller slot is the newcomer's alone. Seen on 1.3.0 (2026-11-09, a solo event while a remote player of the online
+ * world was far away): the local car took 0, the player's car 1, ten Drivatars 2..11, and the eleventh Drivatar's load request stayed invalid, so the event's
+ * "Synchronizing Drivatars... 10/11" never finished. The holders are what the id search's collector (game+0xfce160) reads: the vehicles in the vector at
+ * extra+0x2b0 (begin, end), and the manager's pending requests (vector at manager+0x8, +0x10) whose +0x38 is extra and whose byte +0x1c0 is 0, vehicle at
+ * +0x28. A vehicle's id and type are read as car_pool_vehicle_info does (+0x110 is what game+0x1762870 returns). */
+#define CAR_POOL_IDS_WALK_MAX 512                 /* list entries looked at, at most */
+
+static void car_pool_mark_holder(unsigned long long vehicle, unsigned char *player, unsigned char *other)
+{
+    int id, type;
+
+    if (car_pool_vehicle_info(vehicle, &id, &type) && id >= 0 && id <= 0x0b) {
+        if (type == CAR_POOL_IDS_PLAYER_TYPE) {
+            player[id] = 1;
+        } else {
+            other[id] = 1;
+        }
+    }
+}
+
+/* -> the lowest id in 1..11 that player cars hold and nothing else does, CAR_POOL_IDS_NONE when there is none */
+static unsigned short car_pool_pick_player_id(const unsigned char *player, const unsigned char *other)
+{
+    unsigned short i;
+
+    for (i = 1; i <= 0x0b; i++) {
+        if (player[i] && !other[i]) {
+            return i;
+        }
+    }
+    return CAR_POOL_IDS_NONE;
+}
+
+static unsigned short car_pool_id_from_player(void *manager, void *extra)
+{
+    unsigned char player[12], other[12];
+    unsigned long long range[2], p, item, owner, vehicle;
+    unsigned char busy;
+    unsigned n = 0;
+
+    memset(player, 0, sizeof player);
+    memset(other, 0, sizeof other);
+    if (extra && read_game_memory((unsigned char *)extra + 0x2b0, range, sizeof range)) {
+        for (p = range[0]; p && p < range[1] && n < CAR_POOL_IDS_WALK_MAX; p += 8, n++) {
+            if (read_game_memory((const void *)(ULONG_PTR)p, &item, sizeof item)) {
+                car_pool_mark_holder(item, player, other);
+            }
+        }
+    }
+    if (manager && read_game_memory((unsigned char *)manager + 0x8, range, sizeof range)) {
+        for (p = range[0]; p && p < range[1] && n < CAR_POOL_IDS_WALK_MAX; p += 8, n++) {
+            if (read_game_memory((const void *)(ULONG_PTR)p, &item, sizeof item) && item &&
+                read_game_memory((const void *)(ULONG_PTR)(item + 0x38), &owner, sizeof owner) && owner == (unsigned long long)(ULONG_PTR)extra &&
+                read_game_memory((const void *)(ULONG_PTR)(item + 0x1c0), &busy, sizeof busy) && !busy &&
+                read_game_memory((const void *)(ULONG_PTR)(item + 0x28), &vehicle, sizeof vehicle)) {
+                car_pool_mark_holder(vehicle, player, other);
+            }
+        }
+    }
+    return car_pool_pick_player_id(player, other);
+}
+
 static unsigned short car_pool_ids(void *manager, unsigned short lo, unsigned short hi, void *extra)
 {
+    static unsigned unshared_lines;
     unsigned short id = g_car_pool_ids_orig(manager, lo, hi, extra);
 
-    if (id == CAR_POOL_IDS_NONE && g_car_pool_share_ids && g_car_pool_cur_type == CAR_POOL_IDS_PLAYER_TYPE && lo == 0 && hi == 0x0b) {
+    if (id != CAR_POOL_IDS_NONE || !g_car_pool_share_ids || g_car_pool_cur_type < 0 || lo != 0 || hi != 0x0b) {
+        return id;
+    }
+    if (g_car_pool_cur_type == CAR_POOL_IDS_PLAYER_TYPE) {
         id = (unsigned short)(1 + g_car_pool_share_next++ % 11);
         g_car_pool_shared_now = 1;
         if (g_car_pool_share_next <= 5) {
@@ -389,6 +464,25 @@ static unsigned short car_pool_ids(void *manager, unsigned short lo, unsigned sh
             log_dec(id);
             log_raw(" (FH2MP_CAR_IDS)\n");
         }
+        return id;
+    }
+    id = car_pool_id_from_player(manager, extra);
+    if (id != CAR_POOL_IDS_NONE) {
+        g_car_pool_share_next++;
+        g_car_pool_shared_now = 1;
+        if (g_car_pool_share_next <= 20) {
+            log_begin();
+            log_raw("carpool: stand-in ids full, a type ");
+            log_dec((unsigned long)g_car_pool_cur_type);
+            log_raw(" car (1 = Drivatar) shares id ");
+            log_dec(id);
+            log_raw(" with a network player's car (FH2MP_CAR_IDS)\n");
+        }
+    } else if (++unshared_lines <= 5) {
+        log_begin();
+        log_raw("carpool: stand-in ids full for a type ");
+        log_dec((unsigned long)g_car_pool_cur_type);
+        log_raw(" car and no id is held by player cars only: its load request stays invalid\n");
     }
     return id;
 }

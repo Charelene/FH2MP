@@ -181,6 +181,16 @@ def find_crash(folder, since):
     start_t = _session_start(session)
     if mod_crash and ((start_t is not None and mod_t < start_t) or (next_session_t is not None and mod_t >= next_session_t)):
         mod_crash, mod_t = None, 0.0
+    guard_t = 0.0
+    guard_log = os.path.join(folder, "data", "logs", "fh2mp-memguard.log")     # memguard.STOP_FILE: the launcher ended a memory runaway
+    try:
+        guard_t = os.path.getmtime(guard_log)
+    except OSError:
+        pass
+    if guard_t > since and not line:
+        stops = [ln for ln in _read_tail(guard_log, 4096).splitlines() if "STOPPED" in ln]
+        line = stops[-1] if stops else ""
+        log_t = max(log_t, guard_t) if line else log_t
     if not dump and not line and not mod_crash:
         return None
     return Crash(folder, line, dump, dump_t or log_t or mod_t, max(dump_t, mod_t, log_t if line else 0.0), mod_crash)

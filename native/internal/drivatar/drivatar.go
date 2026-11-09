@@ -52,7 +52,11 @@ func CacheLimit() int {
 // Switches read at start (tests change them).
 var (
 	CachePlayers = os.Getenv("FH2MP_DRIVATAR_CACHE_PLAYERS") != "0" // 0 serves shipped records only, which replaces the client's saved file
-	Cars         = os.Getenv("FH2MP_DRIVATAR_CARS") == "1"          // real cars, tunes and liveries on player Drivatars
+	// Cars puts a player's Drivatar in that player's latest car with their own shared livery and tune for it (withCars); FH2MP_DRIVATAR_CARS=0 turns
+	// it off. On by default since 2026-11-09 (the user's Drivatar rules: their livery, a car they own); it never ran on the Go LSP before, because
+	// KnownCars was not set (the Python server took it from car_policy.KNOWN_CARS). The client checks the car against the race bucket and swaps a
+	// misfit, clearing both ids (ValidateRecordCars 0xa30630); only liveries and tunes still shared (refs > 0) are named.
+	Cars = os.Getenv("FH2MP_DRIVATAR_CARS") != "0"
 	// Bots puts the shipped Drivatars (named after real racing drivers) into races and the cache, as before 2026-11-08. Off: only players'
 	// Drivatars are served, and the shipped records stay templates for new players' records; a store without any usable player still gets them.
 	Bots = os.Getenv("FH2MP_DRIVATAR_BOTS") == "1"
@@ -138,6 +142,9 @@ type Store struct {
 	KnownCars map[int]struct{}
 	// CarOverride maps a decimal xuid to the car id its Drivatar uses.
 	CarOverride map[string]int64
+	// FriendsOf lists a player's friends (social.Store.Friends, set by the LSP; nil = nobody has friends): friends come first in a race grid and in
+	// the cache, marked IsFriend.
+	FriendsOf func(xuid int64) ([]int64, error)
 
 	mu       sync.Mutex
 	rng      *pyrand.Random
@@ -537,6 +544,9 @@ func (s *Store) Pool(limit int, skill, nearWristband *int64, excludeXuid int64, 
 		}
 	}
 	sort.Slice(skip, func(i, j int) bool { return skip[i] < skip[j] })
+	if !Bots {
+		return s.playersRace(limit, skill, nearWristband, excludeXuid, skipSet, skip)
+	}
 	where, args := "xuid <> ? AND xuid <> ALL(?::bigint[])", []any{excludeXuid, skip}
 	if !anySkillPlayers && skill != nil {
 		where += " AND skill = ?"
@@ -561,27 +571,23 @@ func (s *Store) Pool(limit int, skill, nearWristband *int64, excludeXuid int64, 
 		}
 	}
 	noteSkipped(len(recs)-len(players), "pool")
-	if !Bots {
-		named := players[:0]
-		for _, r := range players {
-			if tag, _ := get(r, "GamerTag").(string); tag != "" {
-				named = append(named, r)
-			}
-		}
-		if players = named; len(players) > 0 {
-			if len(players) > limit {
-				players = players[:max(0, limit)]
-			}
-			out, err := s.withCars(players)
-			if err != nil {
-				return nil, err
-			}
-			s.mu.Lock()
-			pyrand.Shuffle(s.rng, out)
-			s.mu.Unlock()
-			return out, nil
-		}
+	chosen := s.shippedFor(max(0, limit-len(players)), skill, nearWristband, skipSet)
+	all := append(append([]Record{}, players...), chosen...)
+	if len(all) > limit {
+		all = all[:max(0, limit)]
 	}
+	out, err := s.withCars(all)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	pyrand.Shuffle(s.rng, out)
+	s.mu.Unlock()
+	return out, nil
+}
+
+// shippedFor picks room shipped Drivatars of the skill (nil = any), nearest car value first when nearWristband is set, but not always the same ones.
+func (s *Store) shippedFor(room int, skill, nearWristband *int64, skipSet map[int64]bool) []Record {
 	var tpl []Record
 	for _, t := range s.Templates {
 		if (skill == nil || asInt(get(t, "UserSkillLevel")) == *skill) && !skipSet[asInt(get(t, "Xuid"))] {
@@ -600,24 +606,155 @@ func (s *Store) Pool(limit int, skill, nearWristband *int64, excludeXuid int64, 
 			return a < b
 		})
 	}
-	room := max(0, limit-len(players))
 	window := tpl
-	if nearWristband != nil { // nearest car values, but not always the same ones
+	if nearWristband != nil {
 		window = tpl[:min(len(tpl), max(room*4, 40))]
 	}
-	chosen := s.sample(window, min(room, len(window)))
-	all := append(append([]Record{}, players...), chosen...)
-	if len(all) > limit {
-		all = all[:max(0, limit)]
+	return s.sample(window, min(room, len(window)))
+}
+
+// raceFetchChunk: candidate records read per query beyond the number still missing (some fail SaneInfo).
+const raceFetchChunk = 8
+
+// usable reads the named records of these xuids whose numbers pass SaneInfo, in the order of xuids, until want are found (want < 0: all of them).
+// The second result is how many were left out.
+func (s *Store) usable(xuids []int64, want int) ([]Record, int, error) {
+	var out []Record
+	skipped := 0
+	for start := 0; start < len(xuids) && (want < 0 || len(out) < want); {
+		n := len(xuids) - start
+		if want >= 0 {
+			n = min(n, want-len(out)+raceFetchChunk)
+		}
+		chunk := xuids[start : start+n]
+		start += n
+		rows, err := s.DB.Query("SELECT record, locked FROM drivatars WHERE xuid = ANY(?::bigint[]) AND gamertag <> ''", chunk)
+		if err != nil {
+			return nil, 0, err
+		}
+		byXuid := map[int64]Record{}
+		for i := range rows {
+			rec, err := recOf(&rows[i])
+			if err != nil {
+				return nil, 0, err
+			}
+			if tag, _ := get(rec, "GamerTag").(string); tag != "" && SaneInfo(get(rec, "UserInfo")) {
+				byXuid[asInt(get(rec, "Xuid"))] = rec
+			} else {
+				skipped++
+			}
+		}
+		for _, x := range chunk {
+			if r, ok := byXuid[x]; ok && (want < 0 || len(out) < want) {
+				out = append(out, s.spreadWristband(r))
+			}
+		}
 	}
-	out, err := s.withCars(all)
+	return out, skipped, nil
+}
+
+// friendsOf: the requesting player's friends minus the taken ids, in a random order, and as a set.
+func (s *Store) friendsOf(me int64, taken map[int64]bool) ([]int64, map[int64]bool, error) {
+	set := map[int64]bool{}
+	if s.FriendsOf == nil || me == 0 {
+		return nil, set, nil
+	}
+	all, err := s.FriendsOf(me)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	var out []int64
+	for _, x := range all {
+		if !taken[x] && !set[x] {
+			set[x] = true
+			out = append(out, x)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	s.mu.Lock()
 	pyrand.Shuffle(s.rng, out)
 	s.mu.Unlock()
-	return out, nil
+	return out, set, nil
+}
+
+// playersRace is a race grid of real players' Drivatars (FH2MP_DRIVATAR_BOTS off): exactly limit records whenever the store has one usable player.
+// The requesting player's friends come first (IsFriend set), then other players drawn at random from every named record (not the oldest rows), then,
+// when the players run out, shipped Drivatars of the skill as before. The name and number checks run before the count, so a bad row never shortens
+// the grid. Every player record is labelled with the requested skill: the game sets an AI driver's strength from the record's UserSkillLevel
+// (FestivalModelSelector::helper_83b9a0, game+0x83b9a0, passes Drivatar_SkillToByte(record+0x2648) to the AI player) and checks the records against
+// its AIDifficulty option (FUN_140a06400 compares record+0x2648 with Options+0x2530, which CmdLine "AIDifficulty" sets): inferred from the
+// decompile, not seen in a race. A player's stored level only says how their record was last labelled, not how they drive. A short grid is avoided
+// because the client's re-request on a difficulty change copies the new records index by index (helper_a327f0, inferred).
+func (s *Store) playersRace(limit int, skill, nearWristband *int64, me int64, skipSet map[int64]bool, skip []int64) ([]Record, error) {
+	if limit <= 0 {
+		return []Record{}, nil
+	}
+	taken := map[int64]bool{me: true}
+	for x := range skipSet {
+		taken[x] = true
+	}
+	friendIDs, isFriend, err := s.friendsOf(me, taken)
+	if err != nil {
+		return nil, err
+	}
+	friends, skippedF, err := s.usable(friendIDs, limit)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.DB.Query("SELECT xuid FROM drivatars WHERE gamertag <> '' AND xuid <> ? AND xuid <> ALL(?::bigint[]) ORDER BY xuid", me, skip)
+	if err != nil {
+		return nil, err
+	}
+	var cand []int64
+	for i := range rows {
+		if x := rows[i].IntAt(0); !isFriend[x] {
+			cand = append(cand, x)
+		}
+	}
+	s.mu.Lock()
+	pyrand.Shuffle(s.rng, cand)
+	s.mu.Unlock()
+	others, skippedO, err := s.usable(cand, limit-len(friends))
+	if err != nil {
+		return nil, err
+	}
+	noteSkipped(skippedF+skippedO, "pool")
+	players := append(append([]Record{}, friends...), others...)
+	if len(players) == 0 {
+		out, err := s.withCars(s.shippedFor(limit, skill, nearWristband, skipSet))
+		if err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		pyrand.Shuffle(s.rng, out)
+		s.mu.Unlock()
+		return out, nil
+	}
+	for i, r := range players {
+		r.Set("IsFriend", i < len(friends))
+		if skill != nil {
+			r.Set("UserSkillLevel", *skill)
+		}
+	}
+	if players, err = s.withCars(players); err != nil {
+		return nil, err
+	}
+	f, o := players[:len(friends)], players[len(friends):]
+	if room := limit - len(players); room > 0 {
+		used := map[int64]bool{}
+		for x := range taken {
+			used[x] = true
+		}
+		for _, r := range players {
+			used[asInt(get(r, "Xuid"))] = true
+		}
+		o = append(append([]Record{}, o...), s.shippedFor(room, skill, nearWristband, used)...)
+	}
+	s.mu.Lock()
+	pyrand.Shuffle(s.rng, f)
+	pyrand.Shuffle(s.rng, o)
+	s.mu.Unlock()
+	return append(append([]Record{}, f...), o...), nil
 }
 
 func (s *Store) sample(pop []Record, k int) []Record {
@@ -707,49 +844,74 @@ func (s *Store) ForCache(limit int, excludeXuid int64) ([]Record, error) {
 	return s.withCars(append(append(append([]Record{}, shipped...), players...), fill...))
 }
 
-// playersOnlyCache is the cache without shipped Drivatars: the most recently updated named players, CacheShippedPerSkill of them labelled with
-// each skill level first (the client keeps a floor per skill; players' records are all one level), then the rest at their own level. Empty when the
-// store has no usable player.
+// playersOnlyCache is the cache without shipped Drivatars: the requesting player's friends first (IsFriend set), then the most recently updated
+// named players. Each skill level 0..4 gets an equal share of the limit, every record relabelled to its level: the client groups the cache by
+// UserSkillLevel (DrivatarDataManager::BuildGlobalCacheSkillMap, game+0xa252f0) and an offline race draws from the level of its difficulty only
+// (SelectFromSkillMap, game+0xa2eff0), so a level without records has no Drivatars. With fewer players than a share every level holds all of them
+// (the same player at several levels; a race draws from one level, so never twice in a grid); a big store spreads distinct players over the
+// levels. Empty when the store has no usable player.
 func (s *Store) playersOnlyCache(limit int, excludeXuid int64) ([]Record, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
-	rows, err := s.DB.Query("SELECT record, locked FROM drivatars WHERE xuid <> ? ORDER BY updated DESC LIMIT ?", excludeXuid, limit*4)
+	rows, err := s.DB.Query("SELECT record, locked FROM drivatars WHERE xuid <> ? AND gamertag <> '' ORDER BY updated DESC LIMIT ?", excludeXuid, limit*4)
 	if err != nil {
 		return nil, err
 	}
-	var recs []Record
+	var recent []Record
 	for i := range rows {
 		rec, err := recOf(&rows[i])
 		if err != nil {
 			return nil, err
 		}
 		if tag, _ := get(rec, "GamerTag").(string); tag != "" && SaneInfo(get(rec, "UserInfo")) {
-			recs = append(recs, s.spreadWristband(rec))
+			recent = append(recent, s.spreadWristband(rec))
 		}
 	}
-	noteSkipped(len(rows)-len(recs), "cache")
-	if len(recs) > limit {
-		recs = recs[:limit]
+	friendIDs, isFriend, err := s.friendsOf(excludeXuid, map[int64]bool{excludeXuid: true})
+	if err != nil {
+		return nil, err
 	}
-	out := make([]Record, 0, len(recs))
-	next := 0
-	for skill := int64(0); skill < NumSkills && next < len(recs); skill++ {
-		for k := 0; k < CacheShippedPerSkill && next < len(recs); k++ {
-			r := recs[next]
-			next++
-			if asInt(get(r, "UserSkillLevel")) != skill {
-				c, err := copyRecord(r)
-				if err != nil {
-					return nil, err
-				}
-				c.Set("UserSkillLevel", skill)
-				r = c
+	friends, skippedF, err := s.usable(friendIDs, limit/NumSkills+1)
+	if err != nil {
+		return nil, err
+	}
+	noteSkipped(len(rows)-len(recent)+skippedF, "cache")
+	var others []Record
+	for _, r := range recent {
+		if !isFriend[asInt(get(r, "Xuid"))] {
+			others = append(others, r)
+		}
+	}
+	if len(friends)+len(others) == 0 {
+		return nil, nil
+	}
+	out := make([]Record, 0, limit)
+	next := 0 // where the next level starts in others
+	for skill := int64(0); skill < NumSkills; skill++ {
+		share := limit / NumSkills
+		if skill < int64(limit%NumSkills) {
+			share++
+		}
+		group := make([]Record, 0, share)
+		group = append(group, friends[:min(len(friends), share)]...)
+		took := 0
+		for ; took < len(others) && len(group) < share; took++ {
+			group = append(group, others[(next+took)%len(others)])
+		}
+		if len(others) > 0 {
+			next = (next + took) % len(others)
+		}
+		for _, r := range group {
+			c, err := copyRecord(r)
+			if err != nil {
+				return nil, err
 			}
-			out = append(out, r)
+			c.Set("UserSkillLevel", skill)
+			c.Set("IsFriend", isFriend[asInt(get(r, "Xuid"))])
+			out = append(out, c)
 		}
 	}
-	out = append(out, recs[next:]...)
 	return s.withCars(out)
 }
 

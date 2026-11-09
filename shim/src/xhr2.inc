@@ -20,6 +20,10 @@
 /* Largest response body taken (security audit 2026-10-25, F12): the biggest the services send are UGC downloads, which the server caps
  * at 32 MiB unpacked. A longer body fails the request instead of growing the buffer until the game runs out of memory. */
 #define XHR_MAX_RESPONSE (64u << 20)
+/* Request threads running at once, at most XHR_THREADS_MAX: one thread and one WinHTTP session per request, and each can hold a response buffer of up to
+ * XHR_MAX_RESPONSE. The game has a few in flight at a time (the health summaries); a burst past the cap is a fault somewhere, not traffic. */
+#define XHR_THREADS_MAX 64
+static volatile LONG g_xhr_threads;
 
 typedef struct {
     const void *const *vtbl;
@@ -981,6 +985,7 @@ done:
         g_wh.close(ses);
     }
     xhr_release(x);
+    InterlockedDecrement(&g_xhr_threads);
     return 0;
 }
 
@@ -989,6 +994,17 @@ static HRESULT STDMETHODCALLTYPE xhr_send(void *self, void *body, unsigned long 
     xhr_obj *x = (xhr_obj *)self;
     HANDLE t;
 
+    if (body && cb > XHR_MAX_RESPONSE) {
+        log_begin();
+        log_raw("xhr#");
+        log_dec(x->seq);
+        log_raw(" Send refused: the request body is ");
+        log_dec((unsigned long)(cb >> 20));
+        log_raw(" MB, more than the shim sends (");
+        log_dec(XHR_MAX_RESPONSE >> 20);
+        log_raw(" MB)\n");
+        return E_OUTOFMEMORY;
+    }
     if (body && cb) {
         DWORD total = 0;
         x->body = (unsigned char *)xhr_alloc((SIZE_T)cb);
@@ -1011,10 +1027,27 @@ static HRESULT STDMETHODCALLTYPE xhr_send(void *self, void *body, unsigned long 
         }
         x->nbody = total;
     }
+    if (InterlockedIncrement(&g_xhr_threads) > XHR_THREADS_MAX) {
+        static volatile LONG refused;
+        LONG n = InterlockedIncrement(&refused);
+        InterlockedDecrement(&g_xhr_threads);
+        if (n <= 5 || n % 100 == 0) {
+            log_begin();
+            log_raw("xhr#");
+            log_dec(x->seq);
+            log_raw(" Send refused: ");
+            log_dec(XHR_THREADS_MAX);
+            log_raw(" request threads are already running (#");
+            log_dec((unsigned long)n);
+            log_raw(")\n");
+        }
+        return HRESULT_FROM_WIN32(ERROR_MAX_THRDS_REACHED);
+    }
     InterlockedIncrement(&x->ref); /* the worker owns a reference */
     t = CreateThread(NULL, 0, xhr_thread, x, 0, NULL);
     if (!t) {
         DWORD err = GetLastError();
+        InterlockedDecrement(&g_xhr_threads);
         InterlockedDecrement(&x->ref);
         log_begin();
         log_raw("xhr#");
@@ -1312,6 +1345,16 @@ static void xs_response_store_stub(void *slot, void *resp)
                 unsigned char *p = st->data;
                 DWORD n = st->len;
                 found = 1;
+                if (n > XHR_MAX_RESPONSE + 65536) {
+                    static volatile LONG oversized;
+                    if (InterlockedIncrement(&oversized) <= 3) {
+                        log_begin();
+                        log_raw("xsbody: the response stream says ");
+                        log_dec((unsigned long)(n >> 20));
+                        log_raw(" MB, more than the shim ever stores: its body stays empty\n");
+                    }
+                    break;
+                }
                 if (n >= 3 && p[0] == 0xEF && p[1] == 0xBB && p[2] == 0xBF) {
                     p += 3;
                     n -= 3;

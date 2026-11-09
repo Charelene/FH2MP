@@ -108,13 +108,13 @@ func TestRefusalAndDropNotices(t *testing.T) {
 	mu.Lock()
 	text := sent[0]
 	mu.Unlock()
-	if !strings.Contains(text, "your car is class S 834, the event needs class A") {
+	if !strings.Contains(text, "your car is class S1 834, the event needs class A") {
 		t.Fatalf("the notice does not say why: %q", text)
 	}
 	if got := refusalText(gameopts.Rule{Class: 255, Min: 601, Max: 700}, &Choices{PI: math.NaN()}); !strings.Contains(got, "class unknown") || !strings.Contains(got, "any class with PI 601-700") {
 		t.Fatalf("rule without a class or a car class: %q", got)
 	}
-	if classLetter(6) != "X" || classLetter(7) != "7" {
+	if classLetter(4) != "S1" || classLetter(5) != "S2" || classLetter(6) != "X" || classLetter(7) != "7" {
 		t.Fatal("class letters")
 	}
 }
