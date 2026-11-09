@@ -835,11 +835,14 @@ class MainWindow(QMainWindow):
         if lc.process is not None and not lc.game_running():
             import time
             code = lc.process.returncode
-            lc.note_game_exit(code)
+            stopped = lc.note_game_exit(code)
             lc.process = None
             quick = time.time() - self._launched_at < 25
             run_async(lambda j: lc.after_game(), lambda _r: None, lambda e: None)
-            if quick and launch.gpu_check_failure(lc.settings["azimuth_dir"], self._launched_at - 5):
+            if stopped:
+                self.say(f"FH2MP stopped the game: its memory grew by {stopped['grew_mb'] / 1024:.1f} GB in {stopped['seconds']:.0f} s and your PC "
+                         f"had only {stopped['free_mb'] / 1024:.1f} GB of RAM left. Please send the crash report or your logs.", theme.BAD)
+            elif quick and launch.gpu_check_failure(lc.settings["azimuth_dir"], self._launched_at - 5):
                 self.say(launch.gpu_check_advice(lc.settings), theme.BAD)
             elif quick and code not in (0, None):
                 self.say(f"The game closed right away (exit code {code}). See Logs.", theme.BAD)

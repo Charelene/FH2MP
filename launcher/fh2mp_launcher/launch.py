@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 
-from . import azimuth, crashreport, logs, paths, shim
+from . import azimuth, crashreport, logs, memguard, paths, shim
 from .constants import WINE_DLL_OVERRIDES
 
 WIN = sys.platform == "win32"
@@ -234,6 +234,7 @@ def start(settings, folder, extra_args=(), skip_launcher=True, extra_env=None):
     # Names only: the environment can hold a developer's own lines (Settings, extra environment).
     logs.info("game", "game.started", pid=getattr(p, "pid", None), command=os.path.basename(argv[0]), mode=settings["launch_mode"], skip_launcher=skip_launcher, cwd=cwd,
               env=",".join(sorted({*env_add, *(extra_env or {})})) or None)
+    p.memguard = memguard.guard(p, folder, env)        # Windows: the memory cap and the runaway watchdog; never stops Play
     return p
 
 

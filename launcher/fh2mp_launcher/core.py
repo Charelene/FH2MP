@@ -5,7 +5,7 @@ import re
 import time
 import threading
 
-from . import azimuth, gamedb, hotfix, keystore, launch, logs, paths, shim, tunnel, updater, upstream
+from . import azimuth, gamedb, hotfix, keystore, launch, logs, memguard, paths, shim, tunnel, updater, upstream
 from .api import Api, ApiError
 from .constants import AZIMUTH_VERSION, BUILTIN_AZIMUTH_BUILDS, DEFAULT_WEBSITE, MODS_DIR, PLATFORM_VERSION, SHIM_DLL
 from .identity import Identity
@@ -887,10 +887,24 @@ class Launcher:
             return acct, notes
 
     def note_game_exit(self, code):
-        """The game's process ended by itself. On Windows a crash shows as an NTSTATUS exit code, which is only readable in hex."""
+        """The game's process ended (by itself, or ended by the memory guard). On Windows a crash shows as an NTSTATUS exit code, which is only
+        readable in hex. -> the memory guard's stop ({"grew_mb", "seconds", "free_mb", ...}) when it ended the game, else None."""
         began = getattr(self, "game_started_at", None)
+        guard = getattr(getattr(self, "process", None), "memguard", None)
+        if not isinstance(guard, (memguard.Guard, memguard.NoGuard)):
+            guard = None
+        stopped = guard.stopped if guard is not None and isinstance(guard.stopped, dict) else None
         logs.event("INFO" if code in (0, None) else "WARN", "game", "game.exited", code=code, code_hex=f"{code & 0xffffffff:#x}" if code not in (0, None) else None,
-                   ran_s=int(time.monotonic() - began) if began else None, offline=getattr(self, "offline_run", False) or None)
+                   ran_s=int(time.monotonic() - began) if began else None, offline=getattr(self, "offline_run", False) or None,
+                   ended_by="memory guard" if stopped else None)
+        if guard is not None:
+            try:
+                peak = guard.peak()
+                if peak is not None:
+                    logs.info("game", "game.memory_peak", peak_mb=peak // (1 << 20), cap_mb=(guard.cap or 0) // (1 << 20) or None)
+            finally:
+                guard.close()
+        return stopped
 
     def play_offline(self, azimuth_window=False):
         """Solo play with the account's local save. The shim only sets the save ID; online hooks stay off."""
