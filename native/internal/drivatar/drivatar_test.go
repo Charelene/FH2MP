@@ -83,8 +83,9 @@ func TestMatchesPython(t *testing.T) {
 	clock := 1_700_000_000.0
 	oldNow := Now
 	Now = func() float64 { return clock }
-	oldPlayers, oldCars := CachePlayers, Cars
-	defer func() { Now, CachePlayers, Cars = oldNow, oldPlayers, oldCars }()
+	oldPlayers, oldCars, oldBots := CachePlayers, Cars, Bots
+	defer func() { Now, CachePlayers, Cars, Bots = oldNow, oldPlayers, oldCars, oldBots }()
+	Bots = true // the Python store served the shipped Drivatars; FH2MP_DRIVATAR_BOTS=1 keeps that behaviour
 	rows, err := d.Query("SELECT record FROM game.drivatar_shipped ORDER BY idx")
 	if err != nil {
 		t.Fatal(err)
