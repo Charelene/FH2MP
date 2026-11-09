@@ -163,6 +163,8 @@ class RealJobTests(unittest.TestCase):
         g = memguard.guard(p, tempfile.mkdtemp(), {"FH2MP_MEMORY_CAP_MB": "300"})
         try:
             self.assertIsInstance(g, memguard.Guard)
+            if g.job is None:                                                   # a runner whose own job forbids nesting: the guard runs watchdog-only
+                self.skipTest("this machine does not allow the child in a nested Job")
             self.assertEqual(g.cap, 300 * MB)
             self.assertEqual(p.wait(30), 7)                                     # MemoryError in the child: the cap held
             self.assertLessEqual(g.peak(), 300 * MB)
