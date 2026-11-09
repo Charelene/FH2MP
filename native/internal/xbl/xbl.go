@@ -1078,8 +1078,17 @@ func (s *Server) Populations() (map[string][]string, bool) {
 
 func lstrip0(s string) string { return strings.TrimLeft(s, "0") }
 
+// CountSessionMembers: with the game server's report, a lobby's session members that are not connected still count as taking a seat. The game
+// decides from the session document whether a lobby has room, so a member the game server does not see fills it all the same: a player whose game
+// ended without leaving the session stays an active member for up to ActiveMemberIdleSeconds. Prod 2026-11-09 20:20 UTC, worlds of 12: a lobby
+// with 11 connected players listed 12 active members (two had signed out 4 min and 19 s before); a player matched into it as "11 of 12" read the
+// full session, waited 22 s and left without an OpenConnection, and so did the next one (inferred from the calls; the game's own check is not
+// traced). FH2MP_LOBBY_COUNT_MEMBERS=0 goes back to counting connected players alone.
+var CountSessionMembers = os.Getenv("FH2MP_LOBBY_COUNT_MEMBERS") != "0"
+
 // lobbyOccupancy counts the players in a lobby, including the ones matched into it that are still on their way. With the game server's report that
-// is who is connected plus the recent matches it has not seen yet; without it, the session's members.
+// is who is connected plus the recent matches it has not seen yet and the session's other members (CountSessionMembers); without it, the session's
+// members.
 func (s *Server) lobbyOccupancy(name string, rec *Session, pops map[string][]string, havePops bool) int {
 	now := s.Now()
 	if !havePops {
@@ -1119,6 +1128,13 @@ func (s *Server) lobbyOccupancy(name string, rec *Session, pops map[string][]str
 	}
 	for x := range held {
 		extra[x] = true
+	}
+	if CountSessionMembers && rec != nil {
+		for _, k := range rec.Members.Keys() {
+			if isDigits(k) {
+				extra[k] = true
+			}
+		}
 	}
 	n := len(pops[name])
 	for x := range extra {
