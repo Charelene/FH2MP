@@ -921,9 +921,9 @@ func (w *World) NotifyPlayer(peer *Peer, key string, interval float64, text stri
 	go w.Sinks.Notice(peer.Xuid, text, w.Log)
 }
 
-// classLetter is the class a car shows in the game (0 D ... 6 X); other values print as numbers.
+// classLetter is the class a car shows in the game (0 D, 1 C, 2 B, 3 A, 4 S1, 5 S2, 6 X, as rivals.ClassLetters); other values print as numbers.
 func classLetter(c uint64) string {
-	letters := []string{"D", "C", "B", "A", "S", "R", "X"}
+	letters := []string{"D", "C", "B", "A", "S1", "S2", "X"}
 	if c < uint64(len(letters)) {
 		return letters[c]
 	}
