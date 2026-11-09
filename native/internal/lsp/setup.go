@@ -50,11 +50,11 @@ func (c *Core) Setup(dsn string) error {
 	c.Clubs = clubs.New(d)
 	c.Social = social.New(d)
 	c.Ugc = ugc.New(d)
-	if cat, err := catalog.Load(); err == nil {
-		c.Tables = cat.Parts // part ids of the game data (the catalog the game server checks lobby cars with)
-	} else {
+	cat, err := catalog.Load()
+	if err != nil {
 		return err
 	}
+	c.Tables = cat.Parts // part ids of the game data (the catalog the game server checks lobby cars with)
 	if err := c.SetupAuth(); err != nil {
 		return err
 	}
@@ -117,6 +117,12 @@ func (c *Core) Setup(dsn string) error {
 		shipped = append(shipped, drivatar.Record(rec))
 	}
 	c.Drv = drivatar.New(shipped, d)
+	// The game's own cars (car_policy KNOWN_CARS, as the Python server used): a player's Drivatar drives their latest one with their livery and tune
+	// for it. Unset, no Drivatar ever got a car (the Go port until 2026-11-09). Car pack cars are not in it and never reach another player's grid.
+	// The friend graph puts friends first in grids and the cache.
+	c.Drv.KnownCars = cat.KnownCars
+	c.Drv.FriendsOf = c.Social.Friends
+
 	c.Social.NameLookup = func(x int64) string { t, _ := c.Drv.TagForXuid(x); return t } // stored player Drivatars show their names, not Player#
 	c.Xbl = xbl.New(xbl.NewUDPHub())
 	c.Xbl.NameLookup = func(x int64) string { // session members carry their gamertag, not "Player 1" (GitHub #3)

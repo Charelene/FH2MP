@@ -63,20 +63,26 @@ func TestNoBotsOnceThereArePlayers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cache) != 80 {
-		t.Errorf("cache has %d records, want the 80 named players", len(cache))
+	// every level gets an equal share (2026-11-09): 80 players fill 5 x 24 records, some players at two levels, never twice at one level
+	if len(cache) != 120 {
+		t.Errorf("cache has %d records, want 120 (24 per skill level from the 80 named players)", len(cache))
 	}
 	perSkill := map[int64]int{}
+	seen := map[[2]int64]bool{}
 	for _, r := range cache {
-		x := asInt(get(r, "Xuid"))
+		x, skill := asInt(get(r, "Xuid")), asInt(get(r, "UserSkillLevel"))
 		if bot[x] || x == 0x7fff {
 			t.Errorf("cache serves %v (%v)", x, get(r, "GamerTag"))
 		}
-		perSkill[asInt(get(r, "UserSkillLevel"))]++
+		if seen[[2]int64{x, skill}] {
+			t.Errorf("player %#x twice at skill %d", x, skill)
+		}
+		seen[[2]int64{x, skill}] = true
+		perSkill[skill]++
 	}
 	for skill := int64(0); skill < NumSkills; skill++ {
-		if perSkill[skill] < CacheShippedPerSkill {
-			t.Errorf("skill %d has %d records in the cache, want at least %d", skill, perSkill[skill], CacheShippedPerSkill)
+		if perSkill[skill] != CacheCapacity/NumSkills {
+			t.Errorf("skill %d has %d records in the cache, want %d", skill, perSkill[skill], CacheCapacity/NumSkills)
 		}
 	}
 

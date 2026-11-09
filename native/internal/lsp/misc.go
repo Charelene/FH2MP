@@ -115,8 +115,17 @@ func drvForRace(c *Core, r *Req, req *xls.Struct) (*xls.Struct, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.Log(r, fmt.Sprintf("  ForRace bucket=%d n=%d skill=%d cached=%d+%d: me + %d others", bucket, req.Int("numberOfDrivatars"), req.Int("skillSelection"),
-		len(req.List("cachedDrivatars")), len(req.List("cachedDrivatarsNewCars")), len(others)))
+	friends, cars := 0, 0
+	for _, o := range others {
+		if f, _ := o.Get("IsFriend"); f == true {
+			friends++
+		}
+		if recInt(o, "LiveryId") > 0 || recInt(o, "TuneId") > 0 {
+			cars++
+		}
+	}
+	c.Log(r, fmt.Sprintf("  ForRace bucket=%d n=%d skill=%d cached=%d+%d: me + %d others (%d friends, %d with the owner's livery or tune)", bucket,
+		req.Int("numberOfDrivatars"), req.Int("skillSelection"), len(req.List("cachedDrivatars")), len(req.List("cachedDrivatarsNewCars")), len(others), friends, cars))
 	out := xls.NewStruct()
 	out.Set("playerData", jsonToStruct(pyjson.Obj(me)))
 	out.Set("drivatarInfos", c.recStructs(others))
