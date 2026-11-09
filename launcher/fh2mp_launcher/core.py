@@ -5,7 +5,7 @@ import re
 import time
 import threading
 
-from . import azimuth, gamedb, hotfix, keystore, launch, logs, paths, shim, tunnel, updater, upstream
+from . import azimuth, gamedb, hotfix, keystore, launch, logs, memguard, paths, shim, tunnel, updater, upstream
 from .api import Api, ApiError
 from .constants import AZIMUTH_VERSION, BUILTIN_AZIMUTH_BUILDS, DEFAULT_WEBSITE, MODS_DIR, PLATFORM_VERSION, SHIM_DLL
 from .identity import Identity
@@ -634,6 +634,12 @@ class Launcher:
         except shim.ShimError as e:                  # not worth stopping a game over: the toggles just stay where they are
             from .api import log_failure
             log_failure("PLAY", "controls", e, str(e))
+        try:
+            self._aero_note = self.aero_unlock_for_online()
+        except shim.ShimError as e:                  # not worth stopping a game over: an aero-unlocked car is then refused by events, with a message
+            from .api import log_failure
+            log_failure("PLAY", "eo_aero", e, str(e))
+            self._aero_note = ""
         logs.step("mods")
         self.ensure_game()
         if require_game and not azimuth.has_game_configured(s["azimuth_dir"]):
@@ -657,6 +663,8 @@ class Launcher:
                            switches=self.hotfix.switches)
         shim.write_identity(d, acct["xuid"])
         notes = [cars] if cars else []
+        if getattr(self, "_aero_note", ""):
+            notes.append(self._aero_note)
         if self.hotfix_disabled:
             notes.append("turned off for a known crash: " + ", ".join(self.hotfix_disabled))
         if enabled:
@@ -887,10 +895,24 @@ class Launcher:
             return acct, notes
 
     def note_game_exit(self, code):
-        """The game's process ended by itself. On Windows a crash shows as an NTSTATUS exit code, which is only readable in hex."""
+        """The game's process ended (by itself, or ended by the memory guard). On Windows a crash shows as an NTSTATUS exit code, which is only
+        readable in hex. -> the memory guard's stop ({"grew_mb", "seconds", "free_mb", ...}) when it ended the game, else None."""
         began = getattr(self, "game_started_at", None)
+        guard = getattr(getattr(self, "process", None), "memguard", None)
+        if not isinstance(guard, (memguard.Guard, memguard.NoGuard)):
+            guard = None
+        stopped = guard.stopped if guard is not None and isinstance(guard.stopped, dict) else None
         logs.event("INFO" if code in (0, None) else "WARN", "game", "game.exited", code=code, code_hex=f"{code & 0xffffffff:#x}" if code not in (0, None) else None,
-                   ran_s=int(time.monotonic() - began) if began else None, offline=getattr(self, "offline_run", False) or None)
+                   ran_s=int(time.monotonic() - began) if began else None, offline=getattr(self, "offline_run", False) or None,
+                   ended_by="memory guard" if stopped else None)
+        if guard is not None:
+            try:
+                peak = guard.peak()
+                if peak is not None:
+                    logs.info("game", "game.memory_peak", peak_mb=peak // (1 << 20), cap_mb=(guard.cap or 0) // (1 << 20) or None)
+            finally:
+                guard.close()
+        return stopped
 
     def play_offline(self, azimuth_window=False):
         """Solo play with the account's local save. The shim only sets the save ID; online hooks stay off."""
@@ -916,6 +938,7 @@ class Launcher:
             raise PlayBlocked("Update the FH2MP shim to use your account save offline.", "offline_shim_outdated")
         if xuid:
             self.prepare_saves(xuid)
+        self.aero_unlock_restore()                  # offline play gets the player's own Extra Options aero setting
         self.stop_tunnel()
         self.token = ""
         self.account = None
@@ -1032,6 +1055,37 @@ class Launcher:
             self.settings.save()
         return did
 
+    def aero_unlock_for_online(self):
+        """Extra Options' aero unlock off for an online game (it raises a car's PI, shim.AERO_KEY). The player's value is remembered and comes back
+        with aero_unlock_restore(). -> a note for the player when it was turned off for this game, else ''."""
+        d = self.settings["azimuth_dir"]
+        if not d or not os.path.isdir(d):
+            return ""
+        was = shim.aero_unlock_off(d)
+        if not was:
+            return ""
+        if not self.settings["eo_aero_restore"]:
+            self.settings["eo_aero_restore"] = was
+            self.settings.save()
+        logs.info("game", "eo.aero_unlock_off", was=was, why="it raises a car's PI, online events refuse such cars")
+        return "Extra Options' aero unlock is off for online play (it raises a car's PI); it comes back for offline play"
+
+    def aero_unlock_restore(self):
+        """Puts back the aero unlock value aero_unlock_for_online() remembered, when no game runs. -> True when the settings file was changed."""
+        value, d = self.settings["eo_aero_restore"], self.settings["azimuth_dir"]
+        if not value or not d or not os.path.isdir(d) or self.game_running():
+            return False
+        try:
+            done = shim.aero_unlock_restore(d, value)
+        except shim.ShimError as e:
+            logs.swallowed("game", "eo.aero_unlock_restore_failed", e, value=value, then="kept for the next try")
+            return False
+        self.settings["eo_aero_restore"] = ""
+        self.settings.save()
+        if done:
+            logs.info("game", "eo.aero_unlock_restored", value=value)
+        return done
+
     def ensure_controls(self):
         """Extra Options' headlight and roof toggles leave the right stick (the horn) once; a binding the player chose is never touched, and
         a player who sets RightStick again afterwards keeps it. When the last game says the shim could not put the horn on the right stick
@@ -1119,12 +1173,14 @@ class Launcher:
         d = self.settings["azimuth_dir"]
         if not d or not os.path.isdir(d) or self.game_running():
             return False
+        self.aero_unlock_restore()                  # an online game that ended while the launcher was closed
         before = os.path.exists(os.path.join(shim.bin_dir(d), shim.SESSION_FILE))
         launch.cleanup(d)
         return before
 
     def after_game(self):
         launch.cleanup(self.settings["azimuth_dir"])
+        self.aero_unlock_restore()
         if getattr(self, "offline_run", False):
             self.offline_run = False
             if self._offline_disabled:

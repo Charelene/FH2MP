@@ -25,6 +25,7 @@ static void log_raw(const char *s)
     }
 }
 static void log_dec(unsigned long v) { char b[16]; sprintf(b, "%lu", v); log_raw(b); }
+static volatile LONG g_place_logged = 3;
 
 #define HEALTH_SUMMARY_S 2u
 #include "src/xhr_stats.inc"

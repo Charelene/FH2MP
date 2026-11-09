@@ -85,7 +85,8 @@ func TestMatchesPython(t *testing.T) {
 	Now = func() float64 { return clock }
 	oldPlayers, oldCars, oldBots := CachePlayers, Cars, Bots
 	defer func() { Now, CachePlayers, Cars, Bots = oldNow, oldPlayers, oldCars, oldBots }()
-	Bots = true // the Python store served the shipped Drivatars; FH2MP_DRIVATAR_BOTS=1 keeps that behaviour
+	Bots = true  // the Python store served the shipped Drivatars; FH2MP_DRIVATAR_BOTS=1 keeps that behaviour
+	Cars = false // Python's default; the steps below switch it on where Python did (the Go default is on since 2026-11-09)
 	rows, err := d.Query("SELECT record FROM game.drivatar_shipped ORDER BY idx")
 	if err != nil {
 		t.Fatal(err)

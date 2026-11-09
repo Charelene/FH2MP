@@ -641,6 +641,52 @@ class GpuCheckTests(unittest.TestCase):
         self.assertFalse(launch.gpu_check_failure(d, since=time.time() + 100))   # a log older than this launch says nothing
         self.assertFalse(launch.gpu_check_failure(tempfile.mkdtemp()))
 
+    def test_gpu_check_failure_reads_only_the_end_of_a_long_log(self):
+        from fh2mp_launcher import launch
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "data", "logs"))
+        log = os.path.join(d, "data", "logs", "azimuth.log")
+        with open(log, "w") as f:
+            f.write("0 tid=1 session A began x\n" + "1 tid=1 filler line of an old session\n" * 20000)     # ~760 KB, never read whole
+            f.write("2 tid=1 session B began x\n3 tid=2 STOPPED CreateDXGIFactory2 HRESULT=0x80004005 at azimuth+0x595c3\n")
+        self.assertGreater(os.path.getsize(log), 512 * 1024)
+        real = open
+        with mock.patch("builtins.open", side_effect=lambda p, *a, **k: self.fail("read the whole log") if p == log and "b" not in (a[0] if a else k.get("mode", "r")) else real(p, *a, **k)):
+            self.assertTrue(launch.gpu_check_failure(d))
+
+
+class CacheSizeTests(unittest.TestCase):
+    """Azimuth's pipeline cache is serialised whole at each save (#378: out of memory 730499427 bytes at azimuth+0x207a92): its size goes to launcher.log."""
+
+    def test_cache_sizes(self):
+        from fh2mp_launcher import launch
+        d = tempfile.mkdtemp()
+        self.assertIsNone(launch.cache_sizes(d))
+        cache = os.path.join(d, "data", "cache")
+        os.makedirs(os.path.join(cache, "graphics"))
+        for name, mb in (("pipelines-10de-2208-0020000000100842-cf293de09ce2a312.bin", 3), ("pipelines-10de-2208-0020000000100842-cf293de09ce2a312.bin.next", 2),
+                         ("translated-23b220b1f9c5b061.pack", 1), ("xg-layouts.bin", 5)):
+            with open(os.path.join(cache, name), "wb") as f:
+                f.truncate(mb << 20)
+        self.assertEqual(launch.cache_sizes(d), {"pipelines_mb": 5, "pipelines_files": 2, "translated_mb": 1})
+
+    def test_start_logs_the_cache_sizes(self):
+        from fh2mp_launcher import launch
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "data", "cache"))
+        with open(os.path.join(d, "data", "cache", "pipelines-1002-73ff-1-2.bin"), "wb") as f:
+            f.truncate(7 << 20)
+
+        class P:
+            pass
+        with mock.patch.object(launch, "build_command", lambda *a, **k: (["x"], {}, ".")), \
+                mock.patch.object(launch.subprocess, "Popen", lambda *a, **k: P()), \
+                mock.patch.object(launch.logs, "info") as info:
+            launch.start(Settings(), d)
+        calls = {c.args[1]: c.kwargs for c in info.call_args_list}
+        self.assertEqual(calls["game.caches"], {"pipelines_mb": 7, "pipelines_files": 1, "translated_mb": 0})
+        self.assertIn("game.started", calls)
+
 
 def platform_dll(version):
     """A stand-in d3dcompiler_47.dll with the FH2 Mod Platform's version resource strings."""

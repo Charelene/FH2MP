@@ -753,6 +753,61 @@ def install_anna(folder, files):
     return [f"installed FH2 ANNA {anna_version()} (qiangqiang101, MIT) from its GitHub release"]
 
 
+# ---- Extra Options' aero unlock ([Experiments] UnlockAeroTuning). With it on, Extra Options gives every stock aero part its car's race aero physics at game
+# start (EO 0.4.4 winmm.dll, read statically 2026-11-09: one switch for all six aero patches, read once at start, nothing kept between runs; only SELECTs on the
+# game database). The game's PI ignores the tune, so the car's PI goes up even at default tuning, and online events refused such cars ("your car is class
+# S2 989, the event needs class S1", 2026-11-09). An online game starts with it at 0; the player's value comes back for offline play and after the game.
+# With it at 0 a car tuned while it was on loads its stock aero physics and its stock PI; the aero values stay in its save.
+AERO_KEY = "UnlockAeroTuning"
+_AERO_RE = re.compile(rb"^(UnlockAeroTuning[ \t]*=[ \t]*)([^\s;]*)([ \t]*\r?)$", re.I | re.M)
+
+
+def aero_unlock_bytes(data, value):
+    """`data` (the Extra Options settings file) with every UnlockAeroTuning line set to `value` (bytes); every other byte stays.
+    -> (bytes, the first line's previous value as bytes, or None when the file has no such line)."""
+    found = _AERO_RE.search(data)
+    if not found:
+        return data, None
+    return _AERO_RE.sub(lambda m: m.group(1) + value + m.group(3), data), found.group(2)
+
+
+def _rewrite_extra_ini(folder, change, backup):
+    """change(bytes) -> (new bytes, result) on the FH2_ExtraOptions.ini in `folder`, written (after a copy to .<backup>) only when it changed.
+    -> (ini found, result)."""
+    path = os.path.join(folder, EXTRA_INI)
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except FileNotFoundError:
+        return False, None
+    except OSError as e:
+        raise ShimError(f"could not read the FH2 Extra Options settings: {e.strerror or e}") from None
+    new, result = change(data)
+    if new != data:
+        try:
+            shutil.copy2(path, path + backup)
+            paths.atomic_write(path, new, 0o644)
+        except OSError as e:
+            raise ShimError(f"could not update the FH2 Extra Options settings: {e.strerror or e}. Is the game still running?") from None
+    return True, result
+
+
+def aero_unlock_off(folder):
+    """UnlockAeroTuning to 0 in `folder`'s Extra Options settings. -> the value it had (str) when it was something else, else ""."""
+    _found, was = _rewrite_extra_ini(folder, lambda data: aero_unlock_bytes(data, b"0"), ".before-fh2mp-aero")
+    was = (was or b"").decode("ascii", "replace").strip()
+    return "" if was in ("", "0") else was
+
+
+def aero_unlock_restore(folder, value):
+    """UnlockAeroTuning back to `value` where it is still 0 (a value the player set since is kept). -> True when the file was changed."""
+    def change(data):
+        new, was = aero_unlock_bytes(data, value.encode("ascii"))
+        return (new, True) if was is not None and was.strip() == b"0" else (data, False)
+    _found, done = _rewrite_extra_ini(folder, change, ".before-fh2mp-aero-restore")
+    return bool(done)
+
+
 # ANNA opens on D-pad down and moves up its list with D-pad up, which are Extra Options' default autodrive and hazard buttons: with both, opening
 # ANNA also starts Extra Options' autodrive (ANNA's README). Those two go to None once, only where they are still the defaults.
 ANNA_EO_KEYS = {"AutodriveXbox": "DPadDown", "HazardsXbox": "DPadUp"}
