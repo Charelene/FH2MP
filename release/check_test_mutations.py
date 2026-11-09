@@ -26,11 +26,16 @@ CASES = {
                                  'fh2mp_launcher.core.Launcher._refuse_replay', lambda self, m: None),
     'save-verification-disabled': ('launcher', ['test_saves.SaveTests.test_corrupt_copy_is_detected_before_replacement'],
                                     'fh2mp_launcher.saves._manifest', lambda path: {}),
-    'memguard-never-stops-a-runaway': ('launcher', ['test_memguard.RunawayTests.test_a_fast_runaway_with_the_pc_running_out_is_ended'],
-                                       'fh2mp_launcher.memguard.runaway', lambda *args, **kw: None),
-    'memguard-ends-normal-play': ('launcher', ['test_memguard.RunawayTests.test_normal_play_is_left_alone',
-                                               'test_memguard.RunawayTests.test_a_slow_fill_or_another_program_is_left_alone'],
-                                  'fh2mp_launcher.memguard.runaway', lambda *args, **kw: (3 << 30, 1.0)),
+    # the memory watch never caps or ends a game unless asked to (1.3.1's default did both and ended healthy games)
+    'memguard-kills-by-default': ('launcher', ['test_memguard.SwitchTests.test_options'],
+                                  'fh2mp_launcher.memguard.options', lambda env: ('kill', None)),
+    'memguard-caps-by-default': ('launcher', ['test_memguard.SwitchTests.test_options'],
+                                 'fh2mp_launcher.memguard.options', lambda env: ('watch', 12288)),
+    'memguard-kill-mode-never-stops-a-runaway': ('launcher', ['test_memguard.RunawayTests.test_a_fast_runaway_with_the_pc_running_out_is_ended'],
+                                                 'fh2mp_launcher.memguard.runaway', lambda *args, **kw: None),
+    'memguard-kill-mode-ends-normal-play': ('launcher', ['test_memguard.RunawayTests.test_normal_play_is_left_alone',
+                                                         'test_memguard.RunawayTests.test_a_slow_fill_or_another_program_is_left_alone'],
+                                            'fh2mp_launcher.memguard.runaway', lambda *args, **kw: (3 << 30, 1.0)),
 }
 
 

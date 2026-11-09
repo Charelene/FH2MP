@@ -1,16 +1,22 @@
-"""Memory guard for the game on Windows: a cap on its private commit (Job Object) and a watchdog that ends a runaway before the PC runs out.
+"""Memory watch for the game on Windows. By default it only measures: nothing here caps or ends the game.
 
-Why (2026-11-09): a player's PC froze with RAM going from 55% to 100% within seconds (1.2.0, 32 GB). Prod crash reports stop with Azimuth's own
-"out of memory" (92..886 MB at once at azimuth+0x207a92, its pipeline cache save; 864 bytes at +0x493f21), so a game can run its machine dry.
-Measured on this project's Windows PC (RTX 3080 Ti + RX 6600, 32 GB): the game's private commit counts all its D3D12 memory, in VRAM or not,
-and a Job's process memory limit catches it (an allocation past the cap fails, so Azimuth ends with its own "STOPPED out of memory" line and dump);
-a normal session peaked at 8.5 GB of commit; ending a 3 GB process takes 0.2-0.3 s.
+Why it only watches. 1.3.1 (2026-11-09) capped the game's commit with a Job Object (12 GB up to 16 GB of RAM, 16 GB above) and ended the game
+when free RAM was under max(1.5 GB, 5%) and the game had grown 3 GB within 10 s. Both numbers came from one 32 GB PC at 720p and both were wrong
+(prod, the first hour, 13 crash reports):
+- A game's commit counts its D3D12 memory, in VRAM or not. Normal play is 11-16 GB on 32 GB PCs with 16 GB cards (1440p / ultra) and 12 GB half a
+  minute into a boot on a 16 GB laptop: 9 sessions ran into the cap and ended with "out of memory" (azimuth+0x207a92, +0x5765b6, game+0x125d9e8).
+- Loading grows 3-8 GB within seconds, and on 14-16 GB PCs free RAM is under 1.5 GB during an ordinary boot (39 MB seen, the game went on):
+  5 games were ended 18-27 s into a boot, at 5.1-5.7 GB.
+So what a runaway looks like is not known yet; this module collects what will show it.
 
-- Cap: CAP_MIN..CAP_MAX by 3/4 of RAM (12 GB on 8-16 GB machines, 16 GB from 22 GB of RAM up); FH2MP_MEMORY_CAP_MB overrides.
-- Watchdog: every SAMPLE_S while the game runs; it ends the game (exit code STOP_CODE) only when free RAM is below the floor (max(1.5 GB, 5% of
-  RAM)) and the game's own commit grew by GROW within WINDOW_S: a slow fill, or another program eating memory, never triggers it.
-- FH2MP_MEMGUARD=0 turns both off. Nothing here may stop Play: any failure logs game.memguard_unavailable and the game runs unguarded.
-- No KILL_ON_JOB_CLOSE: closing the launcher leaves the game running, still under its cap.
+- watch (default): a thread reads, once a second, the game's commit, free RAM and the system's commit charge. While free RAM is under the floor
+  it writes game.memory_low (at most every LOW_EVERY_S, LOW_LINES per game) and puts the log on disk, so the last seconds before a frozen PC
+  survive its reset. At exit game.memory_peak says the peak commit, the lowest free RAM and the highest system commit share.
+  The process is opened with query rights only: this mode cannot end or limit it.
+- FH2MP_MEMGUARD=kill (opt-in, for our own tests): the 1.3.1 watchdog, ending the game with exit code STOP_CODE.
+- FH2MP_MEMORY_CAP_MB=N (opt-in): a Job Object limit of N MB on the game's commit. No KILL_ON_JOB_CLOSE.
+- FH2MP_MEMGUARD=0: nothing at all.
+Nothing here may stop Play: any failure logs game.memguard_unavailable and the game runs unwatched.
 """
 import ctypes
 import os
@@ -22,29 +28,24 @@ from . import logs
 
 WIN = sys.platform == "win32"
 GB, MB = 1 << 30, 1 << 20
-CAP_MIN, CAP_MAX = 12 * GB, 16 * GB
-GROW = 3 * GB
+GROW = 3 * GB                               # kill mode: growth within WINDOW_S
 WINDOW_S = 10.0
-SAMPLE_S = 0.25
-STOP_CODE = 0xC0000017                      # STATUS_NO_MEMORY, as the game's exit code after a stop
-STOP_FILE = os.path.join("data", "logs", "fh2mp-memguard.log")   # in the Azimuth folder: crashreport finds it and attaches it
-
-
-def cap_bytes(total_ram, override_mb=None):
-    """The game's commit cap for a machine with total_ram bytes of RAM."""
-    if override_mb:
-        return int(override_mb) * MB
-    return max(CAP_MIN, min(CAP_MAX, total_ram * 3 // 4))
+WATCH_S = 1.0                               # sample period, watch mode
+KILL_S = 0.25                               # sample period, kill mode
+LOW_EVERY_S = 10.0
+LOW_LINES = 30
+STOP_CODE = 0xC0000017                      # STATUS_NO_MEMORY, as the game's exit code after a stop (kill mode)
+STOP_FILE = os.path.join("data", "logs", "fh2mp-memguard.log")   # in the Azimuth folder: crashreport finds it and attaches it (kill mode)
 
 
 def floor_bytes(total_ram):
-    """Free RAM below which a growing game is ended."""
+    """Free RAM below which memory counts as low."""
     return max(int(1.5 * GB), total_ram // 20)
 
 
 def runaway(samples, floor, grow=GROW, window=WINDOW_S):
-    """samples: [(t, free_ram, game_commit)], oldest first, newest last (commit None when unreadable). -> (grew_bytes, seconds) when the game must
-    be ended: free RAM below `floor` now and the game's commit grew by `grow` or more within the last `window` seconds. Else None."""
+    """Kill mode's rule. samples: [(t, free_ram, game_commit)], oldest first, newest last (commit None when unreadable). -> (grew_bytes, seconds)
+    when free RAM is below `floor` now and the game's commit grew by `grow` or more within the last `window` seconds. Else None."""
     if not samples:
         return None
     t, free, commit = samples[-1]
@@ -59,19 +60,72 @@ def runaway(samples, floor, grow=GROW, window=WINDOW_S):
 
 
 def options(env):
-    """-> (enabled, cap override in MB or None) from the game's environment (the launcher's own plus the Settings extra lines)."""
+    """-> (mode, cap in MB or None) from the game's environment (the launcher's own plus the Settings extra lines). mode: "watch" (default),
+    "off" (FH2MP_MEMGUARD=0), "kill" (FH2MP_MEMGUARD=kill). Anything else is "watch": a typo never turns the old behaviour on."""
     env = env or {}
-    enabled = env.get("FH2MP_MEMGUARD", "1").strip() not in ("0", "off", "no", "false")
+    value = env.get("FH2MP_MEMGUARD", "").strip().lower()
+    mode = "off" if value in ("0", "off", "no", "false") else "kill" if value == "kill" else "watch"
     cap = env.get("FH2MP_MEMORY_CAP_MB", "").strip()
-    return enabled, (int(cap) if cap.isdigit() and int(cap) > 0 else None)
+    return mode, (int(cap) if cap.isdigit() and int(cap) > 0 else None)
+
+
+class Watch:
+    """What the watcher keeps of a game: the peak commit, the lowest free RAM, the highest share of the system's commit limit in use, and when a
+    game.memory_low line is due. No Windows calls: tested everywhere."""
+
+    def __init__(self, total_ram, floor=None):
+        self.total, self.floor = total_ram, floor_bytes(total_ram) if floor is None else floor
+        self.peak = self.min_free = self.sys_pct = None
+        self.samples = 0
+        self._recent = []                    # (t, commit) of the last WINDOW_S
+        self._low_at, self._low_lines = None, 0
+
+    def sample(self, now, free, commit, peak_commit=None, sys_used=None, sys_limit=None):
+        """One reading. -> the fields of a game.memory_low line when one is due, else None."""
+        self.samples += 1
+        for v in (commit, peak_commit):
+            if v is not None and (self.peak is None or v > self.peak):
+                self.peak = v
+        self.min_free = free if self.min_free is None else min(self.min_free, free)
+        pct = round(100.0 * sys_used / sys_limit) if sys_used is not None and sys_limit else None
+        if pct is not None:
+            self.sys_pct = pct if self.sys_pct is None else max(self.sys_pct, pct)
+        if commit is not None:
+            self._recent.append((now, commit))
+        while self._recent and now - self._recent[0][0] > WINDOW_S:
+            self._recent.pop(0)
+        if free >= self.floor or self._low_lines >= LOW_LINES or (self._low_at is not None and now - self._low_at < LOW_EVERY_S):
+            return None
+        self._low_at, self._low_lines = now, self._low_lines + 1
+        grew = commit - self._recent[0][1] if commit is not None and self._recent else None
+        return {"commit_mb": commit // MB if commit is not None else None, "free_mb": free // MB, "ram_mb": self.total // MB,
+                "sys_commit_pct": pct, "grew_mb_10s": grew // MB if grew is not None else None, "line": self._low_lines}
+
+    def life_peak(self, peak_commit):
+        """The process's own peak commit, read once more after it ended (a game shorter than one sample period still gets its line)."""
+        if peak_commit:
+            self.peak = max(self.peak or 0, peak_commit)
+            self.samples += 1
+
+    def summary(self):
+        """The fields of game.memory_peak, or None when nothing was read."""
+        if not self.samples:
+            return None
+        return {"peak_mb": self.peak // MB if self.peak is not None else None,
+                "min_free_mb": self.min_free // MB if self.min_free is not None else None, "ram_mb": self.total // MB,
+                "sys_commit_pct": self.sys_pct}
 
 
 class NoGuard:
-    """What guard() returns when there is nothing to guard (not Windows, switched off, or the Windows calls failed)."""
+    """What guard() returns when there is nothing to watch (not Windows, switched off, or the Windows calls failed)."""
     stopped = None
     cap = None
+    mode = "off"
 
     def peak(self):
+        return None
+
+    def summary(self):
         return None
 
     def close(self):
@@ -108,7 +162,6 @@ if WIN:
     _k32.CreateJobObjectW.restype = w.HANDLE
     _k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, w.LPCWSTR]
     _k32.SetInformationJobObject.argtypes = [w.HANDLE, ctypes.c_int, ctypes.c_void_p, w.DWORD]
-    _k32.QueryInformationJobObject.argtypes = [w.HANDLE, ctypes.c_int, ctypes.c_void_p, w.DWORD, ctypes.c_void_p]
     _k32.AssignProcessToJobObject.argtypes = [w.HANDLE, w.HANDLE]
     _k32.K32GetProcessMemoryInfo.argtypes = [w.HANDLE, ctypes.POINTER(_PMC), w.DWORD]
     _k32.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(_MSX)]
@@ -118,68 +171,88 @@ if WIN:
     _k32.CloseHandle.argtypes = [w.HANDLE]
     _k32.GetCurrentThread.restype = w.HANDLE
     _k32.SetThreadPriority.argtypes = [w.HANDLE, ctypes.c_int]
-    _ACCESS = 0x0100 | 0x0001 | 0x1000 | 0x00100000      # SET_QUOTA | TERMINATE | QUERY_LIMITED_INFORMATION | SYNCHRONIZE
+    _QUERY = 0x1000 | 0x00100000             # PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE: all the watch needs, and it can do no more
+    _TERMINATE, _SET_QUOTA = 0x0001, 0x0100  # asked for only in kill mode / with an explicit cap
     _LIMIT_PROCESS_MEMORY = 0x100
     _EXTENDED_LIMIT_INFORMATION = 9
 
 
-def _free_ram():
+def _system():
+    """-> (free RAM, total RAM, commit charge, commit limit) of the system, in bytes."""
     m = _MSX()
     m.dwLength = ctypes.sizeof(_MSX)
     if not _k32.GlobalMemoryStatusEx(ctypes.byref(m)):
         raise OSError(ctypes.get_last_error(), "GlobalMemoryStatusEx")
-    return m.ullAvailPhys, m.ullTotalPhys
+    return m.ullAvailPhys, m.ullTotalPhys, m.ullTotalPageFile - m.ullAvailPageFile, m.ullTotalPageFile
 
 
 def _commit(handle):
+    """-> (commit now, peak commit of the process's life) in bytes, (None, None) when unreadable."""
     p = _PMC()
     p.cb = ctypes.sizeof(_PMC)
-    return p.PrivateUsage if _k32.K32GetProcessMemoryInfo(handle, ctypes.byref(p), p.cb) else None
+    if not _k32.K32GetProcessMemoryInfo(handle, ctypes.byref(p), p.cb):
+        return None, None
+    return p.PrivateUsage, p.PeakPagefileUsage
 
 
 class Guard:
-    """A running game under its cap and watchdog. `stopped` is None, or {"grew_mb", "seconds", "free_mb", "total_mb", "commit_mb"} once the
-    watchdog ended the game."""
+    """A running game being watched. `stopped` stays None unless kill mode ended the game: then {"grew_mb", "seconds", "free_mb", "total_mb",
+    "commit_mb"}."""
 
     def __init__(self, pid, folder, env):
-        self.pid, self.folder, self.stopped, self.job = pid, folder, None, None
-        _enabled, override = options(env)
-        free, self.total = _free_ram()
-        self.cap, self.floor = cap_bytes(self.total, override), floor_bytes(self.total)
-        self.handle = _k32.OpenProcess(_ACCESS, False, pid)
+        self.pid, self.folder, self.stopped, self.job, self.cap = pid, folder, None, None, None
+        self.mode, cap_mb = options(env)
+        free, total, _used, _limit = _system()
+        self.watch = Watch(total)
+        self.total, self.floor = total, self.watch.floor
+        access = _QUERY | (_TERMINATE if self.mode == "kill" else 0) | (_TERMINATE | _SET_QUOTA if cap_mb else 0)
+        self.handle = _k32.OpenProcess(access, False, pid)
         if not self.handle:
             raise OSError(ctypes.get_last_error(), "OpenProcess")
-        self.job = _k32.CreateJobObjectW(None, None)
-        info = _EXT()
-        info.BasicLimitInformation.LimitFlags = _LIMIT_PROCESS_MEMORY
-        info.ProcessMemoryLimit = self.cap
-        capped = bool(self.job and _k32.SetInformationJobObject(self.job, _EXTENDED_LIMIT_INFORMATION, ctypes.byref(info), ctypes.sizeof(info))
-                      and _k32.AssignProcessToJobObject(self.job, self.handle))
-        if not capped:          # e.g. a job the game is already in forbids nesting: the watchdog still runs
-            logs.warn("game", "game.memguard_cap_unavailable", pid=pid, error=ctypes.get_last_error(), then="watchdog only")
-            if self.job:
-                _k32.CloseHandle(self.job)
-            self.job = None
-        logs.info("game", "game.memguard", pid=pid, cap_mb=self.cap // MB if capped else None, floor_mb=self.floor // MB, ram_mb=self.total // MB,
-                  free_mb=free // MB)
-        self.thread = threading.Thread(target=self._watch, name="memguard", daemon=True)
+        if cap_mb:
+            self.job = _k32.CreateJobObjectW(None, None)
+            info = _EXT()
+            info.BasicLimitInformation.LimitFlags = _LIMIT_PROCESS_MEMORY
+            info.ProcessMemoryLimit = cap_mb * MB
+            if self.job and _k32.SetInformationJobObject(self.job, _EXTENDED_LIMIT_INFORMATION, ctypes.byref(info), ctypes.sizeof(info)) \
+                    and _k32.AssignProcessToJobObject(self.job, self.handle):
+                self.cap = cap_mb * MB
+            else:                               # e.g. a job the game is already in forbids nesting
+                logs.warn("game", "game.memguard_cap_unavailable", pid=pid, cap_mb=cap_mb, error=ctypes.get_last_error(), then="no cap")
+                if self.job:
+                    _k32.CloseHandle(self.job)
+                self.job = None
+        logs.info("game", "game.memguard", pid=pid, mode=self.mode, cap_mb=self.cap // MB if self.cap else None, floor_mb=self.floor // MB,
+                  ram_mb=total // MB, free_mb=free // MB)
+        self._closing = threading.Event()
+        self.thread = threading.Thread(target=self._run, name="memguard", daemon=True)
         self.thread.start()
 
-    def _watch(self):
+    def _run(self):
         try:
-            _k32.SetThreadPriority(_k32.GetCurrentThread(), 2)       # THREAD_PRIORITY_HIGHEST: keep sampling while the machine is short of memory
+            kill = self.mode == "kill"
+            if kill:
+                _k32.SetThreadPriority(_k32.GetCurrentThread(), 2)       # THREAD_PRIORITY_HIGHEST: keep sampling while the machine is short of memory
             samples = []
-            while _k32.WaitForSingleObject(self.handle, int(SAMPLE_S * 1000)) == 0x102:   # WAIT_TIMEOUT: still running
+            period = int((KILL_S if kill else WATCH_S) * 1000)
+            while not self._closing.is_set() and _k32.WaitForSingleObject(self.handle, period) == 0x102:   # WAIT_TIMEOUT: still running
                 now = time.monotonic()
-                free, _total = _free_ram()
-                samples.append((now, free, _commit(self.handle)))
-                while samples and now - samples[0][0] > WINDOW_S:
-                    samples.pop(0)
-                hit = runaway(samples, self.floor, GROW, WINDOW_S)
-                if hit:
-                    self._stop(hit, free, samples[-1][2])
-                    return
-        except Exception as e:            # never let the guard take the launcher down; the cap stays in place
+                free, _total, used, limit = _system()
+                commit, peak = _commit(self.handle)
+                low = self.watch.sample(now, free, commit, peak, used, limit)
+                if low:
+                    logs.warn("game", "game.memory_low", pid=self.pid, **low)
+                    logs.sync()                 # a PC that freezes next is reset by hand: these lines are why we looked
+                if kill:
+                    samples.append((now, free, commit))
+                    while samples and now - samples[0][0] > WINDOW_S:
+                        samples.pop(0)
+                    hit = runaway(samples, self.floor, GROW, WINDOW_S)
+                    if hit:
+                        self._stop(hit, free, commit)
+                        return
+            self.watch.life_peak(_commit(self.handle)[1])                # the process is gone (or the watch closes); its handle still answers
+        except Exception as e:            # never let the watch take the launcher down
             logs.swallowed("game", "game.memguard_watch_failed", e, pid=self.pid)
 
     def _stop(self, hit, free, commit):
@@ -187,7 +260,7 @@ class Guard:
         _k32.TerminateProcess(self.handle, STOP_CODE)
         self.stopped = {"grew_mb": grew // MB, "seconds": round(secs, 1), "free_mb": free // MB, "total_mb": self.total // MB,
                         "commit_mb": (commit or 0) // MB}
-        logs.warn("game", "game.memory_runaway", pid=self.pid, then="ended the game", **self.stopped)
+        logs.warn("game", "game.memory_runaway", pid=self.pid, then="ended the game (FH2MP_MEMGUARD=kill)", **self.stopped)
         try:
             path = os.path.join(self.folder, STOP_FILE)
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -199,15 +272,25 @@ class Guard:
             logs.swallowed("game", "game.memguard_note_failed", e, path=STOP_FILE)
 
     def peak(self):
-        """The game's highest private commit while it was in the job (bytes), or None."""
-        if not self.job:
-            return None
-        info = _EXT()
-        if not _k32.QueryInformationJobObject(self.job, _EXTENDED_LIMIT_INFORMATION, ctypes.byref(info), ctypes.sizeof(info), None):
-            return None
-        return info.PeakProcessMemoryUsed
+        """The game's highest commit (bytes), or None when nothing was read."""
+        return self.watch.peak
+
+    def summary(self):
+        """The fields of game.memory_peak (Watch.summary plus the cap, when one was set), or None."""
+        out = self.watch.summary()
+        if out is not None and self.cap:
+            out["cap_mb"] = self.cap // MB
+        return out
 
     def close(self):
+        """Ends the watch (the game has normally ended by now: the thread takes its last reading and returns at once). The handles are closed
+        only once the thread has left them."""
+        t = getattr(self, "thread", None)
+        if t is not None and t is not threading.current_thread():
+            self._closing.set()
+            t.join(WATCH_S + 1.0)
+            if t.is_alive():
+                return
         for attr in ("handle", "job"):
             h = getattr(self, attr, None)
             if h:
@@ -216,15 +299,15 @@ class Guard:
 
 
 def guard(popen, folder, env):
-    """Put the just-started game under the cap and the watchdog. -> Guard, or NoGuard. Never raises."""
+    """Start watching the just-started game. -> Guard, or NoGuard. Never raises."""
     pid = getattr(popen, "pid", None)
-    enabled, _cap = options(env)
-    if not WIN or not enabled or not isinstance(pid, int):
-        if WIN and not enabled:
+    mode, _cap = options(env)
+    if not WIN or mode == "off" or not isinstance(pid, int):
+        if WIN and mode == "off":
             logs.info("game", "game.memguard_off", reason="FH2MP_MEMGUARD=0")
         return NoGuard()
     try:
         return Guard(pid, folder, env)
     except Exception as e:
-        logs.warn("game", "game.memguard_unavailable", pid=pid, error=f"{type(e).__name__}: {e}", then="game runs without the memory guard")
+        logs.warn("game", "game.memguard_unavailable", pid=pid, error=f"{type(e).__name__}: {e}", then="game runs without the memory watch")
         return NoGuard()

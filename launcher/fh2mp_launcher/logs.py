@@ -94,6 +94,19 @@ def _write(text):
         pass
 
 
+def sync():
+    """Asks the system to put launcher.log on disk now: for the few lines that must survive a frozen PC being reset."""
+    try:
+        with _lock:
+            fd = os.open(os.path.join(paths.cache_dir(), "launcher.log"), os.O_RDWR)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+    except Exception:  # noqa: BLE001 - as _write: logging never stops the launcher
+        pass
+
+
 def event(level, sub, name, /, **fields):
     if not enabled(level, sub):
         return

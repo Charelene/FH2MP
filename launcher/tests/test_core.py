@@ -1545,7 +1545,7 @@ class DevModeTests(unittest.TestCase):
             self.assertEqual(rows["FH2MP shim"][1:], ("1.0.0-rc3", version.__version__ + " (server needs 1.1.2)", False))   # outdated: marked
             self.assertEqual(rows["Azimuth"][3], False)                          # no azimuth.exe in the folder
             self.assertEqual(rows["FH2 Mod Platform"][1], "not installed")
-            self.assertEqual(rows["Session for the game"][1], "none: the game starts offline")
+            self.assertEqual(rows["Session for the game"][1], "none yet: Play makes it")
             lc.shim_state = lambda: ("ours", version.__version__)
             self.assertEqual({r[0]: r for r in lc.status_lines()}["FH2MP shim"][3], True)
             shim.write_session(d, 0x9000000000001, "fh2.token", "https://lsp.example")
