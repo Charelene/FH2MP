@@ -895,8 +895,9 @@ class Launcher:
             return acct, notes
 
     def note_game_exit(self, code):
-        """The game's process ended (by itself, or ended by the memory guard). On Windows a crash shows as an NTSTATUS exit code, which is only
-        readable in hex. -> the memory guard's stop ({"grew_mb", "seconds", "free_mb", ...}) when it ended the game, else None."""
+        """The game's process ended. On Windows a crash shows as an NTSTATUS exit code, which is only readable in hex. Logs what the memory
+        watch measured (memguard.py). -> the watch's stop ({"grew_mb", "seconds", "free_mb", ...}) when FH2MP_MEMGUARD=kill ended the game,
+        else None."""
         began = getattr(self, "game_started_at", None)
         guard = getattr(getattr(self, "process", None), "memguard", None)
         if not isinstance(guard, (memguard.Guard, memguard.NoGuard)):
@@ -906,12 +907,10 @@ class Launcher:
                    ran_s=int(time.monotonic() - began) if began else None, offline=getattr(self, "offline_run", False) or None,
                    ended_by="memory guard" if stopped else None)
         if guard is not None:
-            try:
-                peak = guard.peak()
-                if peak is not None:
-                    logs.info("game", "game.memory_peak", peak_mb=peak // (1 << 20), cap_mb=(guard.cap or 0) // (1 << 20) or None)
-            finally:
-                guard.close()
+            guard.close()                   # first: the watch takes its last reading (the peak of the game's whole life)
+            seen = guard.summary()
+            if seen:
+                logs.info("game", "game.memory_peak", **seen)
         return stopped
 
     def play_offline(self, azimuth_window=False):
@@ -1155,7 +1154,7 @@ class Launcher:
         an_ok, an_ver = shim.anna_installed(d)
         out.append(("FH2 ANNA", an_ver if an_ok else "not installed", shim.anna_version(), shim.anna_complete(d)))
         session = os.path.exists(os.path.join(shim.bin_dir(d), shim.SESSION_FILE))
-        out.append(("Session for the game", "present (written by Play)" if session else "none: the game starts offline", "Play writes it", None))
+        out.append(("Session for the game", "present (written by Play)" if session else "none yet: Play makes it", "Play writes it", None))
         out.append(("Car database", "your own car packs kept: custom cars stay out of online events" if s["keep_car_packs"] else "the server's, put in place at Play", "-", None))
         out.append(("Connection", "TCP always" if s["tcp_fallback"] else "UDP, TCP when the probe fails" if s["tcp_auto"] else "UDP only", "-", None))
         out.append(("Mode", "offline" if s["offline_mode"] else "online", "-", None))

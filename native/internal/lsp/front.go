@@ -1027,7 +1027,11 @@ func (c *Core) OnLogin(xuid int64, ip, token string) {
 	c.AnnounceAuth(xuid, ip, token)
 }
 
-// OnLogout is a launcher signing out (after the game exits, or a profile window closed): the connections that session's ticket opened end.
+// OnLogout is a launcher signing out (after the game exits, or a profile window closed): the connections that session's ticket opened end, and the
+// player's seats in lobby sessions, reservations and tickets go (xbl.DropPlayer). An account has one live session (a sign-in deletes the older ones,
+// auth.Login), so after its logout no game of the account is online; a game that ended without leaving its lobby session (closed window, crash) would
+// otherwise stay an active member for up to xbl.ActiveMemberIdleSeconds and fill the lobby for the games that read the session (prod 2026-11-09,
+// see xbl.CountSessionMembers).
 func (c *Core) OnLogout(xuid int64, token string) {
 	tkey := auth.UdpTicketKey(token)
 	f := &c.front
@@ -1039,6 +1043,7 @@ func (c *Core) OnLogout(xuid int64, token string) {
 	}
 	f.mu.Unlock()
 	c.Xbl.AnnounceLogout(xuid, tkey)
+	c.Xbl.DropPlayer(fmt.Sprint(xuid))
 }
 
 // OnRevoke is a ban or kick: sessions and tickets go, and the game server ends the player's live UDP connections.
