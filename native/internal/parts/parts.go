@@ -55,6 +55,10 @@ func contains(s, sub string) bool {
 	return false
 }
 
+// BodyTables are keyed by a car body (CarBodyID), not by a car (Ordinal): their owner is the car whose body the car's slot 2 row installs, the
+// car itself for every stock car, the base car for a car pack's car (catalog.Tables.BodyOf).
+var BodyTables = map[string]bool{"CarBodyChassisStiffness": true, "CarBodyFrontBumper": true, "CarBodyHood": true, "CarBodyRearBumper": true, "CarBodySideSkirt": true}
+
 // expectedOwner: who a row in `table` must belong to for this car (ok=false when it cannot be told).
 func expectedOwner(t *catalog.Tables, table string, words []uint32) (int64, bool) {
 	kind := t.OwnerKind[table]
@@ -62,6 +66,11 @@ func expectedOwner(t *catalog.Tables, table string, words []uint32) (int64, bool
 	switch kind {
 	case "car":
 		if _, ok := t.TableIDs["CarBody"][body]; ok {
+			if BodyTables[table] {
+				if car, ok := t.BodyOf[body]; ok {
+					return car, true
+				}
+			}
 			return int64(body) / 1000, true
 		}
 	case "engine":

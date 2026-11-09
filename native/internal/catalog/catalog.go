@@ -37,6 +37,10 @@ type Tables struct {
 	RowOwner  map[string]map[uint32]int64
 	Stock     map[string]map[int64]uint32
 	Installs  map[string]map[uint32]int64
+	// BodyOf: a List_UpgradeCarBody row that installs another car's body -> that car (CarBodyID / 1000). A car pack's car (the FH2 Mod
+	// Platform's make_car_pack.py) gets body rows of its own that install its base car's body, so its rows in the body tables are the base
+	// car's; every stock car's body row installs its own body and has no entry (synced databases only, PR #426).
+	BodyOf map[uint32]int64
 }
 
 // Catalog is the car policy and part data.
@@ -234,6 +238,10 @@ func (c *Catalog) Clone() *Catalog {
 			cp[a] = b
 		}
 		t.Installs[k] = cp
+	}
+	t.BodyOf = make(map[uint32]int64, len(c.Parts.BodyOf))
+	for k, v := range c.Parts.BodyOf {
+		t.BodyOf[k] = v
 	}
 	n.Parts = &t
 	return &n
