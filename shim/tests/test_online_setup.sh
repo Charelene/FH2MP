@@ -71,6 +71,16 @@ static long fake_send(unsigned char *self, const char *svc, const char *method, 
     return 77;
 }
 
+static int fake_hr;
+static int fake_measure_calls;
+static int *fake_measure(int *result, unsigned probes, unsigned timeout_ms, unsigned limit)
+{
+    (void)probes; (void)timeout_ms; (void)limit;
+    fake_measure_calls++;
+    *result = fake_hr;
+    return result;
+}
+
 int main(void)
 {
     static const unsigned char signin[] = {0x41, 0x80, 0x79, 0x20, 0x00, 0x74, 0x44, 0x49, 0x8B, 0x49, 0x18};
@@ -123,6 +133,28 @@ int main(void)
     CHECK(g_img[0x17b1b58] == 0xBB && g_img[0x17b1b5d] == 0xB8 && g_img[0x17b1b62] == 0x83);
     CHECK(patch_qos_timeout());
     CHECK(g_patches == 2);
+
+    /* the QoS measurement result: other code -> not hooked; the expected head -> hooked; 0x800704cf becomes 0, any other hr passes */
+    {
+        static const unsigned char qm_head[] = {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x48, 0x08, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57};
+        int res = 99;
+        g_hook_target = NULL;
+        CHECK(!patch_qos_measure_result());
+        CHECK(g_hook_target == NULL);
+        memcpy(g_img + FH2_QOS_MEASURE_RVA, qm_head, sizeof qm_head);
+        CHECK(patch_qos_measure_result());
+        CHECK(g_hook_target == g_img + FH2_QOS_MEASURE_RVA && g_hook_detour == (void *)qos_measure);
+        g_qos_measure_original = fake_measure;
+        fake_hr = (int)0x800704CF;
+        CHECK(qos_measure(&res, 8, 1000, 200) == &res && res == 0 && g_qos_measure_fixed == 1);
+        fake_hr = (int)0x80004005;
+        CHECK(qos_measure(&res, 8, 1000, 200) == &res && res == (int)0x80004005 && g_qos_measure_fixed == 1);
+        fake_hr = 0;
+        CHECK(qos_measure(&res, 8, 1000, 200) == &res && res == 0 && g_qos_measure_fixed == 1);
+        fake_hr = (int)0x800704CF;
+        CHECK(qos_measure(&res, 8, 1000, 200) == &res && res == 0 && g_qos_measure_fixed == 2);
+        CHECK(fake_measure_calls == 4);
+    }
 
     /* the web transport watch: hooked only on the expected code; a call before the logon is counted (Live ones apart) and passed on */
     {

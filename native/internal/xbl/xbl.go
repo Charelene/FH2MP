@@ -544,6 +544,27 @@ func serversBlock() *Dict {
 // ServersBlock is the allocated game server, as the game reads it: servers.gameServerPlatform.properties.custom.
 func ServersBlock() pyjson.Obj { return ToJSON(serversBlock()).(pyjson.Obj) }
 
+// AllocateServer answers a GSMS AllocateCluster for the session the request names (sessionPath is the "sessionId" of the request body): the allocated
+// game server goes into that session's servers, the place the game reads it from. After the cluster answer Network::Live::Session polls the session
+// and ends the request with "Unable to allocate a game server" when the block never shows up (win1 -> dev 2026-11-08: the private Free Roam the game
+// creates itself allocates into its QoS session, template defaultTemplate_qos, not into a lobby session). The change number moves so a poller sees a
+// change. It reports false when the path is not a session path or the session is unknown.
+func (s *Server) AllocateServer(sessionPath string) bool {
+	key, ok := ParsePath(sessionPath)
+	if !ok {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec := s.sessions[lowerKey(key)]
+	if rec == nil {
+		return false
+	}
+	rec.Servers = serversBlock()
+	rec.Change++
+	return true
+}
+
 // PutSession creates or updates a session and returns (http status, document or nil). xuid is the authenticated caller; the server's own calls
 // leave it "" and are not restricted. A caller may create a session (and becomes its owner), join it, and write, update or remove only its own member
 // entry. Only a member or the owner may change the session's properties or servers.

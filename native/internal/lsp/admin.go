@@ -606,6 +606,21 @@ func gsmsCluster() []byte {
 	return []byte(s)
 }
 
+// clusterSessionID is the session a GSMS AllocateCluster request names: {"sessionId": "/serviceconfigs/<scid>/sessionTemplates/<template>/sessions/<name>"}.
+func clusterSessionID(body []byte) string {
+	v, err := pyjson.Parse(string(body))
+	if err != nil {
+		return ""
+	}
+	o, ok := v.(pyjson.Obj)
+	if !ok {
+		return ""
+	}
+	id, _ := o.Get("sessionId")
+	s, _ := id.(string)
+	return s
+}
+
 // verifyStrings: XSAPI uses `stringstoVerify` (lower-case t), with one result per input; the old spelling stays accepted.
 func verifyStrings(body []byte) (pyjson.Obj, error) {
 	v, err := pyjson.Parse(string(body))

@@ -1171,40 +1171,61 @@ static int patch_matchmaking_allowed(void)
  */
 #define FH2_QOS_JNE_RVA 0x17941dbu
 #define FH2_QOS_FLAG_RVA 0x1794216u
-static int patch_qos_assume_success(void)
+/*
+ * The same lambda for the game's own private session (Free Roam / Road Trip started from the Car Meet, Nerd::CreatePrivateGame;
+ * traced on win1 -> dev 2026-11-08: the continuation FUN_14178f060 throws "wait() cannot be called on a default constructed task",
+ * [manager+0x279] stays 0, MatchRequester::Tick delivers false to FUN_1417ae470 and the request fails with reason 2). It is
+ * FUN_141794840, same layout, flag at +0x279 and the callback slot at +0x1d8:
+ *   test rdi,rdi ; jne                      (RVA 0x1794907)
+ *   mov byte [rax+0x279], 0                 (RVA 0x179493f)
+ * Same switch, FH2MP_NO_QOSOK.
+ */
+#define FH2_QOS_PRIV_JNE_RVA 0x1794907u
+#define FH2_QOS_PRIV_FLAG_RVA 0x179493fu
+
+/* Both changes of one lambda, or neither: half of it would skip the association and still report failure. */
+static int qos_skip_association(const char *what, unsigned jne_rva, const unsigned char *want_jne, unsigned flag_rva,
+                                const unsigned char *want_flag)
 {
-    static const unsigned char want_jne[] = {0x48, 0x85, 0xFF, 0x75, 0x56, 0x48, 0x8B, 0x1E};
-    static const unsigned char want_flag[] = {0xC6, 0x80, 0x78, 0x02, 0x00, 0x00, 0x00};
     static const unsigned char nop2[] = {0x90, 0x90}, one = 0x01;
     unsigned char *img = find_fh2_image();
     unsigned char *a, *b;
-    int i;
 
     if (!img) {
         return 0;
     }
-    a = img + FH2_QOS_JNE_RVA - 3;
-    b = img + FH2_QOS_FLAG_RVA - 6;
-    (void)i;
-    if (!code_is("qosok", "the match-request QoS lambda (test rdi / jne)", img, FH2_QOS_JNE_RVA - 3, want_jne, sizeof want_jne) ||
-        !code_is("qosok", "the match-request QoS lambda (flag store)", img, FH2_QOS_FLAG_RVA - 6, want_flag, sizeof want_flag)) {
+    a = img + jne_rva - 3;
+    b = img + flag_rva - 6;
+    if (!code_is("qosok", what, img, jne_rva - 3, want_jne, 8) || !code_is("qosok", what, img, flag_rva - 6, want_flag, 7)) {
         return 0;
     }
     {
-        /* both or neither: half of it would skip the association and still report failure */
         FH2Hook *ha = g_api->patch_bytes(g_mod, plat_tag("qosok: skip the secure association"), a + 3, want_jne + 3, nop2, 2);
         FH2Hook *hb = ha ? g_api->patch_bytes(g_mod, plat_tag("qosok: report success"), b + 6, want_flag + 6, &one, 1) : NULL;
         if (!hb || !g_api->enable_hooks(g_mod, ha) || !g_api->enable_hooks(g_mod, hb)) {
             if (ha) {
                 g_api->disable_hooks(g_mod, ha);
             }
-            plat_failed("qosok: match-request QoS lambda", ha ? b + 6 : a + 3,
+            plat_failed(what, ha ? b + 6 : a + 3,
                         !ha ? "refused the skip of the secure association" : !hb ? "refused the success flag (the skip is undone)"
                                                                                : "could not switch both changes on (the skip is undone)");
             return 0;
         }
     }
     return 1;
+}
+
+static int patch_qos_assume_success(void)
+{
+    static const unsigned char want_jne[] = {0x48, 0x85, 0xFF, 0x75, 0x56, 0x48, 0x8B, 0x1E};
+    static const unsigned char want_flag[] = {0xC6, 0x80, 0x78, 0x02, 0x00, 0x00, 0x00};
+    static const unsigned char want_jne_priv[] = {0x48, 0x85, 0xFF, 0x75, 0x53, 0x49, 0x8B, 0x1E};
+    static const unsigned char want_flag_priv[] = {0xC6, 0x80, 0x79, 0x02, 0x00, 0x00, 0x00};
+    int public_ok = qos_skip_association("the match-request QoS lambda", FH2_QOS_JNE_RVA, want_jne, FH2_QOS_FLAG_RVA, want_flag);
+    int private_ok = qos_skip_association("the private-game QoS lambda", FH2_QOS_PRIV_JNE_RVA, want_jne_priv, FH2_QOS_PRIV_FLAG_RVA,
+                                          want_flag_priv);
+
+    return public_ok && private_ok;
 }
 
 /*
@@ -5554,6 +5575,12 @@ static DWORD WINAPI late_init(LPVOID unused)
             wchar_t qt_env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_QOSTIMEOUT", qt_env, 8) == 0) {
                 patch_qos_timeout();
+            }
+        }
+        {
+            wchar_t qr_env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_QOSRESULT", qr_env, 8) == 0) {
+                patch_qos_measure_result();
             }
         }
         {

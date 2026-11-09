@@ -100,6 +100,12 @@ func runTraceN(t *testing.T, name string, seed uint64, workers int) {
 		t.Setenv(k, v)
 	}
 	t.Setenv("FH2MP_TRAFFIC_CARS", filepath.Join(data, "trafficcars.txt"))
+	// The traces were recorded when King and Infection lasted 240 s; the server default is 300 s now.
+	for _, tm := range TagModes {
+		old := tm.Seconds
+		tm.Seconds = 240
+		defer func(tm *TagMode, old float64) { tm.Seconds = old }(tm, old)
+	}
 	// The traces were recorded when a car players cannot get was kicked; the server default is "events" now (it drives in Free Roam only).
 	oldCarPolicy := CarPolicy
 	CarPolicy = "kick"

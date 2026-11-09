@@ -354,6 +354,13 @@ func (c *Core) handle(rw respWriter, r *Req, req *http.Request) {
 	case host == "gameserverms.xboxlive.com" && strings.HasSuffix(trail, "/clusters"):
 		out, ctype = gsmsCluster(), "application/json"
 		c.Log(r, "  GSMS cluster -> "+string(out))
+		if sid := clusterSessionID(body); sid == "" {
+			c.Warn(r, "  GSMS cluster: the request names no session, so no server is written into one")
+		} else if c.Xbl.AllocateServer(sid) {
+			c.Log(r, "  GSMS cluster: the allocated server is now in session "+sid)
+		} else {
+			c.Warn(r, "  GSMS cluster: session "+sid+" is not known, so the server is not written into it")
+		}
 	case host == "client-strings.xboxlive.com" && strings.HasSuffix(trail, "/system/strings/validate"):
 		verified, err := verifyStrings(body)
 		if err != nil {

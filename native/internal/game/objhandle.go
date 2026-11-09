@@ -356,6 +356,12 @@ func (w *World) handleGameOptions(peer *Peer, addr Addr, mtype, router, oid, seq
 		if rawSize != size || !rawPayload.Equal(payload) {
 			w.Logf("%d GameOptions NumLaps corrected to %d (maximum %d)", addr.Port, w.FreeRoamLaps, gameopts.MaxLaps)
 		}
+	} else {
+		var fixed *gameopts.Options
+		if s, p, c := w.rtFixLaps(addr.Port, size, payload); c != nil {
+			size, payload, fixed = s, p, c
+		}
+		correction = fixed
 	}
 	kind := "update"
 	if first {
@@ -364,6 +370,9 @@ func (w *World) handleGameOptions(peer *Peer, addr Addr, mtype, router, oid, seq
 	w.Logf("%d GameOptions %s relayed (%d bits, own seq %d, mtype %d)", addr.Port, kind, size, seq, mtype)
 	if CarCapture {
 		w.Logf("  GameOptions payload hex=%s", hexOf(payload, size))
+	}
+	if w.Roadtrip {
+		w.logRoadTripLaps(addr.Port, rawSize, rawPayload)
 	}
 	unchanged := w.GameOptions != nil && w.GameOptions.Size == size && w.GameOptions.Payload.Equal(payload)
 	w.GameOptions = &gameopts.Options{Size: size, Payload: payload}

@@ -194,10 +194,13 @@ type TagMode struct {
 	PerIt   int
 }
 
+// TagSeconds is how long a King or Infection event lasts when the leader did not pick a time (5 minutes; FH2MP_TAG_SECONDS).
+var TagSeconds = envFloat("FH2MP_TAG_SECONDS", 300)
+
 // TagModes by RaceModes.id.
 var TagModes = map[int]*TagMode{
-	RaceModeKing:      {"King", 240.0, 6},
-	RaceModeInfection: {"Infection", 240.0, 0},
+	RaceModeKing:      {"King", TagSeconds, 6},
+	RaceModeInfection: {"Infection", TagSeconds, 0},
 }
 
 // TagAssignRepeats: seconds after the first send.
