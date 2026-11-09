@@ -84,6 +84,61 @@ func carPosition(rest bits.Int) [3]float64 {
 
 func (w *World) peerXuid(p *Peer) string { return fmt.Sprintf("%#x", p.Xuid) }
 
+// CustomCarID: car is one the game data does not have (a car pack's own car, not a DLC car or a car players cannot get).
+func (w *World) CustomCarID(car int64) bool {
+	c := w.cat()
+	_, blocked := c.Blocked[int(car)]
+	_, known := c.KnownCars[int(car)]
+	_, dlc := DlcCars[car]
+	return !blocked && len(c.KnownCars) > 0 && !known && !dlc
+}
+
+// standinSetup turns a custom car's setup into the stand-in car's complete stock setup: its stock parts, stock tune, no wheel style, livery or
+// paint of the custom car (playersetup.StockCorrection, the server's repair of a car with foreign parts) and the stand-in as Model. The custom
+// car's own paint and livery ids (e.g. colour 9024000) exist for no stock car, and a remote car built with them is not drawn at all.
+func (w *World) standinSetup(peer *Peer, car int64, values map[int]bits.Int) (int, bits.Int, bool) {
+	s := w.standinFor(peer, car)
+	stock, ok := parts.StockList(w.cat().Parts, s)
+	if !ok {
+		return 0, nil, false
+	}
+	out := make(map[int]bits.Int, len(values)+4)
+	for k, v := range values {
+		out[k] = v
+	}
+	for k, v := range w.stockCorrection(stock, s) {
+		out[k] = v
+	}
+	if _, has := values[playersetup.Model]; has {
+		out[playersetup.Model] = bits.FromUint64(uint64(s))
+	}
+	size, payload, err := encodeValues(out)
+	if err != nil {
+		return 0, nil, false
+	}
+	return size, payload, true
+}
+
+// standinModel writes the stand-in car into the setup's Model value (var 103) when it has one: the others' games pick the car to draw from the
+// model, not from the part list, and a model they do not have becomes the game's placeholder car (1215 NUL_Car_00, drawn as a VW Bora).
+func (w *World) standinModel(peer *Peer, car int64, decoded map[int]playersetup.Field, payload bits.Int) bits.Int {
+	f, ok := decoded[playersetup.Model]
+	if !ok || UnknownCarPolicy != "standin" {
+		return payload
+	}
+	s := w.standinFor(peer, car)
+	if f.Width < 64 && uint64(s) >= 1<<uint(f.Width) {
+		return payload
+	}
+	return replaceBits(payload, f.Offset, f.Width, bits.FromUint64(uint64(s)))
+}
+
+// CustomCar: the peer drives a car the game data does not have (a car pack's own car, not a DLC car). It may drive in Free Roam, where the others
+// see the stand-in car, but it never races: events and Road Trip refuse it (EligibleForEvent).
+func (w *World) CustomCar(peer *Peer) bool {
+	return peer.ModelID != nil && w.CustomCarID(*peer.ModelID)
+}
+
 // CarModelSeen: the client told us its car. True when the car object must not be relayed to the others (policy kick).
 func (w *World) CarModelSeen(peer *Peer, mid int64) bool {
 	peer.ModelID = i64p(mid)
@@ -136,9 +191,29 @@ func (w *World) CarModelSeen(peer *Peer, mid int64) bool {
 		}
 		return true
 	}
+	if CarPolicy == "events" {
+		if k := fmt.Sprintf("blocked-car:%d", mid); !peer.Flagged(k) {
+			peer.Flag(k)
+			w.Logf("CAR POLICY (events): owner %d xuid %#x uses car %d (%s), which players cannot get: it drives in Free Roam, events and Road Trip refuse it",
+				peer.Owner, peer.Xuid, mid, name)
+		}
+		return false
+	}
 	w.Logf("CAR POLICY (log only): owner %d xuid %#x uses car %d (%s), which players cannot get", peer.Owner, peer.Xuid, mid, name)
 	return false
 }
+
+// BlockedCar: the peer drives a car players cannot get (a traffic-only car), which events and Road Trip refuse under CarPolicy "events".
+func (w *World) BlockedCar(peer *Peer) bool {
+	if peer.ModelID == nil || CarPolicy != "events" {
+		return false
+	}
+	_, blocked := w.cat().Blocked[int(*peer.ModelID)]
+	return blocked
+}
+
+// NotForEvents: the peer's car may drive in Free Roam but not race: a car pack's own car or a car players cannot get.
+func (w *World) NotForEvents(peer *Peer) bool { return w.CustomCar(peer) || w.BlockedCar(peer) }
 
 func dist3(a, b [3]float64) float64 {
 	dx, dy, dz := a[0]-b[0], a[1]-b[1], a[2]-b[2]
@@ -332,6 +407,7 @@ func subOne(x bits.Int) bits.Int {
 
 // CheckParts decodes before validating; returns (violation, withhold, size, payload).
 func (w *World) CheckParts(peer *Peer, size int, payload bits.Int, oid int) (bool, bool, int, bits.Int) {
+	w.standinApplied = false
 	if PartPolicy == "off" {
 		return false, false, size, payload
 	}
@@ -374,6 +450,17 @@ func (w *World) CheckParts(peer *Peer, size int, payload bits.Int, oid int) (boo
 		peer.CarSeenAt = w.Mono()
 		if _, ok := tables.TableIDs["CarBody"][words[2]]; !ok {
 			bad, hide, np := w.UnknownCar(peer, payload, decoded[playersetup.Parts].Offset, words)
+			if !hide && UnknownCarPolicy == "standin" {
+				w.standinApplied = true
+				// a stand-in the launcher named is a real car: it gets a complete stock setup. The default stand-in is the game's placeholder car,
+				// which draws whatever the setup says (the recorded traces keep that path)
+				if w.standinFor(peer, car) != StandinCar {
+					if n2, p2, ok := w.standinSetup(peer, car, values); ok {
+						return bad, hide, n2, p2
+					}
+				}
+				np = w.standinModel(peer, car, decoded, np)
+			}
 			return bad, hide, size, np
 		}
 		if m, ok := values[playersetup.Model]; ok && int64(m.Uint64()) != car {
@@ -437,6 +524,10 @@ func (w *World) CheckParts(peer *Peer, size int, payload bits.Int, oid int) (boo
 				return true, false, size, payload
 			}
 		}
+	} else if haveCar && w.CustomCarID(car) {
+		// a setup that names only the model (no part list) of a custom car: the others' games look the model up, so it is the stand-in too
+		w.standinApplied = UnknownCarPolicy == "standin"
+		return true, false, size, w.standinModel(peer, car, decoded, payload)
 	} else if haveCar && peer.PartsRepairCar != nil && car != *peer.PartsRepairCar {
 		if peer.PartNotes < 3 {
 			peer.PartNotes++
@@ -743,7 +834,7 @@ func (w *World) UnknownCar(peer *Peer, payload bits.Int, offset int, words []uin
 	what := "log only"
 	switch UnknownCarPolicy {
 	case "standin":
-		what = fmt.Sprintf("the others see car %d", StandinCar)
+		what = fmt.Sprintf("the others see car %d", w.standinFor(peer, car))
 	case "kick":
 		what = "ending the connection"
 	}
@@ -760,10 +851,11 @@ func (w *World) UnknownCar(peer *Peer, payload bits.Int, offset int, words []uin
 		return true, true, payload
 	}
 	if UnknownCarPolicy == "standin" {
-		stand, ok := parts.StockList(w.cat().Parts, StandinCar)
+		standin := w.standinFor(peer, car)
+		stand, ok := parts.StockList(w.cat().Parts, standin)
 		if !ok {
 			w.LogEvery([2]any{"no-standin", car}, 60.0, fmt.Sprintf("CAR POLICY: car %d is unknown and the stand-in car %d has no stock part list either (owner %d xuid %#x): the object is withheld",
-				car, StandinCar, peer.Owner, peer.Xuid), diag.Warn)
+				car, standin, peer.Owner, peer.Xuid), diag.Warn)
 			return true, true, payload
 		}
 		return true, false, parts.WriteParts(payload, offset, stand)
@@ -855,4 +947,83 @@ func refusalText(r gameopts.Rule, c *Choices) string {
 		need += fmt.Sprintf(" with PI %d-%d", r.Min, r.Max)
 	}
 	return fmt.Sprintf("FH2MP: you were not let into the event: your car is %s, the event needs %s. Pick a car that fits and try again.", own, need)
+}
+
+// MaxStandins caps the custom cars one player can name a stand-in for (control "standins").
+const MaxStandins = 64
+
+// parseStandins reads "<custom>:<candidate>/<candidate>...,..." (the launcher's choice, closest stock car first, from the car pack's own data):
+// each custom car gets the first candidate the game data has, players can own and has a stock part list. -> the stand-ins, one note per car.
+func (h *Hub) parseStandins(field string) (map[int64]int64, map[int64]bool, []string) {
+	cat := h.catalogPtr.Load()
+	out := map[int64]int64{}
+	owned := map[int64]bool{}
+	var notes []string
+	for i, item := range strings.Split(field, ",") {
+		if i >= MaxStandins {
+			notes = append(notes, fmt.Sprintf("%d more ignored (limit %d)", len(strings.Split(field, ","))-MaxStandins, MaxStandins))
+			break
+		}
+		custom, list, ok := strings.Cut(item, ":")
+		car, err := strconv.ParseInt(custom, 10, 64)
+		if !ok || err != nil || car <= 0 {
+			notes = append(notes, fmt.Sprintf("%q unreadable", item))
+			continue
+		}
+		owned[car] = true
+		chosen := int64(0)
+		for _, c := range strings.Split(list, "/") {
+			id, err := strconv.ParseInt(c, 10, 64)
+			if err != nil || cat == nil {
+				continue
+			}
+			_, known := cat.KnownCars[int(id)]
+			_, blocked := cat.Blocked[int(id)]
+			if _, stock := parts.StockList(cat.Parts, id); known && !blocked && stock {
+				chosen = id
+				break
+			}
+		}
+		if chosen == 0 {
+			notes = append(notes, fmt.Sprintf("car %d: no usable candidate in %q, the others see car %d", car, list, StandinCar))
+			continue
+		}
+		out[car] = chosen
+		notes = append(notes, fmt.Sprintf("car %d -> %d", car, chosen))
+	}
+	return out, owned, notes
+}
+
+// HasCustomCars: the player's launcher listed custom cars (a car pack's own cars).
+func (w *World) HasCustomCars(p *Peer) bool {
+	return w.Hub != nil && len(w.Hub.CustomCars[p.Xuid]) > 0
+}
+
+// RealCarsFor: q may see sender's custom cars as they are, because q's game has every custom car sender's launcher listed (the same car pack).
+// Fixed for a pair for the whole session (the lists come at sign-in), so q gets one version of each of sender's objects, never a mix.
+func (w *World) RealCarsFor(sender, q *Peer) bool {
+	if w.Hub == nil {
+		return false
+	}
+	have := w.Hub.CustomCars[q.Xuid]
+	s := w.Hub.CustomCars[sender.Xuid]
+	if len(s) == 0 {
+		return false
+	}
+	for car := range s {
+		if !have[car] {
+			return false
+		}
+	}
+	return true
+}
+
+// standinFor is the stock car the others see for a player's custom car: the player's own stand-in when the launcher named one, else StandinCar.
+func (w *World) standinFor(peer *Peer, car int64) int64 {
+	if w.Hub != nil {
+		if s, ok := w.Hub.Standins[peer.Xuid][car]; ok {
+			return s
+		}
+	}
+	return StandinCar
 }

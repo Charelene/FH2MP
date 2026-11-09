@@ -342,6 +342,10 @@ class Api:
     def upload_gamerpic(self, token, png):
         return self._call("PUT", "/v1/me/gamerpic", png, token=token, ctype="image/png")
 
+    def put_standins(self, token, standins):
+        """The stock cars the others see for this player's custom cars ("<custom>:<candidate>/...,...", gamedb.custom_standins)."""
+        return self._call("PUT", "/v1/me/standins", {"standins": standins}, token=token)
+
     def clear_gamerpic(self, token):
         return self._call("DELETE", "/v1/me/gamerpic", token=token)
 

@@ -143,3 +143,65 @@ class SessionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BasePartsTests(unittest.TestCase):
+    def test_lists_the_part_tables_and_the_stock_cars_of_the_servers_database(self):
+        import sqlite3
+        az = tempfile.mkdtemp()
+        os.makedirs(os.path.join(az, "fh2mp"))
+        con = sqlite3.connect(os.path.join(az, *gamedb.LOCAL))
+        con.executescript("CREATE TABLE List_UpgradeEngine (Id INTEGER); INSERT INTO List_UpgradeEngine VALUES (12), (5);"
+                          "CREATE TABLE List_UpgradeTireCompound (Id INTEGER); INSERT INTO List_UpgradeTireCompound VALUES (900);"
+                          "CREATE TABLE List_UpgradeCarBodyWeightPack (Id INTEGER); INSERT INTO List_UpgradeCarBodyWeightPack VALUES (7);"
+                          "CREATE TABLE Data_Car (Id INTEGER, ClassID INTEGER, PerformanceIndex REAL); INSERT INTO Data_Car VALUES (1005, 3, 0.512);")
+        con.commit()
+        con.close()
+        self.assertEqual(gamedb.write_base_parts(az), 5)
+        with open(os.path.join(az, *gamedb.BASE_PARTS), "rb") as f:
+            self.assertEqual(f.read().decode("ascii").splitlines(),
+                             ["fh2mp-base-parts 1", "p Engine 5", "p Engine 12", "p TireCompound 900", "c 1005 3 512000"])   # tables the shim does not check are left out
+
+    def test_an_unreadable_database_is_an_error(self):
+        az = tempfile.mkdtemp()
+        os.makedirs(os.path.join(az, "fh2mp"))
+        with open(os.path.join(az, *gamedb.LOCAL), "wb") as f:
+            f.write(b"not a database" * 100)
+        with self.assertRaises(gamedb.GameDbError):
+            gamedb.write_base_parts(az)
+
+
+class StandinTests(unittest.TestCase):
+    def test_a_custom_car_gets_the_closest_stock_cars_of_its_category(self):
+        import json
+        import sqlite3
+        az = tempfile.mkdtemp()
+        os.makedirs(os.path.join(az, "fh2mp"))
+        con = sqlite3.connect(os.path.join(az, *gamedb.LOCAL))
+        con.executescript("CREATE TABLE Data_Car (Id INTEGER, ClassID INTEGER, PerformanceIndex REAL);"
+                          "CREATE TABLE Data_Car_Buckets (CarId INTEGER, CarBucket INTEGER, BucketHero INTEGER);"
+                          "INSERT INTO Data_Car VALUES (1, 5, 0.95), (2, 4, 0.80), (3, 7, 1.0), (4, 5, 0.99);"
+                          "INSERT INTO Data_Car_Buckets VALUES (1, 26, 0), (2, 26, 0), (3, 10, 0), (4, 3, 0);")
+        con.commit()
+        con.close()
+        mod = os.path.join(az, "mods", "Pack")
+        os.makedirs(mod)
+        with open(os.path.join(mod, "mod.json"), "w") as f:
+            json.dump({"database": "database.json"}, f)
+        with open(os.path.join(mod, "database.json"), "w") as f:
+            json.dump({"tables": {"Data_Car": {"insert": [{"Id": 9024, "ClassID": 7, "PerformanceIndex": 1.1}, {"Id": 2, "ClassID": 4}]},
+                                  "Data_Car_Buckets": {"insert": [{"CarId": 9024, "CarBucket": 26}]}}}, f)
+        # same category first (closest PI first), then the same class; car 2 is the server's own, so it is no custom car
+        self.assertEqual(gamedb.custom_standins(az), "9024:1/2/3")
+        with open(os.path.join(mod, "database.json"), "w") as f:
+            json.dump({"tables": {"Data_Car": {"insert": [{"Id": 9024, "ClassID": 7, "PerformanceIndex": 1.1}, {"Id": 9031, "ClassID": 99}]},
+                                  "Data_Car_Buckets": {"insert": [{"CarId": 9024, "CarBucket": 26}]}}}, f)
+        self.assertEqual(gamedb.custom_standins(az), "9024:1/2/3,9031:0")    # no candidate: listed all the same, so the server knows it is here
+        bad = os.path.join(az, "mods", "Evil")
+        os.makedirs(bad)
+        with open(os.path.join(bad, "mod.json"), "w") as f:
+            json.dump({"database": "../../fh2mp/gamedbRC.slt"}, f)
+        self.assertEqual(gamedb.custom_standins(az), "9024:1/2/3,9031:0")   # a path out of the mod's folder is not read
+
+    def test_no_car_packs_nothing_to_send(self):
+        self.assertEqual(gamedb.custom_standins(tempfile.mkdtemp()), "")

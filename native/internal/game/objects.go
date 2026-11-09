@@ -162,6 +162,19 @@ func (w *World) blApply(peer *Peer, what string, out []bucketlist.Send, text str
 
 // RememberAndRelay stores a client's object message in its history and relays it to the others.
 func (w *World) RememberAndRelay(peer *Peer, mtype, router, oid int, tid *int, seq, size int, payload bits.Int) {
+	w.rememberAndRelay(peer, mtype, router, oid, tid, seq, size, payload, nil)
+}
+
+// relayVariant is an object message as the player sent it, before its custom car became a stand-in.
+type relayVariant struct {
+	size    int
+	payload bits.Int
+}
+
+// rememberAndRelay is RememberAndRelay with the real version of a message whose custom car was replaced by a stand-in (real, nil when the
+// message was not changed). Once an object had one, its real history is kept next to Objs (RealObjs, same numbering), and the players whose
+// games have the sender's custom cars (RealCarsFor) get that version, live and when they join later.
+func (w *World) rememberAndRelay(peer *Peer, mtype, router, oid int, tid *int, seq, size int, payload bits.Int, real *relayVariant) {
 	rb := netv2.RouterBits[router]
 	idBits, typeBits := rb[0], rb[1]
 	if peer.Owner != 0 || peer.Xuid != 0 {
@@ -175,6 +188,10 @@ func (w *World) RememberAndRelay(peer *Peer, mtype, router, oid int, tid *int, s
 			if n > 0 {
 				w.Logf("%d router %d object %d: user id rewritten x%d -> %#x for other clients", peer.Addr.Port, router, oid, n, newID)
 			}
+			if real != nil {
+				rp, _ := netv2.RewriteXuid(real.payload, real.size, newID)
+				real = &relayVariant{real.size, rp}
+			}
 		}
 	}
 	key := ObjKey{router, oid}
@@ -186,7 +203,18 @@ func (w *World) RememberAndRelay(peer *Peer, mtype, router, oid int, tid *int, s
 	if tid != nil {
 		t = *tid
 	}
+	rhist, track := peer.RealObjs[key]
+	if real != nil && !track {
+		rhist, track = append([]replay.Entry(nil), hist...), true
+	}
 	hist = append(hist, replay.Entry{Type: mtype, TID: t, Seq: seqN, Size: size, Payload: payload})
+	if track {
+		re := hist[len(hist)-1]
+		if real != nil {
+			re.Size, re.Payload = real.size, real.payload
+		}
+		rhist = append(rhist, re)
+	}
 	if router == 1 && size >= 200 {
 		kind := "update"
 		if mtype == netv2.MsgObjectCreate {
@@ -205,8 +233,20 @@ func (w *World) RememberAndRelay(peer *Peer, mtype, router, oid int, tid *int, s
 		if len(hist) > RelayHistoryCap {
 			hist = append(hist[:1], hist[len(hist)-RelayHistoryCap+1:]...)
 		}
+		if track {
+			rhist = replay.Compact(router, rhist, netv2.MsgObjectUpdate)
+			if len(rhist) > RelayHistoryCap {
+				rhist = append(rhist[:1], rhist[len(rhist)-RelayHistoryCap+1:]...)
+			}
+		}
 	}
 	peer.Objs.Set(key, hist)
+	if track {
+		if peer.RealObjs == nil {
+			peer.RealObjs = map[ObjKey][]replay.Entry{}
+		}
+		peer.RealObjs[key] = rhist
+	}
 	if peer.Owner == 0 {
 		return
 	}
@@ -215,9 +255,16 @@ func (w *World) RememberAndRelay(peer *Peer, mtype, router, oid int, tid *int, s
 		tidv = uint64(*tid)
 	}
 	owner := peer.Owner
-	w.RelayNumbered(peer, key, n, func(sq int) netv2.Msg {
+	var realBuild func(int) netv2.Msg
+	if track {
+		re := rhist[len(rhist)-1]
+		realBuild = func(sq int) netv2.Msg {
+			return netv2.RelayObjectMessage(uint64(mtype), uint64(router), uint64(oid), uint64(owner), tidv, uint64(sq), idBits, typeBits, re.Size, re.Payload)
+		}
+	}
+	w.relayNumbered(peer, key, n, func(sq int) netv2.Msg {
 		return netv2.RelayObjectMessage(uint64(mtype), uint64(router), uint64(oid), uint64(owner), tidv, uint64(sq), idBits, typeBits, size, payload)
-	})
+	}, realBuild)
 }
 
 func maxInt(a, b int) int {
@@ -233,6 +280,7 @@ func (w *World) RelayHeldObjects(peer *Peer) {
 		hist, _ := peer.Objs.Get(key)
 		rb := netv2.RouterBits[key.Router]
 		idBits, typeBits := rb[0], rb[1]
+		rhist, track := peer.RealObjs[key]
 		for n := range hist {
 			e := hist[n]
 			if peer.Xuid == 0 {
@@ -240,9 +288,20 @@ func (w *World) RelayHeldObjects(peer *Peer) {
 				hist[n] = e
 			}
 			e2, owner := e, peer.Owner
-			w.RelayNumbered(peer, key, n, func(sq int) netv2.Msg {
+			var realBuild func(int) netv2.Msg
+			if track && n < len(rhist) {
+				r := rhist[n]
+				if peer.Xuid == 0 {
+					r.Payload, _ = netv2.RewriteXuid(r.Payload, r.Size, netv2.XuidPattern+uint64(peer.Owner))
+					rhist[n] = r
+				}
+				realBuild = func(sq int) netv2.Msg {
+					return netv2.RelayObjectMessage(uint64(r.Type), uint64(key.Router), uint64(key.ID), uint64(owner), uint64(r.TID), uint64(sq), idBits, typeBits, r.Size, r.Payload)
+				}
+			}
+			w.relayNumbered(peer, key, n, func(sq int) netv2.Msg {
 				return netv2.RelayObjectMessage(uint64(e2.Type), uint64(key.Router), uint64(key.ID), uint64(owner), uint64(e2.TID), uint64(sq), idBits, typeBits, e2.Size, e2.Payload)
-			})
+			}, realBuild)
 		}
 		peer.Objs.Set(key, hist)
 	}
@@ -250,19 +309,34 @@ func (w *World) RelayHeldObjects(peer *Peer) {
 
 // RelayNumbered is relay() for a message numbered by the server (its n-th of that object): build(seq) writes it.
 func (w *World) RelayNumbered(sender *Peer, key ObjKey, n int, build func(seq int) netv2.Msg) {
+	w.relayNumbered(sender, key, n, build, nil)
+}
+
+// relayNumbered is RelayNumbered with a second version (realBuild, nil when there is none) for the players RealCarsFor allows.
+func (w *World) relayNumbered(sender *Peer, key ObjKey, n int, build, realBuild func(seq int) netv2.Msg) {
 	baked := netv2.Bake(build(n % 0xFF))
 	alt := map[int]netv2.Baked{}
+	var realBaked *netv2.Baked
+	realAlt := map[int]netv2.Baked{}
 	due := w.Mono() + RelayFlushSecs
 	skey := OwnerObj{sender.Owner, key.Router, key.ID}
 	for _, q := range w.Audience(sender, key.Router) {
 		b := baked
+		bld, cache := build, alt
+		if realBuild != nil && w.RealCarsFor(sender, q) {
+			if realBaked == nil {
+				rb := netv2.Bake(realBuild(n % 0xFF))
+				realBaked = &rb
+			}
+			b, bld, cache = *realBaked, realBuild, realAlt
+		}
 		if shift := q.SeqShift[skey]; shift != 0 {
 			sq := replay.WireSeq(n, shift)
-			if cached, ok := alt[sq]; ok {
+			if cached, ok := cache[sq]; ok {
 				b = cached
 			} else {
-				b = netv2.Bake(build(sq))
-				alt[sq] = b
+				b = netv2.Bake(bld(sq))
+				cache[sq] = b
 			}
 		}
 		q.Outbox = append(q.Outbox, b)
@@ -392,6 +466,9 @@ func (w *World) ReplayFrom(newcomer, q *Peer, routers, skip map[int]bool) {
 		hist, _ := q.Objs.Get(key)
 		if skip[key.Router] || (routers != nil && !routers[key.Router]) {
 			continue
+		}
+		if rh, ok := q.RealObjs[key]; ok && w.RealCarsFor(q, newcomer) {
+			hist = rh // the newcomer's game has q's custom cars: their real version
 		}
 		rb := netv2.RouterBits[key.Router]
 		idBits, typeBits := rb[0], rb[1]

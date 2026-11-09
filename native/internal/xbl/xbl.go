@@ -924,6 +924,14 @@ func (s *Server) AnnounceLogout(xuid int64, key string) {
 	}
 }
 
+// AnnounceStandins: the stock cars a car-pack player's custom cars are shown as ("<custom>:<candidate>/...,...", checked by the caller); "-"
+// forgets the player's list (its game runs the server's database).
+func (s *Server) AnnounceStandins(xuid int64, field string) {
+	if xuid != 0 && field != "" {
+		s.Hub.Control(fmt.Sprintf("standins %x %s", xuid, field))
+	}
+}
+
 // AnnounceAllow: a fresh sign-in lifts an earlier revoke of this player on the game server.
 func (s *Server) AnnounceAllow(xuid int64) {
 	if xuid != 0 {

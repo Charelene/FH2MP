@@ -90,6 +90,7 @@ type Peer struct {
 	BlCheckAt                             float64
 	BlSlotSeq                             int
 	Objs                                  *omap.Map[ObjKey, []replay.Entry]
+	RealObjs                              map[ObjKey][]replay.Entry // the real version of objects relayed with a stand-in car, numbered like Objs
 	HostSeq                               int
 	RelayNext                             map[ObjKey]int
 	SeqShift                              map[OwnerObj]int
@@ -136,8 +137,8 @@ type Peer struct {
 	PartNotes                             int
 	PartLogged                            string
 	SpeedRef                              *SpeedRef
-	InvisibleLogged                       bool
 	Push                                  PushState
+	InvisibleLogged                       bool
 	RepairNotified                        map[int64]float64
 	NoticedAt                             map[string]float64 // Message Center notices sent to this player by key (NotifyPlayer)
 	TopKmh                                float64

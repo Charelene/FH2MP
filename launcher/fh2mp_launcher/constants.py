@@ -130,6 +130,20 @@ UPSTREAM = {
             "fh2-mods/HonkHonk/HZ2_SFX_HonkHonk.bank": "6f657bf3258670838bdaef1d1b18dfa198d11e39efa961d1fb2f036fce501063",
         },
     },
+    # Only the mod's DLL is taken: the zip also carries a build of the FH2 Mod Platform (DWrite.dll), which stays the pinned one above.
+    "anna": {
+        "name": "FH2 ANNA", "author": "qiangqiang101", "license": "MIT", "version": "1.1.0",
+        "url": "https://github.com/qiangqiang101/FH2_ANNA/releases/download/1.1.0/FH2ANNA-1.1.0.zip",
+        "mirror": MIRROR_BASE + "FH2ANNA-1.1.0.zip",
+        "sha256": "929c060eaba02bef8a332eca574fd34c860c59fcdcda5054637b9ee91fa2aff1", "size": 1333425,
+        "dll": "fh2-mods/FH2ANNA.dll", "dllSha256": "dcb947ef4448eaf7f2eb62c65d6a20ba23fea2e72d129cbc54b778f66782932a",
+        "files": {
+            "fh2-mods/FH2ANNA.dll": "fh2-mods/FH2ANNA.dll",
+        },
+        "fileSha256": {
+            "fh2-mods/FH2ANNA.dll": "dcb947ef4448eaf7f2eb62c65d6a20ba23fea2e72d129cbc54b778f66782932a",
+        },
+    },
 }
 # The exact platform build in this release's supported combination.
 PLATFORM_VERSION = UPSTREAM["platform"]["version"]

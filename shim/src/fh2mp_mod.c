@@ -2292,6 +2292,7 @@ static int patch_online_meet(void)
 #include "gameplaylog_guard.inc"
 #include "remote_prediction_guard.inc"
 #include "picker_pi.inc"
+#include "autodrive_rule.inc"
 
 static int patch_torque_load(void)
 {
@@ -3175,6 +3176,7 @@ static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *
 #include "lighting_sync.inc"
 #include "honk_sync.inc"
 #include "carsel_sync.inc"
+#include "event_stock.inc"
 #include "stall_trace.inc"
 
 /*
@@ -5486,6 +5488,12 @@ static DWORD WINAPI late_init(LPVOID unused)
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_PICKERPI", env, 8) == 0) {
                 patch_picker_pi();
+                if (GetEnvironmentVariableW(L"FH2MP_NO_EVENTSTOCK", env, 8) == 0) {
+                    patch_event_stock();
+                }
+            }
+            if (GetEnvironmentVariableW(L"FH2MP_NO_AUTODRIVE_RULE", env, 8) == 0) {
+                patch_autodrive_rule();
             }
         }
         {
@@ -5888,6 +5896,8 @@ static int patch_identity(void)
 
 /* FH2 was selected but its executable is not the supported build: FH2MP then stays out of the launch (no registration, no files of its own), and this
  * one line is the only trace of why. It goes straight to data\bin\fh2mp.log, which is not open yet. */
+#include "online_api.inc"
+
 static void early_refusal_note(const wchar_t *azimuth_dir, const char *why)
 {
     wchar_t path[MAX_PATH];
@@ -6020,6 +6030,7 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
             patch_identity();
         }
     }
+    online_api_start();
     if (!g_gamedb_src[0]) {
         gamedb_put_back();    /* offline: now, before the platform's database step, which then sees what was put back */
     }

@@ -1033,7 +1033,7 @@ class ExtraOptionsTests(unittest.TestCase):
 
     def test_only_one_extra_options_pin_is_supplied(self):
         from fh2mp_launcher.constants import UPSTREAM
-        self.assertEqual(set(UPSTREAM), {'platform', 'extraOptions', 'honkHonk'})
+        self.assertEqual(set(UPSTREAM), {'platform', 'extraOptions', 'honkHonk', 'anna'})
         self.assertEqual(UPSTREAM['extraOptions']['version'], '0.4.4')
         with tempfile.TemporaryDirectory() as az:
             self.write(b'MZ-0.3.0-old', az, 'winmm.dll')
@@ -1459,13 +1459,27 @@ class DevModeTests(unittest.TestCase):
         lc = core.Launcher(Settings(), load_identity=False)
         synced = []
         lc.sync_gamedb = lambda: synced.append(1) or "synced"
+        lc.sync_base_parts = lambda: synced.append("parts") and ""
         lc.gamedb_synced = True                                   # left over from an earlier start
         lc.settings["keep_car_packs"] = True
         note = lc.car_database_step()
-        self.assertEqual((synced, lc.gamedb_synced), ([], False))   # nothing replaced, and no database named for the shim
+        self.assertEqual((synced, lc.gamedb_synced), (["parts"], False))   # nothing replaced, no database named for the shim, the part list refreshed
         self.assertIn("car packs are kept", note)
         lc.settings["keep_car_packs"] = False
-        self.assertEqual((lc.car_database_step(), synced), ("synced", [1]))          # the default is unchanged
+        self.assertEqual((lc.car_database_step(), synced), ("synced", ["parts", 1]))          # the default is unchanged
+
+    def test_a_part_list_that_cannot_be_refreshed_does_not_block_play(self):
+        from fh2mp_launcher import core
+        from fh2mp_launcher.settings import Settings
+        with tempfile.TemporaryDirectory() as d:
+            lc = core.Launcher(Settings(os.path.join(d, "settings.json")), load_identity=False)
+            lc.settings["azimuth_dir"] = d
+
+            class Down:
+                def gamedb(self, token):
+                    raise core.ApiError(0, "unreachable", "server unreachable")
+            lc.api = lambda: Down()
+            self.assertIn("couldn't refresh the list of the game's parts", lc.sync_base_parts())
 
     def test_the_setup_check_names_every_component_and_what_is_wrong(self):
         from fh2mp_launcher import core, shim, version
@@ -1481,7 +1495,7 @@ class DevModeTests(unittest.TestCase):
             lc.shim_state = lambda: ("ours", "1.0.0-rc3")
             rows = {r[0]: r for r in lc.status_lines()}
             self.assertEqual(list(rows), ["FH2MP launcher", "Azimuth", "FH2MP shim", "FH2 Mod Platform", "FH2 Extra Options",
-                                          "HonkHonk", "Session for the game", "Car database", "Connection", "Mode"])
+                                          "HonkHonk", "FH2 ANNA", "Session for the game", "Car database", "Connection", "Mode"])
             self.assertEqual(rows["FH2MP shim"][1:], ("1.0.0-rc3", version.__version__ + " (server needs 1.1.2)", False))   # outdated: marked
             self.assertEqual(rows["Azimuth"][3], False)                          # no azimuth.exe in the folder
             self.assertEqual(rows["FH2 Mod Platform"][1], "not installed")
@@ -1491,7 +1505,7 @@ class DevModeTests(unittest.TestCase):
             shim.write_session(d, 0x9000000000001, "fh2.token", "https://lsp.example")
             self.assertIn("present", {r[0]: r for r in lc.status_lines()}["Session for the game"][1])
             lc.settings["keep_car_packs"] = True
-            self.assertIn("no play with other people", {r[0]: r for r in lc.status_lines()}["Car database"][1])
+            self.assertIn("custom cars stay out of online events", {r[0]: r for r in lc.status_lines()}["Car database"][1])
         text = repr(lc.status_lines())
         self.assertNotIn("fh2.token", text)                                       # the token never appears in what a player copies
 
@@ -1870,3 +1884,61 @@ class HonkHonkTests(unittest.TestCase):
             with mock.patch.object(core.upstream, "fetch", return_value=self.files):
                 self.assertTrue(lc.ensure_honk())
             self.assertEqual(lc.honk_state(), (True, shim.honk_version()))
+
+
+class AnnaTests(unittest.TestCase):
+    """FH2 ANNA (shim.install_anna, anna_bindings): only its DLL comes from the release, the platform build in its zip stays out; Extra Options'
+    D-pad autodrive and hazard buttons go to None only where they are still the defaults."""
+    INI = (b"[Bindings]\r\n; comment AutodriveXbox=DPadDown\r\nAutodriveXbox=DPadDown\r\nAutodriveKeyboard=F2\r\n"
+           b"hazardsxbox = dpadup \r\nHeadlightsXbox=LeftStick\r\n")
+
+    def setUp(self):
+        self.az = tempfile.mkdtemp()
+        self.dll = b"MZ-anna"
+
+    def test_the_pin_takes_the_dll_only(self):
+        from fh2mp_launcher import upstream
+        from fh2mp_launcher.constants import UPSTREAM
+        pin = UPSTREAM["anna"]
+        self.assertTrue(pin["url"].startswith("https://github.com/qiangqiang101/FH2_ANNA/releases/download/1.1.0/"))
+        self.assertEqual(pin["files"], {"fh2-mods/FH2ANNA.dll": "fh2-mods/FH2ANNA.dll"})
+        data, pin = fake_release("anna", {"fh2-mods/FH2ANNA.dll": self.dll, "DWrite.dll": b"MZ-platform", "README.md": b"r"}, "fh2-mods/FH2ANNA.dll")
+        self.assertEqual(upstream.extract("anna", data, pin), {"fh2-mods/FH2ANNA.dll": self.dll})
+
+    def test_install_keeps_another_build_and_reports_it(self):
+        from fh2mp_launcher.constants import UPSTREAM
+        with mock.patch.dict(UPSTREAM["anna"], dllSha256=hashlib.sha256(self.dll).hexdigest()):
+            self.assertEqual(shim.anna_installed(self.az), (False, ""))
+            os.makedirs(os.path.join(self.az, "fh2-mods"))
+            with open(os.path.join(self.az, "fh2-mods", "FH2ANNA.dll"), "wb") as f:
+                f.write(b"MZ-other")
+            self.assertEqual(shim.anna_installed(self.az), (True, "unknown"))
+            self.assertFalse(shim.anna_complete(self.az))
+            self.assertTrue(shim.install_anna(self.az, {"fh2-mods/FH2ANNA.dll": self.dll}))
+            self.assertTrue(shim.anna_complete(self.az))
+            with open(os.path.join(self.az, "fh2-mods", "FH2ANNA.dll.before-fh2mp-setup"), "rb") as f:
+                self.assertEqual(f.read(), b"MZ-other")
+            self.assertEqual(shim.install_anna(self.az, {"fh2-mods/FH2ANNA.dll": self.dll}), [])
+            self.assertFalse(os.path.exists(os.path.join(self.az, "DWrite.dll")))
+
+    def test_extra_options_d_pad_buttons_go_to_none_only_from_their_defaults(self):
+        new, n = shim.anna_bindings_bytes(self.INI)
+        self.assertEqual(n, 2)
+        self.assertEqual(new, self.INI.replace(b"\r\nAutodriveXbox=DPadDown", b"\r\nAutodriveXbox=None").replace(b"= dpadup ", b"= None "))
+        mine = b"AutodriveXbox=DPadUp\r\nHazardsXbox=DPadDown\r\n"                  # swapped by the player: theirs
+        self.assertEqual(shim.anna_bindings_bytes(mine), (mine, 0))
+
+    def test_the_bindings_move_once(self):
+        from fh2mp_launcher import core
+        from fh2mp_launcher.settings import Settings
+        with open(os.path.join(self.az, shim.EXTRA_INI), "wb") as f:
+            f.write(self.INI)
+        lc = core.Launcher(Settings(os.path.join(self.az, "settings.json")), load_identity=False)   # never the player's own settings file
+        lc.settings["azimuth_dir"] = self.az
+        lc.settings["anna_bindings_moved"] = False
+        self.assertTrue(lc.ensure_anna_bindings())
+        with open(os.path.join(self.az, shim.EXTRA_INI), "wb") as f:
+            f.write(self.INI)                                                          # the player puts them back
+        self.assertEqual(lc.ensure_anna_bindings(), [])
+        with open(os.path.join(self.az, shim.EXTRA_INI), "rb") as f:
+            self.assertEqual(f.read(), self.INI)

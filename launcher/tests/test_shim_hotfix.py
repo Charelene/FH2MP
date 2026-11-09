@@ -146,6 +146,7 @@ class LauncherShimTargetTests(unittest.TestCase):
                 mock.patch.object(core.shim, "install", return_value=[]) as install, \
                 mock.patch.object(self.lc, "platform_files", return_value=None), mock.patch.object(self.lc, "repair_tls_helper", return_value=[]), \
                 mock.patch.object(self.lc, "ensure_extra_options", return_value=[]), mock.patch.object(self.lc, "ensure_honk", return_value=[]), \
+                mock.patch.object(self.lc, "ensure_anna", return_value=[]), mock.patch.object(self.lc, "ensure_anna_bindings", return_value=[]), \
                 mock.patch.object(self.lc, "ensure_controls", return_value=[]):
             self.lc.install_shim()
             up = factory.return_value

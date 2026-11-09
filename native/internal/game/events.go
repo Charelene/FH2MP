@@ -443,8 +443,8 @@ func (w *World) RetryRefusedReady(peer *Peer) {
 			diag.KV(diag.KVP{K: "owner", V: peer.Owner}, diag.KVP{K: "error", V: err.Error()})), diag.Warn)
 		return
 	}
-	if !gameopts.AcceptsCar(rule, optsChoices(peer.Choices)) {
-		return
+	if w.NotForEvents(peer) || !gameopts.AcceptsCar(rule, optsChoices(peer.Choices)) {
+		return // still a custom or traffic car, or still outside the rule: refused until the next change
 	}
 	peer.ReadyRetry = nil
 	if w.EventSeatsFull(peer) {
@@ -750,6 +750,18 @@ func (w *World) DropUnloaded(now float64) {
 
 // EligibleForEvent says whether a peer's car meets the event's class/PI rule.
 func (w *World) EligibleForEvent(peer *Peer, rule *gameopts.Rule) bool {
+	if w.CustomCar(peer) {
+		w.ev("not_eligible", kv("xuid", fmt.Sprintf("%#x", peer.Xuid)), kv("car", *peer.ModelID), kv("custom", true), kv("roadtrip", w.Roadtrip))
+		w.Logf("%d not eligible: owner %d car %d is not in the game data (a car pack's own car); custom cars do not race in events or Road Trip", peer.Addr.Port, peer.Owner, *peer.ModelID)
+		w.NotifyPlayer(peer, "refused", NoticeRefusedSeconds, "Custom cars can't race in online events or Road Trip. Pick a car from the game.")
+		return false
+	}
+	if w.BlockedCar(peer) {
+		w.ev("not_eligible", kv("xuid", fmt.Sprintf("%#x", peer.Xuid)), kv("car", *peer.ModelID), kv("blocked", true), kv("roadtrip", w.Roadtrip))
+		w.Logf("%d not eligible: owner %d car %d is one players cannot get (a traffic car); such cars do not race in events or Road Trip", peer.Addr.Port, peer.Owner, *peer.ModelID)
+		w.NotifyPlayer(peer, "refused", NoticeRefusedSeconds, "Traffic cars and other cars you can't buy can't race in online events or Road Trip. Pick another car.")
+		return false
+	}
 	if w.Roadtrip {
 		return true
 	}
@@ -805,10 +817,11 @@ func (w *World) EligibleForEvent(peer *Peer, rule *gameopts.Rule) bool {
 	return false
 }
 
-// ValidateEventCars: a participant whose car does not meet the event's rule leaves the EVENT; false only when no participant is left.
+// ValidateEventCars: a participant whose car does not meet the event's rule (or, in Road Trip, which has no rule, drives a custom or traffic car) leaves the
+// EVENT; false only when no participant is left.
 func (w *World) ValidateEventCars() bool {
 	ev := w.Event
-	if ev == nil || ev.CarRule == nil {
+	if ev == nil || (ev.CarRule == nil && !w.Roadtrip) {
 		return true
 	}
 	var wrong []*Peer

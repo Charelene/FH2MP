@@ -7,15 +7,25 @@ the game reads exactly the server's copy. FH2 Extra Options loads mediaoverride 
 not change what the game reads online. Without Extra Options (or with its overrides off) the copy would be ignored, so play is refused.
 """
 import hashlib
+import json
 import lzma
 import os
 import re
+import sqlite3
 
 from . import azimuth, paths, shim
 from .constants import DATA_DIR
 
 LOCAL = (DATA_DIR, "gamedbRC.slt")
 PLACED = (DATA_DIR, "gamedb-placed.txt")  # the shim's list of its copies in mediaoverride ("size date", newest last)
+BASE_PARTS = (DATA_DIR, "base-parts.txt")  # the parts and stock cars of the server's database, for a game that keeps its own car packs
+# The part tables (after List_Upgrade) in CarPartSlotTable order, as the shim's picker check reads them (shim/src/picker_pi.inc g_ppi_table, g_ppi_motor).
+PART_TABLES = ("Engine", "Drivetrain", "CarBody", "Motor", "Brakes", "SpringDamper", "AntiSwayFront", "AntiSwayRear", "TireCompound", "RearWing",
+               "RimSizeFront", "RimSizeRear", "EngineCamshaft", "EngineValves", "EngineDisplacement", "EnginePistonsCompression", "EngineFuelSystem",
+               "EngineIgnition", "EngineExhaust", "EngineIntake", "EngineFlywheel", "EngineManifold", "EngineRestrictorPlate", "EngineOilCooling",
+               "EngineTurboSingle", "EngineTurboTwin", "EngineCSC", "EngineDSC", "EngineIntercooler", "DrivetrainClutch", "DrivetrainTransmission",
+               "DrivetrainDriveline", "DrivetrainDifferential", "CarBodyFrontBumper", "CarBodyRearBumper", "CarBodyHood", "CarBodySideSkirt",
+               "CarBodyTireWidthFront", "CarBodyTireWidthRear", "CarBodyWeight", "CarBodyChassisStiffness", "MotorParts")
 MAX_SIZE = 64 * 1024 * 1024
 
 
@@ -100,3 +110,95 @@ def remember_copy(folder):
         paths.atomic_write(path, "".join(ln + "\n" for ln in lines[-4:]).encode("ascii"), 0o644)
     except OSError:
         pass
+
+
+def write_base_parts(folder):
+    """A game that keeps its own car packs reads its own database, in which a car pack's parts look like the game's. The shim needs the
+    server's parts to tell them apart (picker_pi.inc: the event car picker shows such a car with its stock class and PI; the event car gets
+    stock parts in their slots). Reads the server's database, already in fh2mp/ (sync), and writes fh2mp/base-parts.txt:
+    "p <table> <id>" for every part row, "c <car id> <class id> <performance index in millionths>" for every car. -> the number of lines.
+    Raises GameDbError when the database cannot be read."""
+    src = os.path.join(folder, *LOCAL)
+    lines = ["fh2mp-base-parts 1"]
+    try:
+        con = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+        try:
+            have = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            for t in PART_TABLES:
+                if "List_Upgrade" + t in have:
+                    lines += [f"p {t} {i}" for (i,) in con.execute(f"SELECT Id FROM List_Upgrade{t} ORDER BY Id") if isinstance(i, int) and i >= 0]
+            for car, cls, pi in con.execute("SELECT Id, ClassID, PerformanceIndex FROM Data_Car ORDER BY Id"):
+                if isinstance(car, int) and car >= 0 and isinstance(cls, int) and 0 <= cls <= 255 and isinstance(pi, (int, float)) and 0 <= pi < 1000:
+                    lines.append(f"c {car} {cls} {round(float(pi) * 1e6)}")      # millionths: the shim reads no floats
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        raise GameDbError(f"The server's car database could not be read ({e}).") from None
+    paths.atomic_write(os.path.join(folder, *BASE_PARTS), "".join(ln + "\n" for ln in lines).encode("ascii"), 0o644)
+    return len(lines)
+
+
+STANDIN_CANDIDATES = 5
+
+
+def _pack_cars(folder):
+    """The cars the Extra Options mods in <folder>/mods add (mod.json naming a database.json with Data_Car rows) -> {car id: (bucket, class,
+    performance index)}; a mod whose files cannot be read is skipped."""
+    out = {}
+    mods = os.path.join(folder, "mods")
+    try:
+        names = sorted(os.listdir(mods))
+    except OSError:
+        return out
+    for name in names:
+        try:
+            with open(os.path.join(mods, name, "mod.json"), encoding="utf-8-sig") as f:
+                manifest = json.load(f)
+            rel = manifest.get("database") if isinstance(manifest, dict) else None
+            if not isinstance(rel, str) or os.path.isabs(rel) or ".." in rel.replace("\\", "/").split("/"):
+                continue
+            with open(os.path.join(mods, name, rel), encoding="utf-8-sig") as f:
+                db = json.load(f)
+            tables = db.get("tables", {})
+            buckets = {r.get("CarId"): r.get("CarBucket") for r in tables.get("Data_Car_Buckets", {}).get("insert", []) if isinstance(r, dict)}
+            for r in tables.get("Data_Car", {}).get("insert", []):
+                car = r.get("Id") if isinstance(r, dict) else None
+                if isinstance(car, int) and car > 0:
+                    out[car] = (buckets.get(car), r.get("ClassID"), r.get("PerformanceIndex"))
+        except (OSError, ValueError, AttributeError):
+            continue
+    return out
+
+
+def custom_standins(folder):
+    """For each car a car pack adds that the server's database (fh2mp/gamedbRC.slt) lacks: up to STANDIN_CANDIDATES stock cars, closest first,
+    for the game server to show the others instead of its one fixed stand-in car (it takes the first it accepts). Closest = the same car category
+    (Data_Car_Buckets, e.g. Extreme Track Toys) with the nearest performance index, then the same class with the nearest performance index.
+    -> "<custom>:<a>/<b>...,..." for PUT /v1/me/standins, "" when there is nothing to send. Raises GameDbError when the database cannot be read."""
+    packs = _pack_cars(folder)
+    if not packs:
+        return ""
+    try:
+        con = sqlite3.connect(f"file:{os.path.join(folder, *LOCAL)}?mode=ro", uri=True)
+        try:
+            stock = {r[0]: (r[1], r[2]) for r in con.execute("SELECT Id, ClassID, PerformanceIndex FROM Data_Car")
+                     if isinstance(r[0], int) and isinstance(r[2], (int, float))}
+            bucket = {r[0]: r[1] for r in con.execute("SELECT CarId, CarBucket FROM Data_Car_Buckets")}
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        raise GameDbError(f"The server's car database could not be read ({e}).") from None
+    items = []
+    for car in sorted(packs):
+        if car in stock or len(items) >= 64:
+            continue
+        b, cls, pi = packs[car]
+        pi = float(pi) if isinstance(pi, (int, float)) else 0.0
+        ranked = sorted(((0 if b is not None and bucket.get(s) == b else 1 if cls is not None and stock[s][0] == cls else 2,
+                          abs(float(stock[s][1]) - pi), s) for s in stock))
+        picks = [s for rank, _, s in ranked if rank < 2][:STANDIN_CANDIDATES]
+        # a car without a candidate is still listed (candidate 0, never a car): the server then knows this game has it, so players with the
+        # same car pack see it as it is (game.RealCarsFor)
+        items.append(f"{car}:" + ("/".join(str(s) for s in picks) or "0"))
+    return ",".join(items)
+

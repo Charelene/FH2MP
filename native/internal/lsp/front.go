@@ -47,8 +47,7 @@ type OpsAPI interface {
 const ctypeXtsw = "bin/xtsw"
 
 var (
-	socialHosts      = []string{"profile.xboxlive.com", "social.xboxlive.com", "peoplehub.xboxlive.com", "userpresence.xboxlive.com"}
-	multiplayerHosts = []string{"momatch.xboxlive.com", "sessiondirectory.xboxlive.com", "gameserverds.xboxlive.com", "gameserverms.xboxlive.com"}
+	socialHosts = []string{"profile.xboxlive.com", "social.xboxlive.com", "peoplehub.xboxlive.com", "userpresence.xboxlive.com"}
 )
 
 func inList(l []string, s string) bool {
@@ -65,6 +64,7 @@ type frontState struct {
 	mu            sync.Mutex
 	oldRemoved    map[int64]time.Time
 	ownCars       map[int64]time.Time
+	standinsGone  map[int64]bool // players whose stand-in list the game server was told to forget (their game runs the server's database)
 	toolsAnnounce map[int64]toolsEntry
 	authAnnounce  map[authKey]time.Time
 	lastPoll      map[string]uint64
@@ -334,20 +334,6 @@ func (c *Core) handle(rw respWriter, r *Req, req *http.Request) {
 		c.Debug(r, "poll", reqLine)
 	} else {
 		c.Log(r, reqLine)
-	}
-	if r.OwnCars && inList(multiplayerHosts, host) {
-		mine, theirs := r.GameDB[0], r.GameDB[1]
-		if mine == "" {
-			mine = "(none sent)"
-		}
-		shim := r.Shim
-		if shim == "" {
-			shim = "(none)"
-		}
-		c.LogEvery(r, fmt.Sprintf("mp-refused/%d", r.Xuid), 120, "  multiplayer refused: this player's car database is not the server's "+diag.KV(diag.KVP{K: "xuid", V: fmt.Sprintf("%#x", r.Xuid)},
-			diag.KVP{K: "host", V: host}, diag.KVP{K: "client_db", V: mine}, diag.KVP{K: "server_db", V: theirs}, diag.KVP{K: "shim", V: shim}), diag.Info, "")
-		rw.json(409, pyjson.Obj{{K: "error", V: "gamedb_mismatch"}, {K: "message", V: "Playing with other people needs the server's car database. Press Play in the FH2MP launcher without keeping your own car packs."}}, "")
-		return
 	}
 	var out []byte
 	if strings.HasSuffix(host, "forzamotorsport.net") && cls != "" {
@@ -746,9 +732,9 @@ func (c *Core) removeOldClient(r *Req, req *http.Request) {
 	c.OnRevoke(acct.Xuid)
 }
 
-// gamedbOK: a game whose car database is not the server's (X-FH2MP-GameDb) may use every service but not play with other people: a car the others do not
-// have crashes them. The request is marked (OwnCars); the multiplayer entry points and the public boards refuse marked requests. Only a server whose
-// database cannot be read refuses everything.
+// gamedbOK: a game whose car database is not the server's (X-FH2MP-GameDb, a player's own car pack) plays with other people like everyone else: the game
+// server shows its custom cars to the others as the stand-in car and keeps them out of events and Road Trip (game.CustomCar). The request is marked
+// (OwnCars) so the public boards refuse its scores. Only a server whose database cannot be read refuses everything.
 func (c *Core) gamedbOK(rw respWriter, r *Req, req *http.Request, acct *auth.Account) bool {
 	have := req.Header.Get("X-FH2MP-GameDb")
 	if c.Launcher == nil {
@@ -769,11 +755,21 @@ func (c *Core) gamedbOK(rw respWriter, r *Req, req *http.Request, acct *auth.Acc
 	if have == sha {
 		f.mu.Lock()
 		delete(f.ownCars, acct.Xuid)
+		forget := !f.standinsGone[acct.Xuid]
+		if forget {
+			if f.standinsGone == nil || len(f.standinsGone) > 20000 {
+				f.standinsGone = map[int64]bool{}
+			}
+			f.standinsGone[acct.Xuid] = true
+		}
 		f.mu.Unlock()
+		if forget {
+			// this game has no custom cars now: an earlier list (a car pack since removed) must not make others' custom cars reach it as they are
+			c.Xbl.AnnounceStandins(acct.Xuid, "-")
+		}
 		return true
 	}
 	r.OwnCars = true
-	r.GameDB = [2]string{cut(have, 16), cut(sha, 16)} // for the lines that refuse this request later
 	f.mu.Lock()
 	_, seen := f.ownCars[acct.Xuid]
 	if !seen {
@@ -788,9 +784,8 @@ func (c *Core) gamedbOK(rw respWriter, r *Req, req *http.Request, acct *auth.Acc
 		if have == "" {
 			extra = "; the client sent no hash"
 		}
-		c.Log(r, fmt.Sprintf("  car database %s is not the server's %s: %s %#x keeps the services but is out of play with other people (shim %s%s)",
+		c.Log(r, fmt.Sprintf("  car database %s is not the server's %s: %s %#x plays with its own car pack: its custom cars stay out of events and Road Trip, its scores out of the boards (shim %s%s)",
 			pyjson.PyRepr(cut(have, 16)), cut(sha, 16), pyjson.PyRepr(acct.Gamertag), acct.Xuid, c.shimOrNone(r), extra))
-		c.OnRevoke(acct.Xuid) // a game in progress had the server's database: it must not carry on with another one
 	}
 	return true
 }
@@ -944,9 +939,7 @@ func (c *Core) identify(rw respWriter, r *Req, req *http.Request) bool {
 			if !c.gamedbOK(rw, r, req, acct) {
 				return false
 			}
-			if !r.OwnCars {
-				c.AnnounceAuth(acct.Xuid, clientIP(req), token) // the game server only admits the server's car database
-			}
+			c.AnnounceAuth(acct.Xuid, clientIP(req), token)
 			return true
 		}
 		if c.Auth.Mode == "required" {

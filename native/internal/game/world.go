@@ -253,19 +253,20 @@ type rxState struct {
 
 // World is one lobby: the peers of one world with their own race / Road Trip state (= fh2mp_server.Server).
 type World struct {
-	Tag      string
-	Out      *LogOut
-	Clk      Clock
-	Rng      Rand
-	Sock     PacketConn
-	Events   *eventlog.Log
-	Sinks    *Sinks
-	Cat      func() *catalog.Catalog
-	Hub      *Hub
-	HubKey   *WorldKey
-	IsIdle   bool
-	Carmeet  bool
-	Roadtrip bool
+	standinApplied bool // the last CheckParts put a stand-in car in place of a custom car (objhandle keeps the real version)
+	Tag            string
+	Out            *LogOut
+	Clk            Clock
+	Rng            Rand
+	Sock           PacketConn
+	Events         *eventlog.Log
+	Sinks          *Sinks
+	Cat            func() *catalog.Catalog
+	Hub            *Hub
+	HubKey         *WorldKey
+	IsIdle         bool
+	Carmeet        bool
+	Roadtrip       bool
 
 	VisibilityChecked               float64
 	RtState                         int

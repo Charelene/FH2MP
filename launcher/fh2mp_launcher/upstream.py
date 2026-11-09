@@ -1,5 +1,6 @@
 """Third-party mods FH2MP needs (constants.UPSTREAM): the FH2 Mod Platform (Trinculo54, MIT) that loads the shim, FH2 Extra Options
-(RokkuDayo, GPL-3.0) and HonkHonk (suderek22, GPL-3.0; the horns other players hear). Fetched from FH2MP's mirror of the exact pinned release (constants.MIRROR_BASE), or from the authors' own GitHub release. Each release is pinned by the SHA-256 of
+(RokkuDayo, GPL-3.0), HonkHonk (suderek22, GPL-3.0; the horns other players hear) and FH2 ANNA (qiangqiang101, MIT; the in-car menu, whose
+lights and doors other players see). Fetched from FH2MP's mirror of the exact pinned release (constants.MIRROR_BASE), or from the authors' own GitHub release. Each release is pinned by the SHA-256 of
 its zip and of the DLL inside it, so nothing else is installed; the launcher only fetches one when the copy in the Azimuth folder is
 missing or not the pinned build (shim.py decides)."""
 import hashlib
@@ -37,7 +38,7 @@ def extract(kind, data, pin=None):
 
 
 def fetch(kind, updater, progress=None, cancelled=lambda: False):
-    """Downloads the pinned release of `kind` ("platform" | "extraOptions" | "honkHonk") with `updater` (updater.Updater: certificates, size and hash
+    """Downloads the pinned release of `kind` ("platform" | "extraOptions" | "honkHonk" | "anna") with `updater` (updater.Updater: certificates, size and hash
     checks, cache) and returns extract()'s files. The FH2MP mirror is tried first, the author's GitHub release second; both must be exactly the
     pinned bytes."""
     pin = UPSTREAM[kind]

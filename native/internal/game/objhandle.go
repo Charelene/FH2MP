@@ -87,11 +87,16 @@ func (w *World) handleObject(peer *Peer, r rd, br *bits.Reader, mtype int, data 
 	if router == 1 && a == 0 && b == 0 && size != 0 && os.Getenv("FH2MP_KEEP_VIP") == "" {
 		size, payload = w.HideVIP(peer, oid, size, payload)
 	}
+	var real *relayVariant // the object as the player sent it, for those whose games have the same custom cars (RealCarsFor)
 	if router == 1 && a == 0 && b == 0 {
 		var sup bool
+		rs, rp := size, payload
 		_, sup, size, payload = w.CheckParts(peer, size, payload, oid)
 		if sup {
 			return handleContinue
+		}
+		if w.standinApplied && w.HasCustomCars(peer) {
+			real = &relayVariant{rs, rp}
 		}
 		if size >= 240 {
 			payload = w.NoteChoices(peer, size, payload)
@@ -117,7 +122,10 @@ func (w *World) handleObject(peer *Peer, r rd, br *bits.Reader, mtype int, data 
 			_, dlc := DlcCars[mid]
 			_, blocked := c.Blocked[int(mid)]
 			if !suppress && UnknownCarPolicy == "standin" && len(c.KnownCars) > 0 && !known && !dlc && !blocked {
-				payload = replaceBits(payload, 5, 32, bits.FromUint64(uint64(StandinCar)))
+				if w.HasCustomCars(peer) {
+					real = &relayVariant{size, payload}
+				}
+				payload = replaceBits(payload, 5, 32, bits.FromUint64(uint64(w.standinFor(peer, mid))))
 			}
 		}
 	}
@@ -135,7 +143,7 @@ func (w *World) handleObject(peer *Peer, r rd, br *bits.Reader, mtype int, data 
 			return handleContinue
 		}
 	} else if isRelayRouter(router) && a == 0 && b == 0 && !suppress && peer.KickReason == nil {
-		w.RememberAndRelay(peer, mtype, router, oid, tid, seq, size, payload)
+		w.rememberAndRelay(peer, mtype, router, oid, tid, seq, size, payload, real)
 	}
 	if router == 3 && mtype == netv2.MsgObjectUpdate && size != 0 {
 		w.consoleUpdate(peer, addr, size, payload)

@@ -99,7 +99,6 @@ type Req struct {
 	Run     string
 	Shim    string
 	OwnCars bool
-	GameDB  [2]string // client's and server's database hash, for the lines that refuse a request later
 }
 
 func (c *Core) nextSeq() int64 { return c.seq.Add(1) }

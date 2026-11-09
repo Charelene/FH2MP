@@ -28,6 +28,7 @@ import (
 //	GET    /v1/challenges[?top=3]     GET /v1/leaderboards[?limit=10]   GET /v1/home
 //	GET    /v1/launcher/assets/<file> POST /v1/auth/challenge|register|login|logout
 //	GET    /v1/gamertags/check?name=  GET|PATCH /v1/me     PUT|DELETE /v1/me/gamerpic     GET /v1/gamerpic/<xuid>.png
+//	PUT    /v1/me/standins
 //	GET    /v1/gamedb[/gamedbRC.slt.xz]    POST /v1/crash-reports    /v1/community[/...]
 //
 // Errors are {"error": "<code>", "message": "..."} with the HTTP status of the auth.Error.
@@ -762,6 +763,27 @@ func (l *Launcher) route(r *Req, method, path string, h http.Header, body []byte
 				return 0, nil, "", err
 			}
 			return 200, accountJSON(&auth.Account{Xuid: acct.Xuid, Gamertag: tag}, nil), ok, nil
+		case p == "/v1/me/standins" && method == "PUT":
+			// A car-pack player's custom cars and, for each, up to 5 stock cars the launcher found closest (same car category, nearest PI): the game
+			// server shows the others the first one it accepts instead of its fixed stand-in car (game.parseStandins). Kept until the game server
+			// restarts; the launcher sends it at every Play.
+			d, err := jsonBody(body, jsonBodyDefault)
+			if err != nil {
+				return 0, nil, "", err
+			}
+			field := str(d, "standins")
+			if !standinsOK(field) {
+				return 0, nil, "", auth.NewError(400, "bad_standins", "the stand-in list is not valid").WithXuid(acct.Xuid).WithDetail(fmt.Sprintf("%d characters", len(field)))
+			}
+			if !a.Hit([2]any{"standins", acct.Xuid}, 30, 3600) {
+				return 0, nil, "", auth.NewError(429, "rate_limited", "too many stand-in updates, wait a while").WithXuid(acct.Xuid).WithDetail("standins: over 30 per hour for this account")
+			}
+			c.Xbl.AnnounceStandins(acct.Xuid, field)
+			c.front.mu.Lock()
+			delete(c.front.standinsGone, acct.Xuid) // a later game on the server's database clears this list again
+			c.front.mu.Unlock()
+			c.Log(r, fmt.Sprintf("  v1 stand-ins for %#x: %s", acct.Xuid, field))
+			return 200, pyjson.Obj{{K: "ok", V: true}}, ok, nil
 		case p == "/v1/me/gamerpic" && method == "PUT":
 			if len(body) > maxBody {
 				return 0, nil, "", auth.NewError(413, "too_large", "").WithXuid(acct.Xuid).WithDetail(fmt.Sprintf("picture %d bytes, limit %d", len(body), maxBody))
@@ -805,4 +827,36 @@ func rowAny(r *db.Row, k string) any {
 		return nil
 	}
 	return r.Any(k)
+}
+
+// standinsOK: "<custom car>:<candidate>[/<candidate>]...", up to 64 cars and 5 candidates each, ids of 1 to 7 digits (PUT /v1/me/standins).
+func standinsOK(field string) bool {
+	digits := func(s string) bool {
+		if len(s) < 1 || len(s) > 7 {
+			return false
+		}
+		for _, c := range s {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	items := strings.Split(field, ",")
+	if len(items) > 64 {
+		return false
+	}
+	for _, item := range items {
+		car, list, ok := strings.Cut(item, ":")
+		cands := strings.Split(list, "/")
+		if !ok || !digits(car) || len(cands) > 5 {
+			return false
+		}
+		for _, c := range cands {
+			if !digits(c) {
+				return false
+			}
+		}
+	}
+	return true
 }

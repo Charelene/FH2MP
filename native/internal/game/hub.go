@@ -91,6 +91,8 @@ type Hub struct {
 	CtlSend        func(data []byte, to Addr)
 	DefaultType    int
 	Assign         map[uint64]string
+	Standins       map[uint64]map[int64]int64 // a car-pack player's custom car -> the stock car the others see (control "standins")
+	CustomCars     map[uint64]map[int64]bool  // every custom car a player's launcher listed (control "standins"), with or without a stand-in
 	Runs           map[uint64]string
 	Authed         map[uint64]authEnt
 	Flagged        *omap.Map[uint64, flagEnt]
@@ -134,7 +136,7 @@ func NewHub(cfg HubConfig) (*Hub, error) {
 		return nil, err
 	}
 	h := &Hub{cfg: cfg, Clk: cfg.Clock, Rng: cfg.Rng, Sock: cfg.Sock, Out: cfg.Out, Sinks: cfg.Sinks, CtlSend: cfg.CtlSend,
-		Assign: map[uint64]string{}, Runs: map[uint64]string{}, Authed: map[uint64]authEnt{}, Flagged: omap.New[uint64, flagEnt](), Revoked: map[uint64]float64{},
+		Assign: map[uint64]string{}, Standins: map[uint64]map[int64]int64{}, CustomCars: map[uint64]map[int64]bool{}, Runs: map[uint64]string{}, Authed: map[uint64]authEnt{}, Flagged: omap.New[uint64, flagEnt](), Revoked: map[uint64]float64{},
 		Keys: map[uint64]map[string]float64{}, TicketEpochs: map[Addr][]byte{}, Bound: map[Addr]boundEnt{}, Nonces: omap.New[nonceKey, float64](), NonceCount: map[uint64]int{},
 		AuthLog: map[any]float64{}, Worlds: omap.New[WorldKey, *World](), Route: omap.New[Addr, *World](), EmptySince: map[WorldKey]float64{},
 		LightingRoutes: map[uint64]Addr{}, HonkRoutes: map[uint64]Addr{}, CarselRoutes: map[uint64]Addr{}, probeSeen: map[Addr]probeEnt{}, nxt: math.Inf(1)}
@@ -432,6 +434,31 @@ func (h *Hub) ControlText(text string, replyTo *Addr) {
 			h.Runs = map[uint64]string{}
 		}
 		h.Runs[xuid] = diag.RunID(parts[2])
+	case n == 3 && parts[0] == "standins":
+		xuid, err := parseHex(parts[1])
+		if err != nil {
+			h.ctlIgnored(parts, fmt.Sprintf("standins message unreadable (%v)", err))
+			return
+		}
+		if parts[2] == "-" {
+			_, had := h.CustomCars[xuid]
+			delete(h.Standins, xuid)
+			delete(h.CustomCars, xuid)
+			if had {
+				h.Log(fmt.Sprintf("control: stand-ins for %s forgotten: its game runs the server's car database (no custom cars)", parts[1]))
+			}
+			return
+		}
+		got, owned, notes := h.parseStandins(parts[2])
+		if len(h.Standins) >= 20000 {
+			h.Standins, h.CustomCars = map[uint64]map[int64]int64{}, map[uint64]map[int64]bool{}
+		}
+		h.Standins[xuid] = got
+		if h.CustomCars == nil {
+			h.CustomCars = map[uint64]map[int64]bool{}
+		}
+		h.CustomCars[xuid] = owned
+		h.Log(fmt.Sprintf("control: stand-ins for %s: %s", parts[1], strings.Join(notes, "; ")))
 	case n == 3 && parts[0] == "assign":
 		xuid, err := parseHex(parts[1])
 		if err != nil {

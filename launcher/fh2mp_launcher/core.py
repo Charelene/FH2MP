@@ -507,7 +507,9 @@ class Launcher:
         did += self.repair_tls_helper()
         did += self.ensure_extra_options(progress, cancelled)
         did += self.ensure_honk(progress, cancelled)
+        did += self.ensure_anna(progress, cancelled)
         did += self.ensure_controls()
+        did += self.ensure_anna_bindings()
         return did
 
     def remember_shim(self, entry, manifest, before):
@@ -614,6 +616,19 @@ class Launcher:
             raise PlayBlocked(f"HonkHonk {shim.honk_version()} could not be installed: {e}. Run setup from Settings to get it.", "honk") from None
         if not self.honk_state()[0]:
             raise PlayBlocked(f"FH2MP needs HonkHonk {shim.honk_version()} (fh2-mods\\HonkHonk.dll and its HonkHonk folder). Run setup from Settings to install it.", "honk")
+        try:
+            self.ensure_anna()
+        except Exception as e:  # noqa: BLE001
+            from .api import log_failure
+            log_failure("PLAY", "anna", e, str(e))
+            raise PlayBlocked(f"FH2 ANNA {shim.anna_version()} could not be installed: {e}. Run setup from Settings to get it.", "anna") from None
+        if not self.anna_state()[0]:
+            raise PlayBlocked(f"FH2MP needs FH2 ANNA {shim.anna_version()} (fh2-mods\\FH2ANNA.dll). Run setup from Settings to install it.", "anna")
+        try:
+            self.ensure_anna_bindings()
+        except shim.ShimError as e:                  # not worth stopping a game over: ANNA and Extra Options then share the D-pad
+            from .api import log_failure
+            log_failure("PLAY", "anna_bindings", e, str(e))
         try:
             self.ensure_controls()
         except shim.ShimError as e:                  # not worth stopping a game over: the toggles just stay where they are
@@ -728,11 +743,34 @@ class Launcher:
     def car_database_step(self):
         """Every start: the server's car database goes in place, unless the player keeps their own car packs. -> a note for the player.
         Keeping them: the session names no database, so the shim leaves the game's database (and the car packs in it) alone; the server
-        serves every service as usual but keeps this client out of play with other people (fh2mp_lsp._gamedb_ok)."""
+        lets it play with others, keeps its custom cars out of events and Road Trip and its scores off the boards (lsp gamedbOK, game.CustomCar)."""
         if self.settings["keep_car_packs"]:
             self.gamedb_synced = False
-            return "your own car packs are kept: tunes, liveries and photos work, play with other people is off"
+            note = "your own car packs are kept: custom cars stay out of online events and Road Trip, scores stay off the leaderboards"
+            return ", ".join(n for n in (note, self.sync_base_parts()) if n)
         return self.sync_gamedb()
+
+    def sync_base_parts(self):
+        """Keeping car packs: the server's database is downloaded to fh2mp\\ (not put in place) and its parts and stock cars written to
+        fh2mp\\base-parts.txt, from which the shim tells a car pack's parts from the game's (gamedb.write_base_parts). Never blocks Play: the
+        game server resets such parts for the others anyway. -> a note for the player, '' when it went through."""
+        folder = self.settings["azimuth_dir"]
+        try:
+            api = self.api()
+            m = api.gamedb(self.token)
+            if not m:
+                return ""
+            gamedb.sync(api, self.token, m, folder)
+            n = gamedb.write_base_parts(folder)
+            standins = gamedb.custom_standins(folder)
+            if standins:
+                api.put_standins(self.token, standins)
+                logs.info("gamedb", "gamedb.standins_sent", cars=standins.count(",") + 1)
+        except (gamedb.GameDbError, ApiError, OSError) as e:
+            logs.warn("gamedb", "gamedb.base_parts_failed", error=str(e), kept=os.path.isfile(os.path.join(folder, *gamedb.BASE_PARTS)))
+            return "couldn't refresh the list of the game's parts: car pack parts may show their own PI in event car select"
+        logs.info("gamedb", "gamedb.base_parts_written", lines=n)
+        return ""
 
     def sync_gamedb(self):
         """Every start: the server's car database goes into fh2mp\\ in the Azimuth folder, from where the shim puts it in the game's
@@ -963,6 +1001,37 @@ class Launcher:
             raise updater.UpdateError(str(e)) from None
         return shim.install_honk(d, files)
 
+    # ---- FH2 ANNA (required: the in-car menu whose lights and doors other players see)
+    def anna_state(self):
+        """-> (the pinned FH2 ANNA is in place, version)."""
+        d = self.settings["azimuth_dir"]
+        if not d or not os.path.isdir(d) or not shim.anna_complete(d):
+            return False, ""
+        return True, shim.anna_version()
+
+    def ensure_anna(self, progress=None, cancelled=lambda: False):
+        """Install the pinned FH2 ANNA release when its DLL is missing or another build. -> list of things done."""
+        d = self.settings["azimuth_dir"]
+        if not d or not os.path.isdir(d) or shim.anna_complete(d):
+            return []
+        try:
+            files = upstream.fetch("anna", updater.Updater(channel=self.settings["channel"]), progress, cancelled)
+        except upstream.UpstreamError as e:
+            raise updater.UpdateError(str(e)) from None
+        return shim.install_anna(d, files)
+
+    def ensure_anna_bindings(self):
+        """Extra Options' D-pad autodrive and hazard buttons (ANNA's buttons) go to None once; a binding the player chose is never touched, and a
+        player who sets them again afterwards keeps them. -> list of things done."""
+        d = self.settings["azimuth_dir"]
+        if not d or not os.path.isdir(d) or self.settings["anna_bindings_moved"]:
+            return []
+        found, did = shim.anna_bindings(d)
+        if found:
+            self.settings["anna_bindings_moved"] = True
+            self.settings.save()
+        return did
+
     def ensure_controls(self):
         """Extra Options' headlight and roof toggles leave the right stick (the horn) once; a binding the player chose is never touched, and
         a player who sets RightStick again afterwards keeps it. When the last game says the shim could not put the horn on the right stick
@@ -1029,9 +1098,11 @@ class Launcher:
         out.append(("FH2 Extra Options", eo_ver if have else "not installed", want_eo, have and eo_ver == want_eo))
         hh_ok, hh_ver = shim.honk_installed(d)
         out.append(("HonkHonk", hh_ver if hh_ok else "not installed", shim.honk_version(), shim.honk_complete(d)))
+        an_ok, an_ver = shim.anna_installed(d)
+        out.append(("FH2 ANNA", an_ver if an_ok else "not installed", shim.anna_version(), shim.anna_complete(d)))
         session = os.path.exists(os.path.join(shim.bin_dir(d), shim.SESSION_FILE))
         out.append(("Session for the game", "present (written by Play)" if session else "none: the game starts offline", "Play writes it", None))
-        out.append(("Car database", "your own car packs kept: no play with other people" if s["keep_car_packs"] else "the server's, put in place at Play", "-", None))
+        out.append(("Car database", "your own car packs kept: custom cars stay out of online events" if s["keep_car_packs"] else "the server's, put in place at Play", "-", None))
         out.append(("Connection", "TCP always" if s["tcp_fallback"] else "UDP, TCP when the probe fails" if s["tcp_auto"] else "UDP only", "-", None))
         out.append(("Mode", "offline" if s["offline_mode"] else "online", "-", None))
         h = self.hotfix

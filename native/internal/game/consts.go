@@ -153,7 +153,10 @@ var (
 	MaxPacketBytes   = envInt("FH2MP_MAX_PACKET_BYTES", 1000)
 	Reliable         = envStr("FH2MP_RELIABLE", "0") == "1"
 	OwnerQuarantineS = envFloat("FH2MP_OWNER_QUARANTINE", 30)
-	CarPolicy        = envStr("FH2MP_CAR_POLICY", "kick")
+	// CarPolicy for a car players cannot get (traffic-only cars, catalog.Blocked): "events" (default, user decision 2026-11-08: it drives in Free
+	// Roam, events and Road Trip refuse it, like a car pack's own car), "kick" (ends the connection and puts the account in the cheater pool),
+	// "log" or "off".
+	CarPolicy        = envStr("FH2MP_CAR_POLICY", "events")
 	PartPolicy       = strings.ToLower(strings.TrimSpace(envStr("FH2MP_PART_POLICY", "fix")))
 	UnknownCarPolicy = envStr("FH2MP_UNKNOWN_CAR_POLICY", "standin")
 	StandinCar       = int64(envInt("FH2MP_STANDIN_CAR", 1215))

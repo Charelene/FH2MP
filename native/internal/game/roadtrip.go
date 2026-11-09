@@ -493,7 +493,7 @@ func (w *World) RtSendConfigure() {
 func (w *World) RtCheckReady(force bool) {
 	var peers, ready []*Peer
 	for _, q := range w.Peers.Values() {
-		if q.Connected && q.RtStarted {
+		if q.Connected && q.RtStarted && !w.NotForEvents(q) { // a custom or traffic car is refused at Ready: the others do not wait for it
 			peers = append(peers, q)
 			if q.ConsoleVars[4] {
 				ready = append(ready, q)

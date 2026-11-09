@@ -699,3 +699,97 @@ def install_honk(folder, files):
     except OSError as e:
         raise ShimError(f"could not install HonkHonk: {e.strerror or e}. Is the game still running?") from None
     return did + ([f"installed HonkHonk {honk_version()} (suderek22, GPL-3.0) from its GitHub release"] if did else [])
+
+# ---- FH2 ANNA (qiangqiang101): fh2-mods\FH2ANNA.dll, loaded by the platform next to the shim; its settings file (FH2ANNA.ini) is its own.
+
+ANNA_DLL = "fh2-mods/FH2ANNA.dll"
+
+
+def anna_version():
+    return UPSTREAM["anna"]["version"]
+
+
+def anna_complete(folder):
+    """The pinned FH2 ANNA DLL is in place."""
+    try:
+        with open(os.path.join(folder, *ANNA_DLL.split("/")), "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest() == UPSTREAM["anna"]["dllSha256"]
+    except OSError:
+        return False
+
+
+def anna_installed(folder):
+    """-> (installed, version): the pinned version when the DLL is the pinned build, "unknown" for another FH2ANNA.dll, (False, "") when missing."""
+    try:
+        with open(os.path.join(folder, *ANNA_DLL.split("/")), "rb") as f:
+            same = hashlib.sha256(f.read()).hexdigest() == UPSTREAM["anna"]["dllSha256"]
+    except OSError:
+        return False, ""
+    return True, anna_version() if same else "unknown"
+
+
+def install_anna(folder, files):
+    """Installs FH2 ANNA from its release (`files` = upstream.fetch("anna"): the DLL only). A different FH2ANNA.dll there is kept as
+    FH2ANNA.dll.before-fh2mp-setup. -> list of things done."""
+    data = files.get(ANNA_DLL)
+    if data is None:
+        raise ShimError("the FH2 ANNA release has no FH2ANNA.dll")
+    target = os.path.join(folder, *ANNA_DLL.split("/"))
+    try:
+        if os.path.exists(target):
+            with open(target, "rb") as f:
+                if f.read() == data:
+                    return []
+            saved = target + ".before-fh2mp-setup"
+            n = 1
+            while os.path.lexists(saved):
+                n += 1
+                saved = f"{target}.before-fh2mp-setup-{n}"
+            shutil.copy2(target, saved)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        paths.atomic_write(target, data, 0o755, busy_ok=True)
+    except OSError as e:
+        raise ShimError(f"could not install FH2 ANNA: {e.strerror or e}. Is the game still running?") from None
+    return [f"installed FH2 ANNA {anna_version()} (qiangqiang101, MIT) from its GitHub release"]
+
+
+# ANNA opens on D-pad down and moves up its list with D-pad up, which are Extra Options' default autodrive and hazard buttons: with both, opening
+# ANNA also starts Extra Options' autodrive (ANNA's README). Those two go to None once, only where they are still the defaults.
+ANNA_EO_KEYS = {"AutodriveXbox": "DPadDown", "HazardsXbox": "DPadUp"}
+_ANNA_EO_RE = re.compile(rb"^(" + b"|".join(k.encode() for k in ANNA_EO_KEYS) + rb")([ \t]*=[ \t]*)(DPadDown|DPadUp)([ \t]*\r?)$", re.I | re.M)
+
+
+def anna_bindings_bytes(data):
+    """The Extra Options settings file `data` with AutodriveXbox=DPadDown and HazardsXbox=DPadUp (each only with its own default) set to None;
+    every other byte stays. -> (bytes, number of keys changed)."""
+    defaults = {k.lower(): v.lower() for k, v in ANNA_EO_KEYS.items()}
+    n = 0
+
+    def one(m):
+        nonlocal n
+        if defaults[m.group(1).decode("ascii").lower()] != m.group(3).decode("ascii").lower():
+            return m.group(0)                    # e.g. HazardsXbox=DPadDown: the player's own choice
+        n += 1
+        return m.group(1) + m.group(2) + b"None" + m.group(4)
+    return _ANNA_EO_RE.sub(one, data), n
+
+
+def anna_bindings(folder):
+    """anna_bindings_bytes() on the FH2_ExtraOptions.ini in `folder`, written back only when something changed. -> (ini found, things done)."""
+    path = os.path.join(folder, EXTRA_INI)
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except FileNotFoundError:
+        return False, []
+    except OSError as e:
+        raise ShimError(f"could not read the FH2 Extra Options settings: {e.strerror or e}") from None
+    new, n = anna_bindings_bytes(data)
+    if not n:
+        return True, []
+    try:
+        shutil.copy2(path, path + ".before-fh2mp-anna")
+        paths.atomic_write(path, new, 0o644)
+    except OSError as e:
+        raise ShimError(f"could not update the FH2 Extra Options settings: {e.strerror or e}. Is the game still running?") from None
+    return True, [f"turned off Extra Options' D-pad autodrive/hazard buttons ({n} setting(s)); the D-pad opens FH2 ANNA"]

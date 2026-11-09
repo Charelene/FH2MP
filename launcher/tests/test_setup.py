@@ -449,7 +449,7 @@ class WizardFlow(unittest.TestCase):
             self.w.packages.install_shim()
 
     def test_honkhonk_is_a_required_add_on_card_and_setup_reopens_for_it(self):
-        self.assertEqual(set(self.w.dep_get), {'platform', 'extra', 'honk'})
+        self.assertEqual(set(self.w.dep_get), {'platform', 'extra', 'honk', 'anna'})
         self.assertIn('honk', self.w._dep_ready)
         self.assertGreaterEqual(setup.REVISION, 3)                    # installs set up before HonkHonk reopen the wizard
         self.lc.settings['azimuth_dir'] = str(self.root)
