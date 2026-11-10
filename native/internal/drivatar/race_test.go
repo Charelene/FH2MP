@@ -313,3 +313,69 @@ func TestCarsFromTheCatalog(t *testing.T) {
 		}
 	}
 }
+
+// paceOf is a record's UserInfo.base.timeRatioMean.
+func paceOf(r Record) float64 {
+	ui, _ := get(r, "UserInfo").(pyjson.Obj)
+	base, _ := get(ui, "base").(pyjson.Obj)
+	return asFloat(get(base, "timeRatioMean"))
+}
+
+// A player's record served at a skill level drives at that level's pace (the band of the game's own Drivatars), at the player's place in it; the
+// stored record keeps the player's own pace, and the same player in two levels gets two paces.
+func TestPaceFollowsTheLevel(t *testing.T) {
+	st, _, _ := playersStore(t)
+	paces := map[int64]float64{0xd000: 0, 0xd001: 0.661, 0xd002: 1, 0xd003: 0.25}
+	for x, p := range paces {
+		addPlayers(t, st, x, 1)
+		if _, err := st.Edit(x, []Set{{K: "timeRatioMean", V: p}}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inBand := func(where string, r Record) {
+		t.Helper()
+		x, skill := asInt(get(r, "Xuid")), asInt(get(r, "UserSkillLevel"))
+		own, ok := paces[x]
+		if !ok {
+			return
+		}
+		want := skillBand*float64(skill) + skillBandSpan*own
+		if got := paceOf(r); got < want-1e-6 || got > want+1e-6 || got < skillBand*float64(skill)-1e-6 || got > skillBand*float64(skill)+skillBandSpan+1e-6 {
+			t.Errorf("%s: %#x (own pace %.3f) at skill %d has pace %.4f, want %.4f", where, x, own, skill, got, want)
+		}
+	}
+	cache, err := st.ForCache(120, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	levels := map[int64]map[int64]bool{}
+	for _, r := range cache {
+		inBand("cache", r)
+		x := asInt(get(r, "Xuid"))
+		if levels[x] == nil {
+			levels[x] = map[int64]bool{}
+		}
+		levels[x][asInt(get(r, "UserSkillLevel"))] = true
+	}
+	if len(levels[0xd001]) != NumSkills {
+		t.Errorf("0xd001 is in %d levels of the cache, want %d", len(levels[0xd001]), NumSkills)
+	}
+	for skill := int64(0); skill < NumSkills; skill++ {
+		recs, err := st.Pool(11, &skill, nil, 0x1, nil, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range recs {
+			inBand(fmt.Sprintf("grid %d", skill), r)
+		}
+	}
+	for x, p := range paces {
+		rec, err := st.ForPlayer(x, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := paceOf(rec); got < p-1e-6 || got > p+1e-6 {
+			t.Errorf("stored %#x has pace %.4f after serving, want its own %.4f", x, got, p)
+		}
+	}
+}
