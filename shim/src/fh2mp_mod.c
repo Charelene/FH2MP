@@ -3552,50 +3552,82 @@ static void weather_sample(unsigned char *img)
 
 #include "eo_timelock.inc"
 
-/* The plugin as far as this code knows it: each global's use, byte for byte, so another build is left alone */
-static unsigned char *eo_timelock_plugin(void)
+/* The plugin as far as this code knows it: each global's use, byte for byte, per known build, so another build is left alone. -> the plugin's
+ * image with *layout set, or NULL. */
+static unsigned char *eo_timelock_plugin(const struct eo_wc_layout **layout)
 {
-    static const struct { unsigned rva; unsigned char code[13]; unsigned n; } known[] = {
-        {0x2d90, {0x31, 0xc0, 0x83, 0x3d, 0x43, 0x79, 0x00, 0x00, 0x00, 0x0f, 0x95, 0xc0, 0xc3}, 13},  /* enabled */
-        {0x2dd0, {0x8b, 0x05, 0x0a, 0x79, 0x00, 0x00, 0xc3}, 7},                                       /* generation */
-        {0x32b0, {0x8b, 0x05, 0x2e, 0x74, 0x00, 0x00, 0xc3}, 7},                                       /* weather */
-        {0x36d8, {0x48, 0x3b, 0x1d, 0x29, 0x70, 0x00, 0x00}, 7},                                       /* held clock */
+    struct eo_wc_check { unsigned rva; unsigned char code[13]; unsigned n; };
+    static const struct { const char *name; const struct eo_wc_layout *at; struct eo_wc_check check[4]; } builds[] = {
+        {"1.1.0 (Extra Options 0.6.0)", &EO_WC_1_1_0, {
+            {0x30c0, {0x31, 0xc0, 0x83, 0x3d, 0x27, 0x76, 0x00, 0x00, 0x00, 0x0f, 0x95, 0xc0, 0xc3}, 13},  /* enabled */
+            {0x3130, {0x8b, 0x05, 0xbe, 0x75, 0x00, 0x00, 0xc3}, 7},                                       /* generation */
+            {0x3590, {0x8b, 0x05, 0x62, 0x71, 0x00, 0x00, 0xc3}, 7},                                       /* weather */
+            {0x3908, {0x48, 0x39, 0x1d, 0x11, 0x6e, 0x00, 0x00}, 7}}},                                     /* held clock */
+        {"1.0.4 (Extra Options 0.4.4)", &EO_WC_1_0_4, {
+            {0x2d90, {0x31, 0xc0, 0x83, 0x3d, 0x43, 0x79, 0x00, 0x00, 0x00, 0x0f, 0x95, 0xc0, 0xc3}, 13},  /* enabled */
+            {0x2dd0, {0x8b, 0x05, 0x0a, 0x79, 0x00, 0x00, 0xc3}, 7},                                       /* generation */
+            {0x32b0, {0x8b, 0x05, 0x2e, 0x74, 0x00, 0x00, 0xc3}, 7},                                       /* weather */
+            {0x36d8, {0x48, 0x3b, 0x1d, 0x29, 0x70, 0x00, 0x00}, 7}}},                                     /* held clock */
     };
-    static int refused;
+    static int refused, found = -1;
     unsigned char *wc;
-    unsigned char code[13];
-    unsigned i;
+    unsigned char code[13], first[13];
+    const struct eo_wc_check *first_check = NULL;
+    unsigned b, i;
+    int first_readable = 0;
 
     if (refused || !(wc = (unsigned char *)GetModuleHandleW(L"EO_WeatherControl.dll"))) {
         return NULL;
     }
-    for (i = 0; i < sizeof known / sizeof known[0]; i++) {
-        int readable = read_game_memory(wc + known[i].rva, code, known[i].n);
-        if (!readable || memcmp(code, known[i].code, known[i].n)) {
-            refused = 1;
-            log_begin();
-            log_raw("timelock: unexpected EO_WeatherControl.dll (only the one in Extra Options 0.4.4 is known), its time lock is not parked online: at plugin+0x");
-            log_hex(known[i].rva, 4);
-            if (readable) {
-                log_raw(" expected ");
-                log_hexbytes(known[i].code, known[i].n);
-                log_raw(", found ");
-                log_hexbytes(code, known[i].n);
-            } else {
-                log_raw(" the code cannot be read");
+    if (found >= 0) {
+        *layout = builds[found].at;
+        return wc;
+    }
+    for (b = 0; b < sizeof builds / sizeof builds[0]; b++) {
+        for (i = 0; i < 4; i++) {
+            const struct eo_wc_check *c = &builds[b].check[i];
+            int readable = read_game_memory(wc + c->rva, code, c->n);
+            if (!readable || memcmp(code, c->code, c->n)) {
+                if (b == 0) {                       /* the newest build's first difference goes in the log */
+                    first_check = c;
+                    first_readable = readable;
+                    memcpy(first, code, c->n);
+                }
+                break;
             }
-            log_raw("\n");
-            return NULL;
+        }
+        if (i == 4) {
+            found = (int)b;
+            log_begin();
+            log_raw("timelock: EO_WeatherControl.dll ");
+            log_raw(builds[b].name);
+            log_raw(" found; its time lock and weather are parked while a session exists\n");
+            *layout = builds[b].at;
+            return wc;
         }
     }
-    return wc;
+    refused = 1;
+    log_begin();
+    log_raw("timelock: unexpected EO_WeatherControl.dll (the builds in Extra Options 0.4.4 and 0.6.0 are known), its time lock is not parked online: at plugin+0x");
+    log_hex(first_check->rva, 4);
+    if (first_readable) {
+        log_raw(" expected ");
+        log_hexbytes(first_check->code, first_check->n);
+        log_raw(", found ");
+        log_hexbytes(first, first_check->n);
+    } else {
+        log_raw(" the code cannot be read");
+    }
+    log_raw("\n");
+    return NULL;
 }
 
 static void eo_timelock_tick(unsigned char *img)
 {
     static struct eo_lock state;
     struct eo_lock before;
-    unsigned char *wc = eo_timelock_plugin();
+    const struct eo_wc_layout *layout = NULL;
+    unsigned char *wc = eo_timelock_plugin(&layout);
     unsigned char *manager = NULL, *session = NULL, *root = NULL, *players = NULL, *world = NULL, *clock = NULL;
     int did;
 
@@ -3610,7 +3642,7 @@ static void eo_timelock_tick(unsigned char *img)
         read_game_memory(world + 0x480, &clock, 8);
     }
     before = state;
-    did = eo_lock_step(&state, wc, session != NULL, clock);
+    did = eo_lock_step(&state, wc, layout, session != NULL, clock);
     if (did & EO_LOCK_RESTORED) {
         log_begin();
         log_raw("timelock: session over, EO's settings are back (time lock ");
