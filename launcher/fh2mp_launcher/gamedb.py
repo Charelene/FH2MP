@@ -14,7 +14,7 @@ import re
 import sqlite3
 
 from . import azimuth, paths, shim
-from .constants import DATA_DIR
+from .constants import DATA_DIR, EXTRA_MODS_DIR, EXTRA_MODS_RESERVED
 
 LOCAL = (DATA_DIR, "gamedbRC.slt")
 PLACED = (DATA_DIR, "gamedb-placed.txt")  # the shim's list of its copies in mediaoverride ("size date", newest last)
@@ -141,23 +141,37 @@ def write_base_parts(folder):
 STANDIN_CANDIDATES = 5
 
 
-def _pack_cars(folder):
-    """The cars the Extra Options mods in <folder>/mods add (mod.json naming a database.json with Data_Car rows) -> {car id: (bucket, class,
-    performance index)}; a mod whose files cannot be read is skipped."""
-    out = {}
-    mods = os.path.join(folder, "mods")
-    try:
-        names = sorted(os.listdir(mods))
-    except OSError:
-        return out
-    for name in names:
+def _pack_dirs(folder):
+    """The Extra Options package folders in `folder`: mods/Forza Horizon 2/* (0.6.0), then mods/* (up to 0.4.4; 0.6.0 moves them over on its
+    first start, after this Play's check) without the names 0.6.0 keeps for itself or one already in mods/Forza Horizon 2, whose copy 0.6.0
+    loads. -> list of paths."""
+    out, seen = [], set()
+    reserved = {n.lower() for n in EXTRA_MODS_RESERVED}
+    for base, skip in ((os.path.join(folder, *EXTRA_MODS_DIR.split("/")), set()), (os.path.join(folder, "mods"), reserved)):
         try:
-            with open(os.path.join(mods, name, "mod.json"), encoding="utf-8-sig") as f:
+            names = sorted(os.listdir(base))
+        except OSError:
+            continue
+        for name in names:
+            if name.lower() in skip or name.lower() in seen or not os.path.isdir(os.path.join(base, name)):
+                continue
+            seen.add(name.lower())
+            out.append(os.path.join(base, name))
+    return out
+
+
+def _pack_cars(folder):
+    """The cars the Extra Options mods in the Azimuth folder add (mod.json naming a database.json with Data_Car rows; _pack_dirs) -> {car id:
+    (bucket, class, performance index)}; a mod whose files cannot be read is skipped."""
+    out = {}
+    for pack in _pack_dirs(folder):
+        try:
+            with open(os.path.join(pack, "mod.json"), encoding="utf-8-sig") as f:
                 manifest = json.load(f)
             rel = manifest.get("database") if isinstance(manifest, dict) else None
             if not isinstance(rel, str) or os.path.isabs(rel) or ".." in rel.replace("\\", "/").split("/"):
                 continue
-            with open(os.path.join(mods, name, rel), encoding="utf-8-sig") as f:
+            with open(os.path.join(pack, rel), encoding="utf-8-sig") as f:
                 db = json.load(f)
             tables = db.get("tables", {})
             buckets = {r.get("CarId"): r.get("CarBucket") for r in tables.get("Data_Car_Buckets", {}).get("insert", []) if isinstance(r, dict)}

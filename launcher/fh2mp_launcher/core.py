@@ -609,6 +609,12 @@ class Launcher:
                               "Turn on \"Install FH2 Extra Options\" in Settings and press Play: the launcher installs it and keeps your "
                               "old winmm.dll in the fh2extra folder.", "extra_options")
         try:
+            self._eo_layout_note = self.ensure_extra_layout()
+        except shim.ShimError as e:                  # not worth stopping a game over: Extra Options then loads no mods, and says so in its log
+            from .api import log_failure
+            log_failure("PLAY", "extra_layout", e, str(e))
+            self._eo_layout_note = ""
+        try:
             self.ensure_honk()
         except Exception as e:  # noqa: BLE001
             from .api import log_failure
@@ -665,6 +671,8 @@ class Launcher:
         notes = [cars] if cars else []
         if getattr(self, "_aero_note", ""):
             notes.append(self._aero_note)
+        if getattr(self, "_eo_layout_note", ""):
+            notes.append(self._eo_layout_note)
         if self.hotfix_disabled:
             notes.append("turned off for a known crash: " + ", ".join(self.hotfix_disabled))
         if enabled:
@@ -1002,6 +1010,15 @@ class Launcher:
         except upstream.UpstreamError as e:
             raise updater.UpdateError(str(e)) from None
         return shim.install_extra(d, files)
+
+    def ensure_extra_layout(self):
+        """Every Play: a mods folder Extra Options 0.6.0 would refuse to load (two mod lists) is put right where nothing is lost
+        (shim.eo_layout_repair, which logs it). -> a note for the player: what was done, or what is left for them; "" when nothing was wrong."""
+        d = self.settings["azimuth_dir"]
+        if not d or not os.path.isdir(d):
+            return ""
+        did, note = shim.eo_layout_repair(d)
+        return note or "; ".join(did)
 
     # ---- HonkHonk (required: the horns other players hear)
     def honk_state(self):

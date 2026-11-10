@@ -1022,11 +1022,14 @@ def fake_release(kind, files, dll_name):
 class UpstreamTests(unittest.TestCase):
     def test_extract_takes_only_the_pinned_build(self):
         from fh2mp_launcher import upstream
-        files = {"Azimuth/winmm.dll": b"MZ-eo", "Azimuth/FH2_ExtraOptions.ini": b"ini", "Azimuth/data/bin/azimuth-tls.dll": b"stub",
-                 "Mezcal/xg.dll": b"other"}
-        data, pin = fake_release("extraOptions", files, "Azimuth/winmm.dll")
-        pin['files'] = {'Azimuth/winmm.dll': 'winmm.dll', 'Azimuth/FH2_ExtraOptions.ini': 'FH2_ExtraOptions.ini'}
-        self.assertEqual(upstream.extract("extraOptions", data, pin), {"winmm.dll": b"MZ-eo", "FH2_ExtraOptions.ini": b"ini"})
+        # 0.6.0's layout: one winmm.dll at the root for FH2, FH3 and FM5; only the FH2 files the pin names are taken
+        files = {"winmm.dll": b"MZ-eo", "FH2_ExtraOptions.ini": b"ini", "FH3_ExtraOptions.ini": b"fh3", "FM5_ExtraOptions.ini": b"fm5",
+                 "mods/Forza Horizon 2/P/mod.json": b"{}", "mods/Forza Horizon 2/P/plugins/P.lib": b"lib",
+                 "mods/Forza Motorsport 5/Q/mod.json": b"{}"}
+        data, pin = fake_release("extraOptions", files, "winmm.dll")
+        pin['files'] = {n: n for n in ('winmm.dll', 'FH2_ExtraOptions.ini', 'mods/Forza Horizon 2/P/mod.json')}
+        self.assertEqual(upstream.extract("extraOptions", data, pin),
+                         {"winmm.dll": b"MZ-eo", "FH2_ExtraOptions.ini": b"ini", "mods/Forza Horizon 2/P/mod.json": b"{}"})
         with self.assertRaises(upstream.UpstreamError):
             upstream.extract("extraOptions", data + b"x", pin)                         # not the pinned zip
         with self.assertRaises(upstream.UpstreamError):
@@ -1041,6 +1044,12 @@ class UpstreamTests(unittest.TestCase):
         self.assertTrue(UPSTREAM["platform"]["url"].startswith("https://github.com/Trinculo54/fh2-mod-platform/releases/download/"))
         self.assertTrue(UPSTREAM["extraOptions"]["url"].startswith("https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions/releases/download/"))
         self.assertEqual(set(UPSTREAM["platform"]["files"].values()), set(shim.PLATFORM_FILES))
+        eo = UPSTREAM["extraOptions"]
+        # Extra Options 0.6.0: the FH2 files only (no FH3/FM5 settings or mods, no import library), nothing at the old mods root, and every
+        # file but the settings pinned by hash
+        self.assertTrue(all(n in ("winmm.dll", "FH2_ExtraOptions.ini") or n.startswith("mods/Forza Horizon 2/") for n in eo["files"].values()))
+        self.assertFalse([n for n in eo["files"] if n.endswith(".lib")])
+        self.assertEqual(set(eo["fileSha256"]), {n for n in eo["files"].values() if not n.endswith(".ini") and n != "winmm.dll"})
 
 
 class OfflineTests(unittest.TestCase):
@@ -1080,7 +1089,8 @@ class ExtraOptionsTests(unittest.TestCase):
     def test_only_one_extra_options_pin_is_supplied(self):
         from fh2mp_launcher.constants import UPSTREAM
         self.assertEqual(set(UPSTREAM), {'platform', 'extraOptions', 'honkHonk', 'anna'})
-        self.assertEqual(UPSTREAM['extraOptions']['version'], '0.4.4')
+        self.assertEqual(UPSTREAM['extraOptions']['version'], '0.6.0')
+        self.assertEqual(UPSTREAM['extraOptions']['dll'], 'winmm.dll')
         with tempfile.TemporaryDirectory() as az:
             self.write(b'MZ-0.3.0-old', az, 'winmm.dll')
             self.assertFalse(shim.extra_options_supported(az))
@@ -1134,6 +1144,75 @@ class ExtraOptionsTests(unittest.TestCase):
             self.assertEqual(self.read(az, "winmm.dll"), b"MZ-mod-dll")
             self.assertEqual(self.read(az, "FH2_ExtraOptions.ini"), self.INI)
             self.assertTrue(shim.extra_options_complete(az))
+
+    def retired(self):
+        """shim.RETIRED_EXTRA_OPTIONS with stand-in 0.4.4 files: the DLL b"MZ-0.4.4" and one package, its mod.json and plugin DLL."""
+        h = lambda b: hashlib.sha256(b).hexdigest()  # noqa: E731
+        return mock.patch.dict(shim.RETIRED_EXTRA_OPTIONS, dllSha256=h(b"MZ-0.4.4"), packages={
+            "Extra Options - Weather Control": {"mod.json": h(b"wc-json"), "plugins/EO_WeatherControl.dll": h(b"MZ-wc-1.0")},
+            "Extra Options - Garage Revving": {"mod.json": h(b"gr-json"), "plugins/EO_GarageEngineRev.dll": h(b"MZ-gr")}})
+
+    def test_the_0_4_4_build_is_updated_and_kept_under_its_version(self):
+        with tempfile.TemporaryDirectory() as az, self.retired():
+            self.write(b"MZ-0.4.4", az, "winmm.dll")
+            self.write(self.INI + b"Mine=1\n", az, "FH2_ExtraOptions.ini")
+            did = shim.install_extra(az, self.release())
+            self.assertIn("updated FH2 Extra Options 0.4.4 to", did[-1])
+            self.assertEqual(self.read(az, "fh2extra", "winmm.dll.0.4.4"), b"MZ-0.4.4")
+            self.assertEqual(self.read(az, "winmm.dll"), b"MZ-release")
+            self.assertIn(b"Mine=1", self.read(az, "FH2_ExtraOptions.ini"))
+            self.write(b"MZ-0.4.4", az, "winmm.dll")                              # again (a 1.3.2 launcher put it back): the first copy stays
+            shim.install_extra(az, self.release())
+            self.assertEqual(self.read(az, "fh2extra", "winmm.dll.0.4.4-2"), b"MZ-0.4.4")
+
+    def test_packages_go_to_the_fh2_folder_and_the_old_bundled_ones_are_retired(self):
+        """0.6.0 brings its packages in mods/Forza Horizon 2; the 0.4.4 copies earlier launchers put at the mods root move to
+        fh2extra/mods-0.4.4 (with the player's settings in them) when they are exactly the 0.4.4 files, a changed one stays."""
+        pkg = "mods/Forza Horizon 2/Extra Options - Weather Control"
+        release = dict(self.release(), **{f"{pkg}/mod.json": b"wc-json-1.1", f"{pkg}/plugins/EO_WeatherControl.dll": b"MZ-wc-1.1",
+                                          f"{pkg}/plugins/EO_WeatherControl.ini": b"[TimeLock]\nEnabled=0\n"})
+        with tempfile.TemporaryDirectory() as az, self.retired():
+            old_wc, old_gr = os.path.join(az, "mods", "Extra Options - Weather Control"), os.path.join(az, "mods", "Extra Options - Garage Revving")
+            self.write(b"wc-json", old_wc, "mod.json")
+            self.write(b"MZ-wc-1.0", old_wc, "plugins", "EO_WeatherControl.dll")
+            self.write(b"[TimeLock]\nHour=20\n", old_wc, "plugins", "EO_WeatherControl.ini")
+            self.write(b"gr-json", old_gr, "mod.json")
+            self.write(b"MZ-gr-changed", old_gr, "plugins", "EO_GarageEngineRev.dll")
+            self.write(b"MZ-car", az, "mods", "Some Car Pack", "mod.json")        # the player's own: Extra Options moves it, not FH2MP
+            self.write(b"Mine\n", az, *pkg.split("/"), "plugins", "EO_WeatherControl.ini")   # settings already there are kept
+            did = shim.install_extra(az, release)
+            self.assertEqual(self.read(az, *pkg.split("/"), "plugins", "EO_WeatherControl.dll"), b"MZ-wc-1.1")
+            self.assertEqual(self.read(az, *pkg.split("/"), "plugins", "EO_WeatherControl.ini"), b"Mine\n")
+            moved = os.path.join(az, "fh2extra", "mods-0.4.4", "Extra Options - Weather Control")
+            self.assertFalse(os.path.exists(old_wc))
+            self.assertEqual(self.read(moved, "plugins", "EO_WeatherControl.ini"), b"[TimeLock]\nHour=20\n")
+            self.assertTrue(any("mods-0.4.4" in s for s in did))
+            self.assertEqual(self.read(old_gr, "plugins", "EO_GarageEngineRev.dll"), b"MZ-gr-changed")
+            self.assertTrue(os.path.isdir(os.path.join(az, "mods", "Some Car Pack")))
+
+    def test_two_mod_lists_are_put_right_only_when_nothing_is_lost(self):
+        """Extra Options 0.6.0 loads no mods at all with both mods/loadorder.txt and mods/Forza Horizon 2/loadorder.txt (a player went
+        0.6.0 -> 0.4.4 -> 0.6.0). When every root package is already in mods/Forza Horizon 2 the root list is renamed; else both stay."""
+        with tempfile.TemporaryDirectory() as az:
+            self.assertEqual(shim.eo_layout_repair(az), ([], ""))                   # no mods folder
+            self.write(b"Pack\n", az, "mods", "loadorder.txt")
+            self.write(b"x", az, "mods", "Pack", "mod.json")
+            self.assertEqual(shim.eo_layout_repair(az), ([], ""))                   # only the old list: Extra Options moves it itself
+            self.write(b"Pack\n", az, "mods", "Forza Horizon 2", "loadorder.txt")
+            did, note = shim.eo_layout_repair(az)                                   # Pack is only at the root: it would be lost
+            self.assertEqual(did, [])
+            self.assertIn("two mod lists", note)
+            self.assertIn("Pack", note)
+            self.assertTrue(os.path.isfile(os.path.join(az, "mods", "loadorder.txt")))
+            self.write(b"x", az, "mods", "Forza Horizon 2", "Pack", "mod.json")
+            os.makedirs(os.path.join(az, "mods", "Cache", "fh2-db"))                # 0.6.0's own folders are no packages
+            os.makedirs(os.path.join(az, "mods", "Forza Motorsport 5"))
+            did, note = shim.eo_layout_repair(az)
+            self.assertEqual(note, "")
+            self.assertTrue(did)
+            self.assertFalse(os.path.exists(os.path.join(az, "mods", "loadorder.txt")))
+            self.assertEqual(self.read(az, "mods", "loadorder.txt" + shim.EO_OLD_ORDER_SUFFIX), b"Pack\n")
+            self.assertEqual(self.read(az, "mods", "Forza Horizon 2", "loadorder.txt"), b"Pack\n")
 
     def tls_rig(self, az, with_backup=True):
         """azimuth.exe that names the SHA-256 of its own helper, an old Extra Options in its place, the mod's backup as .old."""
