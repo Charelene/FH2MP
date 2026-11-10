@@ -4,6 +4,7 @@ Layout (the same as every FH2 Mod Platform mod):
     d3dcompiler_47.dll          FH2 Mod Platform (Trinculo54, MIT): loads every DLL in fh2-mods
     fh2-mods\\FH2MP.dll          the shim
     winmm.dll                   FH2 Extra Options (RokkuDayo, GPL-3.0), with its ini
+    mods\\Forza Horizon 2\\       Extra Options' packages (0.6.0 on; up to 0.4.4 they were in mods\\)
 The platform and Extra Options come from their authors' pinned GitHub releases (upstream.py). Up to 1.0.0-rc5 the shim itself was winmm.dll
 and chain-loaded Extra Options from fh2extra\\; install() moves that layout over.
 """
@@ -14,8 +15,9 @@ import shutil
 
 from . import logs, paths, upstream
 from .constants import AZIMUTH_TLS_HELPERS, AZIMUTH_VERSION, BUILTIN_AZIMUTH_BUILDS, UPSTREAM
-from .constants import (EXTRA_OPTIONS_DIR, EXTRA_OPTIONS_DLL, EXTRA_OPTIONS_DLL_SHA256, EXTRA_OPTIONS_VERSION, LEGACY_SHIM_DLL, LSP_FILE,
-                        MODS_DIR, PLATFORM_DLL, PLATFORM_DLL_SHA256, PLATFORM_FILES, PLATFORM_LOADERS, PLATFORM_VERSION, SESSION_FILE, SHIM_DLL)
+from .constants import (EXTRA_MODS_DIR, EXTRA_MODS_RESERVED, EXTRA_OPTIONS_DIR, EXTRA_OPTIONS_DLL, EXTRA_OPTIONS_DLL_SHA256, EXTRA_OPTIONS_VERSION,
+                        LEGACY_SHIM_DLL, LSP_FILE, MODS_DIR, PLATFORM_DLL, PLATFORM_DLL_SHA256, PLATFORM_FILES, PLATFORM_LOADERS, PLATFORM_VERSION,
+                        RETIRED_EXTRA_OPTIONS, SESSION_FILE, SHIM_DLL)
 
 MARKER = re.compile(rb"FH2MP-SHIM-VERSION:([0-9A-Za-z.+-]{1,32}):END")
 EXTRA_FILES_PREFIX = "FH2_ExtraOptions."
@@ -485,10 +487,26 @@ def extra_options_complete(folder):
     return True
 
 
+def _sha256_file(path):
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def _free_name(path):
+    """`path`, or path-2, path-3, ... : the first name nothing is at yet."""
+    n, dest = 1, path
+    while os.path.lexists(dest):
+        n += 1
+        dest = f"{path}-{n}"
+    return dest
+
+
 def install_extra(folder, files):
-    """Installs FH2 Extra Options from its release (`files` = upstream.fetch("extraOptions"): winmm.dll and its default ini) unless the
-    supported build is there already. Moves the rc5 layout over first; another winmm.dll there is kept as fh2extra\\winmm.dll.unsupported-N;
-    settings that exist are kept. -> list of things done."""
+    """Installs FH2 Extra Options from its release (`files` = upstream.fetch("extraOptions"): winmm.dll, its default ini and its FH2 packages
+    in mods\\Forza Horizon 2) unless the supported build is there already. Moves the rc5 layout over first. The winmm.dll it replaces is kept in
+    fh2extra: as winmm.dll.0.4.4 when it is the build earlier launchers installed, else as winmm.dll.unsupported-N. Settings that exist are
+    kept; the 0.4.4 packages FH2MP put at the mods root are moved aside (retire_old_extra_packages), and a mods folder Extra Options would not
+    load is put right where nothing is lost (eo_layout_repair). -> list of things done."""
     try:
         dll = files[EXTRA_OPTIONS_DLL]
         if MARKER.search(dll) or dll[:2] != b"MZ" or not is_supported_extra(dll, folder):
@@ -509,26 +527,99 @@ def install_extra(folder, files):
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 paths.atomic_write(target, data, 0o644)
                 did.append(f"installed {name}")
+        did += retire_old_extra_packages(folder)
         if extra_options_supported(folder):            # it was in fh2extra (rc5 layout), or only its settings file is missing
             if EXTRA_INI in files and not os.path.exists(os.path.join(folder, EXTRA_INI)):
                 paths.atomic_write(os.path.join(folder, EXTRA_INI), swap_stick_bindings_bytes(files[EXTRA_INI])[0], 0o644)
                 did.append("restored the FH2 Extra Options settings file")
-            return did
+            return did + eo_layout_repair(folder)[0]
         old = _extra_dll(folder)
+        updated = ""
         if old:
+            retired = _sha256_file(old) == RETIRED_EXTRA_OPTIONS["dllSha256"]
             dest = os.path.join(folder, EXTRA_OPTIONS_DIR, EXTRA_OPTIONS_DLL)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
-            n = 1
-            while os.path.exists(f"{dest}.unsupported-{n}"):
-                n += 1
-            os.replace(old, f"{dest}.unsupported-{n}")
-            did.append(f"kept your previous winmm.dll as {EXTRA_OPTIONS_DIR}\\winmm.dll.unsupported-{n}")
+            if retired:
+                kept = _free_name(f"{dest}.{RETIRED_EXTRA_OPTIONS['version']}")
+                updated = RETIRED_EXTRA_OPTIONS["version"]
+            else:
+                n = 1
+                while os.path.exists(f"{dest}.unsupported-{n}"):
+                    n += 1
+                kept = f"{dest}.unsupported-{n}"
+            os.replace(old, kept)
+            did.append(f"kept your previous winmm.dll as {EXTRA_OPTIONS_DIR}\\{os.path.basename(kept)}")
         paths.atomic_write(os.path.join(folder, EXTRA_OPTIONS_DLL), dll, 0o755)
         if EXTRA_INI in files and not os.path.exists(os.path.join(folder, EXTRA_INI)):
             paths.atomic_write(os.path.join(folder, EXTRA_INI), swap_stick_bindings_bytes(files[EXTRA_INI])[0], 0o644)
+        did += eo_layout_repair(folder)[0]
     except OSError as e:
         raise ShimError(f"could not install FH2 Extra Options: {e.strerror or e}. Is the game still running?") from None
+    if updated:
+        return did + [f"updated FH2 Extra Options {updated} to {extra_options_version(folder)} (RokkuDayo, GPL-3.0) from its GitHub release; "
+                      "your mods move to mods\\Forza Horizon 2 when the game starts"]
     return did + [f"installed FH2 Extra Options {extra_options_version(folder)} (RokkuDayo, GPL-3.0) from its GitHub release"]
+
+
+def retire_old_extra_packages(folder):
+    """Extra Options 0.4.4's bundled packages at the mods root (Garage Revving, Weather Control), which launchers up to 1.3.2 installed there:
+    0.6.0 has its own copies in mods\\Forza Horizon 2, so when it moves the root folders over on its first start it leaves these behind
+    (it never overwrites). Each one whose DLL and mod.json are exactly the 0.4.4 files moves to fh2extra\\mods-0.4.4\\<name>, with the player's
+    settings in it; one the player changed stays and is logged. -> list of things done."""
+    did = []
+    for name, digests in RETIRED_EXTRA_OPTIONS["packages"].items():
+        src = os.path.join(folder, "mods", name)
+        if not os.path.isdir(src) or os.path.islink(src):
+            continue
+        try:
+            same = all(_sha256_file(os.path.join(src, *rel.split("/"))) == digest for rel, digest in digests.items())
+        except OSError:
+            same = False
+        if not same:
+            logs.warn("extra", "extra.old_package_kept", package=name, why="its files are not the ones Extra Options 0.4.4 shipped",
+                      effect="Extra Options 0.6.0 loads its own copy from mods\\Forza Horizon 2; this one stays at the mods root, unused")
+            continue
+        dest = _free_name(os.path.join(folder, EXTRA_OPTIONS_DIR, f"mods-{RETIRED_EXTRA_OPTIONS['version']}", name))
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        os.replace(src, dest)
+        did.append(f"moved Extra Options {RETIRED_EXTRA_OPTIONS['version']}'s {name} to {os.path.relpath(dest, folder)}")
+    return did
+
+
+EO_OLD_ORDER_SUFFIX = ".before-fh2mp-0.6.0"
+
+
+def eo_layout_repair(folder):
+    """Extra Options 0.6.0 moves mods\\loadorder.txt and the package folders at the mods root into mods\\Forza Horizon 2 on its first start. When
+    both lists exist (a player went 0.6.0 -> 0.4.4 -> 0.6.0: 0.4.4 wrote a new root list) it stops with "layout failure; loader disabled" and
+    loads no mods at all. When every package folder at the root is already in mods\\Forza Horizon 2, nothing would move, so the root list is
+    renamed to loadorder.txt.before-fh2mp-0.6.0 and Extra Options goes on with its own. Otherwise both stay for the player to sort out.
+    -> (list of things done, a note for the player or "")."""
+    root = os.path.join(folder, "mods")
+    fh2 = os.path.join(folder, *EXTRA_MODS_DIR.split("/"))
+    order, fh2_order = os.path.join(root, "loadorder.txt"), os.path.join(fh2, "loadorder.txt")
+    if not (os.path.isfile(order) and os.path.isfile(fh2_order)):
+        return [], ""
+    try:
+        reserved = {n.lower() for n in EXTRA_MODS_RESERVED}
+        left = sorted(n for n in os.listdir(root) if os.path.isdir(os.path.join(root, n)) and n.lower() not in reserved
+                      and not os.path.isdir(os.path.join(fh2, n)))
+    except OSError as e:
+        raise ShimError(f"could not read your mods folder: {e.strerror or e}") from None
+    if left:
+        logs.warn("extra", "extra.two_load_orders", root=order, fh2=fh2_order, not_moved=",".join(left[:8]), count=len(left),
+                  effect="Extra Options loads no mods until one list goes; FH2MP leaves both, a package would be lost otherwise")
+        return [], (f"Extra Options found two mod lists (mods\\loadorder.txt and mods\\Forza Horizon 2\\loadorder.txt) and loads no mods until "
+                    f"one goes. {len(left)} mod folder(s) are still only in mods, e.g. {left[0]}: move them into mods\\Forza Horizon 2, then "
+                    "delete mods\\loadorder.txt")
+    try:
+        dest = _free_name(order + EO_OLD_ORDER_SUFFIX)
+        os.replace(order, dest)
+    except OSError as e:
+        raise ShimError(f"could not rename mods\\loadorder.txt: {e.strerror or e}. Is the game still running?") from None
+    logs.info("extra", "extra.load_order_renamed", kept=dest, why="mods\\Forza Horizon 2 has its own list and every root package",
+              effect="Extra Options 0.6.0 loads mods\\Forza Horizon 2 with its own list")
+    return [f"renamed the second mod list to mods\\{os.path.basename(dest)}: Extra Options uses mods\\Forza Horizon 2\\loadorder.txt"], ""
 
 
 # ---- Controls: HonkHonk honks on the right stick (R3, as in the Forza games), so Extra Options' toggles move to the left stick.

@@ -36,6 +36,12 @@ CASES = {
     'memguard-kill-mode-ends-normal-play': ('launcher', ['test_memguard.RunawayTests.test_normal_play_is_left_alone',
                                                          'test_memguard.RunawayTests.test_a_slow_fill_or_another_program_is_left_alone'],
                                             'fh2mp_launcher.memguard.runaway', lambda *args, **kw: (3 << 30, 1.0)),
+    # Extra Options 0.6.0 loads no mods with two mod lists; the launcher puts that right, or tells the player (hotfix 1.3.3)
+    'eo-two-mod-lists-left-broken': ('launcher', ['test_core.ExtraOptionsTests.test_two_mod_lists_are_put_right_only_when_nothing_is_lost'],
+                                     'fh2mp_launcher.shim.eo_layout_repair', lambda folder: ([], "")),
+    # car packs in 0.6.0's mods/Forza Horizon 2 still get their stand-ins
+    'eo-car-packs-not-found': ('launcher', ['test_gamedb.StandinTests.test_packs_are_read_from_both_extra_options_layouts'],
+                               'fh2mp_launcher.gamedb._pack_dirs', lambda folder: []),
 }
 
 

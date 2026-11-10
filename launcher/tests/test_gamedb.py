@@ -205,3 +205,23 @@ class StandinTests(unittest.TestCase):
 
     def test_no_car_packs_nothing_to_send(self):
         self.assertEqual(gamedb.custom_standins(tempfile.mkdtemp()), "")
+
+    def test_packs_are_read_from_both_extra_options_layouts(self):
+        """Extra Options 0.6.0 keeps packages in mods/Forza Horizon 2 and moves mods/<pack> there on its first start, after the Play that
+        checks them: both places count, the copy in mods/Forza Horizon 2 wins, and the names 0.6.0 keeps for itself are no packages."""
+        import json
+        az = tempfile.mkdtemp()
+
+        def pack(where, car, cls):
+            os.makedirs(where)
+            with open(os.path.join(where, "mod.json"), "w") as f:
+                json.dump({"database": "database.json"}, f)
+            with open(os.path.join(where, "database.json"), "w") as f:
+                json.dump({"tables": {"Data_Car": {"insert": [{"Id": car, "ClassID": cls, "PerformanceIndex": 0.9}]}}}, f)
+        pack(os.path.join(az, "mods", "Forza Horizon 2", "Moved"), 9001, 5)
+        pack(os.path.join(az, "mods", "Forza Horizon 2", "Both"), 9002, 5)
+        pack(os.path.join(az, "mods", "Both"), 9099, 5)                       # the legacy copy of a package already moved: not loaded by 0.6.0
+        pack(os.path.join(az, "mods", "NotYetMoved"), 9003, 6)
+        pack(os.path.join(az, "mods", "Cache"), 9098, 5)                       # 0.6.0's own folders at the mods root
+        pack(os.path.join(az, "mods", "Forza Motorsport 5", "FM5Pack"), 9097, 5)
+        self.assertEqual(gamedb._pack_cars(az), {9001: (None, 5, 0.9), 9002: (None, 5, 0.9), 9003: (None, 6, 0.9)})
