@@ -95,6 +95,37 @@ func asFloat(v any) float64 {
 	return 0
 }
 
+// Pace bands of the game's own Drivatars: level n drives at UserInfo.base.timeRatioMean 0.2n .. 0.2n+0.194 [C: all 125 records of
+// media/drivatarglobalcache/DefaultCache.bin; the game database's AIDrivingBehaviorObservationDefaults has TimeRatioMean = 0.2*DifficultyLevelId +
+// 0.008*(index-1), index 1..25]. The level sets how many mistakes the AI makes and how loosely it holds its line, the pace how fast it goes.
+const (
+	skillBand     = 0.2
+	skillBandSpan = 0.194
+)
+
+// labelSkill puts a player's record at skill level `skill` and moves its pace into that level's band, at the same place in it as the player's own
+// pace in 0..1. A record labelled New Recruit that kept a fast player's pace made New Recruit's mistakes at speed and drove into walls and trees in
+// Free Roam (reported 2026-11-10, after records were first labelled with every level on 2026-11-09). The nested objects are replaced, not
+// changed, so a record shared with another reply is untouched; the stored record keeps the player's own numbers.
+func labelSkill(rec *Record, skill int64) {
+	rec.Set("UserSkillLevel", skill)
+	ui, ok := get(*rec, "UserInfo").(pyjson.Obj)
+	if !ok {
+		return
+	}
+	base, ok := get(ui, "base").(pyjson.Obj)
+	if !ok {
+		return
+	}
+	pace := min(1, max(0, asFloat(get(base, "timeRatioMean"))))
+	level := min(NumSkills-1, max(0, skill))
+	base = append(pyjson.Obj(nil), base...)
+	base.Set("timeRatioMean", float64(float32(skillBand*float64(level)+skillBandSpan*pace)))
+	ui = append(pyjson.Obj(nil), ui...)
+	ui.Set("base", base)
+	rec.Set("UserInfo", ui)
+}
+
 // copyRecord is json.loads(json.dumps(r)).
 func copyRecord(r Record) (Record, error) {
 	text, err := pyjson.Dumps(r, pyjson.Opts{})
@@ -730,10 +761,10 @@ func (s *Store) playersRace(limit int, skill, nearWristband *int64, me int64, sk
 		s.mu.Unlock()
 		return out, nil
 	}
-	for i, r := range players {
-		r.Set("IsFriend", i < len(friends))
+	for i := range players {
+		players[i].Set("IsFriend", i < len(friends))
 		if skill != nil {
-			r.Set("UserSkillLevel", *skill)
+			labelSkill(&players[i], *skill)
 		}
 	}
 	if players, err = s.withCars(players); err != nil {
@@ -907,7 +938,7 @@ func (s *Store) playersOnlyCache(limit int, excludeXuid int64) ([]Record, error)
 			if err != nil {
 				return nil, err
 			}
-			c.Set("UserSkillLevel", skill)
+			labelSkill(&c, skill)
 			c.Set("IsFriend", isFriend[asInt(get(r, "Xuid"))])
 			out = append(out, c)
 		}

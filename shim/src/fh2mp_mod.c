@@ -441,9 +441,16 @@ static void load_args(void)
     g_argv[g_argc] = NULL;
 }
 
-/* Replacement for Platform::Details::GetCmdArguments(int* count) -> wchar_t** */
+/* Replacement for Platform::Details::GetCmdArguments(int* count) -> wchar_t**. The game Azimuth started asks it; FH2MP's arguments are only
+ * for FH2 1.0.0.64 (a player who picks another game in Azimuth's window after the shim loaded gets Azimuth's own, see identity_scope.inc). */
+typedef wchar_t **(*get_cmd_arguments_fn)(int *count);
+static get_cmd_arguments_fn g_cmd_orig;
+
 static wchar_t **hooked_get_cmd_arguments(int *count)
 {
+    if (g_cmd_orig && !find_fh2_image()) {
+        return g_cmd_orig(count);
+    }
     if (count) {
         *count = g_argc;
     }
@@ -2767,7 +2774,7 @@ static int install_cmdline_hook(void)
         log_raw("; launch arguments will not be injected\n");
         return 0;
     }
-    return plat_hook("hook: Azimuth Platform::Details::GetCmdArguments", target, (void *)hooked_get_cmd_arguments, NULL);
+    return plat_hook("hook: Azimuth Platform::Details::GetCmdArguments", target, (void *)hooked_get_cmd_arguments, (void **)&g_cmd_orig);
 }
 
 static int has_arg_prefix(const wchar_t *prefix)
@@ -5352,6 +5359,104 @@ static int install_create_probe(void)
     return 1;
 }
 
+#include "eo_routes.inc"
+
+static int page_executable(const void *p);
+typedef void (*eor_helper_fn)(void *state, struct eor_str *name, unsigned char on);
+typedef void (*eor_set_fn)(struct eor_str *name, unsigned char on);
+static eor_helper_fn g_eor_orig[3];
+static unsigned char *g_eor_img;
+static volatile LONG g_eor_last[2] = {-1, -1};    /* the value last passed on per route group, for the log */
+static volatile LONG g_eor_unknown_said;
+
+/* After feature state `from` set route group `group` to `on`: the same goes to what the offline call site calls now (see eo_routes.inc). */
+static void eor_pass_on(const char *from, int group, unsigned char on)
+{
+    static const unsigned site_rva[2] = {EOR_MAINLAND_CALL_RVA, EOR_ISLAND_CALL_RVA};
+    unsigned char *site = g_eor_img + site_rva[group], code[5];
+    unsigned long long to;
+    struct eor_str name;
+
+    if (!read_game_memory(site, code, sizeof code)) {
+        return;
+    }
+    to = eor_forward_target(code, (unsigned long long)(ULONG_PTR)site, (unsigned long long)(ULONG_PTR)(g_eor_img + EOR_SET_FEATURE_RVA));
+    if (!to) {
+        if (code[0] != 0xE8 && !InterlockedExchange(&g_eor_unknown_said, 1)) {
+            log_begin();
+            log_raw("eoroutes: the offline route feature call at game+0x");
+            log_hex(site_rva[group], 6);
+            log_raw(" is no call any more (another mod changed it); the route state is not passed on\n");
+        }
+        return;
+    }
+    if (!page_executable((const void *)(ULONG_PTR)to)) {
+        return;
+    }
+    eor_borrow(&name, group);
+    ((eor_set_fn)(ULONG_PTR)to)(&name, on);
+    if (InterlockedExchange(&g_eor_last[group], on) != on) {
+        log_begin();
+        log_raw("eoroutes: ");
+        log_raw(group ? EOR_ISLAND : EOR_MAINLAND);
+        log_raw(on ? " on" : " off");
+        log_raw(" from the ");
+        log_raw(from);
+        log_raw(" feature state, passed on to 0x");
+        log_hex(to, 12);
+        log_raw(" (what game+0x");
+        log_hex(site_rva[group], 6);
+        log_raw(" calls instead of SetFeature: Extra Options' route gates)\n");
+    }
+}
+
+#define EOR_DETOUR(n, from)                                                     \
+    static void eor_helper##n(void *state, struct eor_str *name, unsigned char on) \
+    {                                                                           \
+        int group = eor_route_group(name); /* before the call: it may take the string */ \
+        g_eor_orig[n](state, name, on);                                         \
+        if (group >= 0) {                                                       \
+            eor_pass_on(from, group, on);                                       \
+        }                                                                       \
+    }
+EOR_DETOUR(0, "network")
+EOR_DETOUR(1, "event")
+EOR_DETOUR(2, "Storm Island intro")
+
+static void patch_eo_routes(void)
+{
+    static const struct { unsigned rva; const char *name; eor_helper_fn detour; } hooks[3] = {
+        {EOR_NETWORK_HELPER_RVA, "eoroutes: NetworkApplyFeatureStateToGame helper", eor_helper0},
+        {EOR_EVENT_HELPER_RVA, "eoroutes: ApplyFeatureStateToGameForEvent helper", eor_helper1},
+        {EOR_ISLAND_IE_HELPER_RVA, "eoroutes: IslandIEApplyFeatureStateToGame helper", eor_helper2},
+    };
+    unsigned char *img = find_fh2_image(), code[5];
+    unsigned long long to[2];
+    unsigned i, ok = 0;
+
+    if (!img) {
+        return;
+    }
+    g_eor_img = img;
+    for (i = 0; i < 2; i++) {
+        unsigned char *site = img + (i ? EOR_ISLAND_CALL_RVA : EOR_MAINLAND_CALL_RVA);
+        to[i] = read_game_memory(site, code, sizeof code) ? eor_call_target(code, (unsigned long long)(ULONG_PTR)site) : 0;
+    }
+    for (i = 0; i < 3; i++) {
+        ok += plat_hook(hooks[i].name, img + hooks[i].rva, (void *)hooks[i].detour, (void **)&g_eor_orig[i]);
+    }
+    log_begin();
+    log_raw("eoroutes: ");
+    log_dec(ok);
+    log_raw(" of 3 feature-state helpers pass the route features on; the offline calls go to 0x");
+    log_hex(to[0], 12);
+    log_raw(" and 0x");
+    log_hex(to[1], 12);
+    log_raw(to[0] == (ULONG_PTR)(img + EOR_SET_FEATURE_RVA) && to[1] == (ULONG_PTR)(img + EOR_SET_FEATURE_RVA)
+                ? " (SetFeature itself: no mod renames the route activations, nothing is passed on)\n"
+                : " (redirected: Extra Options' route gates get the online value too)\n");
+}
+
 /*
  * wait_for_code gives up waiting for the game's code to be marked executable after 10 seconds and goes ahead; when Azimuth is held up
  * (a message box while it maps the game) our patches would then read pages that are not there yet (seen 2026-10-23: 0xc0000005 at
@@ -5547,6 +5652,9 @@ static DWORD WINAPI late_init(LPVOID unused)
             }
             if (GetEnvironmentVariableW(L"FH2MP_NO_AUTODRIVE_RULE", env, 8) == 0) {
                 patch_autodrive_rule();
+            }
+            if (GetEnvironmentVariableW(L"FH2MP_NO_EOROUTES", env, 8) == 0) {
+                patch_eo_routes();
             }
         }
         {
@@ -5910,14 +6018,152 @@ static int identity_load(void)
     return 1;
 }
 
-/* movabs r8, 0x0009000000000000 (49 B8 imm64) in Azimuth's User.XboxUserId formatting code */
+#define ID_SCOPE_YIELD() SwitchToThread()
+#include "identity_scope.inc"
+
+#define ID_SITES_MAX 4
+static struct id_scope g_id;
+/* what each hooked Azimuth function's thunk goes on to (the platform's trampoline); read by the thunks below */
+static void *g_id_orig[ID_SITES_MAX] __attribute__((used));
+static volatile LONG g_id_early_said;
+static unsigned g_id_other_stamp, g_id_other_size;
+
+/* 1: FH2 1.0.0.64 is the game Azimuth started; 0: another game is; -1: no game is mapped yet (see identity_scope.inc). */
+static int id_started_game(void *unused)
+{
+    unsigned char *at = (unsigned char *)(ULONG_PTR)0x140000000ull;
+    IMAGE_DOS_HEADER dos;
+    IMAGE_NT_HEADERS64 nt;
+    HMODULE module;
+
+    (void)unused;
+    if (find_fh2_image()) {
+        return 1;
+    }
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)at, &module)) {
+        return -1;      /* a module the Windows loader put there, not a game Azimuth mapped */
+    }
+    if (!read_game_memory(at, &dos, sizeof dos) || dos.e_magic != IMAGE_DOS_SIGNATURE || dos.e_lfanew < 64 || dos.e_lfanew > 0x800 ||
+        !read_game_memory(at + dos.e_lfanew, &nt, sizeof nt) || nt.Signature != IMAGE_NT_SIGNATURE ||
+        nt.FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 || (nt.FileHeader.Characteristics & IMAGE_FILE_DLL)) {
+        return -1;
+    }
+    if (nt.FileHeader.TimeDateStamp == FH2_TIMESTAMP && nt.OptionalHeader.SizeOfImage == FH2_SIZE_OF_IMAGE) {
+        return 1;       /* FH2 1.0.0.64 is there although the platform did not report it */
+    }
+    g_id_other_stamp = nt.FileHeader.TimeDateStamp;
+    g_id_other_size = nt.OptionalHeader.SizeOfImage;
+    return 0;
+}
+
+/* Run by the thunks at the start of each function that reads Azimuth's XboxUserId, on whatever thread called it. */
+static void identity_decide(void) __attribute__((used, noinline, noclone));
+static void identity_decide(void)
+{
+    int game = 0;
+
+    if (!g_id.slot || !id_scope_settle(&g_id, id_started_game, NULL, &game)) {
+        return;
+    }
+    if (game < 0) {
+        if (!InterlockedExchange(&g_id_early_said, 1)) {
+            log_begin();
+            log_raw("identity: Azimuth asked for the XboxUserId before any game was mapped; that request got Azimuth's own id, the next one "
+                    "decides\n");
+        }
+        return;
+    }
+    log_begin();
+    if (game) {
+        log_raw("identity: the started game is FH2 1.0.0.64: Azimuth's XboxUserId is 0x");
+        log_hex(g_id.account, 16);
+        log_raw(" (");
+        log_raw(g_xuid_source);
+        log_raw(") from its first request on\n");
+    } else {
+        log_raw("identity: Azimuth started another game (exe at 0x140000000: TimeDateStamp 0x");
+        log_hex(g_id_other_stamp, 8);
+        log_raw(", SizeOfImage 0x");
+        log_hex(g_id_other_size, 8);
+        log_raw("), not FH2: it keeps Azimuth's own XboxUserId 0x");
+        log_hex(g_id.azimuth, 16);
+        log_raw(", so its saves stay in its own profile\n");
+    }
+}
+
+/* One per hooked function: settle the id, then go on into the function with the registers and the stack as they came (the argument
+ * registers, integer and vector, are kept around the call; a tail jump, so the caller's return address and stack arguments are untouched). */
+#define ID_THUNK(n)                                                                     \
+    __asm__(".text\n"                                                                   \
+            ".p2align 4\n"                                                              \
+            "id_thunk" #n ":\n"                                                         \
+            ".seh_proc id_thunk" #n "\n"                                                \
+            "pushq %rcx\n"                                                              \
+            ".seh_pushreg %rcx\n"                                                       \
+            "pushq %rdx\n"                                                              \
+            ".seh_pushreg %rdx\n"                                                       \
+            "pushq %r8\n"                                                               \
+            ".seh_pushreg %r8\n"                                                        \
+            "pushq %r9\n"                                                               \
+            ".seh_pushreg %r9\n"                                                        \
+            "subq $0x68, %rsp\n"                                                        \
+            ".seh_stackalloc 0x68\n"                                                    \
+            ".seh_endprologue\n"                                                        \
+            "movdqu %xmm0, 0x20(%rsp)\n"                                                \
+            "movdqu %xmm1, 0x30(%rsp)\n"                                                \
+            "movdqu %xmm2, 0x40(%rsp)\n"                                                \
+            "movdqu %xmm3, 0x50(%rsp)\n"                                                \
+            "call identity_decide\n"                                                    \
+            "movdqu 0x20(%rsp), %xmm0\n"                                                \
+            "movdqu 0x30(%rsp), %xmm1\n"                                                \
+            "movdqu 0x40(%rsp), %xmm2\n"                                                \
+            "movdqu 0x50(%rsp), %xmm3\n"                                                \
+            "addq $0x68, %rsp\n"                                                        \
+            "popq %r9\n"                                                                \
+            "popq %r8\n"                                                                \
+            "popq %rdx\n"                                                               \
+            "popq %rcx\n"                                                               \
+            "jmp *g_id_orig+" #n "*8(%rip)\n"                                           \
+            ".seh_endproc\n")
+ID_THUNK(0);
+ID_THUNK(1);
+ID_THUNK(2);
+ID_THUNK(3);
+extern void id_thunk0(void), id_thunk1(void), id_thunk2(void), id_thunk3(void);
+
+/* The start of the function that holds `code` (its primary entry when the unwind data chains), from azimuth.exe's .pdata; NULL if none. */
+static unsigned char *id_function_start(unsigned char *code)
+{
+    DWORD64 base = 0;
+    PRUNTIME_FUNCTION f = RtlLookupFunctionEntry((DWORD64)(ULONG_PTR)code, &base, NULL);
+    int hops;
+
+    for (hops = 0; f && hops < 8; hops++) {
+        const unsigned char *ui;
+        if (f->UnwindData & 1) {                   /* points straight at the parent's entry */
+            f = (PRUNTIME_FUNCTION)(ULONG_PTR)(base + (f->UnwindData & ~1u));
+            continue;
+        }
+        ui = (const unsigned char *)(ULONG_PTR)(base + f->UnwindData);
+        if (!((ui[0] >> 3) & 4)) {                  /* no UNW_FLAG_CHAININFO: this is the function */
+            return (unsigned char *)(ULONG_PTR)(base + f->BeginAddress);
+        }
+        f = (PRUNTIME_FUNCTION)(ui + 4 + ((ui[2] + 1u) & ~1u) * 2);
+    }
+    return NULL;
+}
+
+/* movabs r8, 0x0009000000000000 (49 B8 imm64) in Azimuth's XboxUserId code: made to follow the game Azimuth starts (identity_scope.inc). If
+ * that cannot be set up, the immediates get the account id directly (the shim's behaviour up to 1.3.3: then whichever game is started has it). */
 static int patch_identity(void)
 {
     static const unsigned char pat[10] = {0x49, 0xB8, 0, 0, 0, 0, 0, 0, 0x09, 0};
-    unsigned char *base = (unsigned char *)GetModuleHandleW(NULL);
+    static void (*const thunks[ID_SITES_MAX])(void) = {id_thunk0, id_thunk1, id_thunk2, id_thunk3};
+    unsigned char *base = (unsigned char *)GetModuleHandleW(NULL), *sites[ID_SITES_MAX], *fns[ID_SITES_MAX], *page = NULL;
+    const char *why = NULL;
     IMAGE_NT_HEADERS *nt;
     IMAGE_SECTION_HEADER *sec;
-    unsigned i, hits = 0;
+    unsigned i, nsites = 0, more = 0, nfns = 0, hooked = 0, follows = 0, fixed = 0;
 
     if (!base) {
         return 0;
@@ -5931,10 +6177,60 @@ static int patch_identity(void)
             continue;
         }
         for (j = 0; j + sizeof pat <= n; j++) {
-            if (p[j] == 0x49 && p[j + 1] == 0xB8 && mem_equal(p + j, pat, sizeof pat) &&
-                plat_patch("identity: Azimuth's XboxUserId", p + j + 2, pat + 2, &g_xuid, 8)) {
-                hits++;
+            if (p[j] == 0x49 && p[j + 1] == 0xB8 && mem_equal(p + j, pat, sizeof pat)) {
+                if (nsites < ID_SITES_MAX) {
+                    sites[nsites++] = p + j;
+                } else {
+                    more++;
+                }
             }
+        }
+    }
+    if (!nsites) {
+        log_begin();
+        log_raw("identity: xuid 0x");
+        log_hex(g_xuid, 16);
+        log_raw(" from ");
+        log_raw(g_xuid_source);
+        log_raw(" (Azimuth's XboxUserId constant NOT found: the game keeps Azimuth's fixed id)\n");
+        return 0;
+    }
+    g_id.account = g_xuid;
+    mem_copy(&g_id.azimuth, sites[0] + 2, 8);
+    if (more) {
+        why = "Azimuth has more places with its fixed id than this shim follows";
+    } else if (!(page = alloc_near(sites[0]))) {
+        why = "no memory within reach of Azimuth's code for the id";
+    } else {
+        g_id.slot = (unsigned long long *)page;
+        *g_id.slot = g_id.azimuth;
+        for (i = 0; i < nsites && !why; i++) {
+            unsigned char *fn = id_function_start(sites[i]);
+            unsigned k;
+            if (!fn) {
+                why = "a place with Azimuth's fixed id has no function entry in azimuth.exe's unwind data";
+                break;
+            }
+            for (k = 0; k < nfns && fns[k] != fn; k++) {
+            }
+            if (k == nfns) {
+                fns[nfns++] = fn;
+            }
+        }
+        for (i = 0; !why && i < nfns; i++) {
+            hooked += plat_hook("identity: the function that reads Azimuth's XboxUserId", fns[i], (void *)thunks[i], &g_id_orig[i]);
+        }
+        if (!why && hooked != nfns) {
+            why = "a function that reads Azimuth's id could not be hooked";
+        }
+    }
+    for (i = 0; i < nsites; i++) {
+        unsigned char load[10];
+        if (!why && id_scope_load(load, (unsigned long long)(ULONG_PTR)sites[i], (unsigned long long)(ULONG_PTR)g_id.slot) &&
+            plat_patch("identity: Azimuth's XboxUserId load", sites[i], pat, load, sizeof load)) {
+            follows++;
+        } else if (plat_patch("identity: Azimuth's XboxUserId", sites[i] + 2, pat + 2, &g_xuid, 8)) {
+            fixed++;
         }
     }
     log_begin();
@@ -5942,8 +6238,24 @@ static int patch_identity(void)
     log_hex(g_xuid, 16);
     log_raw(" from ");
     log_raw(g_xuid_source);
-    log_raw(hits ? " (Azimuth's XboxUserId patched)\n" : " (Azimuth's XboxUserId constant NOT found: the game keeps Azimuth's fixed id)\n");
-    return (int)hits;
+    if (follows == nsites) {
+        log_raw("; Azimuth's XboxUserId (");
+        log_dec(nsites);
+        log_raw(" places) becomes it at the started game's first request if that game is FH2 1.0.0.64, another game keeps Azimuth's own\n");
+    } else if (follows + fixed) {
+        log_raw(" (Azimuth's XboxUserId patched in ");
+        log_dec(follows + fixed);
+        log_raw(" of ");
+        log_dec(nsites);
+        log_raw(" places, ");
+        log_dec(fixed);
+        log_raw(" of them for whichever game Azimuth starts: ");
+        log_raw(why ? why : "the load could not be changed");
+        log_raw(")\n");
+    } else {
+        log_raw(" (Azimuth's XboxUserId NOT patched: the platform refused every place; the game keeps Azimuth's fixed id)\n");
+    }
+    return (int)(follows + fixed);
 }
 
 #ifndef FH2MOD_PLATFORM_VERSION

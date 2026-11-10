@@ -71,6 +71,8 @@ lane_unit() {
     run "shim session switches" shim/tests/test_session_switches.sh
     run "shim health" shim/tests/test_health.sh
     run "shim eo timelock" shim/tests/test_eo_timelock.sh
+    run "shim eo routes" shim/tests/test_eo_routes.sh
+    run "shim identity scope" shim/tests/test_identity_scope.sh
     run "shim online setup" shim/tests/test_online_setup.sh
 }
 
