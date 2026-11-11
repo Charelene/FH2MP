@@ -60,10 +60,25 @@ ImU32 alpha(ImU32 c, float a) {
 
 float ease_guide(float t) { return css_bezier(0.1f, 0.9f, 0.2f, 1.0f, t); }
 
-// Draws text and turns it a quarter clockwise around its top-left corner (CSS writing-mode: vertical-rl).
-void vertical_text(ImDrawList* dl, ImFont* f, float size, ImVec2 at, ImU32 col, const char* text) {
+// Where AddText must start (y) so that a line box centred on cy has its baseline where CSS puts it: cy + (ascent - descent) / 2 em,
+// whatever the line-height (the half-leading is shared out evenly). ImGui puts the baseline ascent / (ascent + descent) of the size down.
+float css_top(const FontMetrics& m, float size, float cy) { return cy + size * (m.asc - m.desc) * 0.5f - size * m.asc / (m.asc + m.desc); }
+
+// Text in a line box centred on cy (CSS align-items: center), starting at x or, with right, ending there.
+void text_mid(ImDrawList* dl, ImFont* f, const FontMetrics& m, float size, float x, float cy, ImU32 col, const char* text, bool right = false) {
+    float w = f->CalcTextSizeA(size, FLT_MAX, 0.0f, text).x;
+    dl->AddText(f, size, ImVec2(right ? x - w : x, css_top(m, size, cy)), col, text);
+}
+
+// CSS writing-mode: vertical-rl: the text runs down from top, turned a quarter clockwise, its column centred on cx. Laid out without a
+// clip rect (ImGui drops glyphs outside the clip rect before they are turned, which cut the blade names short).
+void vertical_text(ImDrawList* dl, ImFont* f, const FontMetrics& m, float size, float cx, float top, ImU32 col, const char* text) {
+    float baseline_x = cx - size * (m.asc - m.desc) * 0.5f;  // the ascent side faces right
+    ImVec2 at(baseline_x + size * m.asc / (m.asc + m.desc), top);
     int from = dl->VtxBuffer.Size;
+    dl->PushClipRectFullScreen();
     dl->AddText(f, size, at, col, text);
+    dl->PopClipRect();
     for (int i = from; i < dl->VtxBuffer.Size; i++) {
         ImVec2 p = dl->VtxBuffer[i].pos;
         float dx = p.x - at.x, dy = p.y - at.y;
@@ -71,10 +86,29 @@ void vertical_text(ImDrawList* dl, ImFont* f, float size, ImVec2 at, ImU32 col, 
     }
 }
 
-// Text vertically centred on cy.
-void text_mid(ImDrawList* dl, ImFont* f, float size, float x, float cy, ImU32 col, const char* text, bool right = false) {
-    ImVec2 sz = f->CalcTextSizeA(size, FLT_MAX, 0.0f, text);
-    dl->AddText(f, size, ImVec2(right ? x - sz.x : x, cy - sz.y * 0.5f), col, text);
+// A key of the hint bar: a 20-unit circle (A, B, X, Y) or a 34x22 rounded box (LB, RB) with a 2-unit ring inside its edge, centred on cy.
+// Returns its width in pixels.
+float hint_key(ImDrawList* dl, const GuideAssets& a, const char* key, ImU32 ring, float x, float cy, float s, float op) {
+    bool wide = strlen(key) > 1;
+    float kw = (wide ? 34 : 20) * s, kh = (wide ? 22 : 20) * s, rr = (wide ? 6 : 10) * s;
+    ImVec2 k0(x, cy - kh / 2), k1(x + kw, cy + kh / 2);
+    dl->AddRectFilled(k0, k1, alpha(BLACK, op), rr);
+    dl->AddRect(ImVec2(k0.x + s, k0.y + s), ImVec2(k1.x - s, k1.y - s), alpha(ring, op), rr - s, 0, 2 * s);
+    ImFont* kf = a.text_bold ? a.text_bold : a.text;
+    float size = (wide ? 11 : 12) * s;
+    float tw = kf->CalcTextSizeA(size, FLT_MAX, 0, key).x;
+    dl->AddText(kf, size, ImVec2(x + (kw - tw) * 0.5f, css_top(a.bold_m, size, cy)), alpha(ring, op), key);
+    return kw;
+}
+
+ImU32 toast_color(ToastKind k) {
+    switch (k) {
+    case ToastKind::Invite: return ACCENT;
+    case ToastKind::Info: return IM_COL32(0xf7, 0x8c, 0x00, 255);
+    case ToastKind::Saving: return IM_COL32(0xf2, 0xc2, 0x00, 255);
+    case ToastKind::Warning: return IM_COL32(0xee, 0x3b, 0x23, 255);
+    }
+    return ACCENT;
 }
 
 }  // namespace
@@ -177,9 +211,7 @@ GuideAction Guide::handle(PadEvent e, double now) {
             open = false, closed_ = now;
             return GuideAction::Resume;
         }
-        char ic[5];
-        utf8(r.icon, ic);
-        toast(r.label, "Coming in a later build", ic, now);
+        toast(ToastKind::Info, r.label, "Coming in a later build", r.icon, 0, now);
         return GuideAction::Soon;
     }
     default: break;
@@ -187,8 +219,8 @@ GuideAction Guide::handle(PadEvent e, double now) {
     return GuideAction::None;
 }
 
-void Guide::toast(const char* title, const char* detail, const char* icon, double now) {
-    toast_title_ = title, toast_detail_ = detail, toast_icon_ = icon, toast_at_ = now;
+void Guide::toast(ToastKind kind, const char* title, const char* detail, uint32_t icon, ImTextureID pic, double now) {
+    toast_kind_ = kind, toast_title_ = title, toast_detail_ = detail, toast_icon_ = icon, toast_pic_ = pic, toast_at_ = now;
     for (auto& c : toast_title_) c = char(toupper((unsigned char)c));
     for (auto& c : toast_detail_) c = char(toupper((unsigned char)c));
 }
@@ -209,8 +241,9 @@ bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double 
         dl->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), IM_COL32(0, 0, 0, int(153 * op)));
 
         // header: blade name (the player on the middle blade), the player's picture, the clock
+        // canvas: h1 at (27, 20) of the section (left 160, top 41), 22 px, line-height 1: its line box is centred on y 72
         const char* title = blade_ == 1 ? gamertag.c_str() : BLADE[blade_];
-        dl->AddText(tf, zs(22), z(at(187, 61)), alpha(WHITE, op), title);
+        text_mid(dl, tf, a.text_m, zs(22), z(at(187, 72)).x, z(at(187, 72)).y, alpha(WHITE, op), title);
         ImVec2 pic0 = z(at(616, 41)), pic1 = z(at(664, 89));
         if (a.gamerpic) {
             dl->AddImage(a.gamerpic, pic0, pic1, ImVec2(0, 0), ImVec2(1, 1), alpha(WHITE, op));
@@ -218,15 +251,15 @@ bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double 
             dl->AddRectFilled(pic0, pic1, alpha(IM_COL32(0xc9, 0x66, 0x2f, 255), op));
             char ic[5];
             utf8(I_PERSON, ic);
-            if (a.icons) text_mid(dl, a.icons, zs(52), pic0.x + (pic1.x - pic0.x) * 0.5f - zs(26), pic0.y + zs(30), alpha(IM_COL32(0, 0, 0, 140), op), ic);
+            if (a.icons)
+                text_mid(dl, a.icons, a.icons_m, zs(52), (pic0.x + pic1.x) * 0.5f - zs(26), (pic0.y + pic1.y) * 0.5f + zs(6), alpha(IM_COL32(0, 0, 0, 140), op), ic);
         }
         SYSTEMTIME st;
         GetLocalTime(&st);
         char clock[32];
         int h12 = st.wHour % 12 == 0 ? 12 : st.wHour % 12;
         snprintf(clock, sizeof clock, "%d:%02d  %s", h12, st.wMinute, st.wHour < 12 ? "AM" : "PM");
-        ImVec2 csz = tf->CalcTextSizeA(zs(22), FLT_MAX, 0, clock);
-        dl->AddText(tf, zs(22), ImVec2(z(at(1090, 61)).x - csz.x, z(at(1090, 61)).y), alpha(WHITE, op), clock);
+        text_mid(dl, tf, a.text_m, zs(22), z(at(1090, 72)).x, z(at(1090, 72)).y, alpha(WHITE, op), clock, true);
 
         // blades
         float x = 160;
@@ -237,12 +270,9 @@ bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double 
             float bh = on ? 500 : 452, top = 96 + (500 - bh) / 2, lw = on ? 96.0f : 64.0f;
             ImVec2 l0 = z(at(x, top)), l1 = z(at(x + std::min(lw, bw), top + bh));
             dl->AddRectFilled(l0, l1, alpha(on ? RAISED : TAB, op));
+            // canvas: 26 px, vertical-rl, centred across the tab, 24 px from its top
             const char* name = bi == 1 ? gamertag.c_str() : BLADE[bi];
-            ImVec2 nsz = tf->CalcTextSizeA(zs(26), FLT_MAX, 0, name);
-            float cx = (l0.x + l1.x) * 0.5f + nsz.y * 0.5f;  // after the turn the text's height is its width
-            dl->PushClipRect(l0, l1, true);
-            vertical_text(dl, tf, zs(26), ImVec2(cx, l0.y + zs(24)), alpha(on ? WHITE : TAB_TEXT, op), name);
-            dl->PopClipRect();
+            vertical_text(dl, tf, a.text_m, zs(26), (l0.x + l1.x) * 0.5f, l0.y + zs(24), alpha(on ? WHITE : TAB_TEXT, op), name);
             if (bw > lw + 1) {
                 ImVec2 b0 = z(at(x + lw, top)), b1 = z(at(x + bw, top + bh));
                 dl->AddRectFilled(b0, b1, alpha(PANEL, op));
@@ -266,44 +296,38 @@ bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double 
                     ImVec2 r0 = z(at(x + lw + slide, y)), r1 = z(at(x + lw + 736 + slide, y + 66));
                     if (!hi) dl->AddLine(ImVec2(r0.x, r1.y - zs(0.5f)), ImVec2(r1.x, r1.y - zs(0.5f)), alpha(LINE, op * rop), zs(1));
                     float cy = (r0.y + r1.y) * 0.5f;
-                    text_mid(dl, tf, zs(26), r0.x + zs(30), cy, alpha(WHITE, op * rop), r.label);
+                    text_mid(dl, tf, a.text_m, zs(26), r0.x + zs(30), cy, alpha(WHITE, op * rop), r.label);
                     float right = r1.x - zs(22);
                     if (r.icon && a.icons) {
                         char ic[5];
                         utf8(r.icon, ic);
-                        ImVec2 isz = a.icons->CalcTextSizeA(zs(32), FLT_MAX, 0, ic);
-                        dl->AddText(a.icons, zs(32), ImVec2(right - zs(16) - isz.x * 0.5f, cy - isz.y * 0.5f), alpha(WHITE, op * rop), ic);
+                        float iw = a.icons->CalcTextSizeA(zs(32), FLT_MAX, 0, ic).x;
+                        dl->AddText(a.icons, zs(32), ImVec2(right - zs(16) - iw * 0.5f, css_top(a.icons_m, zs(32), cy)), alpha(WHITE, op * rop), ic);
                         right -= zs(32 + 16);
                     }
-                    if (r.meta && *r.meta) text_mid(dl, tf, zs(20), right, cy, alpha(hi ? WHITE : MUTED, op * rop), r.meta, true);
+                    if (r.meta && *r.meta) text_mid(dl, tf, a.text_m, zs(20), right, cy, alpha(hi ? WHITE : MUTED, op * rop), r.meta, true);
                 }
                 dl->PopClipRect();
             }
             x += bw;
         }
 
-        // hint bar: A Select, B Back, LB RB Switch (canvas: padding 10 / 27, gaps 22 and 7, keys 20 px round or 34x22 rounded)
-        float hx = 187, hy = 606 + 11;
+        // hint bar (canvas: a flex row 10 px under the blades, 27 px in, 19 px text, gaps 22 between hints and 7 inside one, LB and RB
+        // 8 apart): every item's box is centred on the row's centre, 596 + 10 + half the 19 px text's line box (the tallest item)
+        float hx = 187, hy = 596 + 10 + 19 * (a.text_m.asc + a.text_m.desc) * 0.5f;
         struct Hint { const char* key; const char* label; ImU32 ring; };
         const Hint hints[] = {{"A", "Select", IM_COL32(0x5f, 0xd1, 0x1c, 255)}, {"B", "Back", IM_COL32(0xff, 0x4a, 0x4f, 255)},
                               {"LB", nullptr, MUTED3}, {"RB", "Switch", MUTED3}};
-        ImFont* kf = a.text_bold ? a.text_bold : tf;
         for (const Hint& hnt : hints) {
-            bool wide = strlen(hnt.key) > 1;
-            float kw = wide ? 34 : 20, kh = wide ? 22 : 20;
-            ImVec2 k0 = z(at(hx, hy - kh / 2)), k1 = z(at(hx + kw, hy + kh / 2));
-            float rr = wide ? zs(6) : zs(10);
-            dl->AddRectFilled(k0, k1, alpha(BLACK, op), rr);
-            dl->AddRect(k0, k1, alpha(hnt.ring, op), rr, 0, zs(2));
-            ImVec2 ksz = kf->CalcTextSizeA(zs(wide ? 11 : 12), FLT_MAX, 0, hnt.key);
-            dl->AddText(kf, zs(wide ? 11 : 12), ImVec2((k0.x + k1.x - ksz.x) * 0.5f, (k0.y + k1.y - ksz.y) * 0.5f), alpha(hnt.ring, op), hnt.key);
-            hx += kw;
+            ImVec2 p = z(at(hx, hy));
+            hx += hint_key(dl, a, hnt.key, hnt.ring, p.x, p.y, zs(1), op) / zs(1);
             if (hnt.label) {
                 hx += 7;
-                text_mid(dl, tf, zs(19), z(at(hx, hy)).x, z(at(hx, hy)).y, alpha(WHITE, op), hnt.label);
+                ImVec2 q = z(at(hx, hy));
+                text_mid(dl, tf, a.text_m, zs(19), q.x, q.y, alpha(WHITE, op), hnt.label);
                 hx += tf->CalcTextSizeA(19, FLT_MAX, 0, hnt.label).x + 22;
             } else {
-                hx += 8;  // LB and RB sit together (the canvas' margin-left -14 on RB)
+                hx += 8;
             }
         }
     }
@@ -330,38 +354,44 @@ void Guide::draw_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 ori
         float e = seg(5.85f, 6.3f, 0.6f, 0.0f, 0.9f, 0.4f);
         zoom = 1 - e, zop = 1 - e;
     }
-    // nSlide / nUnfold: 0.6 -> 1.05 s open, 5.4 -> 5.85 s close, cubic-bezier(.7,0,.25,1)
+    // nSlide / nUnfold: 0.6 -> 1.05 s open, 5.4 -> 5.85 s close, cubic-bezier(.7,0,.25,1). The panel is as wide as its text (canvas: 269
+    // with 22 / 12 padding for its sample text), the whole toast centred; it unfolds from its centre while the square slides half its width.
+    ImFont* bf = a.text_bold ? a.text_bold : a.text;
+    float tw = std::max(bf->CalcTextSizeA(17, FLT_MAX, 0, toast_title_.c_str()).x, a.text->CalcTextSizeA(17, FLT_MAX, 0, toast_detail_.c_str()).x);
+    float pw = std::ceil(tw) + 22 + 12, half = pw * 0.5f;
     float unfold = t < 5.4f ? seg(0.6f, 1.05f, 0.7f, 0.0f, 0.25f, 1.0f) : 1 - seg(5.4f, 5.85f, 0.7f, 0.0f, 0.25f, 1.0f);
-    float shift = 134.5f * (1 - unfold);
+    float shift = half * (1 - unfold);
     auto at = [&](float x, float y) { return ImVec2(origin.x + x * s, origin.y + y * s); };
-    float bx = 474, by = 600;
-    // the panel unfolds from its centre (clip-path inset 134.5 on both sides -> 0)
+    float bx = 640 - (64 + pw) * 0.5f, by = 600;
+    ImU32 kc = toast_color(toast_kind_);
     if (unfold > 0.001f) {
-        ImVec2 p0 = at(bx + 64 + shift, by), p1 = at(bx + 333 - shift, by + 64);
+        ImVec2 p0 = at(bx + 64 + shift, by), p1 = at(bx + 64 + pw - shift, by + 64);
         dl->AddRectFilled(p0, p1, PANEL);
         dl->PushClipRect(p0, p1, true);
-        ImFont* bf = a.text_bold ? a.text_bold : a.text;
-        float line = 22 * s, top = at(0, by).y + (64 * s - 2 * line) * 0.5f;
-        dl->AddText(bf, 17 * s, ImVec2(at(bx + 64 + 22, 0).x, top + (line - 17 * s * 1.2f) * 0.5f), ACCENT, toast_title_.c_str());
-        dl->AddText(a.text, 17 * s, ImVec2(at(bx + 64 + 22, 0).x, top + line + (line - 17 * s * 1.2f) * 0.5f), WHITE, toast_detail_.c_str());
+        float x = at(bx + 64 + 22, 0).x;
+        // two 22 px lines centred in the 64 px panel: their line boxes are centred on by + 21 and by + 43
+        dl->AddText(bf, 17 * s, ImVec2(x, css_top(a.bold_m, 17 * s, at(0, by + 21).y)), kc, toast_title_.c_str());
+        dl->AddText(a.text, 17 * s, ImVec2(x, css_top(a.text_m, 17 * s, at(0, by + 43).y)), WHITE, toast_detail_.c_str());
         dl->PopClipRect();
     }
-    // the icon square: slides with the panel, zooms in and out; its icon slides up out at 2.0-2.4 s
+    // the square: slides with the panel, zooms in and out; on an invite its icon slides up at 2.0-2.4 s and the other player's picture
+    // comes up in its place
     float side = 64 * s * zoom;
     ImVec2 c = at(bx + 32 + shift, by + 32);
     ImVec2 q0(c.x - side / 2, c.y - side / 2), q1(c.x + side / 2, c.y + side / 2);
     if (side > 0.5f) {
-        dl->AddRectFilled(q0, q1, alpha(ACCENT, zop));
-        float up = 64 * s * zoom * seg(2.0f, 2.4f, 0.3f, 0.0f, 0.2f, 1.0f);
+        dl->AddRectFilled(q0, q1, alpha(kc, zop));
+        float up = toast_pic_ ? side * seg(2.0f, 2.4f, 0.3f, 0.0f, 0.2f, 1.0f) : 0;
         dl->PushClipRect(q0, q1, true);
-        if (a.icons) {
-            ImVec2 isz = a.icons->CalcTextSizeA(46 * s * zoom, FLT_MAX, 0, toast_icon_.c_str());
-            dl->AddText(a.icons, 46 * s * zoom, ImVec2(c.x - isz.x / 2, c.y - isz.y / 2 - up), alpha(WHITE, zop), toast_icon_.c_str());
+        if (a.icons && toast_icon_) {
+            char ic[5];
+            utf8(toast_icon_, ic);
+            float size = 46 * s * zoom;
+            float iw = a.icons->CalcTextSizeA(size, FLT_MAX, 0, ic).x;
+            dl->AddText(a.icons, size, ImVec2(c.x - iw / 2, css_top(a.icons_m, size, c.y) - up), alpha(WHITE, zop), ic);
         }
-        if (a.gamerpic) {
-            ImVec2 g0(q0.x, q0.y + side - up), g1(q1.x, q1.y + side - up);
-            dl->AddImage(a.gamerpic, g0, g1, ImVec2(0, 0), ImVec2(1, 1), alpha(WHITE, zop));
-        }
+        if (toast_pic_)
+            dl->AddImage(toast_pic_, ImVec2(q0.x, q0.y + side - up), ImVec2(q1.x, q1.y + side - up), ImVec2(0, 0), ImVec2(1, 1), alpha(WHITE, zop));
         dl->PopClipRect();
     }
 }

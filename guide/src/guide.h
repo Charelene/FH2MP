@@ -28,13 +28,26 @@ struct PadReader {
     int feed(uint16_t buttons, int16_t lx, int16_t ly, uint64_t now_ms, bool open, PadEvent* out);
 };
 
+// A font's hhea ascender and descender in em. The fonts are loaded so that a size of N draws N-pixel em glyphs, as CSS's font-size does
+// (Dear ImGui by default makes ascender minus descender N pixels, which drew Segoe UI a quarter smaller than the canvas).
+struct FontMetrics {
+    float asc = 0.8f, desc = 0.2f;
+};
+
 // Fonts and textures the Guide draws with (made by the overlay once Direct3D is ready).
 struct GuideAssets {
     ImFont* text = nullptr;       // Segoe UI, or ImGui's own font when Windows has none
     ImFont* text_bold = nullptr;  // Segoe UI Bold (toast titles), or the same as text
     ImFont* icons = nullptr;      // Material Icons (filled)
+    FontMetrics text_m, bold_m, icons_m;
     ImTextureID gamerpic = 0;     // the player's picture (Azimuth's data/player.png), 0 when there is none
 };
+
+// Loads Segoe UI, Segoe UI Bold and the embedded Material Icons into ImGui's atlas with CSS sizing (assets.cpp). Needs an ImGui context.
+void load_fonts(GuideAssets& a);
+
+// The canvas' toast kinds (artboard 7): the square's colour, the title's colour, and whether a player's picture glides in (invites only).
+enum class ToastKind { Invite, Info, Saving, Warning };
 
 enum class GuideAction { None, Resume, Soon };
 
@@ -48,8 +61,9 @@ public:
     GuideAction handle(PadEvent e, double now);
     // Draws into the game's frame (w x h pixels). Returns true while something is on screen (the Guide or a toast).
     bool draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double now);
-    // A 360 toast at the bottom centre (7.5 s cycle of the canvas, played once).
-    void toast(const char* title, const char* detail, const char* icon_utf8, double now);
+    // A 360 toast at the bottom centre (7.5 s cycle of the canvas, played once). pic: the other player's picture on an invite toast (it
+    // glides in over the icon at 2.0 s), 0 for none.
+    void toast(ToastKind kind, const char* title, const char* detail, uint32_t icon, ImTextureID pic, double now);
     bool busy(double now) const;
 
 private:
@@ -66,7 +80,10 @@ private:
     };
     Tween bar_[3], width_[3];
     bool widths_set_ = false;
-    std::string toast_title_, toast_detail_, toast_icon_;
+    std::string toast_title_, toast_detail_;
+    ToastKind toast_kind_ = ToastKind::Info;
+    uint32_t toast_icon_ = 0;
+    ImTextureID toast_pic_ = 0;
     double toast_at_ = -100;
 
     void switch_to(int b, double now);

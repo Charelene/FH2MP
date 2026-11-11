@@ -23,15 +23,9 @@
 
 #include "backends/imgui_impl_dx12.h"
 #include "fh2mod.h"
+#include "gfx.h"
 #include "guide.h"
 #include "imgui.h"
-
-#define STB_IMAGE_IMPLEMENTATION
-#define STBI_ONLY_PNG
-#define STBI_NO_STDIO
-#include "stb_image.h"
-
-extern "C" const unsigned char _binary_MaterialIcons_Regular_ttf_start[], _binary_MaterialIcons_Regular_ttf_end[];
 
 namespace {
 
@@ -177,7 +171,12 @@ DWORD WINAPI pad_thread(LPVOID) {
         if (!seen && (st.buttons & padbits::Guide)) seen = true, logf("guide: the pad's Guide button reaches the Guide");
         PadEvent out[16];
         int n = reader.feed(st.buttons, st.lx, st.ly, now, g_open.load(), out);
-        for (int i = 0; i < n; i++) push(out[i]);
+        for (int i = 0; i < n; i++) {
+            if (out[i] == PadEvent::Toggle)
+                logf("guide: the Guide button %s (held %llu ms)", reader.guide_fired ? "was held long enough: the Guide toggles" : "was tapped: the open Guide closes",
+                     (unsigned long long)(now - reader.guide_since));
+            push(out[i]);
+        }
     }
 }
 
@@ -295,8 +294,9 @@ HANDLE g_fence_event;
 UINT64 g_fence_value;
 struct Frame { ID3D12CommandAllocator* alloc = nullptr; ID3D12Resource* buffer = nullptr; D3D12_CPU_DESCRIPTOR_HANDLE rtv{}; UINT64 fence = 0; };
 std::vector<Frame> g_frames;
-UINT g_rtv_size, g_srv_size, g_srv_next;
-const UINT SRV_COUNT = 64;
+UINT g_rtv_size, g_srv_size;
+const UINT SRV_COUNT = 256;  // ImGui's font atlas and the pictures (the player's, friends')
+std::vector<UINT> g_srv_free;
 bool g_ready, g_failed, g_buffers_ok;
 DXGI_FORMAT g_format;
 GuideAssets g_assets;
@@ -305,11 +305,20 @@ double g_last_frame;
 thread_local bool t_in_present;
 
 void srv_alloc(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE* cpu, D3D12_GPU_DESCRIPTOR_HANDLE* gpu) {
-    UINT i = g_srv_next++ % SRV_COUNT;
+    if (g_srv_free.empty()) {  // all in use: share the last one (a picture shows wrong; nothing breaks)
+        cpu->ptr = g_srv_heap->GetCPUDescriptorHandleForHeapStart().ptr + SIZE_T(SRV_COUNT - 1) * g_srv_size;
+        gpu->ptr = g_srv_heap->GetGPUDescriptorHandleForHeapStart().ptr + UINT64(SRV_COUNT - 1) * g_srv_size;
+        return;
+    }
+    UINT i = g_srv_free.back();
+    g_srv_free.pop_back();
     cpu->ptr = g_srv_heap->GetCPUDescriptorHandleForHeapStart().ptr + SIZE_T(i) * g_srv_size;
     gpu->ptr = g_srv_heap->GetGPUDescriptorHandleForHeapStart().ptr + UINT64(i) * g_srv_size;
 }
-void srv_free(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_GPU_DESCRIPTOR_HANDLE) {}
+void srv_free(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE cpu, D3D12_GPU_DESCRIPTOR_HANDLE) {
+    UINT i = UINT((cpu.ptr - g_srv_heap->GetCPUDescriptorHandleForHeapStart().ptr) / g_srv_size);
+    if (i < SRV_COUNT - 1) g_srv_free.push_back(i);
+}
 
 void wait_gpu() {
     if (!g_fence || !g_queue) return;
@@ -346,60 +355,20 @@ ImTextureID load_gamerpic() {
     if (f == INVALID_HANDLE_VALUE) return 0;
     std::vector<unsigned char> png(GetFileSize(f, nullptr));
     DWORD got = 0;
-    ReadFile(f, png.data(), DWORD(png.size()), &got, nullptr);
+    if (!ReadFile(f, png.data(), DWORD(png.size()), &got, nullptr)) got = 0;
     CloseHandle(f);
-    int w, h, n;
-    unsigned char* rgba = stbi_load_from_memory(png.data(), int(got), &w, &h, &n, 4);
-    if (!rgba) return 0;
-    ImTextureID id = 0;
-    D3D12_HEAP_PROPERTIES def{D3D12_HEAP_TYPE_DEFAULT}, up{D3D12_HEAP_TYPE_UPLOAD};
-    D3D12_RESOURCE_DESC td{};
-    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D, td.Width = UINT64(w), td.Height = UINT(h), td.DepthOrArraySize = 1, td.MipLevels = 1;
-    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM, td.SampleDesc.Count = 1;
-    ID3D12Resource *tex = nullptr, *upload = nullptr;
-    UINT pitch = (UINT(w) * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
-    D3D12_RESOURCE_DESC bd{};
-    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER, bd.Width = UINT64(pitch) * UINT64(h), bd.Height = 1, bd.DepthOrArraySize = 1, bd.MipLevels = 1;
-    bd.SampleDesc.Count = 1, bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    if (SUCCEEDED(g_device->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&tex))) &&
-        SUCCEEDED(g_device->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload)))) {
-        void* map = nullptr;
-        D3D12_RANGE none{0, 0};
-        upload->Map(0, &none, &map);
-        for (int y = 0; y < h; y++) memcpy((char*)map + size_t(y) * pitch, rgba + size_t(y) * size_t(w) * 4, size_t(w) * 4);
-        upload->Unmap(0, nullptr);
-        ID3D12CommandAllocator* alloc = nullptr;
-        ID3D12GraphicsCommandList* list = nullptr;
-        g_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc));
-        g_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc, nullptr, IID_PPV_ARGS(&list));
-        D3D12_TEXTURE_COPY_LOCATION dst{tex, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, {}}, src{upload, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, {}};
-        dst.SubresourceIndex = 0;
-        src.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UNORM, UINT(w), UINT(h), 1, pitch};
-        list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-        D3D12_RESOURCE_BARRIER b{};
-        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION, b.Transition.pResource = tex;
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST, b.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        list->ResourceBarrier(1, &b);
-        list->Close();
-        ID3D12CommandList* lists[] = {list};
-        g_queue->ExecuteCommandLists(1, lists);
-        wait_gpu();
-        list->Release(), alloc->Release(), upload->Release();
-        D3D12_CPU_DESCRIPTOR_HANDLE cpu;
-        D3D12_GPU_DESCRIPTOR_HANDLE gpu;
-        srv_alloc(nullptr, &cpu, &gpu);
-        D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
-        sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM, sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D, sd.Texture2D.MipLevels = 1;
-        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        g_device->CreateShaderResourceView(tex, &sd, cpu);
-        id = (ImTextureID)gpu.ptr;
-        logf("guide: player picture loaded (%dx%d)", w, h);
-    } else {
-        if (tex) tex->Release();
+    std::vector<unsigned char> rgba;
+    int w = 0, h = 0;
+    if (!decode_png(png.data(), got, &rgba, &w, &h)) return 0;
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu;
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu;
+    srv_alloc(nullptr, &cpu, &gpu);
+    if (!upload_texture(g_device, g_queue, rgba.data(), w, h, cpu)) {
+        srv_free(nullptr, cpu, gpu);
+        return 0;
     }
-    stbi_image_free(rgba);
-    return id;
+    logf("guide: player picture loaded (%dx%d)", w, h);
+    return (ImTextureID)gpu.ptr;
 }
 
 // The player's name: player_name in Azimuth's data/azimuth.ini (UTF-16), which the launcher writes.
@@ -443,6 +412,7 @@ bool setup(IDXGISwapChain3* sc) {
         return false;
     g_rtv_size = g_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     g_srv_size = g_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    for (UINT i = SRV_COUNT - 1; i-- > 0;) g_srv_free.push_back(i);
     for (Frame& f : g_frames)
         if (FAILED(g_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&f.alloc)))) return false;
     if (FAILED(g_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_frames[0].alloc, nullptr, IID_PPV_ARGS(&g_list)))) return false;
@@ -454,19 +424,7 @@ bool setup(IDXGISwapChain3* sc) {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr, io.LogFilename = nullptr;
-    wchar_t win[MAX_PATH];
-    GetWindowsDirectoryW(win, MAX_PATH);
-    char fonts[MAX_PATH];
-    snprintf(fonts, sizeof fonts, "%ls\\Fonts\\", win);
-    ImFontConfig cfg;
-    std::string regular = std::string(fonts) + "segoeui.ttf", bold = std::string(fonts) + "segoeuib.ttf";
-    g_assets.text = GetFileAttributesA(regular.c_str()) != INVALID_FILE_ATTRIBUTES ? io.Fonts->AddFontFromFileTTF(regular.c_str(), 26.0f) : nullptr;
-    if (!g_assets.text) g_assets.text = io.Fonts->AddFontDefault();
-    g_assets.text_bold = GetFileAttributesA(bold.c_str()) != INVALID_FILE_ATTRIBUTES ? io.Fonts->AddFontFromFileTTF(bold.c_str(), 26.0f) : g_assets.text;
-    ImFontConfig icfg;
-    icfg.FontDataOwnedByAtlas = false;
-    g_assets.icons = io.Fonts->AddFontFromMemoryTTF((void*)_binary_MaterialIcons_Regular_ttf_start,
-                                                    int(_binary_MaterialIcons_Regular_ttf_end - _binary_MaterialIcons_Regular_ttf_start), 32.0f, &icfg);
+    load_fonts(g_assets);
 
     ImGui_ImplDX12_InitInfo info;
     info.Device = g_device, info.CommandQueue = g_queue, info.NumFramesInFlight = int(desc.BufferCount);
@@ -478,8 +436,8 @@ bool setup(IDXGISwapChain3* sc) {
     g_guide.gamertag = read_gamertag();
     g_hwnd = desc.OutputWindow;
     if (g_hwnd && !g_old_proc) g_old_proc = (WNDPROC)SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC, (LONG_PTR)guide_wndproc);
-    logf("guide: ready on the game's swap chain (%u buffers, %ux%u, format %d)%s", desc.BufferCount, desc.BufferDesc.Width,
-         desc.BufferDesc.Height, int(g_format), g_assets.text == nullptr ? "" : "");
+    logf("guide: ready on the game's swap chain (%u buffers, %ux%u, format %d)", desc.BufferCount, desc.BufferDesc.Width, desc.BufferDesc.Height,
+         int(g_format));
     return true;
 }
 
@@ -581,7 +539,6 @@ HRESULT STDMETHODCALLTYPE hk_resize(IDXGISwapChain3* sc, UINT n, UINT w, UINT h,
 
 LRESULT CALLBACK dummy_proc(HWND h, UINT m, WPARAM w, LPARAM l) { return DefWindowProcW(h, m, w, l); }
 
-// The vtable addresses come from a throw-away device, queue and swap chain on a hidden window (DXGI and Direct3D 12 share them).
 // DXGI's swap chain makers, hooked as early as possible: they tell which queue each swap chain belongs to.
 bool hook_factory() {
     IDXGIFactory2* fac = nullptr;
@@ -601,6 +558,7 @@ bool hook_factory() {
     return ok;
 }
 
+// The present vtable addresses come from a throw-away device, queue and swap chain on a hidden window (DXGI and Direct3D 12 share them).
 DWORD WINAPI hook_thread(LPVOID) {
     if (!hook_factory()) return 0;
     if (!g_api->wait_for_game(180000)) {
