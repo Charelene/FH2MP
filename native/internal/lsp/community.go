@@ -43,13 +43,14 @@ type communityState struct {
 	hubOK    bool
 	hubValue pyjson.Obj
 	rate     *diag.RateLimit
+	invites  *inviteBook
 }
 
 func (l *Launcher) cstate() *communityState {
 	l.boardsMu.Lock()
 	defer l.boardsMu.Unlock()
 	if l.comm == nil {
-		l.comm = &communityState{seen: map[int64]float64{}, rate: diag.NewRateLimit(nil, 0)}
+		l.comm = &communityState{seen: map[int64]float64{}, rate: diag.NewRateLimit(nil, 0), invites: newInviteBook()}
 	}
 	return l.comm
 }
@@ -773,6 +774,29 @@ func (l *Launcher) handleCommunity(r *Req, method, p string, u *url.URL, body py
 			return l.respond(me, target, false)
 		case len(parts) == 5 && method == "DELETE":
 			return l.remove(me, target)
+		}
+	}
+	if p == "/v1/community/invites" {
+		switch method {
+		case "GET":
+			return l.listInvites(me)
+		case "POST":
+			v, _ := body.Get("player")
+			t, _ := body.Get("text")
+			return l.sendInvite(me, pyjson.PyStr(v), t)
+		}
+	}
+	if (len(parts) == 5 || len(parts) == 6) && strings.Join(parts[:4], "/") == "/v1/community/invites" && isDigits(parts[4]) {
+		id, err := strconv.ParseInt(parts[4], 10, 64)
+		if err != nil || id <= 0 {
+			return nil, auth.NewError(400, "bad_request", "")
+		}
+		switch {
+		case len(parts) == 6 && parts[5] == "accept" && method == "POST":
+			return l.acceptInvite(me, id)
+		case len(parts) == 5 && method == "DELETE":
+			cs.invites.Take(me, id)
+			return ok1(), nil
 		}
 	}
 	if p == "/v1/community/lobbies" && method == "GET" {
