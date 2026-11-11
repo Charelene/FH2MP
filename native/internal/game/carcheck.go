@@ -676,6 +676,9 @@ func (w *World) NoteTypedChoices(peer *Peer, size int, payload bits.Int) bits.In
 		}
 		peer.Choices = &Choices{true, int64(want.Class), want.PI}
 	}
+	if w.Roadtrip {
+		w.RtClassAbove(peer)
+	}
 	return payload
 }
 
@@ -705,6 +708,9 @@ func (w *World) NoteChoices(peer *Peer, size int, payload bits.Int) bits.Int {
 			peer.Addr.Port, peer.Owner, *peer.RentalCar, cur.Class, pyfmt.F(pi), want.Class, want.PI)
 		payload = parts.WriteChoices(payload, found, want.Class, float32(want.PI))
 		peer.Choices = &Choices{true, int64(want.Class), want.PI}
+	}
+	if w.Roadtrip {
+		w.RtClassAbove(peer)
 	}
 	return payload
 }
@@ -749,6 +755,9 @@ func (w *World) ShortRentalChoices(peer *Peer, size int, payload bits.Int) bits.
 		next.PI = *piP
 	}
 	peer.Choices = &next
+	if w.Roadtrip {
+		w.RtClassAbove(peer)
+	}
 	return payload
 }
 

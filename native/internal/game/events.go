@@ -748,22 +748,61 @@ func (w *World) DropUnloaded(now float64) {
 	}
 }
 
-// EligibleForEvent says whether a peer's car meets the event's class/PI rule.
+// EligibleForEvent says whether a peer's car meets the event's class/PI rule; a refused player gets the Message Center notice. Call it only where the
+// refusal is final (the player stays out of the event or leaves it); where the game's car select can still change the car, use carFitsEvent.
 func (w *World) EligibleForEvent(peer *Peer, rule *gameopts.Rule) bool {
+	ok, notice := w.carFitsEvent(peer, rule)
+	if !ok {
+		w.noticeRefused(peer, notice)
+	}
+	return ok
+}
+
+// noticeRefused sends the refusal notice; "" (the event's own options are unreadable, nothing the player can fix) sends nothing.
+func (w *World) noticeRefused(peer *Peer, notice string) {
+	if notice != "" {
+		w.NotifyPlayer(peer, "refused", NoticeRefusedSeconds, notice)
+	}
+}
+
+const (
+	customCarNotice  = "Custom cars can't race in online events or Road Trip. Pick a car from the game."
+	trafficCarNotice = "Traffic cars and other cars you can't buy can't race in online events or Road Trip. Pick another car."
+)
+
+// refusalNotice is the notice for the peer's current car against the stored event rule, without a log line ("" = it fits, or the rule is unreadable).
+func (w *World) refusalNotice(peer *Peer) string {
+	if w.CustomCar(peer) {
+		return customCarNotice
+	}
+	if w.BlockedCar(peer) {
+		return trafficCarNotice
+	}
+	r, err := gameopts.CarRule(w.GameOptions)
+	if err != nil || gameopts.AcceptsCar(r, optsChoices(peer.Choices)) {
+		return ""
+	}
+	return refusalText(r, peer.Choices)
+}
+
+// carFitsEvent is EligibleForEvent without the notice: (fits, the notice text for a refusal). The "not eligible" line is logged either way.
+func (w *World) carFitsEvent(peer *Peer, rule *gameopts.Rule) (bool, string) {
 	if w.CustomCar(peer) {
 		w.ev("not_eligible", kv("xuid", fmt.Sprintf("%#x", peer.Xuid)), kv("car", *peer.ModelID), kv("custom", true), kv("roadtrip", w.Roadtrip))
 		w.Logf("%d not eligible: owner %d car %d is not in the game data (a car pack's own car); custom cars do not race in events or Road Trip", peer.Addr.Port, peer.Owner, *peer.ModelID)
-		w.NotifyPlayer(peer, "refused", NoticeRefusedSeconds, "Custom cars can't race in online events or Road Trip. Pick a car from the game.")
-		return false
+		return false, customCarNotice
 	}
 	if w.BlockedCar(peer) {
 		w.ev("not_eligible", kv("xuid", fmt.Sprintf("%#x", peer.Xuid)), kv("car", *peer.ModelID), kv("blocked", true), kv("roadtrip", w.Roadtrip))
 		w.Logf("%d not eligible: owner %d car %d is one players cannot get (a traffic car); such cars do not race in events or Road Trip", peer.Addr.Port, peer.Owner, *peer.ModelID)
-		w.NotifyPlayer(peer, "refused", NoticeRefusedSeconds, "Traffic cars and other cars you can't buy can't race in online events or Road Trip. Pick another car.")
-		return false
+		return false, trafficCarNotice
 	}
 	if w.Roadtrip {
-		return true
+		if above, trip := w.RtClassAbove(peer); above && RtClassMode == "enforce" {
+			w.ev("not_eligible", kv("xuid", fmt.Sprintf("%#x", peer.Xuid)), kv("class", peer.Choices.Class), kv("trip_class", trip), kv("roadtrip", true))
+			return false, rtClassNotice(trip)
+		}
+		return true, ""
 	}
 	var r gameopts.Rule
 	if rule == nil {
@@ -775,13 +814,13 @@ func (w *World) EligibleForEvent(peer *Peer, rule *gameopts.Rule) bool {
 				stored = fmt.Sprintf("%d bits stored", w.GameOptions.Size)
 			}
 			w.Warnf("event admission refused for owner %d: invalid GameOptions (%v; %s)", peer.Owner, err, stored)
-			return false
+			return false, ""
 		}
 	} else {
 		r = *rule
 	}
 	if gameopts.AcceptsCar(r, optsChoices(peer.Choices)) {
-		return true
+		return true, ""
 	}
 	cls := "None"
 	pi := math.NaN()
@@ -813,8 +852,7 @@ func (w *World) EligibleForEvent(peer *Peer, rule *gameopts.Rule) bool {
 		msg += fmt.Sprintf(", repaired to stock car %d", *peer.PartsRepairCar)
 	}
 	w.Log(msg)
-	w.NotifyPlayer(peer, "refused", NoticeRefusedSeconds, refusalText(r, peer.Choices))
-	return false
+	return false, refusalText(r, peer.Choices)
 }
 
 // ValidateEventCars: a participant whose car does not meet the event's rule (or, in Road Trip, which has no rule, drives a custom or traffic car) leaves the
@@ -876,7 +914,7 @@ func (w *World) StartEvent(leader *Peer) {
 			}
 		}
 	}
-	if !w.EligibleForEvent(leader, nil) {
+	if fits, _ := w.carFitsEvent(leader, nil); !fits {
 		w.Logf("event start: leader owner %d's car does not meet the restrictions yet; it is selected and gets the event car select, its car is checked again when every participant has loaded", leader.Owner)
 	}
 	people := []*Peer{leader}
@@ -888,6 +926,10 @@ func (w *World) StartEvent(leader *Peer) {
 					excluded[q] = "handshake not finished"
 				} else {
 					excluded[q] = "never answered the invite with Ready"
+					if !w.Roadtrip && q.ReadyRetry != nil && *q.ReadyRetry == w.RaceRequestedAt {
+						// Its Ready was refused on its car and no car that fits followed: now the refusal is final.
+						w.noticeRefused(q, w.refusalNotice(q))
+					}
 				}
 			}
 			continue
@@ -1363,6 +1405,7 @@ func (w *World) CheckRaceEnd(now float64) {
 		w.EndRace("every participant left during the race")
 		return
 	}
+	w.StartResendTick(now)
 	if ev.Tag != nil {
 		var people []*Peer
 		for _, q := range ev.People {
@@ -1545,8 +1588,43 @@ func (w *World) GoRace(why string) {
 		goMs = 1
 	}
 	w.SetRaceClock(goMs, "race begun")
+	ev.GoMs = uint64(goMs)
+	ev.RaceHeard = map[*Peer]bool{}
+	ev.StartResends = 0
 	for _, q := range ev.People {
 		w.Send(q, false, netv2.StartRace(uint64(goMs)))
+	}
+}
+
+// NoteRaceHeard records that a participant sent a score message after the start, so it has the start message.
+func (w *World) NoteRaceHeard(peer *Peer) {
+	if ev := w.Event; ev != nil && ev.Racing && ev.RaceHeard != nil {
+		ev.RaceHeard[peer] = true
+	}
+}
+
+// StartResendTick sends MsgStartRace again, with the same start time, to every connected participant that has sent no score message by the next
+// StartResendSeconds round. One lost start datagram otherwise left that player on the grid for the whole race. Tag modes send no score messages and are skipped.
+func (w *World) StartResendTick(now float64) {
+	ev := w.Event
+	if !StartResend || ev == nil || !ev.Racing || ev.Over || ev.Tag != nil || ev.GoMs == 0 || ev.RaceHeard == nil ||
+		ev.StartResends >= len(StartResendSeconds) || now-ev.RacingSince < StartResendSeconds[ev.StartResends] {
+		return
+	}
+	ev.StartResends++
+	var missing []*Peer
+	for _, q := range ev.People {
+		if q.Connected && !ev.RaceHeard[q] && !ev.Finished.Has(q) && !ev.Quit[q] {
+			missing = append(missing, q)
+		}
+	}
+	if len(missing) == 0 {
+		return
+	}
+	w.Logf("race start resent (round %d, %.1f s after the start message) to owner(s) %s: no score message from them since the start; same start time %d",
+		ev.StartResends, now-ev.RacingSince, owners(missing), ev.GoMs)
+	for _, q := range missing {
+		w.Send(q, false, netv2.StartRace(ev.GoMs))
 	}
 }
 

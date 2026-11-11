@@ -508,7 +508,10 @@ loop:
 			if !w.admit(peer, mtype) {
 				continue
 			}
-			accepted := ready == 0 || w.EligibleForEvent(peer, nil)
+			accepted, notice := true, ""
+			if ready != 0 {
+				accepted, notice = w.carFitsEvent(peer, nil)
+			}
 			full := accepted && ready != 0 && w.PendingRace != nil && peer != w.PendingRace.Leader && w.Event == nil && w.EventSeatsFull(peer)
 			tail := ""
 			if !accepted {
@@ -528,8 +531,11 @@ loop:
 				w.SetConsoleBool(peer, 4, 0, "car does not meet the event restrictions")
 				peer.ConsoleVars[4] = false
 				if ready != 0 && w.PendingRace != nil && peer != w.PendingRace.Leader {
+					// An invitee: its game's car select can still switch to a car that fits (RetryRefusedReady). The notice waits for StartEvent.
 					t := w.RaceRequestedAt
 					peer.ReadyRetry = &t
+				} else {
+					w.noticeRefused(peer, notice)
 				}
 				continue
 			}
@@ -636,6 +642,7 @@ loop:
 			}
 			br.Pos = start
 			rest := r.intv(end - start)
+			w.NoteRaceHeard(peer)
 			w.Relay(peer, netv2.RelayScore(uint64(mtype), cid, uint64(peer.Owner), rest, end-start), true)
 			switch mtype {
 			case netv2.MsgLapScore:

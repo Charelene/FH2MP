@@ -135,6 +135,15 @@ func runTraceN(t *testing.T, name string, seed uint64, workers int) {
 	prevReliable := Reliable
 	Reliable = tr.Env["FH2MP_RELIABLE"] == "1"
 	t.Cleanup(func() { Reliable = prevReliable })
+	prevResend := StartResend
+	StartResend = tr.Env["FH2MP_START_RESEND"] == "1" // the traces were recorded with one start message per race
+	t.Cleanup(func() { StartResend = prevResend })
+	prevRtClass := RtClassMode
+	RtClassMode = "off" // the traces were recorded before the Road Trip class check
+	if v := tr.Env["FH2MP_RT_CLASS"]; v != "" {
+		RtClassMode = v
+	}
+	t.Cleanup(func() { RtClassMode = prevRtClass })
 	hub, err := NewHub(HubConfig{Roadtrip: tr.Roadtrip, CtlSend: func(d []byte, _ Addr) { lastCtl = string(d) }, Port: 0, Clock: clk, Rng: pyrand.New(seed), Sock: sock, Out: NewLogOut(logSink), Catalog: cat,
 		Sinks: &Sinks{Gamemode: func(int, []uint64) (string, string, error) { return "session-1", "template-1", nil }}})
 	if err != nil {
