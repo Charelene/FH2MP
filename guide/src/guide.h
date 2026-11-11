@@ -81,9 +81,10 @@ struct MessageItem {
     bool unread = false;
 };
 
-// The Guide's screens: the blades (artboard 1), the friend list as Friends or Invite to Game (artboard 4), the Message Center's list and
-// one message (artboard 5 and the 360's Message screen).
-enum class Page { Home, Friends, Invite, Messages, Message };
+// The Guide's screens: the blades (artboard 1); Community, the 360's tabbed screen (Party, Friends, Messages, Players); Invite to Game
+// (artboard 4); one message (artboard 5 and the 360's Message screen).
+enum class Page { Home, Community, Invite, Message };
+enum CommunityTab { TabParty = 0, TabFriends = 1, TabMessages = 2, TabPlayers = 3 };
 
 class Guide {
 public:
@@ -91,8 +92,8 @@ public:
     std::string gamertag = "FH2MP";
 
     void toggle(double now);
-    // Opens the Guide straight on a page (the game's own Invite Friends opens Invite to Game).
-    void open_on(Page p, double now);
+    // Opens the Guide straight on a page (the game's own Invite Friends opens Invite to Game); tab: Community's tab.
+    void open_on(Page p, double now, int tab = TabFriends);
     // One pad or key event while open; what the overlay must do.
     GuideRequest handle(PadEvent e, double now);
     // The friend list and invites as the server last gave them.
@@ -129,9 +130,14 @@ private:
     double tab_at_ = -10;
     int row_[4] = {0, 0, 0, 0}, top_[4] = {0, 0, 0, 0};
     Tween list_bar_;
-    int msg_row_ = 0, msg_top_ = 0, msg_opt_ = 0;
+    int comm_tab_ = TabFriends, comm_dir_ = 1;
+    double comm_at_ = -10;
+    int msg_row_ = 0, msg_top_ = 0, msg_opt_ = 0;  // Messages tab: row 0 is Create New
     Tween msg_bar_, opt_bar_;
-    MessageItem open_msg_;  // the message on the Message page
+    int party_row_ = 0;
+    Tween party_bar_;
+    MessageItem open_msg_;         // the message on the Message page
+    std::set<std::string> hidden_;  // messages deleted here that the server keeps (a chat's last line)
     std::set<uint64_t> sent_;
     Social social_;
     // toast
@@ -148,12 +154,16 @@ private:
     std::vector<const char*> message_options(const MessageItem& m) const;
     GuideRequest handle_home(PadEvent e, double now);
     GuideRequest handle_list(PadEvent e, double now);
-    GuideRequest handle_messages(PadEvent e, double now);
+    GuideRequest handle_community(PadEvent e, double now);
     GuideRequest handle_message(PadEvent e, double now);
+    GuideRequest delete_message(const MessageItem& m, double now);
     void draw_home(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
     void draw_list(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
-    void draw_messages(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
+    void draw_community(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
     void draw_message(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
+    // Friend rows (artboard 4: picture, name, presence) from y top, `rows` of them, with the focus bar at bar_row (rows from top_index).
+    void friend_rows(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float x, float top, int rows,
+                     const std::vector<const Friend*>& list, int focus, int top_index, float bar_row, float op) const;
     void draw_header(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, float left, float width, const char* title,
                      float title_op);
     void draw_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 origin, double now);

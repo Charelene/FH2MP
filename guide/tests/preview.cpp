@@ -1,7 +1,7 @@
 // guide-preview.exe: draws the Guide off screen with the same code the overlay uses (guide.cpp, assets.cpp, Dear ImGui's DX12 backend) and
 // writes a PNG, so the look can be checked against the design canvas without a game.
 //   guide-preview.exe <out.png> <scene> [seconds] [gamerpic.png] [background.png]
-// Scenes: home (the Guide, the player's blade), games, settings, down (focus moved down one row), friends, invite, messages, message (sample
+// Scenes: home (the Guide, the player's blade), games, settings, down (focus moved down one row), friends, party, invite, messages, message (sample
 // friends), toast-info, toast-invite.
 // seconds: time since the Guide opened or the toast started (default 1.5 and 3.0).
 #define WIN32_LEAN_AND_MEAN
@@ -171,12 +171,14 @@ int main(int argc, char** argv) {
     so.chats.push_back(ct);
     g.set_social(so);
     if (assets.gamerpic) assets.pics[2] = assets.gamerpic;
-    if (scene == "messages" || scene == "message") {
-        g.open_on(Page::Messages, t0 - 5);
-        if (scene == "message") g.handle(PadEvent::A, t0);
-    } else if (scene == "friends" || scene == "invite") {
-        g.open_on(scene == "friends" ? Page::Friends : Page::Invite, t0);
-        if (scene == "invite") g.handle(PadEvent::Down, t0 - 0.5), g.handle(PadEvent::Down, t0 - 0.4), g.mark_sent(3);
+    if (scene == "messages" || scene == "message" || scene == "party" || scene == "friends") {
+        int tab = scene == "party" ? TabParty : scene == "friends" ? TabFriends : TabMessages;
+        g.open_on(Page::Community, t0 - 5, tab);
+        if (scene == "message") g.handle(PadEvent::Down, t0 - 4), g.handle(PadEvent::A, t0);
+        if (scene == "messages") g.handle(PadEvent::Down, t0 - 4), g.handle(PadEvent::Down, t0 - 4);
+    } else if (scene == "invite") {
+        g.open_on(Page::Invite, t0);
+        g.handle(PadEvent::Down, t0 - 0.5), g.handle(PadEvent::Down, t0 - 0.4), g.mark_sent(3);
     } else if (is_toast) {
         if (scene == "toast-invite") g.toast(ToastKind::Invite, "Game invite sent", "To DebugWolf", 0xea28, assets.gamerpic, t0);
         else g.toast(ToastKind::Info, "Notifications", "Coming in a later build", 0xe7f4, 0, t0);
