@@ -599,9 +599,20 @@ LRESULT CALLBACK dummy_proc(HWND h, UINT m, WPARAM w, LPARAM l) { return DefWind
 typedef void*(__fastcall* PartyInviteFn)(void*, void*);
 PartyInviteFn o_party_invite;
 
+// After the press the game calls the task again every frame (2026-11-11 win1: 4761 calls in 80 s, the Party call never finishes under
+// Azimuth), so only the first call of a run opens the Guide: a run ends when the game has not called for 2 s.
+std::atomic<ULONGLONG> g_invite_last{0};
+std::atomic<unsigned> g_invite_calls{0};
+
 void* __fastcall hk_party_invite(void* a, void* b) {
-    logf("guide: the game's Invite Friends ran: the Guide opens Invite to Game");
-    push(PadEvent::OpenInvite);
+    ULONGLONG now = GetTickCount64(), last = g_invite_last.exchange(now);
+    if (now - last > 2000) {
+        unsigned before = g_invite_calls.exchange(0);
+        if (before > 1) logf("guide: the game's previous Invite Friends run called the Party task %u times", before);
+        logf("guide: the game's Invite Friends ran: the Guide opens Invite to Game");
+        push(PadEvent::OpenInvite);
+    }
+    g_invite_calls++;
     return o_party_invite(a, b);
 }
 
