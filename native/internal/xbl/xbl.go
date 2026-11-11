@@ -152,6 +152,7 @@ type Server struct {
 	reserved  map[string]map[string]float64
 	left      map[string]left
 	holds     map[string]*Hold
+	playing   map[string][3]string // xuid -> the session the player last wrote itself into and has not left (lower-case key)
 	lastSweep float64
 
 	rate         *diag.RateLimit
@@ -174,7 +175,7 @@ func New(hub Hub) *Server {
 	start := time.Now()
 	return &Server{
 		sessions: map[[3]string]*Session{}, tickets: map[string]*Ticket{}, lobbies: map[LobbyKey][]string{}, reserved: map[string]map[string]float64{},
-		left: map[string]left{}, holds: map[string]*Hold{}, rate: diag.NewRateLimit(nil, 0), Hub: hub,
+		left: map[string]left{}, holds: map[string]*Hold{}, playing: map[string][3]string{}, rate: diag.NewRateLimit(nil, 0), Hub: hub,
 		Now:       func() float64 { return float64(time.Now().UnixNano()) / 1e9 },
 		Monotonic: func() float64 { return time.Since(start).Seconds() },
 		NewUUID:   randomUUID, MaxSessions: 20000, LobbyCapacity: capacity.FreeRoam(),
@@ -718,6 +719,7 @@ func (s *Server) putSession(path string, body []byte, xuid string) (int, pyjson.
 		Merge(rec.Properties, p.(*Dict))
 	}
 	qos := strings.Contains(strings.ToLower(key[1]), "qos")
+	wroteSelf := false
 	for _, name := range membersReq.Keys() {
 		m, _ := membersReq.m[name].(*Dict)
 		if name == "me" && xuid != "" { // "me" is the caller: key members by xuid so several clients can share a session
@@ -727,7 +729,13 @@ func (s *Server) putSession(path string, body []byte, xuid string) (int, pyjson.
 			if _, had := rec.Members.Delete(name); had && xuid != "" && name == xuid && !qos {
 				s.left[xuid] = left{strings.ToLower(key[2]), s.Now()}
 			}
+			if xuid != "" && name == xuid && s.playing[xuid] == lk {
+				delete(s.playing, xuid)
+			}
 			continue
+		}
+		if xuid != "" && name == xuid {
+			wroteSelf = true
 		}
 		m = m.copyDict()
 		if xuid != "" {
@@ -758,6 +766,9 @@ func (s *Server) putSession(path string, body []byte, xuid string) (int, pyjson.
 		return st, nil, nil
 	}
 	s.sessions[lk] = rec
+	if wroteSelf {
+		s.playing[xuid] = lk
+	}
 	var announce [][2]string
 	if !qos {
 		for _, mk := range rec.Members.Keys() {
@@ -918,6 +929,24 @@ func (s *Server) AnnouncePlayer(xuid, lobby string) {
 		return
 	}
 	s.Hub.Control(fmt.Sprintf("assign %x %s", n, lobby))
+}
+
+// SessionOf is the session a player is in, as the game would name it to join them: the one the player last wrote itself into as a member and
+// has not left, when the directory still has it with that member. For a player in a matched lobby that is the lobby's session; for the host
+// of a private Free Roam it is the session the game made for it (template defaultTemplate_qos), not the Car Meet lobby it came from.
+func (s *Server) SessionOf(xuid string) (scid, template, name string, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lk, has := s.playing[xuid]
+	if !has {
+		return "", "", "", false
+	}
+	rec := s.sessions[lk]
+	if rec == nil || !rec.Members.Has(xuid) {
+		delete(s.playing, xuid)
+		return "", "", "", false
+	}
+	return rec.Scid, rec.Template, rec.Name, true
 }
 
 // AnnounceRun tells the game server the run id of the game this player started: it writes it on its lines about them.

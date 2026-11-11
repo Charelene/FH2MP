@@ -110,5 +110,5 @@ func (l *Launcher) acceptInvite(me, id int64) (any, error) {
 	}
 	cs.invites.Take(me, id)
 	communityLog.Info(fmt.Sprintf("game invite accepted: to=%#x from=%#x lobby=%.8s, seat leased for %d s", me, iv.From, iv.Lobby, xbl.HoldSeconds))
-	return pyjson.Obj{{K: "reservation", V: publicHold(h)}}, nil
+	return pyjson.Obj{{K: "reservation", V: l.seatFor(me, h, iv.From)}}, nil
 }

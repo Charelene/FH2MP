@@ -281,6 +281,33 @@ func publicHold(h *xbl.Hold) any {
 	return out
 }
 
+// seatFor is the answer to a seat held to join another player (an accepted invite, Join Session In Progress): the hold, with the session the
+// other player is in (for the host of a private Free Roam that is the game's own session, not the lobby the world is named after), and
+// the game server told that the joiner belongs in that lobby's world (a session the game made itself is not announced when it is joined).
+func (l *Launcher) seatFor(me int64, h *xbl.Hold, host int64) any {
+	out, _ := publicHold(h).(pyjson.Obj)
+	if h == nil {
+		return nil
+	}
+	if scid, tmpl, name, ok := l.C.Xbl.SessionOf(fmt.Sprint(host)); ok {
+		ses := pyjson.Obj{{K: "scid", V: scid}, {K: "templateName", V: tmpl}, {K: "name", V: name}}
+		replaced := false
+		for i := range out {
+			if out[i].K == "session" {
+				out[i].V, replaced = ses, true
+			}
+		}
+		if !replaced {
+			out = append(out, pyjson.Pair{K: "session", V: ses})
+		}
+		communityLog.Info(fmt.Sprintf("seat to join a player: joiner=%#x host=%#x lobby=%.8s session=%s/%.8s, the game server is told the joiner's world", me, host, h.ID, tmpl, name))
+	} else {
+		communityLog.Info(fmt.Sprintf("seat to join a player: joiner=%#x host=%#x lobby=%.8s, the host is in no session of the directory: the lobby's own session is named", me, host, h.ID))
+	}
+	l.C.Xbl.AnnouncePlayer(fmt.Sprint(me), h.ID)
+	return out
+}
+
 func (l *Launcher) snapshot(me int64) (any, error) {
 	result := l.hubLobbies()
 	var lobbies []any
@@ -840,6 +867,12 @@ func (l *Launcher) handleCommunity(r *Req, method, p string, u *url.URL, body py
 			h, err := l.C.Xbl.Reserve(fmt.Sprint(me), lobby, kind)
 			if err != nil {
 				return nil, err
+			}
+			// "player": the friend whose game is joined (the Guide's Join Session In Progress)
+			if v, ok := body.Get("player"); ok && v != nil && lobby != "" {
+				if host, perr := strconv.ParseInt(pyjson.PyStr(v), 10, 64); perr == nil && host > 0 && host != me {
+					return pyjson.Obj{{K: "reservation", V: l.seatFor(me, h, host)}}, nil
+				}
 			}
 			return pyjson.Obj{{K: "reservation", V: publicHold(h)}}, nil
 		case "DELETE":
