@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Builds guide/build/FH2MPGuide.dll, the in-game Guide (a FH2 Mod Platform mod for fh2-mods/): Dear ImGui 1.92.9b with its DX12 backend
+# (third_party/imgui), stb_image (third_party/stb), Material Icons embedded (third_party/material-icons). Needs a mingw-w64 g++ (MSYS2
+# mingw64 on Windows: PATH with C:\msys64\mingw64\bin; CXX=x86_64-w64-mingw32-g++ on Linux).
+set -euo pipefail
+cd "$(dirname "$0")"
+CXX=${CXX:-g++}
+OBJCOPY=${OBJCOPY:-objcopy}
+mkdir -p build
+root=..
+PLATFORM=$(tr -d '[:space:]' < "$root/third_party/fh2-mod-platform/VERSION")
+imgui=$root/third_party/imgui
+# the icon font as an object file: symbols _binary_MaterialIcons_Regular_ttf_start/_end
+(cd "$root/third_party/material-icons" && "$OBJCOPY" -I binary -O pe-x86-64 -B i386:x86-64 MaterialIcons-Regular.ttf "$OLDPWD/build/icons.o")
+"$CXX" -O2 -s -std=c++17 -shared -static -DFH2MOD_PLATFORM_VERSION="\"$PLATFORM\"" -static-libgcc -static-libstdc++ -DWIDL_EXPLICIT_AGGREGATE_RETURNS -DNOMINMAX \
+    -Wall -Wno-unused-function -Wno-missing-field-initializers \
+    -I src -I "$imgui" -I "$root/third_party/fh2-mod-platform" -I "$root/third_party/stb" \
+    -o build/FH2MPGuide.dll \
+    src/overlay.cpp src/guide.cpp src/d3dcompile.cpp \
+    "$imgui/imgui.cpp" "$imgui/imgui_draw.cpp" "$imgui/imgui_tables.cpp" "$imgui/imgui_widgets.cpp" "$imgui/backends/imgui_impl_dx12.cpp" \
+    build/icons.o -ld3d12 -ldxgi -ldxguid -luuid -lole32 -luser32 -lgdi32
+echo "built: guide/build/FH2MPGuide.dll"

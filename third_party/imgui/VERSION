@@ -1,0 +1,3 @@
+Dear ImGui v1.92.9b (MIT, LICENSE.txt), from https://github.com/ocornut/imgui/archive/refs/tags/v1.92.9b.tar.gz
+sha256 of that archive: 21d8a0a565e85dce943e375db00812c2f3f0ab21f3f0f7964e364a63422d7f99
+Only the core files and the DX12 backend are kept, unchanged; the in-game Guide (guide/) builds them.
