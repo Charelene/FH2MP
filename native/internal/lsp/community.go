@@ -273,7 +273,12 @@ func publicHold(h *xbl.Hold) any {
 	if h == nil {
 		return nil
 	}
-	return pyjson.Obj{{K: "id", V: h.ID}, {K: "kind", V: h.Kind}, {K: "expiresAt", V: h.ExpiresAt}}
+	out := pyjson.Obj{{K: "id", V: h.ID}, {K: "kind", V: h.Kind}, {K: "expiresAt", V: h.ExpiresAt}}
+	if h.Key != nil {
+		// the lobby as the game joins it: its session in the directory (the Guide hands this to the game's own session-ready flow)
+		out = append(out, pyjson.Pair{K: "session", V: pyjson.Obj{{K: "scid", V: h.Key.Scid}, {K: "templateName", V: xbl.TargetTemplate}, {K: "name", V: h.ID}}})
+	}
+	return out
 }
 
 func (l *Launcher) snapshot(me int64) (any, error) {
