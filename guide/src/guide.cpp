@@ -260,6 +260,37 @@ void Guide::open_community(int tab, double now) {
     entered(Page::Community, now);
 }
 
+void Guide::open_profile_for_game(uint64_t xuid, double now) {
+    if (!open) toggle(now);
+    const Friend* f = find(xuid);
+    prof_ = f ? *f : Friend();
+    prof_.xuid = xuid;
+    prof_tab_ = 0, prof_at_ = -10, prof_row_[0] = prof_row_[1] = -1;
+    stack_ = {Page::Profile}, page_at_ = -10, box_.on = false, flow_base_ = -1;
+    entered(Page::Profile, now);
+    if (!f) {
+        // not someone the friend list has: the server is asked for their card
+        GuideRequest r;
+        r.action = GuideAction::Lookup, r.xuid = xuid;
+        wanted_.push_back(r);
+    }
+}
+
+void Guide::open_keyboard_for_game(const std::string& text, const std::string& title, const std::string& description, double now) {
+    if (!open) toggle(now);
+    stack_.clear(), box_.on = false, flow_base_ = -1;
+    game_title_ = title, game_description_ = description, game_text_.clear(), game_done_ = false;
+    open_keyboard(Keys::Game, text, now);
+    page_at_ = -10;
+}
+
+bool Guide::take_game_text(std::string* text) {
+    bool done = game_done_;
+    if (done && text) *text = game_text_;
+    game_done_ = false, game_text_.clear();
+    return done;
+}
+
 void Guide::open_invite(double now) {
     bool was = open;
     if (!open) toggle(now);
@@ -311,6 +342,8 @@ const Friend* Guide::find(uint64_t xuid) const {
     for (const Friend& f : social_.requests)
         if (f.xuid == xuid) return &f;
     for (const Friend& f : social_.outgoing)
+        if (f.xuid == xuid) return &f;
+    for (const Friend& f : social_.others)
         if (f.xuid == xuid) return &f;
     return nullptr;
 }
@@ -573,7 +606,8 @@ void Guide::on_result(const NetResult& r, const GuideAssets& a, double now) {
         // the server words its refusal as the 360 did ("Your motto contains a word or phrase that isn't allowed. Please try again.")
         if (!r.ok) show_box(BoxInfo, "Edit Profile", r.code == "bad_profile_text" ? r.message : failure_text(r, "Can't complete this process. Please try again."), {"OK"}, now);
         break;
-    case NetOp::ReadChat: break;
+    case NetOp::ReadChat:
+    case NetOp::Lookup: break;
     case NetOp::Received: toast_to(ToInvite, r.xuid, r.id, ToastKind::Invite, r.name.c_str(), "wants to play Forza Horizon 2", I_GAMES, them, now); break;
     case NetOp::GotRequest: toast_to(ToFriendRequest, r.xuid, 0, ToastKind::Info, r.name.c_str(), "wants to be your friend", I_PERSON_ADD, 0, now); break;
     case NetOp::GotText: toast_to(ToText, r.xuid, r.id, ToastKind::Info, r.name.c_str(), "sent you a message", I_MAIL, 0, now); break;

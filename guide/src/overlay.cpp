@@ -28,6 +28,7 @@
 #include "imgui.h"
 #include "join.h"
 #include "net.h"
+#include "sysui.h"
 
 // probe.cpp
 void party_probe_start(const FH2ModApi* api, FH2Mod* mod, unsigned char* game, void (*log)(const char*));
@@ -523,6 +524,7 @@ void ask(const GuideRequest& r) {
     case GuideAction::Join: net_join(r.xuid, r.name, r.text, r.kind); break;
     case GuideAction::SetProfile: net_set_profile(r.name, r.text); break;
     case GuideAction::JoinGame: join_request(r.scid, r.kind, r.text, r.name); break;
+    case GuideAction::Lookup: net_lookup(r.xuid); break;
     case GuideAction::None:
     case GuideAction::Resume: break;
     }
@@ -570,8 +572,28 @@ void render(IDXGISwapChain3* sc) {
     g_open.store(g_guide.open);
     g_typing.store(g_guide.typing());
     social_and_toasts(now);
+    // what the game asked the Xbox system UI for: the Guide shows it, and the game's wait ends when the Guide is closed again
+    static void* sys_op;
+    static int sys_kind;
+    SysAsk sys;
+    while (sysui_take(&sys)) {
+        if (sys_op) sysui_complete(sys_op, false, "");
+        if (sys.kind == SysAsk::ProfileCard) g_guide.open_profile_for_game(sys.xuid, now);
+        else g_guide.open_keyboard_for_game(sys.text, sys.title, sys.description, now);
+        sys_op = sys.op, sys_kind = sys.kind;
+    }
+    if (sys_op && !g_guide.open) {
+        std::string text;
+        bool done = sys_kind == SysAsk::Keyboard ? g_guide.take_game_text(&text) : true;
+        if (sys_kind == SysAsk::Keyboard)
+            logf(done ? "guide: the keyboard's text goes back to the game (%d bytes)" : "guide: the keyboard was dismissed: the game keeps its own text (%d bytes typed)",
+                 int(text.size()));
+        sysui_complete(sys_op, done, text);
+        sys_op = nullptr;
+    }
     for (const GuideRequest& r : g_guide.take_requests()) ask(r);
     if (g_open.load() != g_guide.open) net_guide_open(g_guide.open), g_open.store(g_guide.open);
+    g_typing.store(g_guide.typing());
     if (!g_guide.busy(now)) return;
     if (!g_buffers_ok && !make_buffers()) return;
 
@@ -653,7 +675,10 @@ void on_invite_friends(FH2Context*, void*) {
     push(PadEvent::OpenInvite);
 }
 
-void hook_invite_friends(unsigned char* base) {
+// The game asked for the system invite UI (sysui.cpp; any thread).
+void on_game_invite_ui() { push(PadEvent::OpenInvite); }
+
+[[maybe_unused]] void hook_invite_friends(unsigned char* base) {
     static const unsigned char sw[] = {0x8b, 0x4f, 0x68};                                     // game+0xdaf04b mov ecx, [rdi+0x68]
     static const unsigned char case0[] = {0x48, 0x8d, 0x05, 0x53, 0xbd, 0x01, 0x00,           // game+0xdaf226 lea rax, [rip+0x1bd53]
                                           0x48, 0x89, 0x44, 0x24, 0x30, 0x44, 0x89, 0x74, 0x24, 0x38};  // mov [rsp+0x30], rax; mov [rsp+0x38], r14d
@@ -732,7 +757,7 @@ DWORD WINAPI hook_thread(LPVOID) {
     DestroyWindow(w);
     if (ok) CloseHandle(CreateThread(nullptr, 0, pad_thread, nullptr, 0, nullptr));
     if (unsigned char* base = (unsigned char*)g_api->wait_for_code(180000)) {
-        hook_invite_friends(base);
+        sysui_install(g_api, g_mod, base, net_log, on_game_invite_ui);
         g_join_ok.store(join_install(g_api, g_mod, base, net_log));
         wchar_t probe[8];
         if (GetEnvironmentVariableW(L"FH2MP_GUIDE_PROBE", probe, 8) && probe[0] == L'1') party_probe_start(g_api, g_mod, base, net_log);

@@ -34,6 +34,7 @@ struct Op {
 std::deque<Op> g_ops;
 std::deque<NetResult> g_results;
 std::deque<PicReady> g_pics;
+std::map<uint64_t, Friend> g_others;  // players looked up by xuid
 std::set<int64_t> g_hidden;  // messages deleted in the Message Center (data/bin/fh2mp-guide-hidden.txt)
 bool g_hidden_dirty;
 
@@ -310,6 +311,16 @@ DWORD WINAPI worker(LPVOID) {
                 } else if (op.op == NetOp::Join) {
                     body = "{\"lobby\":" + quoted(op.text) + ",\"kind\":" + quoted(op.kind) + ",\"player\":\"" + them + "\"}";
                     status = request(conn, L"POST", "/v1/community/reservation", body, &out, &err);
+                } else if (op.op == NetOp::Lookup) {
+                    status = request(conn, L"GET", "/v1/community/player/" + them, "", &out, &err);
+                    JVal v;
+                    if (status == 200 && json_parse(out, &v)) {
+                        Friend f = card(v["player"]);
+                        f.relation = v["relation"].str();
+                        std::lock_guard<std::mutex> l(g_mu);
+                        if (g_others.size() > 64) g_others.clear();
+                        g_others[f.xuid] = f;
+                    }
                 } else if (op.op == NetOp::SetProfile) {
                     status = request(conn, L"POST", "/v1/community/profile", "{" + quoted(op.name) + ":" + quoted(op.text) + "}", &out, &err);
                 } else if (op.op == NetOp::Accept) {
@@ -343,7 +354,8 @@ DWORD WINAPI worker(LPVOID) {
                                    : op.op == NetOp::DeclineFriend ? "declining or cancelling the friend request with"
                                    : op.op == NetOp::FriendRequest ? "friend request to" : op.op == NetOp::RemoveFriend ? "removing the friend"
                                    : op.op == NetOp::SendText ? "message to" : op.op == NetOp::Join ? "holding a seat in the game of"
-                                   : op.op == NetOp::SetProfile ? "setting the profile text" : "marking read the chat";
+                                   : op.op == NetOp::SetProfile ? "setting the profile text" : op.op == NetOp::Lookup ? "looking up the player"
+                                   : "marking read the chat";
                 if (r.ok) logf("guide: %s %s (%llx) done", what, op.name.c_str(), (unsigned long long)op.xuid);
                 else logf("guide: %s %s (%llx) failed: %s", what, op.name.c_str(), (unsigned long long)op.xuid, r.message.c_str());
                 if (op.op != NetOp::Invite) next_inv = 0;
@@ -436,6 +448,8 @@ DWORD WINAPI worker(LPVOID) {
                         if (!g_hidden.count(m.id)) g_social.texts.push_back(m);
                 }
                 std::sort(g_social.texts.begin(), g_social.texts.end(), [](const TextMessage& a, const TextMessage& b) { return a.id > b.id; });
+                g_social.others.clear();
+                for (auto& kv : g_others) g_social.others.push_back(kv.second);
                 g_social.loaded = true, g_social.error.clear();
                 if (!reachable) logf("guide: the server answers again"), reachable = true;
             } else {
@@ -493,6 +507,7 @@ DWORD WINAPI worker(LPVOID) {
             for (auto& iv : g_social.invites) want.emplace_back(iv.from.xuid, iv.from.pic_version);
             for (auto& f : g_social.requests) want.emplace_back(f.xuid, f.pic_version);
             for (auto& f : g_social.outgoing) want.emplace_back(f.xuid, f.pic_version);
+            for (auto& kv : g_others) want.emplace_back(kv.first, kv.second.pic_version);
         }
         for (auto& w : want) {
             auto it = pic_done.find(w.first);
@@ -551,6 +566,8 @@ void net_read_chat(const std::string& chat, int64_t last_id) { push_op(NetOp::Re
 void net_join(uint64_t xuid, const std::string& name, const std::string& lobby, const std::string& kind) { push_op(NetOp::Join, xuid, 0, name, lobby, kind); }
 
 void net_set_profile(const std::string& field, const std::string& text) { push_op(NetOp::SetProfile, 0, 0, field, text); }
+
+void net_lookup(uint64_t xuid) { push_op(NetOp::Lookup, xuid, 0, ""); }
 
 void net_hide_text(int64_t id) {
     std::lock_guard<std::mutex> l(g_mu);

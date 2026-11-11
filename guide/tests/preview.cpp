@@ -239,6 +239,10 @@ int main(int argc, char** argv) {
         g.toggle(t0 - 5);
         nr.op = NetOp::Accept, nr.ok = false, nr.xuid = 3, nr.name = "NightRunR", nr.code = "lobby_gone";
         g.on_result(nr, assets, t0);
+    } else if (scene == "game-card" || scene == "game-card-unknown") {
+        g.open_profile_for_game(scene == "game-card" ? 3 : 77, t0);
+    } else if (scene == "game-keyboard") {
+        g.open_keyboard_for_game("APEX", "Club Tag", "Enter a tag for your club.", t0);
     } else if (scene == "open-on-toast") {
         nr.op = NetOp::Received, nr.ok = true, nr.xuid = 3, nr.name = "NightRunR", nr.id = 9;
         g.on_result(nr, assets, t0 - 2);

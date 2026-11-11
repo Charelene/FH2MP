@@ -66,7 +66,7 @@ enum class ToastKind { Invite, Info, Saving, Warning };
 
 enum class GuideAction {
     None, Resume, Invite, AcceptInvite, DeclineInvite, FriendRequest, AcceptFriend, DeclineFriend, RemoveFriend, SendText, ReadChat,
-    HideText, Join, SetProfile, JoinGame
+    HideText, Join, SetProfile, JoinGame, Lookup
 };
 
 // What the overlay must ask of the server after an event.
@@ -122,6 +122,12 @@ public:
     void open_invite(double now);
     // Opens straight on Community's tab (the preview tool).
     void open_community(int tab, double now);
+    // The game asked the Xbox system UI for a player's gamercard: the Guide opens on that player's profile alone (B closes the Guide).
+    void open_profile_for_game(uint64_t xuid, double now);
+    // The game asked for the system keyboard: the Guide opens on its keyboard alone, with the game's title, description and text.
+    void open_keyboard_for_game(const std::string& text, const std::string& title, const std::string& description, double now);
+    // After that keyboard closed: true and the text when the player chose Done, false when they backed out.
+    bool take_game_text(std::string* text);
     // One pad or key event while open; what the overlay must ask of the server.
     std::vector<GuideRequest> handle(PadEvent e, double now);
     // The keyboard screen is up: typed characters go to type_char ('\b' backspace, '\r' done).
@@ -183,7 +189,7 @@ private:
     };
     // The on-screen keyboard (artboard 6).
     struct Keys {
-        enum Purpose { Text, Gamertag, Field } purpose = Text;
+        enum Purpose { Text, Gamertag, Field, Game } purpose = Text;
         int field = 0;  // Field: which profile text (0 motto, 1 name, 2 location, 3 bio)
         std::u32string text;
         size_t caret = 0;
@@ -240,6 +246,8 @@ private:
     int draft_row_ = 0;
     Tween draft_bar_;
     Keys keys_;
+    std::string game_title_, game_description_, game_text_;  // the game's keyboard request and its answer
+    bool game_done_ = false;
     // the message box (shown over the page; one that arrives while the Guide is closed waits for the next opening)
     Box box_, box_waiting_;
     // a join held back by the Exit Session question: the invite to accept, or the player whose game to join

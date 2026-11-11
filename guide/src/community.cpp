@@ -331,6 +331,7 @@ std::vector<Opt> Guide::profile_options(int tab) const {
     const Friend& p = live ? *live : prof_;
     Relation rel = relation(p.xuid);
     std::vector<Opt> o;
+    if (p.tag.empty()) return o;  // a player the server is still being asked about
     if (tab == 1) {
         o.push_back({"View Bio", PBio, !p.bio.empty(), 0});
         return o;
@@ -529,7 +530,9 @@ void Guide::profile_side(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
     dl->AddRectFilled(v.pt(cx, py), v.pt(cx + cw, pb), alpha(PANE, pop));
     dl->PushClipRect(v.pt(cx, py), v.pt(cx + cw, pb), true);
     float ix = cx + 20, iw = cw - 40;
-    if (!personal) {
+    if (p.tag.empty()) {
+        // a player the server is still being asked about: nothing is claimed about them yet
+    } else if (!personal) {
         float y = py + 16;
         if (!p.location.empty()) {
             ImVec2 lp = v.pt(ix, y + 14);

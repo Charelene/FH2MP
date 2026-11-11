@@ -476,6 +476,7 @@ void Guide::open_keyboard(Keys::Purpose purpose, const std::string& text, double
     keys_ = Keys();
     keys_.purpose = purpose, keys_.text = utf32(text), keys_.caret = keys_.text.size();
     keys_.max = purpose == Keys::Gamertag ? 15 : 120;
+    if (keys_.text.size() > keys_.max) keys_.max = keys_.text.size();
     push(Page::Keyboard, now);
 }
 
@@ -484,6 +485,12 @@ void Guide::keyboard_done(std::vector<GuideRequest>& out, double now) {
     std::string text = utf8(keys_.text);
     while (!text.empty() && text.back() == ' ') text.pop_back();
     while (!text.empty() && text.front() == ' ') text.erase(text.begin());
+    if (keys_.purpose == Keys::Game) {
+        // the game's own keyboard request: the text goes back to the game, the Guide closes
+        game_text_ = utf8(keys_.text), game_done_ = true;
+        toggle(now);
+        return;
+    }
     stack_.pop_back();
     if (keys_.purpose == Keys::Field) {
         // a profile text: to the server, and shown at once (the server's next answer says what it kept)
@@ -649,11 +656,13 @@ void Guide::draw_keyboard(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, f
     static const char* field_title[4] = {"Motto", "Name", "Location", "Bio"};
     static const char* field_prompt[4] = {"Enter your motto.", "Enter your name.", "Enter your location.", "Enter your bio."};
     int field = keys_.purpose == Keys::Field ? std::clamp(keys_.field, 0, 3) : -1;
-    draw_header(dl, a, origin, s, zoom, op, L, W, field >= 0 ? field_title[field] : tag ? "Enter Gamertag" : "Add Text", title_op);
+    bool game = keys_.purpose == Keys::Game;
+    draw_header(dl, a, origin, s, zoom, op, L, W,
+                game ? (game_title_.empty() ? "Keyboard" : game_title_.c_str()) : field >= 0 ? field_title[field] : tag ? "Enter Gamertag" : "Add Text", title_op);
     float x = L + slide;
     dl->AddRectFilled(v.pt(x, 96), v.pt(x + W, 264), alpha(PANE, pop));
     ImVec2 pp = v.pt(x + 26, 96 + 22 + 14), cp = v.pt(x + W - 26, 96 + 22 + 14);
-    text_mid(dl, a.text, a.text_m, v.sz(22), pp.x, pp.y, alpha(MUTED, pop), field >= 0 ? field_prompt[field] : tag ? "Enter a recipient's gamertag." : "Enter your message.");
+    text_mid(dl, a.text, a.text_m, v.sz(22), pp.x, pp.y, alpha(MUTED, pop), game ? game_description_.c_str() : field >= 0 ? field_prompt[field] : tag ? "Enter a recipient's gamertag." : "Enter your message.");
     char count[32];
     snprintf(count, sizeof count, "%d / %d", int(keys_.text.size()), int(keys_.max));
     text_mid(dl, a.text, a.text_m, v.sz(22), cp.x, cp.y, alpha(MUTED, pop), count, true);
