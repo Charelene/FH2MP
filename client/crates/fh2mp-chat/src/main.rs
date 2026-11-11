@@ -11,6 +11,8 @@
 mod app;
 mod identity;
 mod instance;
+#[allow(dead_code)] // the chat link server that uses it comes with the Guide shell (plan phase 3)
+mod link_wire;
 mod net;
 mod realm;
 
