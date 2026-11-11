@@ -97,6 +97,13 @@ def main(argv=None):
     win.move(area.left() + (area.width() - size[0]) // 2, area.top() + (area.height() - size[1]) // 2)
     win.show()
     win.start()
+    from . import gamepad
+    pad = gamepad.install(app, win, home=win.play, suppressed=lc.game_running)
+    if pad is not None:
+        app._gamepad = pad
+        pad.play.connect(lambda: win.play.animateClick() if win.play.isEnabled() and win.play.isVisible() else None)
+        pad.friends.connect(win._toggle_friends)
+        pad.shoulder.connect(lambda step: win.cards.flip(step) if win.cards.isVisible() else None)
     if "--screenshot" in argv:                      # headless smoke test: render, save, quit
         from PySide6.QtCore import QTimer
         out = argv[argv.index("--screenshot") + 1]
