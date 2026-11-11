@@ -22,6 +22,7 @@ import (
 	"fh2mp/internal/db"
 	"fh2mp/internal/diag"
 	"fh2mp/internal/drivatar"
+	"fh2mp/internal/mt"
 	"fh2mp/internal/notifstore"
 	"fh2mp/internal/pyfmt"
 	"fh2mp/internal/rivals"
@@ -47,6 +48,7 @@ type Core struct {
 	Auth   *auth.Service
 	Xbl    *xbl.Server
 	Tables *catalog.Tables // part ids of the game data (nil: tune checks are skipped)
+	Chat   *mt.Server      // the MTProto chat server (nil: FH2MP_MT is off)
 
 	Launcher  LauncherAPI                      // /v1/* (nil: not served)
 	Ops       OpsAPI                           // /ops/* (nil: not served)
