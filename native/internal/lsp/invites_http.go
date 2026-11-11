@@ -51,6 +51,11 @@ func (l *Launcher) sendInvite(me int64, player string, textV any) (any, error) {
 	kind, _ := lobby.Get("kind")
 	lobbyID, _ := id.(string)
 	kindS, _ := kind.(string)
+	if lobbyID == "" || lobbyID == "default" {
+		// the game server's fallback world (a client it has no lobby for, e.g. after a server restart, dev 2026-11-11): nobody can be
+		// seated there, so an invite into it could never be accepted
+		return nil, auth.NewError(409, "not_in_lobby", "Your game is not in an FH2MP lobby. Go online again, then invite.").WithXuid(me).WithDetail("the sender is in the fallback world")
+	}
 	if theirs, _ := cards[target].Get("lobby"); theirs != nil {
 		if tl, _ := theirs.(pyjson.Obj); tl != nil {
 			if tid, _ := tl.Get("id"); tid == id {
@@ -97,6 +102,10 @@ func (l *Launcher) acceptInvite(me, id int64) (any, error) {
 	}
 	h, err := l.C.Xbl.ReserveInvited(fmt.Sprint(me), iv.Lobby)
 	if err != nil {
+		if ae, ok := err.(*auth.Error); ok && ae.Code == "lobby_gone" {
+			cs.invites.Take(me, id) // the lobby will not come back: the invite leaves the player's Messages
+			communityLog.Info(fmt.Sprintf("game invite dropped: to=%#x from=%#x lobby=%.8s, the lobby is gone", me, iv.From, iv.Lobby))
+		}
 		return nil, err
 	}
 	cs.invites.Take(me, id)
