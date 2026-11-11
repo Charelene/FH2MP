@@ -222,7 +222,7 @@ DWORD WINAPI worker(LPVOID) {
             NetResult r;
             r.op = op.op, r.xuid = op.xuid, r.name = op.name, r.id = op.id;
             if (!have) {
-                r.message = "Not signed in: start the game with Play in the FH2MP launcher";
+                r.message = "Not signed in";
             } else {
                 std::string body, out, err;
                 int status = 0;

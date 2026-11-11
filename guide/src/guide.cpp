@@ -703,13 +703,13 @@ void Guide::draw_list(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float
     float le = ease_guide(std::clamp(float((now - tab_at_) / 0.26), 0.0f, 1.0f));
     float ls = slide + (1 - le) * 110 * tab_dir_, lop = pop * le;
     if (!social_.session || (!social_.loaded && !social_.error.empty()) || list.empty()) {
-        const char* why = !social_.session ? "Not signed in: start the game with Play in the FH2MP launcher"
-                          : !social_.loaded && !social_.error.empty() ? "The FH2MP server can't be reached right now"
-                          : !social_.loaded ? "Loading your friends..."
-                          : tab_ == 0 ? "None of your friends are in your game"
-                          : tab_ == 2 ? (social_.me.club.empty() ? "You are not in a club" : "No friends in your club")
-                          : tab_ == 3 ? "No recent players yet"
-                                      : "No friends yet: add them in the FH2MP launcher";
+        const char* why = !social_.session ? "Not signed in"
+                          : !social_.loaded && !social_.error.empty() ? "Server unavailable"
+                          : !social_.loaded ? ""
+                          : tab_ == 0 ? "No friends in your game"
+                          : tab_ == 2 ? (social_.me.club.empty() ? "No club" : "No club friends")
+                          : tab_ == 3 ? "No recent players"
+                                      : "No friends";
         float ww = a.text->CalcTextSizeA(22, FLT_MAX, 0, why).x;
         ImVec2 c = v.pt(L + ls + (W - ww) / 2, 345);
         text_mid(dl, a.text, a.text_m, v.sz(22), c.x, c.y, alpha(MUTED, lop), why);
@@ -787,7 +787,7 @@ void Guide::draw_messages(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, f
     dl->AddRectFilled(p0, p1, alpha(PANEL, pop));
     dl->PushClipRect(p0, p1, true);
     if (list.empty()) {
-        const char* why = !social_.session ? "Not signed in: start the game with Play in the FH2MP launcher" : "No messages";
+        const char* why = !social_.session ? "Not signed in" : "No messages";
         float ww = a.text->CalcTextSizeA(22, FLT_MAX, 0, why).x;
         ImVec2 c = v.pt(x + (W - ww) / 2, 345);
         text_mid(dl, a.text, a.text_m, v.sz(22), c.x, c.y, alpha(MUTED, pop), why);
@@ -820,8 +820,6 @@ void Guide::draw_messages(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, f
     ImVec2 f0 = v.pt(x, 552), f1 = v.pt(x + W, 607);
     dl->AddRectFilled(f0, f1, alpha(PANEL, pop));
     dl->AddLine(ImVec2(f0.x, f0.y + v.sz(0.5f)), ImVec2(f1.x, f0.y + v.sz(0.5f)), alpha(LINE, pop), v.sz(1));
-    ImVec2 fl = v.pt(x + 27, 579.5f);
-    text_mid(dl, a.text, a.text_m, v.sz(20), fl.x, fl.y, alpha(MUTED, pop), "Invites and requests first");
     char count[32];
     snprintf(count, sizeof count, "%d of %d", list.empty() ? 0 : msg_row_ + 1, int(list.size()));
     ImVec2 fr = v.pt(x + W - 30, 579.5f);

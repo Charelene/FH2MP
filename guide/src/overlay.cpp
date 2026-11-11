@@ -4,7 +4,7 @@
 // swap chain is made (DXGI's CreateSwapChain* are hooked from the mod's start, before Azimuth makes its own; GetDevice does not name it).
 // Never on another queue: drawing on the first direct queue the game used removed the device under Azimuth (2026-11-11). Nothing is
 // drawn or recorded while the Guide is closed and no toast plays.
-// Opening: the pad's Guide button held for one second (XInputGetStateEx, a reader thread) or Home in the game window. While open the
+// Opening: the pad's Guide button held for half a second (XInputGetStateEx, a reader thread) or Home in the game window. While open the
 // game gets an idle pad (Windows.Gaming.Input's IGamepad::GetCurrentReading, which Azimuth reads, is hooked) and the Guide takes the
 // keyboard's arrows, Enter, Escape, Q and E from the game window. FH2MP_NO_GUIDE=1 keeps it off. Log: the platform's log.
 #define WIN32_LEAN_AND_MEAN
@@ -144,7 +144,7 @@ DWORD WINAPI pad_thread(LPVOID) {
         logf("guide: no XInput: the pad cannot open the Guide (Home still does)");
         return 0;
     }
-    logf("guide: pad reader started (Guide button %s; hold it 1 s, or press Home in the game)", ex ? "seen" : "not reported by this XInput");
+    logf("guide: pad reader started (Guide button %s; hold it 0.5 s, or press Home in the game)", ex ? "seen" : "not reported by this XInput");
     typedef HRESULT(WINAPI * RoInitFn)(int);
     if (HMODULE cb = LoadLibraryW(L"combase.dll"))
         if (auto ro_init = (RoInitFn)(void*)GetProcAddress(cb, "RoInitialize")) ro_init(1);  // RO_INIT_MULTITHREADED, for hook_wgi
@@ -607,6 +607,27 @@ HRESULT STDMETHODCALLTYPE hk_resize(IDXGISwapChain3* sc, UINT n, UINT w, UINT h,
 
 LRESULT CALLBACK dummy_proc(HWND h, UINT m, WPARAM w, LPARAM l) { return DefWindowProcW(h, m, w, l); }
 
+// The game's own Pause > Game Party > Invite Friends. The popup (built in game+0xdddf30, build 1.0.0.64) gives its items ids (Invite
+// Friends is 0) and calls a std::function on a choice whose body is game+0xdaefe0: it switches on the chosen item's id (mov ecx,
+// [rdi+0x68] at game+0xdaf04b); case 0 starts at game+0xdaf226 and asks game+0x17b9700 for the shell's invite UI, which Azimuth does not
+// have, so nothing showed (2026-11-11: no call reached Azimuth's stub objects on the press). An instruction hook in case 0
+// (game+0xdaf232, mov [rsp+0x38], r14d: no rip-relative operand) opens the Guide on Invite to Game; the game's code goes on as before.
+void on_invite_friends(FH2Context*, void*) {
+    logf("guide: the game's Invite Friends was chosen: the Guide opens Invite to Game");
+    push(PadEvent::OpenInvite);
+}
+
+void hook_invite_friends(unsigned char* base) {
+    static const unsigned char sw[] = {0x8b, 0x4f, 0x68};                                     // game+0xdaf04b mov ecx, [rdi+0x68]
+    static const unsigned char case0[] = {0x48, 0x8d, 0x05, 0x53, 0xbd, 0x01, 0x00,           // game+0xdaf226 lea rax, [rip+0x1bd53]
+                                          0x48, 0x89, 0x44, 0x24, 0x30, 0x44, 0x89, 0x74, 0x24, 0x38};  // mov [rsp+0x30], rax; mov [rsp+0x38], r14d
+    if (memcmp(base + 0xdaf04b, sw, sizeof sw) || memcmp(base + 0xdaf226, case0, sizeof case0))
+        return logf("guide: the Game Party popup's code is not the one this Guide knows: Invite Friends does not open the Guide");
+    FH2Hook* h = g_api->hook_instruction(g_mod, "guide: the game's Invite Friends (game+0xdaf232)", base + 0xdaf232, on_invite_friends, nullptr);
+    if (!h || !g_api->enable_hooks(g_mod, h)) return logf("guide: the game's Invite Friends could not be hooked: it does not open the Guide");
+    logf("guide: the game's Invite Friends opens the Guide's Invite to Game");
+}
+
 // The Party probe (probe.cpp), on with FH2MP_GUIDE_PROBE=1: logs the Party statics calls, to find the one behind the game's Invite Friends.
 // (game+0x179a110 is not it: it runs when Free Roam is joined and then every frame, 2026-11-11.)
 
@@ -674,9 +695,10 @@ DWORD WINAPI hook_thread(LPVOID) {
     if (dev) dev->Release();
     DestroyWindow(w);
     if (ok) CloseHandle(CreateThread(nullptr, 0, pad_thread, nullptr, 0, nullptr));
-    wchar_t probe[8];
-    if (GetEnvironmentVariableW(L"FH2MP_GUIDE_PROBE", probe, 8) && probe[0] == L'1') {
-        if (unsigned char* base = (unsigned char*)g_api->wait_for_code(180000)) party_probe_start(g_api, g_mod, base, net_log);
+    if (unsigned char* base = (unsigned char*)g_api->wait_for_code(180000)) {
+        hook_invite_friends(base);
+        wchar_t probe[8];
+        if (GetEnvironmentVariableW(L"FH2MP_GUIDE_PROBE", probe, 8) && probe[0] == L'1') party_probe_start(g_api, g_mod, base, net_log);
     }
     return 0;
 }

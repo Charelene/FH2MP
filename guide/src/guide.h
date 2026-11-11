@@ -19,10 +19,10 @@ constexpr uint16_t Up = 0x0001, Down = 0x0002, Left = 0x0004, Right = 0x0008, St
                    A = 0x1000, B = 0x2000, X = 0x4000, Y = 0x8000;
 }
 
-// Readings (buttons, left stick, time) into events: the Guide button held for GUIDE_HOLD_MS toggles, a short press closes an open Guide,
+// Readings (buttons, left stick, time) into events: the Guide button held for GUIDE_HOLD_MS (half a second) toggles, a short press closes an open Guide,
 // navigation only while open, a held direction repeats after 400 ms then every 80 ms. Pure (tests/test_reader.cpp).
 struct PadReader {
-    static constexpr uint64_t GUIDE_HOLD_MS = 1000, REPEAT_DELAY_MS = 400, REPEAT_EVERY_MS = 80;
+    static constexpr uint64_t GUIDE_HOLD_MS = 500, REPEAT_DELAY_MS = 400, REPEAT_EVERY_MS = 80;
     uint16_t prev = 0;
     bool guide_down = false, guide_fired = false;
     uint64_t guide_since = 0;
