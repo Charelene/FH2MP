@@ -254,9 +254,8 @@ impl App {
     fn open_guide(&mut self, ctx: &egui::Context, now: f64) {
         self.guide.toggle(now);
         let ppp = ctx.pixels_per_point();
-        self.guide_rect = crate::pad::game_window().map(|(x, y, w, h)| {
-            egui::Rect::from_min_size(egui::pos2(x as f32 / ppp, y as f32 / ppp), egui::vec2(w as f32 / ppp, h as f32 / ppp))
-        });
+        self.guide_rect = crate::pad::game_window()
+            .map(|(x, y, w, h)| egui::Rect::from_min_size(egui::pos2(x as f32 / ppp, y as f32 / ppp), egui::vec2(w as f32 / ppp, h as f32 / ppp)));
         tracing::info!(over_game = self.guide_rect.is_some(), "guide: opened");
         self.enter_guide(ctx);
     }
@@ -320,7 +319,11 @@ impl App {
         let ctx = ui.ctx().clone();
         let now = self.t0.elapsed().as_secs_f64();
         let (tag, online, requests) = self.guide_facts();
-        let facts = crate::guide::Facts { gamertag: &tag, friends_online: online, requests };
+        let facts = crate::guide::Facts {
+            gamertag: &tag,
+            friends_online: online,
+            requests,
+        };
         use crate::pad::PadEvent as P;
         let keys = [
             (Key::ArrowUp, P::Up),

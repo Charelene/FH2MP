@@ -58,8 +58,8 @@ pub struct Server {
     secret: [u8; 32],
 }
 
-fn paths(config: &Path) -> (PathBuf, PathBuf) {
-    let dir = config.join("chat");
+fn paths(config: &Path, name: &str) -> (PathBuf, PathBuf) {
+    let dir = config.join(name);
     (dir.join("instance.lock"), dir.join("instance.json"))
 }
 
@@ -73,7 +73,12 @@ fn same(a: &[u8], b: &[u8]) -> bool {
 
 /// Takes the lock, or says another core has it.
 pub fn claim(config: &Path) -> io::Result<Claim> {
-    let (lock_path, info_path) = paths(config);
+    claim_named(config, "chat")
+}
+
+/// The same for another program of this crate (the Guide: "guide"), with its own lock and port file in `<config>/<name>/`.
+pub fn claim_named(config: &Path, name: &str) -> io::Result<Claim> {
+    let (lock_path, info_path) = paths(config, name);
     std::fs::create_dir_all(lock_path.parent().unwrap_or(config))?;
     let lock = OpenOptions::new().create(true).truncate(false).write(true).open(&lock_path)?;
     match lock.try_lock() {
@@ -96,7 +101,12 @@ pub fn claim(config: &Path) -> io::Result<Claim> {
 
 /// Hands a request to the running core. The core may have taken the lock a moment ago and not yet written its port: retried for 3 s.
 pub fn send(config: &Path, req: &Request) -> io::Result<()> {
-    let (_, info_path) = paths(config);
+    send_named(config, "chat", req)
+}
+
+/// Hands a request to the running program `name` (see [`claim_named`]).
+pub fn send_named(config: &Path, name: &str, req: &Request) -> io::Result<()> {
+    let (_, info_path) = paths(config, name);
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         match try_send(&info_path, req) {

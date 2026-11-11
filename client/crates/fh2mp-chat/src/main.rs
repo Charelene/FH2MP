@@ -102,7 +102,8 @@ fn main() -> eframe::Result {
     let (ui_tx, ui_rx) = std::sync::mpsc::channel();
     let (inst_tx, inst_rx) = std::sync::mpsc::channel();
     let guide_preview = args.iter().any(|a| a == "--guide-preview");
-    let guide_on = std::env::var("FH2MP_NO_GUIDE").as_deref() != Ok("1");
+    // The Guide runs as its own program now (fh2mp-guide); FH2MP_CHAT_GUIDE=1 still runs it inside the chat core.
+    let guide_on = std::env::var("FH2MP_CHAT_GUIDE").as_deref() == Ok("1");
     let (pad_tx, pad_rx) = std::sync::mpsc::channel();
     let guide_shown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let open_at = match &request {
