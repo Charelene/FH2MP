@@ -109,6 +109,9 @@ pub struct App {
     guide_rect: Option<egui::Rect>,
     t0: Instant,
     guide_preview: bool,
+    /// Frames left in which to hide the window again: eframe shows every window after its first frame (epi_integration post_rendering)
+    /// whatever the builder said, so a `--background` start hides it on the next ones.
+    hide_frames: u8,
 }
 
 fn user(c: &types::Contact) -> &types::User {
@@ -190,6 +193,7 @@ impl App {
             guide_rect: None,
             t0: Instant::now(),
             guide_preview: false,
+            hide_frames: 0,
         }
     }
 
@@ -330,6 +334,9 @@ impl App {
     pub fn set_instance(&mut self, rx: stdmpsc::Receiver<crate::instance::Request>, keep_running: bool, open_at: Option<String>) {
         self.inst = Some(rx);
         self.keep_running = keep_running;
+        if keep_running && open_at.is_none() {
+            self.hide_frames = 3;
+        }
         if let Some(t) = open_at {
             self.open_at(&t);
         }
@@ -788,6 +795,11 @@ impl eframe::App for App {
     // Runs before every ui pass and also while the window is hidden (on request_repaint), so a hidden core still takes network updates and
     // requests from later starts.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.hide_frames > 0 {
+            self.hide_frames -= 1;
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(false));
+            ctx.request_repaint();
+        }
         self.pump(ctx);
         self.instance(ctx);
         self.guide_events(ctx);
