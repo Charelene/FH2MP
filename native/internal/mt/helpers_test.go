@@ -33,11 +33,11 @@ import (
 
 var (
 	testKeyOnce sync.Once
-	testKey     *serverKey
+	testKey     *ServerKey
 	testKeyPEM  []byte
 )
 
-func serverKeyForTest(t testing.TB) *serverKey {
+func serverKeyForTest(t testing.TB) *ServerKey {
 	testKeyOnce.Do(func() {
 		k, err := rsa.GenerateKey(rand.Reader, 2048)
 		if err != nil {

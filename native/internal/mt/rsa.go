@@ -17,14 +17,14 @@ import (
 	"github.com/gotd/td/crypto"
 )
 
-// serverKey is the server's RSA key of the auth-key exchange. Clients pin its fingerprint (the low 64 bits of SHA1 over the TL-serialized n, e).
-type serverKey struct {
+// ServerKey is the server's RSA key of the auth-key exchange. Clients pin its fingerprint (the low 64 bits of SHA1 over the TL-serialized n, e).
+type ServerKey struct {
 	priv *rsa.PrivateKey
 	fp   int64
 }
 
 // LoadServerKey reads a PKCS#1 or PKCS#8 PEM private key (FH2MP_MT_RSA_KEY); 2048 bits, as RSA_PAD needs 256-byte blocks.
-func LoadServerKey(path string) (*serverKey, error) {
+func LoadServerKey(path string) (*ServerKey, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -32,7 +32,10 @@ func LoadServerKey(path string) (*serverKey, error) {
 	return parseServerKey(raw)
 }
 
-func parseServerKey(raw []byte) (*serverKey, error) {
+// ParseServerKey is LoadServerKey on PEM bytes.
+func ParseServerKey(raw []byte) (*ServerKey, error) { return parseServerKey(raw) }
+
+func parseServerKey(raw []byte) (*ServerKey, error) {
 	blk, _ := pem.Decode(raw)
 	if blk == nil {
 		return nil, errors.New("no PEM block")
@@ -55,15 +58,15 @@ func parseServerKey(raw []byte) (*serverKey, error) {
 		return nil, err
 	}
 	priv.Precompute()
-	return &serverKey{priv: priv, fp: crypto.RSAFingerprint(&priv.PublicKey)}, nil
+	return &ServerKey{priv: priv, fp: crypto.RSAFingerprint(&priv.PublicKey)}, nil
 }
 
 // Fingerprint is what clients pin.
-func (k *serverKey) Fingerprint() int64 { return k.fp }
+func (k *ServerKey) Fingerprint() int64 { return k.fp }
 
 // rawDecrypt is textbook RSA (m = c^d mod n) with blinding: math/big's Exp is not constant time, so the exponent works on c*r^e with a fresh
 // random r and the result is unblinded with r^-1. Without blinding the decryption time would follow c and could leak d to a remote timer.
-func (k *serverKey) rawDecrypt(data []byte) ([]byte, error) {
+func (k *ServerKey) rawDecrypt(data []byte) ([]byte, error) {
 	n := k.priv.N
 	c := new(big.Int).SetBytes(data)
 	if c.Sign() == 0 || c.Cmp(n) >= 0 {
@@ -94,7 +97,7 @@ func (k *serverKey) rawDecrypt(data []byte) ([]byte, error) {
 
 // decodeRSAPad is the server side of RSA_PAD (core.telegram.org/mtproto/auth_key, step 4): it returns data_with_padding (192 bytes,
 // the inner data first). The hash check is constant time.
-func (k *serverKey) decodeRSAPad(encrypted []byte) ([]byte, error) {
+func (k *ServerKey) decodeRSAPad(encrypted []byte) ([]byte, error) {
 	if len(encrypted) != 256 {
 		return nil, fmt.Errorf("encrypted_data of %d bytes, 256 expected", len(encrypted))
 	}

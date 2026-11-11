@@ -182,7 +182,7 @@ func (c *clientConn) enqueue(frame []byte) bool {
 // Server is the chat server.
 type Server struct {
 	cfg        Config
-	key        *serverKey
+	key        *ServerKey
 	accounts   Accounts
 	store      UpdateStore
 	disp       *tl.ServerDispatcher
@@ -204,7 +204,7 @@ type Server struct {
 }
 
 // New builds a server around the RSA key; accounts verifies sign-ins and store keeps each account's update sequence.
-func New(cfg Config, key *serverKey, accounts Accounts, store UpdateStore) (*Server, error) {
+func New(cfg Config, key *ServerKey, accounts Accounts, store UpdateStore) (*Server, error) {
 	if key == nil {
 		return nil, errors.New("mt: no RSA key")
 	}

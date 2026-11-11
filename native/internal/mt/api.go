@@ -81,6 +81,7 @@ func (s *Server) registerAPI() {
 			if errors.As(err, &ae) {
 				log.Info("mt.sign_in_refused " + diag.KV(diag.KVP{K: "ip", V: c.ip}, diag.KVP{K: "key", V: c.k.idHex()}, diag.KVP{K: "error", V: re.Message},
 					diag.KVP{K: "xuid", V: xuidOrNil(ae.Xuid)}) + ": " + firstNonEmpty(ae.Detail, ae.Message))
+				re.detail = "" // logged here, not again as a refused call
 			}
 			return nil, re
 		}

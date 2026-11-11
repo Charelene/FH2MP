@@ -75,7 +75,7 @@ type exchangeResult struct {
 
 // exchangeConfig are the knobs of one exchange.
 type exchangeConfig struct {
-	key      *serverKey
+	key      *ServerKey
 	dc       int
 	maxTTL   int
 	minTTL   int

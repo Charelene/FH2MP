@@ -27,6 +27,7 @@
 /scratch/
 /build/
 /target/
+/client/target/
 __pycache__/
 *.pyc
 .venv/
