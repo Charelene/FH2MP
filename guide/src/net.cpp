@@ -200,6 +200,7 @@ Friend card(const JVal& c) {
     const JVal& seen = c["lastSeenAgo"];
     if (seen.type == JVal::Num) f.last_seen = int(seen.i64());
     f.motto = c["motto"].str(), f.name = c["name"].str(), f.location = c["location"].str(), f.bio = c["bio"].str();
+    f.has_profile = c["motto"].type == JVal::Str;
     return f;
 }
 
@@ -309,6 +310,8 @@ DWORD WINAPI worker(LPVOID) {
                 } else if (op.op == NetOp::Join) {
                     body = "{\"lobby\":" + quoted(op.text) + ",\"kind\":" + quoted(op.kind) + "}";
                     status = request(conn, L"POST", "/v1/community/reservation", body, &out, &err);
+                } else if (op.op == NetOp::SetProfile) {
+                    status = request(conn, L"POST", "/v1/community/profile", "{" + quoted(op.name) + ":" + quoted(op.text) + "}", &out, &err);
                 } else if (op.op == NetOp::Accept) {
                     status = request(conn, L"POST", "/v1/community/invites/" + std::to_string(op.id) + "/accept", "{}", &out, &err);
                 } else if (op.op == NetOp::Decline) {
@@ -330,7 +333,8 @@ DWORD WINAPI worker(LPVOID) {
                                    : op.op == NetOp::Decline ? "declining the invite from" : op.op == NetOp::AcceptFriend ? "accepting the friend request from"
                                    : op.op == NetOp::DeclineFriend ? "declining or cancelling the friend request with"
                                    : op.op == NetOp::FriendRequest ? "friend request to" : op.op == NetOp::RemoveFriend ? "removing the friend"
-                                   : op.op == NetOp::SendText ? "message to" : op.op == NetOp::Join ? "holding a seat in the game of" : "marking read the chat";
+                                   : op.op == NetOp::SendText ? "message to" : op.op == NetOp::Join ? "holding a seat in the game of"
+                                   : op.op == NetOp::SetProfile ? "setting the profile text" : "marking read the chat";
                 if (r.ok) logf("guide: %s %s (%llx) done", what, op.name.c_str(), (unsigned long long)op.xuid);
                 else logf("guide: %s %s (%llx) failed: %s", what, op.name.c_str(), (unsigned long long)op.xuid, r.message.c_str());
                 if (op.op != NetOp::Invite) next_inv = 0;
@@ -536,6 +540,8 @@ void net_remove_friend(uint64_t xuid, const std::string& name) { push_op(NetOp::
 void net_send_text(uint64_t xuid, const std::string& name, const std::string& text) { push_op(NetOp::SendText, xuid, 0, name, text); }
 void net_read_chat(const std::string& chat, int64_t last_id) { push_op(NetOp::ReadChat, 0, last_id, chat); }
 void net_join(uint64_t xuid, const std::string& name, const std::string& lobby, const std::string& kind) { push_op(NetOp::Join, xuid, 0, name, lobby, kind); }
+
+void net_set_profile(const std::string& field, const std::string& text) { push_op(NetOp::SetProfile, 0, 0, field, text); }
 
 void net_hide_text(int64_t id) {
     std::lock_guard<std::mutex> l(g_mu);

@@ -18,7 +18,10 @@ const int FRIEND_ROWS = 6;  // 69-unit rows under the tabs
 const int MSG_ROWS = 8;     // 56-unit rows
 const uint32_t COMM_ICON[4] = {I_GROUPS, I_PERSON, I_MAIL, I_GAMES};
 
-enum ProfileCmd { PInvite, PJoin, PMessage, PAddFriend, PAccept, PDecline, PCancel, PRemove, PBio };
+enum ProfileCmd { PInvite, PJoin, PMessage, PAddFriend, PAccept, PDecline, PCancel, PRemove, PBio, PEdit };
+
+// The profile texts a player can set, as the server names them, and how long each may be.
+const char* FIELD_NAME[4] = {"Motto", "Name", "Location", "Bio"};
 
 uint32_t kind_icon(const MessageItem& m) {
     if (m.kind == MessageItem::GameInvite) return I_GAMES;
@@ -332,6 +335,8 @@ std::vector<Opt> Guide::profile_options(int tab) const {
         o.push_back({"View Bio", PBio, !p.bio.empty(), 0});
         return o;
     }
+    // the player's own profile (Settings, Profile): the 360's Edit Profile; greyed on a server that keeps no profile texts
+    if (p.xuid && p.xuid == social_.me.xuid) return {{"Edit Profile", PEdit, p.has_profile, 0}};
     bool idle = waiting_xuid_ != p.xuid;
     if (rel == Relation::RequestReceived) {
         o.push_back({"Accept Friend Request", PAccept, true, 0});
@@ -424,6 +429,10 @@ void Guide::handle_profile(PadEvent e, std::vector<GuideRequest>& out, double no
             drop(social_.friends);
             break;
         case PBio: show_box(0, (p.tag + "'s bio").c_str(), p.bio, {"Back"}, now); break;
+        case PEdit:
+            edit_row_ = -1;
+            push(Page::EditProfile, now);
+            return;
         }
         entered(Page::Profile, now);  // the list is another one now
         break;
@@ -442,7 +451,6 @@ void Guide::draw_profile(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
     float x = L + slide;
     const Friend* live = find(prof_.xuid);
     const Friend& p = live ? *live : prof_;
-    ImFont* bf = a.text_bold ? a.text_bold : a.text;
 
     const char* names[2] = {"Gamer Profile", "Personal Profile"};
     for (int t = 0; t < 2; t++) {
@@ -466,8 +474,21 @@ void Guide::draw_profile(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
     option_list(dl, a, v, ox, 156, 431, 50, 23, 30, opts, row, prof_bar_.value(now), oop);
     dl->PopClipRect();
 
-    // the card: name and level on the accent, the picture, the facts
-    float cx = x + 431 + 14, cw = 431 - 28, cy0 = 152 + 14;
+    float fade = pop * std::clamp(float((now - prof_at_) / 0.16), 0.0f, 1.0f);  // the pane fades when the tab changes
+    profile_side(dl, a, origin, s, zoom, x, 152, p, prof_tab_ == 1, pop, fade);
+    dl->PopClipRect();
+    const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}, {"LB", nullptr, MUTED3}, {"RB", "Switch", MUTED3}};
+    hint_bar(dl, a, v, L + 27, 617, hints, 4, op);
+}
+
+// The right half of a profile screen, from y top down to the panel's foot: the card (name and level on the accent, the picture, the
+// facts) and under it the gamer pane (what they play, their presence) or the personal pane (Motto, Name, Location, Bio).
+void Guide::profile_side(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float x, float top, const Friend& p, bool personal,
+                         float pop, float fade) const {
+    View v{origin, s, zoom};
+    ImFont* bf = a.text_bold ? a.text_bold : a.text;
+    bool me = p.xuid && p.xuid == social_.me.xuid;
+    float cx = x + 431 + 14, cw = 431 - 28, cy0 = top + 14;
     dl->AddRectFilled(v.pt(cx, cy0), v.pt(cx + cw, cy0 + 46 + 112), alpha(RAISED, pop));
     dl->AddRectFilled(v.pt(cx, cy0), v.pt(cx + cw, cy0 + 46), alpha(ACCENT, pop));
     float name_w = cw - 16 - 14;
@@ -481,9 +502,9 @@ void Guide::draw_profile(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
     }
     ImVec2 np = v.pt(cx + 16, cy0 + 23);
     text_fit(dl, bf, a.bold_m, v.sz(25), np.x, np.y, v.sz(name_w), alpha(WHITE, pop), p.tag);
-    player_pic(dl, a, a.pic(p.xuid), p.xuid, v.pt(cx, cy0 + 46), v.pt(cx + 112, cy0 + 46 + 112), pop);
+    player_pic(dl, a, me ? a.gamerpic : a.pic(p.xuid), p.xuid, v.pt(cx, cy0 + 46), v.pt(cx + 112, cy0 + 46 + 112), pop);
     std::vector<std::pair<std::string, std::string>> facts = {{"Club", p.club.empty() ? "-" : p.club}};
-    if (!p.name.empty()) facts.push_back({"Name", p.name});
+    if (!p.name.empty() && !personal) facts.push_back({"Name", p.name});
     float fh = 28.0f * facts.size() + 4.0f * (facts.size() - 1), fy = cy0 + 46 + (112 - fh) / 2 + 14;
     for (size_t i = 0; i < facts.size(); i++) {
         ImVec2 l = v.pt(cx + 112 + 16, fy + i * 32), r = v.pt(cx + cw - 16, fy + i * 32);
@@ -495,11 +516,11 @@ void Guide::draw_profile(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
         else text_fit(dl, a.text, a.text_m, v.sz(21), l.x + v.sz(lw + 12), l.y, v.sz(room), alpha(WHITE, pop), val);
     }
 
-    // the pane under the card (it fades when the tab changes)
-    float py = cy0 + 46 + 112 + 14, pb = 607 - 14, fade = pop * std::clamp(float((now - prof_at_) / 0.16), 0.0f, 1.0f);
+    float py = cy0 + 46 + 112 + 14, pb = 607 - 14;
     dl->AddRectFilled(v.pt(cx, py), v.pt(cx + cw, pb), alpha(PANE, pop));
+    dl->PushClipRect(v.pt(cx, py), v.pt(cx + cw, pb), true);
     float ix = cx + 20, iw = cw - 40;
-    if (prof_tab_ == 0) {
+    if (!personal) {
         float y = py + 16;
         if (!p.location.empty()) {
             ImVec2 lp = v.pt(ix, y + 14);
@@ -511,35 +532,83 @@ void Guide::draw_profile(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
             ImVec2 c = v.pt(ix + 26, y + 26);
             dl->AddCircleFilled(c, v.sz(26), alpha(ACCENT, fade), 48);
             icon_mid(dl, a, v.sz(30), c.x, c.y, alpha(WHITE, fade), I_CAR);
-            std::string where = same_game(p, social_.me) ? "In Your Game" : lobby_words(p);
+            std::string where = !me && same_game(p, social_.me) ? "In Your Game" : lobby_words(p);
             ImVec2 g0 = v.pt(ix + 52 + 14, where.empty() ? y + 26 : y + 14), g1 = v.pt(ix + 52 + 14, y + 39);
             text_fit(dl, a.text, a.text_m, v.sz(21), g0.x, g0.y, v.sz(iw - 66), alpha(WHITE, fade), "Forza Horizon 2");
             if (!where.empty()) text_fit(dl, a.text, a.text_m, v.sz(17), g1.x, g1.y, v.sz(iw - 66), alpha(MUTED, fade), where);
         }
         // presence, at the pane's foot
-        bool on = p.state != Friend::Offline;
+        bool on = p.state != Friend::Offline || me;
         std::string pres = on ? "Online" : p.last_seen >= 0 ? ago(p.last_seen, "Last online ") : "Offline";
-        std::string waiting = waiting_words(p, relation(p.xuid));
+        std::string waiting = me ? "" : waiting_words(p, relation(p.xuid));
         if (!waiting.empty()) pres += " \xC2\xB7 " + waiting;
         ImVec2 ip = v.pt(ix + 12, pb - 16 - 13), tp = v.pt(ix + 32, pb - 16 - 13);
         icon_mid(dl, a, v.sz(24), ip.x, ip.y, alpha(on ? BRIGHT : OFFLINE, fade), I_PERSON);
         text_fit(dl, a.text, a.text_m, v.sz(22), tp.x, tp.y, v.sz(iw - 32), alpha(WHITE, fade), pres);
     } else {
-        // Motto, Location, Bio: a 15-unit label over 19-unit text; the 360's words when there is none
-        const std::pair<const char*, const std::string*> rows[3] = {{"Motto", &p.motto}, {"Location", &p.location}, {"Bio", &p.bio}};
-        const char* none[3] = {"(No motto)", "(No location)", "(No bio)"};
-        float y = py + 16;
-        for (int i = 0; i < 3; i++) {
+        // a 15-unit label over 19-unit text; the 360's words when there is none
+        const std::string* vals[4] = {&p.motto, &p.name, &p.location, &p.bio};
+        const char* none[4] = {"(No motto)", "(No name)", "(No location)", "(No bio)"};
+        float y = py + 14;
+        for (int i = 0; i < 4; i++) {
             ImVec2 lp = v.pt(ix, y + 10);
-            text_mid(dl, a.text, a.text_m, v.sz(15), lp.x, lp.y, alpha(MUTED, fade), rows[i].first);
+            text_mid(dl, a.text, a.text_m, v.sz(15), lp.x, lp.y, alpha(MUTED, fade), FIELD_NAME[i]);
             y += 20;
-            bool has = !rows[i].second->empty();
-            y += wrapped(dl, a, v, 19, 1.25f, ix, y, iw, alpha(has ? WHITE : MUTED2, fade), has ? *rows[i].second : none[i]);
-            y += 10;
-            if (y > pb - 30) break;
+            bool has = !vals[i]->empty();
+            y += wrapped(dl, a, v, 19, 1.25f, ix, y, iw, alpha(has ? WHITE : MUTED2, fade), has ? *vals[i] : none[i]);
+            y += 8;
         }
     }
     dl->PopClipRect();
-    const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}, {"LB", nullptr, MUTED3}, {"RB", "Switch", MUTED3}};
-    hint_bar(dl, a, v, L + 27, 617, hints, 4, op);
+}
+
+// ---- Edit Profile (the player's own): the four texts on the left, the card and the personal pane on the right
+
+std::vector<Opt> Guide::edit_options() const {
+    std::vector<Opt> o;
+    for (int i = 0; i < 4; i++) o.push_back({FIELD_NAME[i], i, true, 0});
+    return o;
+}
+
+void Guide::handle_edit(PadEvent e, std::vector<GuideRequest>& out, double now) {
+    (void)out;
+    std::vector<Opt> opts = edit_options();
+    switch (e) {
+    case PadEvent::Up:
+    case PadEvent::Down:
+        edit_row_ = step_focus(opts, edit_row_, e == PadEvent::Up ? -1 : 1);
+        if (edit_row_ >= 0) edit_bar_.go(float(edit_row_), now, 0.14f);
+        break;
+    case PadEvent::B: pop(now); break;
+    case PadEvent::A: {
+        if (edit_row_ < 0 || edit_row_ >= 4) break;
+        const Friend& me = social_.me;
+        const std::string* vals[4] = {&me.motto, &me.name, &me.location, &me.bio};
+        const size_t max[4] = {21, 40, 40, 500};  // the server's limits
+        int field = edit_row_;
+        open_keyboard(Keys::Field, *vals[field], now);
+        keys_.field = field, keys_.max = max[field];
+        break;
+    }
+    default: break;
+    }
+}
+
+void Guide::draw_edit(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now) {
+    View v{origin, s, zoom};
+    const float L = PAGE_L, W = PAGE_W;
+    float slide, pop, title_op;
+    page_motion(now, op, &slide, &pop, &title_op);
+    draw_header(dl, a, origin, s, zoom, op, L, W, "Edit Profile", title_op);
+    float x = L + slide;
+    ImVec2 p0 = v.pt(x, 96), p1 = v.pt(x + W, 607);
+    dl->AddRectFilled(p0, p1, alpha(PANEL, pop));
+    dl->PushClipRect(p0, p1, true);
+    option_list(dl, a, v, x, 100, 431, 50, 23, 30, edit_options(), edit_row_, edit_bar_.value(now), pop);
+    Friend me = social_.me;
+    if (me.tag.empty()) me.tag = gamertag;
+    profile_side(dl, a, origin, s, zoom, x, 96, me, true, pop, pop);
+    dl->PopClipRect();
+    const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}};
+    hint_bar(dl, a, v, L + 27, 617, hints, 2, op);
 }

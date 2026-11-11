@@ -65,7 +65,7 @@ enum class ToastKind { Invite, Info, Saving, Warning };
 
 enum class GuideAction {
     None, Resume, Invite, AcceptInvite, DeclineInvite, FriendRequest, AcceptFriend, DeclineFriend, RemoveFriend, SendText, ReadChat,
-    HideText, Join
+    HideText, Join, SetProfile
 };
 
 // What the overlay must ask of the server after an event.
@@ -73,8 +73,8 @@ struct GuideRequest {
     GuideAction action = GuideAction::None;
     uint64_t xuid = 0;
     int64_t id = 0;
-    std::string name;  // the other player (the chat's id for ReadChat; the gamertag asked for, for FriendRequest)
-    std::string text;  // Invite, SendText: the words; Join: the lobby's id
+    std::string name;  // the other player (the chat's id for ReadChat; the gamertag asked for, for FriendRequest; the field for SetProfile)
+    std::string text;  // Invite, SendText, SetProfile: the words; Join: the lobby's id
     std::string kind;  // Join: the lobby's kind
 };
 
@@ -100,7 +100,7 @@ struct Opt {
     uint32_t icon = 0;
 };
 
-enum class Page { Home, Community, Profile, Message, CreateNew, Recipients, Compose, Keyboard };
+enum class Page { Home, Community, Profile, EditProfile, Message, CreateNew, Recipients, Compose, Keyboard };
 enum CommunityTab { TabParty = 0, TabFriends = 1, TabMessages = 2, TabPlayers = 3 };
 // What a message box was shown for: just to tell (OK), or the question before a written message is dropped.
 enum BoxTag { BoxInfo = 0, BoxDiscard = 1 };
@@ -119,7 +119,7 @@ public:
     std::vector<GuideRequest> handle(PadEvent e, double now);
     // The keyboard screen is up: typed characters go to type_char ('\b' backspace, '\r' done).
     bool typing() const { return open && page() == Page::Keyboard && !box_.on; }
-    void type_char(uint32_t cp, double now);
+    std::vector<GuideRequest> type_char(uint32_t cp, double now);
     // The friend list, invites and messages as the server last gave them.
     void set_social(const Social& s);
     // What came of a request, or what arrived: the 360's toasts and message boxes.
@@ -169,7 +169,8 @@ private:
     };
     // The on-screen keyboard (artboard 6).
     struct Keys {
-        enum Purpose { Text, Gamertag } purpose = Text;
+        enum Purpose { Text, Gamertag, Field } purpose = Text;
+        int field = 0;  // Field: which profile text (0 motto, 1 name, 2 location, 3 bio)
         std::u32string text;
         size_t caret = 0;
         bool caps = false;
@@ -210,6 +211,8 @@ private:
     int prof_row_[2] = {0, 0};
     Tween prof_bar_;
     uint64_t waiting_xuid_ = 0;  // an option of this profile is on its way to the server
+    int edit_row_ = 0;           // Edit Profile's focus
+    Tween edit_bar_;
     // one message
     MessageItem open_msg_;
     int msg_opt_ = 0;
@@ -244,6 +247,7 @@ private:
     void pop_to(size_t depth, double now);
     void entered(Page p, double now);
     void switch_to(int b, double now);
+    void fix_home_focus();
     void show_box(int tag, const char* title, const std::string& body, std::vector<std::string> buttons, double now);
     void box_done(int tag, int button, std::vector<GuideRequest>& out, double now);
 
@@ -270,8 +274,14 @@ private:
 
     void start_draft(Draft::Kind kind, double now);
     void open_keyboard(Keys::Purpose purpose, const std::string& text, double now);
-    void keyboard_done(double now);
-    void press_key(const Key& k, double now);
+    void keyboard_done(std::vector<GuideRequest>& out, double now);
+    void press_key(const Key& k, std::vector<GuideRequest>& out, double now);
+    std::vector<Opt> edit_options() const;
+    void handle_edit(PadEvent e, std::vector<GuideRequest>& out, double now);
+    void draw_edit(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
+    // The right half of a profile screen (artboards 8 and 9): the player's card, and under it the gamer or the personal pane.
+    void profile_side(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float x, float top, const Friend& p, bool personal,
+                      float pop, float fade) const;
     void send_draft(std::vector<GuideRequest>& out, double now);
     void end_flow(double now);
     void delete_message(const MessageItem& m, std::vector<GuideRequest>& out, double now);

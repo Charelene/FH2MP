@@ -509,6 +509,7 @@ void ask(const GuideRequest& r) {
     case GuideAction::ReadChat: net_read_chat(r.name, r.id); break;
     case GuideAction::HideText: net_hide_text(r.id); break;
     case GuideAction::Join: net_join(r.xuid, r.name, r.text, r.kind); break;
+    case GuideAction::SetProfile: net_set_profile(r.name, r.text); break;
     case GuideAction::None:
     case GuideAction::Resume: break;
     }
@@ -534,7 +535,8 @@ void render(IDXGISwapChain3* sc) {
     for (const Ev& ev : evs) {
         bool was = g_guide.open;
         if (ev.ch) {
-            if (was) g_guide.type_char(ev.ch, now);
+            if (was)
+                for (const GuideRequest& r : g_guide.type_char(ev.ch, now)) ask(r);
             continue;
         }
         PadEvent e = ev.e;

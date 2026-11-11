@@ -471,11 +471,26 @@ void Guide::open_keyboard(Keys::Purpose purpose, const std::string& text, double
 }
 
 // Done: the text goes where it was asked for. A gamertag for a new friend request leads on to the request itself.
-void Guide::keyboard_done(double now) {
+void Guide::keyboard_done(std::vector<GuideRequest>& out, double now) {
     std::string text = utf8(keys_.text);
     while (!text.empty() && text.back() == ' ') text.pop_back();
     while (!text.empty() && text.front() == ' ') text.erase(text.begin());
     stack_.pop_back();
+    if (keys_.purpose == Keys::Field) {
+        // a profile text: to the server, and shown at once (the server's next answer says what it kept)
+        static const char* key[4] = {"motto", "name", "location", "bio"};
+        std::string* vals[4] = {&social_.me.motto, &social_.me.name, &social_.me.location, &social_.me.bio};
+        int f = std::clamp(keys_.field, 0, 3);
+        if (*vals[f] != text) {
+            GuideRequest r;
+            r.action = GuideAction::SetProfile, r.name = key[f], r.text = text;
+            out.push_back(r);
+            *vals[f] = text;
+        }
+        page_dir_ = -1, page_at_ = now;
+        entered(page(), now);
+        return;
+    }
     if (keys_.purpose == Keys::Text) {
         draft_.text = text;
         page_dir_ = -1, page_at_ = now;
@@ -529,7 +544,7 @@ std::vector<Guide::Key> Guide::keyboard() const {
     return keys;
 }
 
-void Guide::press_key(const Key& k, double now) {
+void Guide::press_key(const Key& k, std::vector<GuideRequest>& out, double now) {
     Keys& kb = keys_;
     auto insert = [&](uint32_t c) {
         if (kb.text.size() >= kb.max) return;
@@ -545,32 +560,33 @@ void Guide::press_key(const Key& k, double now) {
     case KCaps: kb.caps = !kb.caps; break;
     case KBackspace: if (kb.caret > 0) kb.text.erase(kb.text.begin() + --kb.caret); break;
     case KSpace: insert(' '); break;
-    case KDone: keyboard_done(now); break;
+    case KDone: keyboard_done(out, now); break;
     }
 }
 
-void Guide::type_char(uint32_t cp, double now) {
-    if (!typing()) return;
+std::vector<GuideRequest> Guide::type_char(uint32_t cp, double now) {
+    std::vector<GuideRequest> out;
+    if (!typing()) return out;
     Key k;
     if (cp == '\b') k.act = KBackspace;
     else if (cp == '\r' || cp == '\n') k.act = KDone;
     else if (cp >= 0x20 && cp != 0x7f) k.act = KChar, k.ch = cp;
-    else return;
-    press_key(k, now);
+    else return out;
+    press_key(k, out, now);
+    return out;
 }
 
 void Guide::handle_keyboard(PadEvent e, std::vector<GuideRequest>& out, double now) {
-    (void)out;
     std::vector<Key> keys = keyboard();
     auto act = [&](int a) {
         Key k;
         k.act = a;
-        press_key(k, now);
+        press_key(k, out, now);
     };
     switch (e) {
     case PadEvent::B: pop(now); break;  // the text stays as it was
     case PadEvent::A:
-        if (keys_.focus >= 0 && keys_.focus < int(keys.size())) press_key(keys[keys_.focus], now);
+        if (keys_.focus >= 0 && keys_.focus < int(keys.size())) press_key(keys[keys_.focus], out, now);
         break;
     case PadEvent::X: act(KBackspace); break;
     case PadEvent::Y: act(KSpace); break;
@@ -621,11 +637,14 @@ void Guide::draw_keyboard(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, f
     float slide, pop, title_op;
     page_motion(now, op, &slide, &pop, &title_op);
     bool tag = keys_.purpose == Keys::Gamertag;
-    draw_header(dl, a, origin, s, zoom, op, L, W, tag ? "Enter Gamertag" : "Add Text", title_op);
+    static const char* field_title[4] = {"Motto", "Name", "Location", "Bio"};
+    static const char* field_prompt[4] = {"Enter your motto.", "Enter your name.", "Enter your location.", "Enter your bio."};
+    int field = keys_.purpose == Keys::Field ? std::clamp(keys_.field, 0, 3) : -1;
+    draw_header(dl, a, origin, s, zoom, op, L, W, field >= 0 ? field_title[field] : tag ? "Enter Gamertag" : "Add Text", title_op);
     float x = L + slide;
     dl->AddRectFilled(v.pt(x, 96), v.pt(x + W, 264), alpha(PANE, pop));
     ImVec2 pp = v.pt(x + 26, 96 + 22 + 14), cp = v.pt(x + W - 26, 96 + 22 + 14);
-    text_mid(dl, a.text, a.text_m, v.sz(22), pp.x, pp.y, alpha(MUTED, pop), tag ? "Enter a recipient's gamertag." : "Enter your message.");
+    text_mid(dl, a.text, a.text_m, v.sz(22), pp.x, pp.y, alpha(MUTED, pop), field >= 0 ? field_prompt[field] : tag ? "Enter a recipient's gamertag." : "Enter your message.");
     char count[32];
     snprintf(count, sizeof count, "%d / %d", int(keys_.text.size()), int(keys_.max));
     text_mid(dl, a.text, a.text_m, v.sz(22), cp.x, cp.y, alpha(MUTED, pop), count, true);

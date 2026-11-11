@@ -18,6 +18,7 @@ struct Friend {
     double pic_version = 0;
     int last_seen = -1;                       // seconds since they were last online, -1 when the server does not say
     std::string motto, name, location, bio;   // profile texts, empty when the server has none
+    bool has_profile = false;                 // the server keeps profile texts (it sent them with this card)
 };
 
 struct ReceivedInvite {
@@ -59,7 +60,7 @@ struct Social {
 
 // Actions (Invite .. Join) and what the worker noticed on its own (Received: a game invite; GotRequest: a friend request; GotText: a
 // message; Online: a friend came online).
-enum class NetOp { Invite, Accept, Decline, FriendRequest, AcceptFriend, DeclineFriend, RemoveFriend, SendText, ReadChat, Join, Received, GotRequest, GotText, Online };
+enum class NetOp { Invite, Accept, Decline, FriendRequest, AcceptFriend, DeclineFriend, RemoveFriend, SendText, ReadChat, Join, SetProfile, Received, GotRequest, GotText, Online };
 
 // What came of an action, or what arrived.
 struct NetResult {
@@ -94,5 +95,6 @@ void net_send_text(uint64_t xuid, const std::string& name, const std::string& te
 void net_read_chat(const std::string& chat, int64_t last_id);
 void net_hide_text(int64_t id);  // a message deleted in the Message Center: the chat keeps it, the Guide stops listing it
 void net_join(uint64_t xuid, const std::string& name, const std::string& lobby, const std::string& kind);
+void net_set_profile(const std::string& field, const std::string& text);  // field: "motto", "name", "location" or "bio"
 bool net_take_result(NetResult* out);
 bool net_take_pic(PicReady* out);

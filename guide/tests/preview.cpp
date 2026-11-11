@@ -4,7 +4,7 @@
 // Scenes: home (the Guide, the player's blade), games, settings, down; friends, friends-nogame, party, players, messages; message,
 // message-invite, message-request; profile, profile-nogame, profile-personal, profile-request, profile-sent, profile-here; create,
 // create-nogame; pick, pick-many, compose, compose-invite, discard, keyboard, keyboard-caps, add-friend; box-accept, box-gone;
-// toast-sent, toast-invite, toast-request, toast-message, toast-online. Sample players, not real ones.
+// own-profile, edit-profile, edit-motto; toast-sent, toast-invite, toast-request, toast-message, toast-online. Sample players, not real ones.
 // seconds: time since the Guide opened or the toast started (default 1.5 and 3.0).
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -152,6 +152,7 @@ int main(int argc, char** argv) {
     Social so;
     so.session = so.loaded = true;
     so.me.xuid = 1, so.me.tag = "DebugFox", so.me.state = Friend::Playing, so.me.lobby_id = "L1", so.me.lobby_kind = "freeroam";
+    so.me.level = 27, so.me.has_profile = true, so.me.motto = "S1 or nothing", so.me.location = "Kyiv";
     auto card = [&](uint64_t x, const char* tag, Friend::State st, const char* lobby, const char* status, const char* club, int level) {
         Friend f;
         f.xuid = x, f.tag = tag, f.state = st, f.lobby_id = lobby, f.lobby_kind = *lobby ? "freeroam" : "", f.lobby_status = status, f.club = club, f.level = level;
@@ -224,6 +225,11 @@ int main(int argc, char** argv) {
     } else if (scene == "add-friend") {
         g.open_community(TabFriends, t0 - 5), g.handle(A, t0);
         for (const char* c = "Charelene"; *c; c++) g.type_char(uint32_t(*c), t0);
+    } else if (scene == "own-profile" || scene == "edit-profile" || scene == "edit-motto") {
+        g.toggle(t0 - 9), g.handle(RB, t0 - 8);
+        g.handle(A, scene == "own-profile" ? t0 : t0 - 5);
+        if (scene != "own-profile") g.handle(A, scene == "edit-profile" ? t0 : t0 - 3);
+        if (scene == "edit-motto") g.handle(A, t0);
     } else if (scene == "box-accept") {
         g.toggle(t0 - 5);
         nr.op = NetOp::Accept, nr.ok = true, nr.xuid = 3, nr.name = "NightRunR", nr.kind = "freeroam";

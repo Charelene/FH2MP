@@ -19,7 +19,7 @@ using namespace ui;
 
 namespace {
 
-enum HomeCmd { HomeNone, HomeResume, HomeFriends, HomeParty, HomeMessages };
+enum HomeCmd { HomeNone, HomeResume, HomeFriends, HomeParty, HomeMessages, HomeProfile };
 const char* BLADE[3] = {"Games", nullptr, "Settings"};
 
 // Toasts take the theme's accent; only a warning is red.
@@ -133,6 +133,7 @@ void Guide::toggle(double now) {
         bar_[1].set(1);  // canvas: the player's blade opens on Friends
         widths_set_ = true;
     }
+    fix_home_focus();
 }
 
 void Guide::push(Page p, double now) {
@@ -168,6 +169,10 @@ void Guide::entered(Page p, double now) {
             if (prof_row_[t] < 0 || prof_row_[t] >= int(o.size()) || !o[prof_row_[t]].enabled) prof_row_[t] = first_enabled(o);
         }
         prof_bar_.set(float(std::max(0, prof_row_[prof_tab_])));
+    } else if (p == Page::EditProfile) {
+        std::vector<Opt> o = edit_options();
+        if (edit_row_ < 0 || edit_row_ >= int(o.size()) || !o[edit_row_].enabled) edit_row_ = first_enabled(o);
+        edit_bar_.set(float(std::max(0, edit_row_)));
     } else if (p == Page::Message) {
         std::vector<Opt> o = message_options(open_msg_);
         if (msg_opt_ < 0 || msg_opt_ >= int(o.size()) || !o[msg_opt_].enabled) msg_opt_ = first_enabled(o);
@@ -216,6 +221,7 @@ void Guide::open_invite(double now) {
 
 void Guide::set_social(const Social& s) {
     social_ = s;
+    fix_home_focus();
     if (!open) return;
     Page p = page();
     if (p == Page::Community || p == Page::Recipients || p == Page::Profile || p == Page::Compose) {
@@ -238,6 +244,7 @@ void Guide::set_social(const Social& s) {
 // ---- who is who
 
 const Friend* Guide::find(uint64_t xuid) const {
+    if (xuid && xuid == social_.me.xuid) return &social_.me;
     for (const Friend& f : social_.friends)
         if (f.xuid == xuid) return &f;
     for (const Friend& f : social_.requests)
@@ -323,6 +330,7 @@ std::vector<GuideRequest> Guide::handle(PadEvent e, double now) {
     case Page::Home: handle_home(e, out, now); break;
     case Page::Community: handle_community(e, out, now); break;
     case Page::Profile: handle_profile(e, out, now); break;
+    case Page::EditProfile: handle_edit(e, out, now); break;
     case Page::Message: handle_message(e, out, now); break;
     case Page::CreateNew: handle_create(e, out, now); break;
     case Page::Recipients: handle_pick(e, out, now); break;
@@ -340,7 +348,7 @@ std::vector<Opt> Guide::home_rows(int blade) const {
         return {{"Leave Game", HomeNone, false, 0},          {"Friends", HomeFriends, true, I_PERSON},  {"Party", HomeParty, true, I_GROUPS},
                 {"Messages", HomeMessages, true, I_MAIL},    {"Beacons & Activity", HomeNone, false, I_SENSORS},
                 {"Chat", HomeNone, false, I_CHAT},           {"Lobbies", HomeNone, false, I_FLAG}};
-    return {{"Profile", HomeNone, false, I_PERSON},       {"Theme", HomeNone, false, I_PALETTE},  {"Voice", HomeNone, false, I_MIC},
+    return {{"Profile", HomeProfile, social_.loaded, I_PERSON}, {"Theme", HomeNone, false, I_PALETTE},  {"Voice", HomeNone, false, I_MIC},
             {"Notifications", HomeNone, false, I_BELL},   {"Network", HomeNone, false, I_WIFI},   {"Controller", HomeNone, false, I_GAMES},
             {"System", HomeNone, false, I_SETTINGS}};
 }
@@ -367,6 +375,11 @@ void Guide::handle_home(PadEvent e, std::vector<GuideRequest>& out, double now) 
             GuideRequest r;
             r.action = GuideAction::Resume;
             out.push_back(r);
+        } else if (cmd == HomeProfile) {
+            prof_ = social_.me;
+            if (prof_.tag.empty()) prof_.tag = gamertag;
+            prof_tab_ = 0, prof_at_ = -10, prof_row_[0] = prof_row_[1] = -1;
+            push(Page::Profile, now);
         } else {
             comm_tab_ = cmd == HomeParty ? TabParty : cmd == HomeMessages ? TabMessages : TabFriends, comm_at_ = -10;
             push(Page::Community, now);
@@ -374,6 +387,17 @@ void Guide::handle_home(PadEvent e, std::vector<GuideRequest>& out, double now) 
         break;
     }
     default: break;
+    }
+}
+
+// Each blade's focus rests on a row that can be chosen (a row becomes usable when the server answers), or on none.
+void Guide::fix_home_focus() {
+    for (int b = 0; b < 3; b++) {
+        std::vector<Opt> rows = home_rows(b);
+        int& f = focus_[b];
+        if (f >= 0 && f < int(rows.size()) && rows[f].enabled) continue;
+        f = first_enabled(rows);
+        if (f >= 0) bar_[b].set(float(f));
     }
 }
 
@@ -455,6 +479,10 @@ void Guide::on_result(const NetResult& r, const GuideAssets& a, double now) {
     case NetOp::SendText:
         if (!r.ok) show_box(BoxInfo, "Message", failure_text(r, "Your message could not be sent."), {"OK"}, now);
         break;
+    case NetOp::SetProfile:
+        // the server words its refusal as the 360 did ("Your motto contains a word or phrase that isn't allowed. Please try again.")
+        if (!r.ok) show_box(BoxInfo, "Edit Profile", r.code == "bad_profile_text" ? r.message : failure_text(r, "Can't complete this process. Please try again."), {"OK"}, now);
+        break;
     case NetOp::ReadChat: break;
     case NetOp::Received: toast(ToastKind::Invite, r.name.c_str(), "wants to play Forza Horizon 2", I_GAMES, them, now); break;
     case NetOp::GotRequest: toast(ToastKind::Info, r.name.c_str(), "wants to be your friend", I_PERSON_ADD, 0, now); break;
@@ -498,6 +526,7 @@ bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double 
         case Page::Home: draw_home(dl, a, origin, s, zoom, op, now); break;
         case Page::Community: draw_community(dl, a, origin, s, zoom, op, now); break;
         case Page::Profile: draw_profile(dl, a, origin, s, zoom, op, now); break;
+        case Page::EditProfile: draw_edit(dl, a, origin, s, zoom, op, now); break;
         case Page::Message: draw_message(dl, a, origin, s, zoom, op, now); break;
         case Page::CreateNew: draw_create(dl, a, origin, s, zoom, op, now); break;
         case Page::Recipients: draw_pick(dl, a, origin, s, zoom, op, now); break;
