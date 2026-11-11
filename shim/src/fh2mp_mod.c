@@ -2319,6 +2319,7 @@ static int patch_online_meet(void)
 #include "hook_guard.inc"
 #include "gameplaylog_guard.inc"
 #include "remote_prediction_guard.inc"
+#include "model_unload_guard.inc"
 #include "picker_pi.inc"
 #include "autodrive_rule.inc"
 #include "tune_gate.inc"
@@ -5600,6 +5601,7 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_HOOKGUARD", env, 8) == 0) patch_hook_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_LOGGUARD", env, 8) == 0) patch_gameplaylog_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_PREDGUARD", env, 8) == 0) patch_remote_prediction_guard();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_MODELGUARD", env, 8) == 0) patch_model_unload_guard();
         }
         patch_car_pool();
         {
