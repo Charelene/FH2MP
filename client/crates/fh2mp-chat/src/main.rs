@@ -114,6 +114,7 @@ fn main() -> eframe::Result {
             .with_title("FH2MP Chat")
             .with_inner_size([900.0, 620.0])
             .with_min_inner_size([640.0, 420.0])
+            .with_transparent(true) // the Guide uses this window over the game (app.rs enter_guide); the chat paints it opaque
             .with_visible(!background || request.is_some()),
         ..Default::default()
     };

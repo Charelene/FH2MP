@@ -112,6 +112,11 @@ pub struct App {
     /// Frames left in which to hide the window again: eframe shows every window after its first frame (epi_integration post_rendering)
     /// whatever the builder said, so a `--background` start hides it on the next ones.
     hide_frames: u8,
+    /// Whether the chat window is meant to be on screen (not a --background start, or opened since); where it was before the Guide took
+    /// the window; preview waiting for the first frame.
+    chat_shown: bool,
+    restore: Option<egui::Rect>,
+    preview_pending: bool,
 }
 
 fn user(c: &types::Contact) -> &types::User {
@@ -194,6 +199,9 @@ impl App {
             t0: Instant::now(),
             guide_preview: false,
             hide_frames: 0,
+            chat_shown: true,
+            restore: None,
+            preview_pending: false,
         }
     }
 
@@ -202,9 +210,7 @@ impl App {
         self.pad = Some(rx);
         self.guide_shown = shown;
         self.guide_preview = preview;
-        if preview {
-            self.guide.toggle(0.0);
-        }
+        self.preview_pending = preview;
     }
 
     fn guide_facts(&self) -> (String, usize, usize) {
@@ -226,31 +232,39 @@ impl App {
         for e in events {
             if !self.guide.open {
                 if e == crate::pad::PadEvent::Toggle {
-                    self.guide.toggle(now);
-                    let ppp = ctx.pixels_per_point();
-                    self.guide_rect = crate::pad::game_window().map(|(x, y, w, h)| {
-                        egui::Rect::from_min_size(egui::pos2(x as f32 / ppp, y as f32 / ppp), egui::vec2(w as f32 / ppp, h as f32 / ppp))
-                    });
-                    tracing::info!(over_game = self.guide_rect.is_some(), "guide: opened");
+                    self.open_guide(ctx, now);
                 }
                 continue;
             }
-            if let Some(a) = self.guide.handle(e, &facts, now) {
-                self.guide_action(ctx, a);
-            }
+            let action = self.guide.handle(e, &facts, now);
             if !self.guide.open {
                 tracing::info!("guide: closed");
+                self.leave_guide(ctx);
+            }
+            if let Some(a) = action {
+                self.guide_action(ctx, a);
             }
         }
         self.guide_shown.store(self.guide.open, std::sync::atomic::Ordering::Relaxed);
         if self.guide.open {
-            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::RequestPaintWhileHidden);
             ctx.request_repaint();
         }
     }
 
+    fn open_guide(&mut self, ctx: &egui::Context, now: f64) {
+        self.guide.toggle(now);
+        let ppp = ctx.pixels_per_point();
+        self.guide_rect = crate::pad::game_window().map(|(x, y, w, h)| {
+            egui::Rect::from_min_size(egui::pos2(x as f32 / ppp, y as f32 / ppp), egui::vec2(w as f32 / ppp, h as f32 / ppp))
+        });
+        tracing::info!(over_game = self.guide_rect.is_some(), "guide: opened");
+        self.enter_guide(ctx);
+    }
+
     fn guide_action(&mut self, ctx: &egui::Context, a: crate::guide::Action) {
         if a == crate::guide::Action::OpenChat {
+            self.chat_shown = true;
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::InnerSize(egui::vec2(900.0, 620.0)));
             self.view = if self.incoming.is_empty() { View::Club } else { View::Requests };
             ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Minimized(false));
@@ -258,73 +272,91 @@ impl App {
         }
     }
 
-    /// The Guide's own window: over the game (borderless, transparent, on top) or, in preview, a normal 1280x720 window.
-    fn guide_window(&mut self, ctx: &egui::Context) {
-        if !self.guide.open {
-            return;
-        }
-        let builder = if self.guide_preview {
-            egui::ViewportBuilder::default()
-                .with_title("FH2MP Guide (preview)")
-                .with_inner_size([1280.0, 720.0])
+    /// The Guide takes over the main window: Windows sends no paint messages to a hidden window, so a second window hanging off the hidden
+    /// chat window was never drawn. Opening makes the main window borderless, on top and the size of the game's client area (or, in
+    /// preview, a normal 1280x720 window); closing puts back the chat window as it was, or hides it again.
+    fn enter_guide(&mut self, ctx: &egui::Context) {
+        let root = egui::ViewportId::ROOT;
+        self.restore = if self.chat_shown { ctx.input(|i| i.viewport().outer_rect) } else { None };
+        if self.guide_preview {
+            ctx.send_viewport_cmd_to(root, egui::ViewportCommand::InnerSize(egui::vec2(1280.0, 720.0)));
         } else {
             let r = self.guide_rect.unwrap_or_else(|| {
                 let size = ctx.input(|i| i.viewport().monitor_size).unwrap_or(egui::vec2(1280.0, 720.0));
                 egui::Rect::from_min_size(egui::Pos2::ZERO, size)
             });
-            egui::ViewportBuilder::default()
-                .with_title("FH2MP Guide")
-                .with_decorations(false)
-                .with_transparent(true)
-                .with_always_on_top()
-                .with_taskbar(false)
-                .with_position(r.min)
-                .with_inner_size(r.size())
-        };
+            ctx.send_viewport_cmd_to(root, egui::ViewportCommand::Decorations(false));
+            ctx.send_viewport_cmd_to(root, egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
+            ctx.send_viewport_cmd_to(root, egui::ViewportCommand::OuterPosition(r.min));
+            ctx.send_viewport_cmd_to(root, egui::ViewportCommand::InnerSize(r.size()));
+        }
+        ctx.send_viewport_cmd_to(root, egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd_to(root, egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd_to(root, egui::ViewportCommand::Focus);
+        ctx.request_repaint();
+    }
+
+    fn leave_guide(&mut self, ctx: &egui::Context) {
+        let root = egui::ViewportId::ROOT;
+        if !self.guide_preview {
+            ctx.send_viewport_cmd_to(root, egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
+            ctx.send_viewport_cmd_to(root, egui::ViewportCommand::Decorations(true));
+        }
+        match self.restore.take() {
+            Some(r) if self.chat_shown => {
+                ctx.send_viewport_cmd_to(root, egui::ViewportCommand::OuterPosition(r.min));
+                ctx.send_viewport_cmd_to(root, egui::ViewportCommand::InnerSize(r.size()));
+            }
+            _ if self.chat_shown => {
+                ctx.send_viewport_cmd_to(root, egui::ViewportCommand::InnerSize(egui::vec2(900.0, 620.0)));
+            }
+            _ => ctx.send_viewport_cmd_to(root, egui::ViewportCommand::Visible(false)),
+        }
+        ctx.request_repaint();
+    }
+
+    /// The open Guide, drawn into the main window instead of the chat.
+    fn guide_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         let now = self.t0.elapsed().as_secs_f64();
         let (tag, online, requests) = self.guide_facts();
+        let facts = crate::guide::Facts { gamertag: &tag, friends_online: online, requests };
+        use crate::pad::PadEvent as P;
+        let keys = [
+            (Key::ArrowUp, P::Up),
+            (Key::ArrowDown, P::Down),
+            (Key::ArrowLeft, P::Left),
+            (Key::ArrowRight, P::Right),
+            (Key::Enter, P::A),
+            (Key::Space, P::A),
+            (Key::Escape, P::B),
+            (Key::Backspace, P::B),
+            (Key::Q, P::Lb),
+            (Key::E, P::Rb),
+        ];
         let mut action = None;
-        let mut closed_by_window = false;
-        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("fh2mp-guide"), builder, |ui, _class| {
-            let facts = crate::guide::Facts {
-                gamertag: &tag,
-                friends_online: online,
-                requests,
-            };
-            use crate::pad::PadEvent as P;
-            let keys = [
-                (Key::ArrowUp, P::Up),
-                (Key::ArrowDown, P::Down),
-                (Key::ArrowLeft, P::Left),
-                (Key::ArrowRight, P::Right),
-                (Key::Enter, P::A),
-                (Key::Space, P::A),
-                (Key::Escape, P::B),
-                (Key::Backspace, P::B),
-                (Key::Q, P::Lb),
-                (Key::E, P::Rb),
-            ];
-            for (k, e) in keys {
-                if ui.input(|i| i.key_pressed(k))
-                    && let Some(a) = self.guide.handle(e, &facts, now)
-                {
-                    action = Some(a);
-                }
+        for (k, e) in keys {
+            if ctx.input(|i| i.key_pressed(k))
+                && let Some(a) = self.guide.handle(e, &facts, now)
+            {
+                action = Some(a);
             }
-            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
-                if let Some(a) = self.guide.draw(ui, &facts, now) {
-                    action = Some(a);
-                }
-            });
-            if ui.input(|i| i.viewport().close_requested()) {
-                closed_by_window = true;
-            }
-        });
-        if closed_by_window {
+        }
+        if self.guide.open
+            && let Some(a) = self.guide.draw(ui, &facts, now)
+        {
+            action = Some(a);
+        }
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.guide.open = false;
         }
+        if !self.guide.open {
+            tracing::info!("guide: closed");
+            self.leave_guide(&ctx);
+        }
         if let Some(a) = action {
-            self.guide_action(ctx, a);
+            self.guide_action(&ctx, a);
         }
         self.guide_shown.store(self.guide.open, std::sync::atomic::Ordering::Relaxed);
     }
@@ -336,6 +368,7 @@ impl App {
         self.keep_running = keep_running;
         if keep_running && open_at.is_none() {
             self.hide_frames = 3;
+            self.chat_shown = false;
         }
         if let Some(t) = open_at {
             self.open_at(&t);
@@ -364,6 +397,7 @@ impl App {
                     if let Some(t) = t {
                         self.open_at(&t);
                     }
+                    self.chat_shown = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -379,6 +413,7 @@ impl App {
             tracing::info!("window closed: hidden, the chat core keeps running for the game (the launcher's Chats button shows it again)");
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.chat_shown = false;
         }
     }
 
@@ -792,6 +827,10 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        if self.guide.open { [0.0; 4] } else { BASE.to_normalized_gamma_f32() }
+    }
+
     // Runs before every ui pass and also while the window is hidden (on request_repaint), so a hidden core still takes network updates and
     // requests from later starts.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -808,7 +847,14 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
-        self.guide_window(&ctx);
+        if std::mem::take(&mut self.preview_pending) {
+            self.chat_shown = false;
+            self.open_guide(&ctx, self.t0.elapsed().as_secs_f64());
+        }
+        if self.guide.open {
+            self.guide_ui(ui);
+            return;
+        }
         egui::Panel::top("bar")
             .frame(egui::Frame::new().fill(CRUST).inner_margin(8))
             .show(ui, |ui| {
