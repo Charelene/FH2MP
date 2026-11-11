@@ -9,12 +9,12 @@ import (
 	"fh2mp/internal/auth"
 )
 
-// Game invites, the way the Xbox 360 Guide had them: one friend at a time, only to a friend who is online, sent from inside a game, with an optional
-// short text. An invite is short-lived and lives in memory: it names the lobby the sender was in when it was sent, and accepting it takes a seat there
+// Game invites, the way the Xbox 360 Guide had them: one friend at a time, online or not (an offline friend finds it in Messages when they
+// sign in, like the 360's inbox), sent from inside a game, with an optional short text. An invite lives in memory for an hour: it names the lobby the sender was in when it was sent, and accepting it takes a seat there
 // (the same lease the launcher's Join button makes). The Guide and the launcher read them from /v1/community/invites.
 
 const (
-	inviteKeep      = 600.0 // seconds an invite stays pending
+	inviteKeep      = 3600.0 // seconds an invite stays pending (accepting fails once its lobby is gone)
 	inviteGap       = 10.0  // seconds between two invites from one player to the same friend
 	invitePending   = 10    // pending invites per recipient
 	inviteTextRunes = 256

@@ -41,7 +41,7 @@ func TestInviteReachesOnlyItsRecipientNewestFirst(t *testing.T) {
 	}
 }
 
-func TestInviteExpiresAfterTenMinutes(t *testing.T) {
+func TestInviteExpiresAfterAnHour(t *testing.T) {
 	now := 1000.0
 	b := bookAt(&now)
 	b.Add(1, 2, "hi", "L", "freeroam")

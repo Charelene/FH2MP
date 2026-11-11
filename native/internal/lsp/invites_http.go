@@ -47,9 +47,6 @@ func (l *Launcher) sendInvite(me int64, player string, textV any) (any, error) {
 	if lobby == nil {
 		return nil, auth.NewError(409, "not_in_game", "Start or join a game first, then invite your friends.").WithXuid(me).WithDetail("the player is in no lobby")
 	}
-	if st, _ := cards[target].Get("state"); st == "offline" {
-		return nil, auth.NewError(409, "not_online", "That friend is offline.").WithXuid(me).WithDetail(fmt.Sprintf("%#x is offline", target))
-	}
 	id, _ := lobby.Get("id")
 	kind, _ := lobby.Get("kind")
 	lobbyID, _ := id.(string)
@@ -65,7 +62,8 @@ func (l *Launcher) sendInvite(me int64, player string, textV any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	communityLog.Info(fmt.Sprintf("game invite sent: from=%#x to=%#x lobby=%.8s kind=%s text=%d chars, pending until it is taken or %.0f s pass", me, target, lobbyID, kindS, len([]rune(iv.Text)), inviteKeep))
+	state, _ := cards[target].Get("state")
+	communityLog.Info(fmt.Sprintf("game invite sent: from=%#x to=%#x (%v) lobby=%.8s kind=%s text=%d chars, pending until it is taken or %.0f s pass", me, target, state, lobbyID, kindS, len([]rune(iv.Text)), inviteKeep))
 	return pyjson.Obj{{K: "ok", V: true}, {K: "id", V: iv.ID}}, nil
 }
 
