@@ -373,6 +373,44 @@ func (l *Launcher) snapshot(me int64) (any, error) {
 
 func ok1() pyjson.Obj { return pyjson.Obj{{K: "ok", V: true}} }
 
+// player is GET /v1/community/player/<xuid>: any player's card and what they are to the caller ("friend", "incoming": they asked the caller,
+// "outgoing": the caller asked them, "none", or "self"). The Guide shows it when the game asks for a player's gamercard (a lobby's player
+// list, a leaderboard row), where the player need not be a friend.
+func (l *Launcher) player(me, target int64) (any, error) {
+	row, err := l.C.DB.One("SELECT 1 FROM accounts WHERE xuid=? AND (banned_at IS NULL OR ban_until <= ?)", target, nowF())
+	if err != nil {
+		return nil, err
+	}
+	if row == nil {
+		return nil, auth.NewError(404, "player_not_found", "No player has that gamertag or ID.").WithXuid(me).WithDetail(fmt.Sprintf("no unbanned account %#x", target))
+	}
+	var lobbies []any
+	if r := l.hubLobbies(); r != nil {
+		lv, _ := r.Get("lobbies")
+		lobbies = anyList(lv)
+	}
+	c, err := l.profile(target, lobbies)
+	if err != nil {
+		return nil, err
+	}
+	relation := "none"
+	if target == me {
+		relation = "self"
+	} else if r, err := l.C.DB.One("SELECT 1 FROM friendships WHERE a=? AND b=?", min(me, target), max(me, target)); err != nil {
+		return nil, err
+	} else if r != nil {
+		relation = "friend"
+	} else if r, err := l.C.DB.One("SELECT sender FROM friend_requests WHERE (sender=? AND recipient=?) OR (sender=? AND recipient=?)", target, me, me, target); err != nil {
+		return nil, err
+	} else if r != nil {
+		relation = "outgoing"
+		if r.IntAt(0) == target {
+			relation = "incoming"
+		}
+	}
+	return pyjson.Obj{{K: "player", V: c}, {K: "relation", V: relation}}, nil
+}
+
 func (l *Launcher) request(me int64, value string) (any, error) {
 	target, err := l.resolve(value)
 	if err != nil {
@@ -845,6 +883,13 @@ func (l *Launcher) handleCommunity(r *Req, method, p string, u *url.URL, body py
 	}
 	if p == "/v1/community/lobbies" && method == "GET" {
 		return l.lobbies(me)
+	}
+	if len(parts) == 5 && strings.Join(parts[:4], "/") == "/v1/community/player" && isDigits(parts[4]) && method == "GET" {
+		target, err := strconv.ParseInt(parts[4], 10, 64)
+		if err != nil || target <= 0 {
+			return nil, auth.NewError(400, "bad_request", "")
+		}
+		return l.player(me, target)
 	}
 	if p == "/v1/community/profile" {
 		switch method {
