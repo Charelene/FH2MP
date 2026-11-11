@@ -97,6 +97,10 @@ pub struct App {
     asked: HashSet<i64>,
     toast: Option<(String, bool, Instant)>,
     focused: bool,
+    /// Requests from later starts (instance.rs), the launcher-started mode (closing hides) and whether a quit was asked for.
+    inst: Option<stdmpsc::Receiver<crate::instance::Request>>,
+    keep_running: bool,
+    quitting: bool,
 }
 
 fn user(c: &types::Contact) -> &types::User {
@@ -169,6 +173,59 @@ impl App {
             asked: HashSet::new(),
             toast: None,
             focused: true,
+            inst: None,
+            keep_running: false,
+            quitting: false,
+        }
+    }
+
+    /// Single-instance mode: requests from later starts, closing hides the window when the launcher started the core (`--background`), and
+    /// the chat to show first.
+    pub fn set_instance(&mut self, rx: stdmpsc::Receiver<crate::instance::Request>, keep_running: bool, open_at: Option<String>) {
+        self.inst = Some(rx);
+        self.keep_running = keep_running;
+        if let Some(t) = open_at {
+            self.open_at(&t);
+        }
+    }
+
+    /// Switches to the named chat: `club`, `requests` or `friend:<xuid hex>`; anything else keeps the current one.
+    fn open_at(&mut self, target: &str) {
+        match target {
+            "club" => self.view = View::Club,
+            "requests" => self.view = View::Requests,
+            t => {
+                if let Some(x) = t.strip_prefix("friend:").and_then(|h| u64::from_str_radix(h, 16).ok()) {
+                    self.view = View::Friend(x as i64);
+                }
+            }
+        }
+    }
+
+    /// Requests from later starts, and the close button: with `--background` a close only hides the window, so the core keeps serving the game.
+    fn instance(&mut self, ctx: &egui::Context) {
+        let reqs: Vec<_> = self.inst.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default();
+        for r in reqs {
+            match r {
+                crate::instance::Request::Open(t) => {
+                    if let Some(t) = t {
+                        self.open_at(&t);
+                    }
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                crate::instance::Request::Quit => {
+                    tracing::info!("quit requested by a later start: closing");
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+        if self.keep_running && !self.quitting && ctx.input(|i| i.viewport().close_requested()) {
+            tracing::info!("window closed: hidden, the chat core keeps running for the game (the launcher's Chats button shows it again)");
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
     }
 
@@ -582,10 +639,16 @@ impl App {
 }
 
 impl eframe::App for App {
+    // Runs before every ui pass and also while the window is hidden (on request_repaint), so a hidden core still takes network updates and
+    // requests from later starts.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.pump(ctx);
+        self.instance(ctx);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
-        self.pump(&ctx);
         egui::Panel::top("bar")
             .frame(egui::Frame::new().fill(CRUST).inner_margin(8))
             .show(ui, |ui| {

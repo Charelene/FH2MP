@@ -97,6 +97,9 @@ def main(argv=None):
     win.move(area.left() + (area.width() - size[0]) // 2, area.top() + (area.height() - size[1]) // 2)
     win.show()
     win.start()
+    from . import chatcore
+    if chatcore.start_background():                 # hidden for the whole session, so the in-game Guide can reach it; closed with the launcher
+        app.aboutToQuit.connect(chatcore.quit_core)
     if "--screenshot" in argv:                      # headless smoke test: render, save, quit
         from PySide6.QtCore import QTimer
         out = argv[argv.index("--screenshot") + 1]

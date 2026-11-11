@@ -1,11 +1,16 @@
 //! fh2mp-chat, the FH2MP chat core: signs the account in to the chat server (MTProto, our own schema) with the launcher's key and shows
 //! friends with presence and the club chat in its own window. `--dev` uses the dev realm and the dev launcher's key and settings, as the
 //! dev launcher does. Log: `<launcher config dir>/logs/chat.log`.
+//!
+//! One core runs per config dir (instance.rs). `--background` starts it hidden and keeps it running when its window is closed (the launcher
+//! starts it this way so the in-game Guide can reach it during play); `--open [club|requests|friend:<xuid>]` shows the running core's window,
+//! `--quit` closes it.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
 mod identity;
+mod instance;
 mod net;
 mod realm;
 
@@ -29,7 +34,28 @@ fn main() -> eframe::Result {
             .init(),
         Err(_) => tracing_subscriber::fmt().with_env_filter(filter).init(),
     }
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), dev, "chat core starting");
+    let args: Vec<String> = std::env::args().collect();
+    let (request, background) = instance::from_args(&args);
+    let server = match instance::claim(&config) {
+        Ok(instance::Claim::First(server)) => Some(server),
+        Ok(instance::Claim::Running) => {
+            let req = request.unwrap_or(instance::Request::Open(None));
+            match instance::send(&config, &req) {
+                Ok(()) => tracing::info!(request = ?req, "a chat core already runs: request handed to it, this start exits"),
+                Err(e) => tracing::error!(request = ?req, error = %e, "a chat core already runs but did not take the request"),
+            }
+            return Ok(());
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "single-instance lock unavailable: this core runs without it and cannot be reached by a later start");
+            None
+        }
+    };
+    if request == Some(instance::Request::Quit) {
+        tracing::info!("--quit and no chat core running: nothing to close");
+        return Ok(());
+    }
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), dev, background, "chat core starting");
 
     let mut blocked = None;
     let mut session = None;
@@ -69,11 +95,17 @@ fn main() -> eframe::Result {
     let handle = rt.handle().clone();
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let (ui_tx, ui_rx) = std::sync::mpsc::channel();
+    let (inst_tx, inst_rx) = std::sync::mpsc::channel();
+    let open_at = match &request {
+        Some(instance::Request::Open(t)) => t.clone(),
+        _ => None,
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("FH2MP Chat")
             .with_inner_size([900.0, 620.0])
-            .with_min_inner_size([640.0, 420.0]),
+            .with_min_inner_size([640.0, 420.0])
+            .with_visible(!background || request.is_some()),
         ..Default::default()
     };
     let result = eframe::run_native(
@@ -84,7 +116,16 @@ fn main() -> eframe::Result {
             if let Some((cfg, account)) = session {
                 handle.spawn(net::run(cfg, account, cmd_rx, ui_tx, cc.egui_ctx.clone()));
             }
-            Ok(Box::new(app::App::new(cmd_tx, ui_rx, realm_name, blocked)))
+            if let Some(server) = server {
+                let ctx = cc.egui_ctx.clone();
+                server.serve(move |r| {
+                    let _ = inst_tx.send(r);
+                    ctx.request_repaint();
+                });
+            }
+            let mut app = app::App::new(cmd_tx, ui_rx, realm_name, blocked);
+            app.set_instance(inst_rx, background, open_at);
+            Ok(Box::new(app))
         }),
     );
     tracing::info!("chat core closing");
