@@ -26,6 +26,7 @@
 #include "gfx.h"
 #include "guide.h"
 #include "imgui.h"
+#include "net.h"
 
 namespace {
 
@@ -441,6 +442,50 @@ bool setup(IDXGISwapChain3* sc) {
     return true;
 }
 
+// The server's side: the friend list (re-read twice a second at most), pictures that arrived, and what came of the player's actions.
+void social_and_toasts(double now) {
+    static double last_read;
+    static uint64_t version = ~0ull;
+    if (now - last_read > 0.5) {
+        last_read = now;
+        Social so = net_social();
+        if (so.version != version) version = so.version, g_guide.set_social(so);
+    }
+    PicReady pic;
+    while (net_take_pic(&pic)) {
+        D3D12_CPU_DESCRIPTOR_HANDLE cpu;
+        D3D12_GPU_DESCRIPTOR_HANDLE gpu;
+        srv_alloc(nullptr, &cpu, &gpu);
+        if (upload_texture(g_device, g_queue, pic.rgba.data(), pic.w, pic.h, cpu)) g_assets.pics[pic.xuid] = (ImTextureID)gpu.ptr;
+        else srv_free(nullptr, cpu, gpu);
+    }
+    NetResult r;
+    const uint32_t I_GAMES = 0xea28, I_MAIL = 0xe158, I_ERROR = 0xe000;
+    while (net_take_result(&r)) {
+        ImTextureID them = g_assets.pic(r.xuid);
+        switch (r.op) {
+        case NetOp::Invite:
+            if (r.ok) {
+                g_guide.mark_sent(r.xuid);
+                g_guide.toast(ToastKind::Invite, "Game invite sent", ("To " + r.name).c_str(), I_GAMES, them, now);
+            } else {
+                g_guide.toast(ToastKind::Warning, "Invite not sent", r.message.c_str(), I_ERROR, 0, now);
+            }
+            break;
+        case NetOp::Accept:
+            if (r.ok) g_guide.toast(ToastKind::Invite, "Invite accepted", ("Go online in Free Roam to join " + r.name).c_str(), I_GAMES, them, now);
+            else g_guide.toast(ToastKind::Warning, "Could not join", r.message.c_str(), I_ERROR, 0, now);
+            break;
+        case NetOp::Decline:
+            if (!r.ok) g_guide.toast(ToastKind::Warning, "Could not decline", r.message.c_str(), I_ERROR, 0, now);
+            break;
+        case NetOp::Received:
+            g_guide.toast(ToastKind::Invite, "Game invite", ("From " + r.name).c_str(), I_MAIL, them, now);
+            break;
+        }
+    }
+}
+
 void render(IDXGISwapChain3* sc) {
     if (g_failed) return;
     if (!g_ready) {
@@ -460,14 +505,23 @@ void render(IDXGISwapChain3* sc) {
     }
     for (PadEvent e : evs) {
         bool was = g_guide.open;
+        if (e == PadEvent::OpenInvite) {
+            g_guide.open_on(Page::Invite, now);
+            continue;
+        }
         if (!was) {
             if (e == PadEvent::Toggle) g_guide.toggle(now), logf("guide: opened");
             continue;
         }
-        g_guide.handle(e, now);
+        GuideRequest r = g_guide.handle(e, now);
+        if (r.action == GuideAction::Invite) net_invite(r.xuid, r.name);
+        if (r.action == GuideAction::Accept) net_accept(r.id, r.xuid, r.name);
+        if (r.action == GuideAction::Decline) net_decline(r.id, r.xuid, r.name);
         if (!g_guide.open) logf("guide: closed");
     }
+    if (g_open.load() != g_guide.open) net_guide_open(g_guide.open);
     g_open.store(g_guide.open);
+    social_and_toasts(now);
     if (!g_guide.busy(now)) return;
     if (!g_buffers_ok && !make_buffers()) return;
 
@@ -539,6 +593,31 @@ HRESULT STDMETHODCALLTYPE hk_resize(IDXGISwapChain3* sc, UINT n, UINT w, UINT h,
 
 LRESULT CALLBACK dummy_proc(HWND h, UINT m, WPARAM w, LPARAM l) { return DefWindowProcW(h, m, w, l); }
 
+// The game's own Pause > Game Party > Invite Friends: its PPL task (game+0x179a110, build 1.0.0.64; only that menu calls it, from
+// game+0x1795120) asks Windows.Xbox.Multiplayer.Party (IID e6110c4c-...) for statics slot 10, which Azimuth has no shell for, so nothing
+// showed. The Guide opens Invite to Game when it runs; the game's call goes on as before.
+typedef void*(__fastcall* PartyInviteFn)(void*, void*);
+PartyInviteFn o_party_invite;
+
+void* __fastcall hk_party_invite(void* a, void* b) {
+    logf("guide: the game's Invite Friends ran: the Guide opens Invite to Game");
+    push(PadEvent::OpenInvite);
+    return o_party_invite(a, b);
+}
+
+void hook_invite_friends() {
+    unsigned char* base = (unsigned char*)g_api->wait_for_code(180000);
+    if (!base) return logf("guide: the game's code was not ready: Invite Friends does not open the Guide");
+    unsigned char* fn = base + 0x179a110;
+    static const unsigned char head[] = {0x48, 0x8b, 0xc4, 0x57, 0x48, 0x83, 0xec, 0x50};  // mov rax, rsp; push rdi; sub rsp, 0x50
+    static const unsigned char iid[] = {0xc7, 0x40, 0xd0, 0x4c, 0x0c, 0x11, 0xe6};        // mov dword [rax-0x30], 0xe6110c4c
+    if (memcmp(fn, head, sizeof head) || memcmp(fn + 0x1a, iid, sizeof iid))
+        return logf("guide: game+0x179a110 is not the Party invite task this build of the Guide knows: Invite Friends does not open the Guide");
+    FH2Hook* h = g_api->hook_function(g_mod, "guide: the game's Invite Friends (game+0x179a110)", fn, (void*)hk_party_invite, (void**)&o_party_invite);
+    if (!h || !g_api->enable_hooks(g_mod, h)) return logf("guide: the game's Invite Friends could not be hooked: it does not open the Guide");
+    logf("guide: the game's Invite Friends opens the Guide's Invite to Game");
+}
+
 // DXGI's swap chain makers, hooked as early as possible: they tell which queue each swap chain belongs to.
 bool hook_factory() {
     IDXGIFactory2* fac = nullptr;
@@ -559,12 +638,15 @@ bool hook_factory() {
 }
 
 // The present vtable addresses come from a throw-away device, queue and swap chain on a hidden window (DXGI and Direct3D 12 share them).
+void net_log(const char* line) { logf("%s", line); }
+
 DWORD WINAPI hook_thread(LPVOID) {
     if (!hook_factory()) return 0;
     if (!g_api->wait_for_game(180000)) {
         logf("guide: the game never came up: no Guide");
         return 0;
     }
+    net_start(g_api->azimuth_dir, net_log);
     WNDCLASSEXW wc{sizeof wc};
     wc.lpfnWndProc = dummy_proc, wc.hInstance = GetModuleHandleW(nullptr), wc.lpszClassName = L"FH2MPGuideProbe";
     RegisterClassExW(&wc);
@@ -599,7 +681,8 @@ DWORD WINAPI hook_thread(LPVOID) {
     if (q) q->Release();
     if (dev) dev->Release();
     DestroyWindow(w);
-    if (ok) CreateThread(nullptr, 0, pad_thread, nullptr, 0, nullptr);
+    if (ok) CloseHandle(CreateThread(nullptr, 0, pad_thread, nullptr, 0, nullptr));
+    if (ok) hook_invite_friends();
     return 0;
 }
 

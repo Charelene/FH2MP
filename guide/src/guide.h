@@ -3,11 +3,15 @@
 #pragma once
 
 #include <cstdint>
+#include <set>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "imgui.h"
+#include "net.h"
 
-enum class PadEvent { Toggle, Up, Down, Left, Right, A, B, X, Y, Lb, Rb, Start };
+enum class PadEvent { Toggle, Up, Down, Left, Right, A, B, X, Y, Lb, Rb, Start, OpenInvite };
 
 // XInput button bits (0x0400 is the Guide button, reported by XInputGetStateEx only).
 namespace padbits {
@@ -41,6 +45,12 @@ struct GuideAssets {
     ImFont* icons = nullptr;      // Material Icons (filled)
     FontMetrics text_m, bold_m, icons_m;
     ImTextureID gamerpic = 0;     // the player's picture (Azimuth's data/player.png), 0 when there is none
+    std::unordered_map<uint64_t, ImTextureID> pics;  // other players' pictures by xuid, as they arrive from the server
+
+    ImTextureID pic(uint64_t xuid) const {
+        auto it = pics.find(xuid);
+        return it == pics.end() ? 0 : it->second;
+    }
 };
 
 // Loads Segoe UI, Segoe UI Bold and the embedded Material Icons into ImGui's atlas with CSS sizing (assets.cpp). Needs an ImGui context.
@@ -49,7 +59,19 @@ void load_fonts(GuideAssets& a);
 // The canvas' toast kinds (artboard 7): the square's colour, the title's colour, and whether a player's picture glides in (invites only).
 enum class ToastKind { Invite, Info, Saving, Warning };
 
-enum class GuideAction { None, Resume, Soon };
+enum class GuideAction { None, Resume, Soon, Invite, Accept, Decline };
+
+// What the overlay must do after an event: the action and whom it is for.
+struct GuideRequest {
+    GuideAction action = GuideAction::None;
+    uint64_t xuid = 0;
+    int64_t id = 0;
+    std::string name;
+};
+
+// The Guide's screens: the blades (artboard 1), the friend list as Friends or Invite to Game (artboard 4), a received game invite
+// (artboard 5).
+enum class Page { Home, Friends, Invite, Received };
 
 class Guide {
 public:
@@ -57,8 +79,14 @@ public:
     std::string gamertag = "FH2MP";
 
     void toggle(double now);
+    // Opens the Guide straight on a page (the game's own Invite Friends opens Invite to Game).
+    void open_on(Page p, double now);
     // One pad or key event while open; what the overlay must do.
-    GuideAction handle(PadEvent e, double now);
+    GuideRequest handle(PadEvent e, double now);
+    // The friend list and invites as the server last gave them.
+    void set_social(const Social& s);
+    // An invite was sent: the row says so until the Guide closes.
+    void mark_sent(uint64_t xuid) { sent_.insert(xuid); }
     // Draws into the game's frame (w x h pixels). Returns true while something is on screen (the Guide or a toast).
     bool draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double now);
     // A 360 toast at the bottom centre (7.5 s cycle of the canvas, played once). pic: the other player's picture on an invite toast (it
@@ -67,10 +95,6 @@ public:
     bool busy(double now) const;
 
 private:
-    int blade_ = 1;
-    int focus_[3] = {0, 0, 0};
-    double opened_ = -10, closed_ = -10, switched_ = -10;
-    int switch_dir_ = 1;
     struct Tween {
         float from = 0, to = 0;
         double start = -10;
@@ -78,8 +102,26 @@ private:
         void go(float v, double now, float s);
         float value(double now) const;
     };
+    // home
+    int blade_ = 1;
+    int focus_[3] = {0, 0, 0};
+    double opened_ = -10, closed_ = -10, switched_ = -10;
+    int switch_dir_ = 1;
     Tween bar_[3], width_[3];
     bool widths_set_ = false;
+    // pages
+    Page page_ = Page::Home;
+    double page_at_ = -10;
+    int page_dir_ = 1;
+    int tab_ = 1, tab_dir_ = 1;
+    double tab_at_ = -10;
+    int row_[4] = {0, 0, 0, 0}, top_[4] = {0, 0, 0, 0};
+    Tween list_bar_;
+    int received_ = 0, received_opt_ = 0;
+    Tween received_bar_;
+    std::set<uint64_t> sent_;
+    Social social_;
+    // toast
     std::string toast_title_, toast_detail_;
     ToastKind toast_kind_ = ToastKind::Info;
     uint32_t toast_icon_ = 0;
@@ -87,6 +129,16 @@ private:
     double toast_at_ = -100;
 
     void switch_to(int b, double now);
+    void go_page(Page p, int dir, double now);
+    std::vector<const Friend*> tab_list(int tab) const;
+    GuideRequest handle_home(PadEvent e, double now);
+    GuideRequest handle_list(PadEvent e, double now);
+    GuideRequest handle_received(PadEvent e, double now);
+    void draw_home(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
+    void draw_list(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
+    void draw_received(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
+    void draw_header(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, float left, float width, const char* title,
+                     float title_op);
     void draw_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 origin, double now);
 };
 

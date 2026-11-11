@@ -1,7 +1,8 @@
 // guide-preview.exe: draws the Guide off screen with the same code the overlay uses (guide.cpp, assets.cpp, Dear ImGui's DX12 backend) and
 // writes a PNG, so the look can be checked against the design canvas without a game.
 //   guide-preview.exe <out.png> <scene> [seconds] [gamerpic.png] [background.png]
-// Scenes: home (the Guide, the player's blade), games, settings, down (focus moved down one row), toast-info, toast-invite.
+// Scenes: home (the Guide, the player's blade), games, settings, down (focus moved down one row), friends, invite, received (sample
+// friends), toast-info, toast-invite.
 // seconds: time since the Guide opened or the toast started (default 1.5 and 3.0).
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -143,7 +144,31 @@ int main(int argc, char** argv) {
     Guide g;
     g.gamertag = "DebugFox";
     const double t0 = 100.0;
-    if (is_toast) {
+    // sample friends for the pages (not real players)
+    Social so;
+    so.session = so.loaded = true;
+    so.me.xuid = 1, so.me.tag = "DebugFox", so.me.state = Friend::Playing, so.me.lobby_id = "L1", so.me.lobby_kind = "freeroam";
+    auto add = [&](uint64_t x, const char* tag, Friend::State st, const char* lobby, const char* status, const char* club, int level) {
+        Friend f;
+        f.xuid = x, f.tag = tag, f.state = st, f.lobby_id = lobby, f.lobby_kind = *lobby ? "freeroam" : "", f.lobby_status = status, f.club = club, f.level = level;
+        so.friends.push_back(f);
+    };
+    add(2, "DebugWolf", Friend::Playing, "L1", "Free roaming", "", 12);
+    add(3, "NightRunR", Friend::Playing, "L2", "Free roaming", "APEX", 41);
+    add(4, "Kestrel 88", Friend::Online, "", "", "", 7);
+    add(5, "torque.tuner", Friend::Playing, "L3", "Road Trip: Nice", "", 29);
+    add(6, "Vellum", Friend::Offline, "", "", "", 3);
+    add(7, "SaltLakeSam", Friend::Offline, "", "", "APEX", 55);
+    add(8, "drift_mum", Friend::Online, "", "", "", 18);
+    ReceivedInvite iv;
+    iv.id = 9, iv.from = so.friends[1], iv.kind = "freeroam", iv.age = 75, iv.expires_in = 525, iv.text = "meet at the docks";
+    so.invites.push_back(iv);
+    g.set_social(so);
+    if (assets.gamerpic) assets.pics[2] = assets.gamerpic;
+    if (scene == "friends" || scene == "invite" || scene == "received") {
+        g.open_on(scene == "friends" ? Page::Friends : scene == "invite" ? Page::Invite : Page::Received, t0);
+        if (scene == "invite") g.handle(PadEvent::Down, t0 - 0.5), g.handle(PadEvent::Down, t0 - 0.4), g.mark_sent(3);
+    } else if (is_toast) {
         if (scene == "toast-invite") g.toast(ToastKind::Invite, "Game invite sent", "To DebugWolf", 0xea28, assets.gamerpic, t0);
         else g.toast(ToastKind::Info, "Notifications", "Coming in a later build", 0xe7f4, 0, t0);
     } else {
