@@ -3,7 +3,7 @@
 //   guide-preview.exe <out.png> <scene> [seconds] [gamerpic.png] [background.png]
 // Scenes: home (the Guide, the player's blade), games, settings, down; friends, friends-nogame, party, players, messages; message,
 // message-invite, message-request; profile, profile-nogame, profile-personal, profile-request, profile-sent, profile-here; create,
-// create-nogame; pick, pick-many, compose, compose-invite, discard, keyboard, keyboard-caps, add-friend; box-accept, box-gone;
+// exit-session; create-nogame; pick, pick-many, compose, compose-invite, discard, keyboard, keyboard-caps, add-friend; box-accept, box-gone;
 // own-profile, edit-profile, edit-motto; toast-sent, toast-invite, toast-request, toast-message, toast-online. Sample players, not real ones.
 // seconds: time since the Guide opened or the toast started (default 1.5 and 3.0).
 #define WIN32_LEAN_AND_MEAN
@@ -194,11 +194,12 @@ int main(int argc, char** argv) {
         g.open_community(TabPlayers, t0 - 5);
     } else if (scene == "messages") {
         g.open_community(TabMessages, t0 - 5), press({D, D});
-    } else if (scene == "message" || scene == "message-invite" || scene == "message-request") {
+    } else if (scene == "message" || scene == "message-invite" || scene == "message-request" || scene == "exit-session") {
         g.open_community(TabMessages, t0 - 5);
-        int downs = scene == "message-request" ? 1 : scene == "message-invite" ? 2 : 3;
+        int downs = scene == "message-request" ? 1 : scene == "message" ? 3 : 2;
         for (int i = 0; i < downs; i++) g.handle(D, 99.0);
-        g.handle(A, t0);
+        g.handle(A, scene == "exit-session" ? t0 - 3 : t0);
+        if (scene == "exit-session") g.handle(A, t0);  // Accept Game Invite while in a game
     } else if (scene.rfind("profile", 0) == 0) {
         // friends tab rows: Add Friend, PaperLantern (request), DebugWolf, NightRunR, torque.tuner, drift_mum, Kestrel 88, Ugandan Hobo (sent), ...
         g.open_community(TabFriends, t0 - 5);

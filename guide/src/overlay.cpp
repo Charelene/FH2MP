@@ -26,6 +26,7 @@
 #include "gfx.h"
 #include "guide.h"
 #include "imgui.h"
+#include "join.h"
 #include "net.h"
 
 // probe.cpp
@@ -52,7 +53,7 @@ struct Ev {
 };
 std::mutex g_ev_mu;
 std::deque<Ev> g_events;
-std::atomic<bool> g_open{false}, g_typing{false};
+std::atomic<bool> g_open{false}, g_typing{false}, g_join_ok{false};
 
 void push(PadEvent e) {
     std::lock_guard<std::mutex> l(g_ev_mu);
@@ -493,7 +494,18 @@ void social_and_toasts(double now) {
     }
     NetResult r;
     while (net_take_result(&r)) g_guide.on_result(r, g_assets, now);
+    // a join the game has not taken for 20 s: its online part is not running (the title screen, say); it is dropped and said
+    unsigned long long waited = 0;
+    if (join_waiting(&waited) && waited > 20000) {
+        join_cancel();
+        logf("guide: join dropped: the game's matchmaking module did not run for 20 s after the seat was held");
+        NetResult late;
+        late.op = NetOp::Join, late.ok = false, late.code = "game_not_ready";
+        g_guide.on_result(late, g_assets, now);
+    }
 }
+
+void ask(const GuideRequest& r);
 
 // What the Guide asked of the server after an event.
 void ask(const GuideRequest& r) {
@@ -510,6 +522,7 @@ void ask(const GuideRequest& r) {
     case GuideAction::HideText: net_hide_text(r.id); break;
     case GuideAction::Join: net_join(r.xuid, r.name, r.text, r.kind); break;
     case GuideAction::SetProfile: net_set_profile(r.name, r.text); break;
+    case GuideAction::JoinGame: join_request(r.scid, r.kind, r.text, r.name); break;
     case GuideAction::None:
     case GuideAction::Resume: break;
     }
@@ -532,6 +545,7 @@ void render(IDXGISwapChain3* sc) {
         std::lock_guard<std::mutex> l(g_ev_mu);
         evs.swap(g_events);
     }
+    g_guide.game_joins = g_join_ok.load();
     for (const Ev& ev : evs) {
         bool was = g_guide.open;
         if (ev.ch) {
@@ -556,6 +570,8 @@ void render(IDXGISwapChain3* sc) {
     g_open.store(g_guide.open);
     g_typing.store(g_guide.typing());
     social_and_toasts(now);
+    for (const GuideRequest& r : g_guide.take_requests()) ask(r);
+    if (g_open.load() != g_guide.open) net_guide_open(g_guide.open), g_open.store(g_guide.open);
     if (!g_guide.busy(now)) return;
     if (!g_buffers_ok && !make_buffers()) return;
 
@@ -717,6 +733,7 @@ DWORD WINAPI hook_thread(LPVOID) {
     if (ok) CloseHandle(CreateThread(nullptr, 0, pad_thread, nullptr, 0, nullptr));
     if (unsigned char* base = (unsigned char*)g_api->wait_for_code(180000)) {
         hook_invite_friends(base);
+        g_join_ok.store(join_install(g_api, g_mod, base, net_log));
         wchar_t probe[8];
         if (GetEnvironmentVariableW(L"FH2MP_GUIDE_PROBE", probe, 8) && probe[0] == L'1') party_probe_start(g_api, g_mod, base, net_log);
     }

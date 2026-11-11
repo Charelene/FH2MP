@@ -327,7 +327,16 @@ DWORD WINAPI worker(LPVOID) {
                 if (!r.ok) r.message = refusal(status, out, err, &r.code);
                 if (r.ok && (op.op == NetOp::Accept || op.op == NetOp::Join)) {
                     JVal v;
-                    if (json_parse(out, &v)) r.kind = v["reservation"]["kind"].str();
+                    if (json_parse(out, &v)) {
+                        const JVal& res = v["reservation"];
+                        r.kind = res["kind"].str();
+                        // the lobby is a session of the directory's lobby template, named by the lobby's id (a server that does not
+                        // say so is an older one with the same layout)
+                        const JVal& ses = res["session"];
+                        r.session = ses["name"].str().empty() ? res["id"].str() : ses["name"].str();
+                        r.scid = ses["scid"].str().empty() ? "788f0100-a4bc-46c3-b19b-d1001a96545b" : ses["scid"].str();
+                        r.tmpl = ses["templateName"].str().empty() ? "defaultTemplate" : ses["templateName"].str();
+                    }
                 }
                 const char* what = op.op == NetOp::Invite ? "game invite to" : op.op == NetOp::Accept ? "accepting the invite from"
                                    : op.op == NetOp::Decline ? "declining the invite from" : op.op == NetOp::AcceptFriend ? "accepting the friend request from"

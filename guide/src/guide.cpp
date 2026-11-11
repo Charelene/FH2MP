@@ -131,7 +131,7 @@ void Guide::toggle(double now) {
         opened_ = now, stack_ = {Page::Home}, page_at_ = -10, flow_base_ = -1;
         if (box_waiting_.on) box_ = box_waiting_, box_.at = now, box_waiting_.on = false;
     } else {
-        closed_ = now, sent_.clear(), box_.on = false, draft_ = Draft(), waiting_xuid_ = 0;
+        closed_ = now, sent_.clear(), box_.on = false, draft_ = Draft(), waiting_xuid_ = 0, held_ = 0;
     }
     if (!widths_set_) {
         for (int i = 0; i < 3; i++) width_[i].set(i == blade_ ? 832.0f : 64.0f);
@@ -310,9 +310,30 @@ void Guide::show_box(int tag, const char* title, const std::string& body, std::v
     else box_waiting_ = b;
 }
 
+// The 360's question before a join: shown when the player is in a game (the join takes them out of it). True when it was asked.
+bool Guide::ask_exit_session(double now) {
+    if (social_.me.lobby_id.empty()) return false;
+    show_box(BoxExitSession, "Exit Session",
+             "Joining this session will exit your current one. If you are playing a game, you will lose any unsaved progress.\n\nAre you sure you want to exit?",
+             {"Yes, exit", "No, don't exit"}, now);
+    return true;
+}
+
+std::vector<GuideRequest> Guide::take_requests() {
+    std::vector<GuideRequest> out;
+    out.swap(wanted_);
+    return out;
+}
+
 void Guide::box_done(int tag, int button, std::vector<GuideRequest>& out, double now) {
-    (void)out;
     box_.on = false;
+    if (tag == BoxExitSession) {
+        int held = held_;
+        held_ = 0;
+        if (button == 0 && held == 1) accept_invite(held_msg_, out, now);
+        if (button == 0 && held == 2) join_player(held_player_, out, now);
+        return;
+    }
     if (tag == BoxDiscard && button == 0) end_flow(now);  // "Yes, discard message"
     if (tag == BoxThenClose && open) toggle(now);
 }
@@ -460,8 +481,15 @@ void Guide::on_result(const NetResult& r, const GuideAssets& a, double now) {
     case NetOp::Accept:
     case NetOp::Join:
         if (waiting_xuid_ == r.xuid) waiting_xuid_ = 0;
-        if (r.ok) {
-            // until the game joins by itself, the place is held and the player goes online by hand
+        if (r.ok && game_joins) {
+            // the seat is held: the game is handed the session and joins it by its own flow (its own prompt, its own errors); the
+            // Guide gets out of the way, as the 360's did after an accepted invite
+            GuideRequest j;
+            j.action = GuideAction::JoinGame, j.xuid = r.xuid, j.name = r.name, j.text = r.session, j.kind = r.tmpl, j.scid = r.scid;
+            wanted_.push_back(j);
+            if (open) toggle(now);
+        } else if (r.ok) {
+            // a game this Guide cannot hand a session to: the place is held and the player goes online by hand
             show_box(BoxInfo, r.op == NetOp::Accept ? "Game Invite" : "Join Session In Progress",
                      "A place in " + r.name + "'s game is held for you. Go online in " + game_words(r.kind) + " to take it.", {"OK"}, now);
         } else if (r.op == NetOp::Accept) {

@@ -75,11 +75,8 @@ void Guide::handle_message(PadEvent e, std::vector<GuideRequest>& out, double no
         r.xuid = m.from.xuid, r.name = m.from.tag, r.id = m.id;
         switch (opts[msg_opt_].cmd) {
         case MAccept:
-            r.action = GuideAction::AcceptInvite, waiting_xuid_ = m.from.xuid;
-            out.push_back(r);
-            for (size_t i = 0; i < social_.invites.size(); i++)
-                if (social_.invites[i].id == m.id) social_.invites.erase(social_.invites.begin() + i--);  // it leaves the list
-            pop(now);
+            held_ = 1, held_msg_ = m;
+            if (!ask_exit_session(now)) held_ = 0, accept_invite(m, out, now);
             break;
         case MAcceptFriend:
             r.action = GuideAction::AcceptFriend;
@@ -112,6 +109,17 @@ void Guide::handle_message(PadEvent e, std::vector<GuideRequest>& out, double no
     }
     default: break;
     }
+}
+
+// Accept Game Invite: the seat is asked of the server (the answer starts the join); the invite leaves the list.
+void Guide::accept_invite(const MessageItem& m, std::vector<GuideRequest>& out, double now) {
+    GuideRequest r;
+    r.action = GuideAction::AcceptInvite, r.xuid = m.from.xuid, r.name = m.from.tag, r.id = m.id;
+    waiting_xuid_ = m.from.xuid;
+    out.push_back(r);
+    for (size_t i = 0; i < social_.invites.size(); i++)
+        if (social_.invites[i].id == m.id) social_.invites.erase(social_.invites.begin() + i--);
+    if (page() == Page::Message) pop(now);
 }
 
 // Left: when it came and the options (56-unit rows); right: the sender's card and the message text.

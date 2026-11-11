@@ -69,6 +69,7 @@ struct NetResult {
     std::string message;  // the server's words when it refused, or ours when it could not be reached
     std::string code;     // the server's error code ("player_not_found", "lobby_gone", ...), empty when it gave none
     std::string kind;     // Accept and Join: the kind of the lobby the seat is held in ("freeroam", "roadtrip")
+    std::string scid, tmpl, session;  // Accept and Join: the lobby's session in the session directory (what the game joins)
     uint64_t xuid = 0;    // the other player
     std::string name;
     int64_t id = 0;

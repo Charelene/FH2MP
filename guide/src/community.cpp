@@ -391,8 +391,8 @@ void Guide::handle_profile(PadEvent e, std::vector<GuideRequest>& out, double no
             out.push_back(r);
             break;
         case PJoin:
-            r.action = GuideAction::Join, r.text = p.lobby_id, r.kind = p.lobby_kind, waiting_xuid_ = p.xuid;
-            out.push_back(r);
+            held_ = 2, held_player_ = p;
+            if (!ask_exit_session(now)) held_ = 0, join_player(p, out, now);
             break;
         case PMessage:
             flow_base_ = int(stack_.size());
@@ -439,6 +439,15 @@ void Guide::handle_profile(PadEvent e, std::vector<GuideRequest>& out, double no
     }
     default: break;
     }
+}
+
+// Join Session In Progress: a seat in their game is asked of the server; with it the game joins.
+void Guide::join_player(const Friend& p, std::vector<GuideRequest>& out, double now) {
+    (void)now;
+    GuideRequest r;
+    r.action = GuideAction::Join, r.xuid = p.xuid, r.name = p.tag, r.text = p.lobby_id, r.kind = p.lobby_kind;
+    waiting_xuid_ = p.xuid;
+    out.push_back(r);
 }
 
 // Artboards 8 and 9: two tabs (56 units), then 455 units: the options on the left (50-unit rows), the player's card and a pane on the right.

@@ -65,7 +65,7 @@ enum class ToastKind { Invite, Info, Saving, Warning };
 
 enum class GuideAction {
     None, Resume, Invite, AcceptInvite, DeclineInvite, FriendRequest, AcceptFriend, DeclineFriend, RemoveFriend, SendText, ReadChat,
-    HideText, Join, SetProfile
+    HideText, Join, SetProfile, JoinGame
 };
 
 // What the overlay must ask of the server after an event.
@@ -75,7 +75,8 @@ struct GuideRequest {
     int64_t id = 0;
     std::string name;  // the other player (the chat's id for ReadChat; the gamertag asked for, for FriendRequest; the field for SetProfile)
     std::string text;  // Invite, SendText, SetProfile: the words; Join: the lobby's id
-    std::string kind;  // Join: the lobby's kind
+    std::string kind;  // Join: the lobby's kind; JoinGame: the session's template
+    std::string scid;  // JoinGame: the session's service configuration (text holds the session's name, name whose game it is)
 };
 
 // One entry of the Messages tab: a game invite, a friend request, or a message a friend sent.
@@ -104,12 +105,16 @@ enum class Page { Home, Community, Profile, EditProfile, Message, CreateNew, Rec
 enum CommunityTab { TabParty = 0, TabFriends = 1, TabMessages = 2, TabPlayers = 3 };
 // What a message box was shown for: just to tell (OK), or the question before a written message is dropped.
 // BoxThenClose: told from a closed Guide (the game's own Invite Friends), so OK closes it again.
-enum BoxTag { BoxInfo = 0, BoxDiscard = 1, BoxThenClose = 2 };
+// BoxExitSession: the 360's question before a join takes the player out of the game they are in.
+enum BoxTag { BoxInfo = 0, BoxDiscard = 1, BoxThenClose = 2, BoxExitSession = 3 };
 
 class Guide {
 public:
     bool open = false;
     std::string gamertag = "FH2MP";
+    // The game itself joins a session it is handed (join.cpp found the game's code): an accepted invite then needs no words. When false
+    // the seat is held and a message box tells the player to go online by hand.
+    bool game_joins = false;
 
     void toggle(double now);
     // The game's own Invite Friends: the Guide opens on a game invite's recipients; sending it closes the Guide again.
@@ -125,6 +130,8 @@ public:
     void set_social(const Social& s);
     // What came of a request, or what arrived: the 360's toasts and message boxes.
     void on_result(const NetResult& r, const GuideAssets& a, double now);
+    // What on_result wants done (JoinGame), for the overlay to take after it.
+    std::vector<GuideRequest> take_requests();
     // Draws into the game's frame (w x h pixels). Returns true while something is on screen (the Guide or a toast).
     bool draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double now);
     // A 360 toast at the bottom centre (7.5 s cycle of the canvas, played once). pic: the other player's picture on an invite toast (it
@@ -229,6 +236,11 @@ private:
     Keys keys_;
     // the message box (shown over the page; one that arrives while the Guide is closed waits for the next opening)
     Box box_, box_waiting_;
+    // a join held back by the Exit Session question: the invite to accept, or the player whose game to join
+    int held_ = 0;  // 0 none, 1 an invite, 2 a player's game
+    MessageItem held_msg_;
+    Friend held_player_;
+    std::vector<GuideRequest> wanted_;
     std::set<uint64_t> sent_;
     Social social_;
     // toast: the one playing and the ones waiting for it
@@ -286,6 +298,9 @@ private:
     void send_draft(std::vector<GuideRequest>& out, double now);
     void end_flow(double now);
     void delete_message(const MessageItem& m, std::vector<GuideRequest>& out, double now);
+    bool ask_exit_session(double now);
+    void accept_invite(const MessageItem& m, std::vector<GuideRequest>& out, double now);
+    void join_player(const Friend& p, std::vector<GuideRequest>& out, double now);
 
     void handle_home(PadEvent e, std::vector<GuideRequest>& out, double now);
     void handle_community(PadEvent e, std::vector<GuideRequest>& out, double now);
