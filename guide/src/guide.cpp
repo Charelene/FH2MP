@@ -67,6 +67,12 @@ int PadReader::feed(uint16_t buttons, uint8_t lt, uint8_t rt, int16_t lx, int16_
         guide_down = guide_fired = false;
     }
     bool ltd = lt >= 128, rtd = rt >= 128;
+    if (open && !was_open) {
+        // the Guide just opened: what is held now was pressed for the game (the A that chose the game's Invite Friends went on to pick
+        // the first friend, win1 2026-11-11), so it counts only after it was let go
+        prev = 0xffff, prev_lt = prev_rt = true, dir_blocked = true;
+    }
+    was_open = open;
     if (open) {
         uint16_t pressed = buttons & ~prev;
         const struct { uint16_t b; PadEvent e; } map[] = {{padbits::A, PadEvent::A},   {padbits::B, PadEvent::B},   {padbits::X, PadEvent::X},
@@ -83,6 +89,10 @@ int PadReader::feed(uint16_t buttons, uint8_t lt, uint8_t rt, int16_t lx, int16_
         else if (buttons & padbits::Right) d = int(PadEvent::Right);
         else if (std::max(std::abs(int(lx)), std::abs(int(ly))) >= 18000)
             d = std::abs(int(lx)) >= std::abs(int(ly)) ? int(lx > 0 ? PadEvent::Right : PadEvent::Left) : int(ly > 0 ? PadEvent::Up : PadEvent::Down);
+        if (dir_blocked) {
+            if (d < 0) dir_blocked = false;
+            d = -1;
+        }
         if (d != dir) {
             dir = d;
             if (d >= 0) out[n++] = PadEvent(d), next_at = now_ms + REPEAT_DELAY_MS;
@@ -130,6 +140,7 @@ void Guide::toggle(double now) {
     if (open) {
         opened_ = now, stack_ = {Page::Home}, page_at_ = -10, flow_base_ = -1;
         if (box_waiting_.on) box_ = box_waiting_, box_.at = now, box_waiting_.on = false;
+        else open_on_toast(now);
     } else {
         closed_ = now, sent_.clear(), box_.on = false, draft_ = Draft(), waiting_xuid_ = 0, held_ = 0;
     }
@@ -139,6 +150,46 @@ void Guide::toggle(double now) {
         widths_set_ = true;
     }
     fix_home_focus();
+}
+
+// The Guide was opened while a toast about something plays: it opens on that thing (the 360's Guide button on a notification).
+void Guide::open_on_toast(double now) {
+    if (now - toast_at_ > 6.3 || toast_.target == NoTarget) return;
+    ToastItem t = toast_;
+    toast_.target = NoTarget;
+    if (t.target == ToPlayer) {
+        const Friend* f = find(t.xuid);
+        comm_tab_ = TabFriends, comm_at_ = -10;
+        if (!f) {
+            stack_ = {Page::Home, Page::Community};
+        } else {
+            prof_ = *f;
+            prof_tab_ = 0, prof_at_ = -10, prof_row_[0] = prof_row_[1] = -1;
+            stack_ = {Page::Home, Page::Community, Page::Profile};
+        }
+        entered(page(), now);
+        return;
+    }
+    comm_tab_ = TabMessages, comm_at_ = -10;
+    stack_ = {Page::Home, Page::Community};
+    for (const MessageItem& m : messages()) {
+        bool it = (t.target == ToInvite && m.kind == MessageItem::GameInvite && m.id == t.id) ||
+                  (t.target == ToFriendRequest && m.kind == MessageItem::FriendRequest && m.from.xuid == t.xuid) ||
+                  (t.target == ToText && m.kind == MessageItem::Text && m.id == t.id);
+        if (!it) continue;
+        open_msg_ = m, msg_opt_ = -1;
+        stack_.push_back(Page::Message);
+        if (m.kind == MessageItem::Text && m.unread) {
+            GuideRequest r;
+            r.action = GuideAction::ReadChat, r.id = m.id, r.name = m.chat;
+            wanted_.push_back(r);
+            for (TextMessage& x : social_.texts)
+                if (x.chat == m.chat && x.id <= m.id) x.unread = false;
+        }
+        break;
+    }
+    entered(Page::Community, now);
+    entered(page(), now);
 }
 
 void Guide::push(Page p, double now) {
@@ -523,17 +574,22 @@ void Guide::on_result(const NetResult& r, const GuideAssets& a, double now) {
         if (!r.ok) show_box(BoxInfo, "Edit Profile", r.code == "bad_profile_text" ? r.message : failure_text(r, "Can't complete this process. Please try again."), {"OK"}, now);
         break;
     case NetOp::ReadChat: break;
-    case NetOp::Received: toast(ToastKind::Invite, r.name.c_str(), "wants to play Forza Horizon 2", I_GAMES, them, now); break;
-    case NetOp::GotRequest: toast(ToastKind::Info, r.name.c_str(), "wants to be your friend", I_PERSON_ADD, 0, now); break;
-    case NetOp::GotText: toast(ToastKind::Info, r.name.c_str(), "sent you a message", I_MAIL, 0, now); break;
-    case NetOp::Online: toast(ToastKind::Info, r.name.c_str(), "is online", I_PERSON, 0, now); break;
+    case NetOp::Received: toast_to(ToInvite, r.xuid, r.id, ToastKind::Invite, r.name.c_str(), "wants to play Forza Horizon 2", I_GAMES, them, now); break;
+    case NetOp::GotRequest: toast_to(ToFriendRequest, r.xuid, 0, ToastKind::Info, r.name.c_str(), "wants to be your friend", I_PERSON_ADD, 0, now); break;
+    case NetOp::GotText: toast_to(ToText, r.xuid, r.id, ToastKind::Info, r.name.c_str(), "sent you a message", I_MAIL, 0, now); break;
+    case NetOp::Online: toast_to(ToPlayer, r.xuid, 0, ToastKind::Info, r.name.c_str(), "is online", I_PERSON, 0, now); break;
     }
 }
 
 // A toast that arrives while another plays waits for it (four at most; the oldest waiting one gives way).
 void Guide::toast(ToastKind kind, const char* title, const char* detail, uint32_t icon, ImTextureID pic, double now) {
+    toast_to(NoTarget, 0, 0, kind, title, detail, icon, pic, now);
+}
+
+void Guide::toast_to(ToastTarget target, uint64_t xuid, int64_t id, ToastKind kind, const char* title, const char* detail, uint32_t icon, ImTextureID pic,
+                     double now) {
     ToastItem t;
-    t.kind = kind, t.title = title, t.detail = detail, t.icon = icon, t.pic = pic;
+    t.kind = kind, t.title = title, t.detail = detail, t.icon = icon, t.pic = pic, t.target = target, t.xuid = xuid, t.id = id;
     for (auto& c : t.title) c = char(toupper((unsigned char)c));
     for (auto& c : t.detail) c = char(toupper((unsigned char)c));
     if (now - toast_at_ < 6.3) {

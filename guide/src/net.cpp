@@ -308,7 +308,7 @@ DWORD WINAPI worker(LPVOID) {
                 } else if (op.op == NetOp::SendText) {
                     status = request(conn, L"POST", "/v1/community/chat/" + them, "{\"text\":" + quoted(op.text) + "}", &out, &err);
                 } else if (op.op == NetOp::Join) {
-                    body = "{\"lobby\":" + quoted(op.text) + ",\"kind\":" + quoted(op.kind) + "}";
+                    body = "{\"lobby\":" + quoted(op.text) + ",\"kind\":" + quoted(op.kind) + ",\"player\":\"" + them + "\"}";
                     status = request(conn, L"POST", "/v1/community/reservation", body, &out, &err);
                 } else if (op.op == NetOp::SetProfile) {
                     status = request(conn, L"POST", "/v1/community/profile", "{" + quoted(op.name) + ":" + quoted(op.text) + "}", &out, &err);

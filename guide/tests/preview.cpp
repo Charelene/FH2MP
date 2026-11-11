@@ -239,6 +239,10 @@ int main(int argc, char** argv) {
         g.toggle(t0 - 5);
         nr.op = NetOp::Accept, nr.ok = false, nr.xuid = 3, nr.name = "NightRunR", nr.code = "lobby_gone";
         g.on_result(nr, assets, t0);
+    } else if (scene == "open-on-toast") {
+        nr.op = NetOp::Received, nr.ok = true, nr.xuid = 3, nr.name = "NightRunR", nr.id = 9;
+        g.on_result(nr, assets, t0 - 2);
+        g.toggle(t0);  // the Guide button while the invite's toast plays
     } else if (is_toast) {
         nr.ok = true, nr.xuid = 2, nr.name = "DebugWolf";
         nr.op = scene == "toast-sent" ? NetOp::Invite : scene == "toast-invite" ? NetOp::Received : scene == "toast-request" ? NetOp::GotRequest

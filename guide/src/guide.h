@@ -27,6 +27,7 @@ struct PadReader {
     static constexpr uint64_t GUIDE_HOLD_MS = 500, REPEAT_DELAY_MS = 400, REPEAT_EVERY_MS = 80;
     uint16_t prev = 0;
     bool prev_lt = false, prev_rt = false;
+    bool was_open = false, dir_blocked = false;
     bool guide_down = false, guide_fired = false;
     uint64_t guide_since = 0;
     int dir = -1;  // PadEvent of the held direction, or -1
@@ -137,6 +138,11 @@ public:
     // A 360 toast at the bottom centre (7.5 s cycle of the canvas, played once). pic: the other player's picture on an invite toast (it
     // glides in over the icon at 2.0 s), 0 for none.
     void toast(ToastKind kind, const char* title, const char* detail, uint32_t icon, ImTextureID pic, double now);
+    // The same, for something the player can go to: opening the Guide while the toast plays opens that item, as the 360 did (an
+    // invite or a message: its Message screen; a friend who came online: their profile).
+    enum ToastTarget { NoTarget, ToInvite, ToFriendRequest, ToText, ToPlayer };
+    void toast_to(ToastTarget target, uint64_t xuid, int64_t id, ToastKind kind, const char* title, const char* detail, uint32_t icon, ImTextureID pic,
+                  double now);
     bool busy(double now) const;
 
 private:
@@ -249,6 +255,9 @@ private:
         std::string title, detail;
         uint32_t icon = 0;
         ImTextureID pic = 0;
+        int target = 0;  // ToastTarget
+        uint64_t xuid = 0;
+        int64_t id = 0;
     };
     ToastItem toast_;
     std::deque<ToastItem> toasts_;
@@ -261,6 +270,7 @@ private:
     void entered(Page p, double now);
     void switch_to(int b, double now);
     void fix_home_focus();
+    void open_on_toast(double now);
     void show_box(int tag, const char* title, const std::string& body, std::vector<std::string> buttons, double now);
     void box_done(int tag, int button, std::vector<GuideRequest>& out, double now);
 
