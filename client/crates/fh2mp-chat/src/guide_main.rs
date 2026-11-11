@@ -45,6 +45,9 @@ struct GuideApp {
     pending_open: bool,
     hide_frames: u8,
     quitting: bool,
+    /// The game's client area in screen pixels while the Guide covers it (pad::place_window keeps the window there).
+    target: Option<(i32, i32, i32, i32)>,
+    size_logs: u8,
 }
 
 /// The player's gamertag from the launcher's settings, for the Guide's header; "FH2MP" without one.
@@ -70,22 +73,20 @@ impl GuideApp {
             ctx.send_viewport_cmd_to(root, egui::ViewportCommand::OuterPosition(egui::pos2(80.0, 80.0)));
             ctx.send_viewport_cmd_to(root, egui::ViewportCommand::InnerSize(egui::vec2(1280.0, 720.0)));
         } else {
-            let ppp = ctx.pixels_per_point();
-            let r = pad::game_window()
-                .map(|(x, y, w, h)| egui::Rect::from_min_size(egui::pos2(x as f32 / ppp, y as f32 / ppp), egui::vec2(w as f32 / ppp, h as f32 / ppp)))
-                .unwrap_or_else(|| {
+            self.target = pad::game_window();
+            self.size_logs = 4;
+            match self.target {
+                Some((x, y, w, h)) => {
+                    tracing::info!(x, y, w, h, "guide: opened over the game window (screen pixels)");
+                    pad::place_window("FH2MP Guide", x, y, w, h);
+                }
+                None => {
                     let size = ctx.input(|i| i.viewport().monitor_size).unwrap_or(egui::vec2(1280.0, 720.0));
-                    egui::Rect::from_min_size(egui::Pos2::ZERO, size)
-                });
-            tracing::info!(
-                x = r.min.x,
-                y = r.min.y,
-                w = r.width(),
-                h = r.height(),
-                "guide: opened over the game window"
-            );
-            ctx.send_viewport_cmd_to(root, egui::ViewportCommand::OuterPosition(r.min));
-            ctx.send_viewport_cmd_to(root, egui::ViewportCommand::InnerSize(r.size()));
+                    tracing::info!("guide: opened, no game window found: it covers this screen");
+                    ctx.send_viewport_cmd_to(root, egui::ViewportCommand::OuterPosition(egui::Pos2::ZERO));
+                    ctx.send_viewport_cmd_to(root, egui::ViewportCommand::InnerSize(size));
+                }
+            }
         }
         ctx.send_viewport_cmd_to(root, egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd_to(root, egui::ViewportCommand::Focus);
@@ -95,9 +96,8 @@ impl GuideApp {
     fn close(&mut self, ctx: &egui::Context) {
         tracing::info!("guide: closed");
         let root = egui::ViewportId::ROOT;
+        self.target = None;
         ctx.send_viewport_cmd_to(root, egui::ViewportCommand::Visible(false));
-        ctx.send_viewport_cmd_to(root, egui::ViewportCommand::OuterPosition(PARKED));
-        ctx.send_viewport_cmd_to(root, egui::ViewportCommand::InnerSize(egui::vec2(1.0, 1.0)));
     }
 
     fn act(&mut self, a: guide::Action) {
@@ -158,6 +158,10 @@ impl eframe::App for GuideApp {
         }
         self.shown.store(self.guide.open, Ordering::Relaxed);
         if self.guide.open {
+            // DPI changes while crossing monitors make Windows resize the window: put it back every frame (a no-op once it is right)
+            if let Some((x, y, w, h)) = self.target {
+                pad::place_window("FH2MP Guide", x, y, w, h);
+            }
             ctx.request_repaint();
         }
     }
@@ -167,6 +171,22 @@ impl eframe::App for GuideApp {
             return;
         }
         let ctx = ui.ctx().clone();
+        if self.size_logs > 0 {
+            self.size_logs -= 1;
+        }
+        if self.size_logs == 1 {
+            // once per open, a few frames in (after the move to the game's monitor and its scale): egui's area against the window
+            let (inner, native) = ctx.input(|i| (i.viewport().inner_rect, i.viewport().native_pixels_per_point));
+            tracing::info!(
+                ppp = ctx.pixels_per_point(),
+                native_ppp = ?native,
+                drawn = ?ui.max_rect(),
+                inner = ?inner,
+                window_px = ?pad::own_window_rect("FH2MP Guide"),
+                target_px = ?self.target,
+                "guide: sizes"
+            );
+        }
         let keys = [
             (Key::ArrowUp, PadEvent::Up),
             (Key::ArrowDown, PadEvent::Down),
@@ -295,6 +315,8 @@ fn main() -> eframe::Result {
                 pending_open: preview,
                 hide_frames: if preview { 0 } else { 3 },
                 quitting: false,
+                target: None,
+                size_logs: 0,
             }))
         }),
     )
