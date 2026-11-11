@@ -1,14 +1,18 @@
 // FH2MPGuide.dll, the in-game Guide as a FH2 Mod Platform mod, drawn into the game's own frames the way the Steam and Discord overlays
 // do: it hooks DXGI's Present/Present1 and ResizeBuffers, and on each present that has something to show it records one command list with
 // Dear ImGui's DX12 backend onto the back buffer, on the swap chain's own queue, before the frame goes out. That queue is learnt when the
-// swap chain is made (DXGI's CreateSwapChain* are hooked from the mod's start, before Azimuth makes its own; GetDevice does not name it). Not on any other queue: drawing on the first direct queue the game used removed the device under Azimuth (2026-11-11), since a
-// swap chain's buffers belong to the queue it was made with. Nothing is drawn (and nothing is recorded) while the Guide is closed and no toast plays.
+// swap chain is made (DXGI's CreateSwapChain* are hooked from the mod's start, before Azimuth makes its own; GetDevice does not name it).
+// Never on another queue: drawing on the first direct queue the game used removed the device under Azimuth (2026-11-11). Nothing is
+// drawn or recorded while the Guide is closed and no toast plays.
 // Opening: the pad's Guide button held for one second (XInputGetStateEx, a reader thread) or Home in the game window. While open the
-// Guide takes the keyboard's arrows, Enter, Escape, Q and E from the game window. FH2MP_NO_GUIDE=1 keeps it off. Log: the platform's log.
+// game gets an idle pad (Windows.Gaming.Input's IGamepad::GetCurrentReading, which Azimuth reads, is hooked) and the Guide takes the
+// keyboard's arrows, Enter, Escape, Q and E from the game window. FH2MP_NO_GUIDE=1 keeps it off. Log: the platform's log.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
+#include <hstring.h>
+#include <roapi.h>
 
 #include <atomic>
 #include <cstdio>
@@ -60,6 +64,71 @@ double now_s() {
     return double(c.QuadPart) / double(f.QuadPart);
 }
 
+// ---- the game's pad: Azimuth reads Windows.Gaming.Input.Gamepad. While the Guide is open the game gets an idle reading; the buttons held
+// when it closes stay hidden from the game until they are let go (so the B that closed the Guide does not also reach the game).
+struct WgiReading {
+    UINT64 timestamp;
+    UINT32 buttons;
+    double lt, rt, lx, ly, rx, ry;
+};
+static_assert(sizeof(WgiReading) == 64, "Windows.Gaming.Input.GamepadReading");
+typedef HRESULT(STDMETHODCALLTYPE* GetReadingFn)(void*, WgiReading*);
+GetReadingFn o_get_reading;
+std::atomic<UINT32> g_hidden{0};
+
+HRESULT STDMETHODCALLTYPE hk_get_reading(void* self, WgiReading* r) {
+    HRESULT hr = o_get_reading(self, r);
+    if (FAILED(hr) || !r) return hr;
+    if (g_open.load()) {
+        g_hidden.fetch_or(r->buttons);
+        UINT64 ts = r->timestamp;
+        *r = WgiReading{};
+        r->timestamp = ts;
+    } else if (UINT32 h = g_hidden.load()) {
+        g_hidden.fetch_and(r->buttons);  // released ones reach the game again
+        r->buttons &= ~h;
+    }
+    return hr;
+}
+
+// The IGamepad of a connected pad, from Windows.Gaming.Input's Gamepad statics (the list fills in shortly after first use, so the pad
+// thread calls this until it works). Hooks GetCurrentReading (IGamepad slot 8) once; true when hooked.
+bool hook_wgi() {
+    static const GUID iid_statics = {0x8bbce529, 0xd49c, 0x39e9, {0x95, 0x60, 0xe4, 0x7d, 0xde, 0x96, 0xb7, 0xc8}};
+    typedef HRESULT(WINAPI * RoGetFn)(HSTRING, REFIID, void**);
+    typedef HRESULT(WINAPI * MakeRefFn)(PCWSTR, UINT32, HSTRING_HEADER*, HSTRING*);
+    static HMODULE combase = LoadLibraryW(L"combase.dll");
+    static RoGetFn ro_get = combase ? (RoGetFn)(void*)GetProcAddress(combase, "RoGetActivationFactory") : nullptr;
+    static MakeRefFn make_ref = combase ? (MakeRefFn)(void*)GetProcAddress(combase, "WindowsCreateStringReference") : nullptr;
+    if (!ro_get || !make_ref) return false;
+    static const wchar_t cls[] = L"Windows.Gaming.Input.Gamepad";
+    HSTRING_HEADER hh;
+    HSTRING name = nullptr;
+    void** statics = nullptr;
+    if (FAILED(make_ref(cls, UINT32(wcslen(cls)), &hh, &name)) || FAILED(ro_get(name, iid_statics, (void**)&statics)) || !statics) return false;
+    typedef HRESULT(STDMETHODCALLTYPE * GetPadsFn)(void*, void**);
+    typedef HRESULT(STDMETHODCALLTYPE * SizeFn)(void*, UINT32*);
+    typedef HRESULT(STDMETHODCALLTYPE * GetAtFn)(void*, UINT32, void**);
+    typedef ULONG(STDMETHODCALLTYPE * ReleaseFn)(void*);
+    auto vt = [](void* o) { return *(void***)o; };
+    void* pads = nullptr;
+    void* pad = nullptr;
+    UINT32 n = 0;
+    if (SUCCEEDED(((GetPadsFn)vt(statics)[10])(statics, &pads)) && pads && SUCCEEDED(((SizeFn)vt(pads)[7])(pads, &n)) && n > 0)
+        ((GetAtFn)vt(pads)[6])(pads, 0, &pad);
+    bool ok = false;
+    if (pad) {
+        FH2Hook* h = g_api->hook_function(g_mod, "guide: IGamepad::GetCurrentReading", vt(pad)[8], (void*)hk_get_reading, (void**)&o_get_reading);
+        ok = h && g_api->enable_hooks(g_mod, h);
+        logf(ok ? "guide: the game's pad reading is hooked: the game gets an idle pad while the Guide is open"
+                : "guide: the game's pad reading could not be hooked: the game still reads the pad while the Guide is open");
+        ((ReleaseFn)vt(pad)[2])(pad);
+    }
+    if (pads) ((ReleaseFn)vt(pads)[2])(pads);
+    ((ReleaseFn)vt(statics)[2])(statics);
+    return pad != nullptr;  // tried: do not try again, hooked or not
+}
+
 // ---- the pad: XInputGetStateEx (ordinal 100: it reports the Guide button) on the first connected pad, every 33 ms
 struct XState { DWORD packet; WORD buttons; BYTE lt, rt; SHORT lx, ly, rx, ry; };
 typedef DWORD(WINAPI* GetStateFn)(DWORD, XState*);
@@ -78,6 +147,11 @@ DWORD WINAPI pad_thread(LPVOID) {
         return 0;
     }
     logf("guide: pad reader started (Guide button %s; hold it 1 s, or press Home in the game)", ex ? "seen" : "not reported by this XInput");
+    typedef HRESULT(WINAPI * RoInitFn)(int);
+    if (HMODULE cb = LoadLibraryW(L"combase.dll"))
+        if (auto ro_init = (RoInitFn)(void*)GetProcAddress(cb, "RoInitialize")) ro_init(1);  // RO_INIT_MULTITHREADED, for hook_wgi
+    bool wgi = false;
+    ULONGLONG next_wgi = 0;
     PadReader reader;
     int slot = -1;
     ULONGLONG next_scan = 0;
@@ -96,6 +170,10 @@ DWORD WINAPI pad_thread(LPVOID) {
                 if (get(DWORD(i), &st) == 0) slot = i, logf("guide: pad found in XInput slot %d", i);
         }
         if (slot < 0) continue;
+        if (!wgi && now >= next_wgi) {
+            next_wgi = now + 2000;
+            wgi = hook_wgi();
+        }
         if (!seen && (st.buttons & padbits::Guide)) seen = true, logf("guide: the pad's Guide button reaches the Guide");
         PadEvent out[16];
         int n = reader.feed(st.buttons, st.lx, st.ly, now, g_open.load(), out);
