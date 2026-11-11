@@ -257,6 +257,7 @@ DWORD WINAPI worker(LPVOID) {
     std::map<uint64_t, double> pic_done;  // xuid -> picture version fetched (-1: none on the server)
     std::map<std::string, ThreadCache> threads;
     std::map<uint64_t, Friend::State> was_state;
+    std::map<uint64_t, ULONGLONG> online_told;
     std::set<uint64_t> seen_requests;
     load_hidden();
     for (;;) {
@@ -361,7 +362,10 @@ DWORD WINAPI worker(LPVOID) {
                 // what is new since the last read gets a toast (nothing on the first read: it was all there before the game started)
                 for (const Friend& f : friends) {
                     auto it = was_state.find(f.xuid);
-                    if (!first_comm && it != was_state.end() && it->second == Friend::Offline && f.state != Friend::Offline) {
+                    // "is online" once per ten minutes a friend: a launcher that polls late flips between online and offline
+                    if (!first_comm && it != was_state.end() && it->second == Friend::Offline && f.state != Friend::Offline &&
+                        (!online_told.count(f.xuid) || now - online_told[f.xuid] > 600000)) {
+                        online_told[f.xuid] = now;
                         NetResult r;
                         r.op = NetOp::Online, r.ok = true, r.xuid = f.xuid, r.name = f.tag;
                         push_result(r);
