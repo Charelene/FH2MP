@@ -1,7 +1,8 @@
 // FH2MPGuide.dll, the in-game Guide as a FH2 Mod Platform mod, drawn into the game's own frames the way the Steam and Discord overlays
-// do: it hooks DXGI's Present/Present1 and ResizeBuffers and Direct3D 12's ExecuteCommandLists (to learn the game's direct queue), and on
-// each present that has something to show it records one command list with Dear ImGui's DX12 backend onto the back buffer, on the game's
-// queue, before the frame goes out. Nothing is drawn (and nothing is recorded) while the Guide is closed and no toast plays.
+// do: it hooks DXGI's Present/Present1 and ResizeBuffers, and on each present that has something to show it records one command list with
+// Dear ImGui's DX12 backend onto the back buffer, on the swap chain's own queue, before the frame goes out. That queue is learnt when the
+// swap chain is made (DXGI's CreateSwapChain* are hooked from the mod's start, before Azimuth makes its own; GetDevice does not name it). Not on any other queue: drawing on the first direct queue the game used removed the device under Azimuth (2026-11-11), since a
+// swap chain's buffers belong to the queue it was made with. Nothing is drawn (and nothing is recorded) while the Guide is closed and no toast plays.
 // Opening: the pad's Guide button held for one second (XInputGetStateEx, a reader thread) or Home in the game window. While open the
 // Guide takes the keyboard's arrows, Enter, Escape, Q and E from the game window. FH2MP_NO_GUIDE=1 keeps it off. Log: the platform's log.
 #define WIN32_LEAN_AND_MEAN
@@ -137,13 +138,76 @@ LRESULT CALLBACK guide_wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 typedef HRESULT(STDMETHODCALLTYPE* PresentFn)(IDXGISwapChain3*, UINT, UINT);
 typedef HRESULT(STDMETHODCALLTYPE* Present1Fn)(IDXGISwapChain3*, UINT, UINT, const DXGI_PRESENT_PARAMETERS*);
 typedef HRESULT(STDMETHODCALLTYPE* ResizeBuffersFn)(IDXGISwapChain3*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
-typedef void(STDMETHODCALLTYPE* ExecuteFn)(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
 PresentFn o_present;
 Present1Fn o_present1;
 ResizeBuffersFn o_resize;
-ExecuteFn o_execute;
 
-ID3D12CommandQueue* g_queue;  // the game's direct queue (the first one that executes)
+ID3D12CommandQueue* g_queue;  // the swap chain's own queue
+
+// Which queue each swap chain was made with (DXGI's CreateSwapChain* detours fill it).
+std::mutex g_chains_mu;
+std::vector<std::pair<IUnknown*, ID3D12CommandQueue*>> g_chains;  // keyed by the swap chain's IUnknown (its COM identity)
+
+IUnknown* identity(IUnknown* p) {
+    IUnknown* u = nullptr;
+    if (!p || FAILED(p->QueryInterface(IID_PPV_ARGS(&u))) || !u) return nullptr;
+    u->Release();  // only compared, never used
+    return u;
+}
+
+void note_chain(IUnknown* device, IUnknown* made) {
+    ID3D12CommandQueue* q = nullptr;
+    IUnknown* chain = identity(made);
+    if (!device || !chain || FAILED(device->QueryInterface(IID_PPV_ARGS(&q))) || !q) return;  // not Direct3D 12
+    std::lock_guard<std::mutex> l(g_chains_mu);
+    for (auto& c : g_chains)
+        if (c.first == chain) {
+            if (c.second) c.second->Release();
+            c.second = q;
+            return;
+        }
+    g_chains.emplace_back(chain, q);
+}
+
+ID3D12CommandQueue* queue_of(IUnknown* presented) {
+    IUnknown* chain = identity(presented);
+    std::lock_guard<std::mutex> l(g_chains_mu);
+    for (auto& c : g_chains)
+        if (c.first == chain) return c.second;
+    return nullptr;
+}
+
+typedef HRESULT(STDMETHODCALLTYPE* CreateSCFn)(IDXGIFactory*, IUnknown*, DXGI_SWAP_CHAIN_DESC*, IDXGISwapChain**);
+typedef HRESULT(STDMETHODCALLTYPE* CreateSCHwndFn)(IDXGIFactory2*, IUnknown*, HWND, const DXGI_SWAP_CHAIN_DESC1*, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC*,
+                                                    IDXGIOutput*, IDXGISwapChain1**);
+typedef HRESULT(STDMETHODCALLTYPE* CreateSCCoreFn)(IDXGIFactory2*, IUnknown*, IUnknown*, const DXGI_SWAP_CHAIN_DESC1*, IDXGIOutput*, IDXGISwapChain1**);
+typedef HRESULT(STDMETHODCALLTYPE* CreateSCCompFn)(IDXGIFactory2*, IUnknown*, const DXGI_SWAP_CHAIN_DESC1*, IDXGIOutput*, IDXGISwapChain1**);
+CreateSCFn o_create_sc;
+CreateSCHwndFn o_create_hwnd;
+CreateSCCoreFn o_create_core;
+CreateSCCompFn o_create_comp;
+
+HRESULT STDMETHODCALLTYPE hk_create_sc(IDXGIFactory* f, IUnknown* dev, DXGI_SWAP_CHAIN_DESC* d, IDXGISwapChain** out) {
+    HRESULT hr = o_create_sc(f, dev, d, out);
+    if (SUCCEEDED(hr) && out) note_chain(dev, *out);
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE hk_create_hwnd(IDXGIFactory2* f, IUnknown* dev, HWND w, const DXGI_SWAP_CHAIN_DESC1* d, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fs,
+                                         IDXGIOutput* o, IDXGISwapChain1** out) {
+    HRESULT hr = o_create_hwnd(f, dev, w, d, fs, o, out);
+    if (SUCCEEDED(hr) && out) note_chain(dev, *out);
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE hk_create_core(IDXGIFactory2* f, IUnknown* dev, IUnknown* win, const DXGI_SWAP_CHAIN_DESC1* d, IDXGIOutput* o, IDXGISwapChain1** out) {
+    HRESULT hr = o_create_core(f, dev, win, d, o, out);
+    if (SUCCEEDED(hr) && out) note_chain(dev, *out);
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE hk_create_comp(IDXGIFactory2* f, IUnknown* dev, const DXGI_SWAP_CHAIN_DESC1* d, IDXGIOutput* o, IDXGISwapChain1** out) {
+    HRESULT hr = o_create_comp(f, dev, d, o, out);
+    if (SUCCEEDED(hr) && out) note_chain(dev, *out);
+    return hr;
+}
 ID3D12Device* g_device;
 IDXGISwapChain3* g_swapchain;  // the swap chain the overlay is set up for
 ID3D12DescriptorHeap *g_rtv_heap, *g_srv_heap;
@@ -241,7 +305,7 @@ ImTextureID load_gamerpic() {
         list->ResourceBarrier(1, &b);
         list->Close();
         ID3D12CommandList* lists[] = {list};
-        o_execute(g_queue, 1, lists);
+        g_queue->ExecuteCommandLists(1, lists);
         wait_gpu();
         list->Release(), alloc->Release(), upload->Release();
         D3D12_CPU_DESCRIPTOR_HANDLE cpu;
@@ -281,7 +345,15 @@ std::string read_gamertag() {
 }
 
 bool setup(IDXGISwapChain3* sc) {
-    if (!g_queue) return false;  // the game has not executed on its direct queue yet
+    g_queue = queue_of(sc);
+    if (!g_queue) {
+        logf("guide: this swap chain was made before the Guide could see it, so its command queue is unknown: no Guide this run");
+        return false;
+    }
+    if (g_queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT) {
+        logf("guide: the swap chain's queue is not a direct queue (%d): no Guide", int(g_queue->GetDesc().Type));
+        return false;
+    }
     DXGI_SWAP_CHAIN_DESC desc{};
     if (FAILED(sc->GetDesc(&desc)) || FAILED(sc->GetDevice(IID_PPV_ARGS(&g_device)))) return false;
     g_swapchain = sc;
@@ -336,7 +408,6 @@ bool setup(IDXGISwapChain3* sc) {
 void render(IDXGISwapChain3* sc) {
     if (g_failed) return;
     if (!g_ready) {
-        if (!g_queue) return;
         g_ready = setup(sc);
         if (!g_ready) {
             g_failed = true;
@@ -394,7 +465,7 @@ void render(IDXGISwapChain3* sc) {
     g_list->ResourceBarrier(1, &b);
     g_list->Close();
     ID3D12CommandList* lists[] = {g_list};
-    o_execute(g_queue, 1, lists);
+    g_queue->ExecuteCommandLists(1, lists);
     g_queue->Signal(g_fence, f.fence = ++g_fence_value);
 }
 
@@ -430,21 +501,30 @@ HRESULT STDMETHODCALLTYPE hk_resize(IDXGISwapChain3* sc, UINT n, UINT w, UINT h,
     return hr;
 }
 
-void STDMETHODCALLTYPE hk_execute(ID3D12CommandQueue* q, UINT n, ID3D12CommandList* const* lists) {
-    if (!g_queue) {
-        D3D12_COMMAND_QUEUE_DESC d = q->GetDesc();
-        if (d.Type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
-            q->AddRef();
-            g_queue = q;
-        }
-    }
-    o_execute(q, n, lists);
-}
-
 LRESULT CALLBACK dummy_proc(HWND h, UINT m, WPARAM w, LPARAM l) { return DefWindowProcW(h, m, w, l); }
 
 // The vtable addresses come from a throw-away device, queue and swap chain on a hidden window (DXGI and Direct3D 12 share them).
+// DXGI's swap chain makers, hooked as early as possible: they tell which queue each swap chain belongs to.
+bool hook_factory() {
+    IDXGIFactory2* fac = nullptr;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&fac))) || !fac) {
+        logf("guide: no DXGI factory: no Guide");
+        return false;
+    }
+    void** fvt = *(void***)fac;
+    FH2Hook* h[4] = {g_api->hook_function(g_mod, "guide: IDXGIFactory::CreateSwapChain", fvt[10], (void*)hk_create_sc, (void**)&o_create_sc),
+                     g_api->hook_function(g_mod, "guide: IDXGIFactory2::CreateSwapChainForHwnd", fvt[15], (void*)hk_create_hwnd, (void**)&o_create_hwnd),
+                     g_api->hook_function(g_mod, "guide: IDXGIFactory2::CreateSwapChainForCoreWindow", fvt[16], (void*)hk_create_core, (void**)&o_create_core),
+                     g_api->hook_function(g_mod, "guide: IDXGIFactory2::CreateSwapChainForComposition", fvt[24], (void*)hk_create_comp, (void**)&o_create_comp)};
+    fac->Release();
+    bool ok = true;
+    for (FH2Hook* x : h) ok = ok && x && g_api->enable_hooks(g_mod, x);
+    if (!ok) logf("guide: the swap chain makers could not be hooked: no Guide");
+    return ok;
+}
+
 DWORD WINAPI hook_thread(LPVOID) {
+    if (!hook_factory()) return 0;
     if (!g_api->wait_for_game(180000)) {
         logf("guide: the game never came up: no Guide");
         return 0;
@@ -467,13 +547,13 @@ DWORD WINAPI hook_thread(LPVOID) {
         logf("guide: could not make the probe swap chain: no Guide");
     } else {
         void** svt = *(void***)sc;
-        void** qvt = *(void***)q;
-        FH2Hook* hooks[4] = {
+        FH2Hook* hooks[3] = {
             g_api->hook_function(g_mod, "guide: IDXGISwapChain::Present", svt[8], (void*)hk_present, (void**)&o_present),
             g_api->hook_function(g_mod, "guide: IDXGISwapChain1::Present1", svt[22], (void*)hk_present1, (void**)&o_present1),
-            g_api->hook_function(g_mod, "guide: IDXGISwapChain::ResizeBuffers", svt[13], (void*)hk_resize, (void**)&o_resize),
-            g_api->hook_function(g_mod, "guide: ID3D12CommandQueue::ExecuteCommandLists", qvt[10], (void*)hk_execute, (void**)&o_execute)};
-        if (!hooks[0] || !hooks[2] || !hooks[3] || !g_api->enable_hooks(g_mod, nullptr))
+            g_api->hook_function(g_mod, "guide: IDXGISwapChain::ResizeBuffers", svt[13], (void*)hk_resize, (void**)&o_resize)};
+        bool on = hooks[0] && hooks[2] && g_api->enable_hooks(g_mod, hooks[0]) && g_api->enable_hooks(g_mod, hooks[2]) &&
+                  (!hooks[1] || g_api->enable_hooks(g_mod, hooks[1]));
+        if (!on)
             logf("guide: the present hooks could not be made: no Guide");
         else
             logf("guide: hooked the game's presents; waiting for its first frame");
