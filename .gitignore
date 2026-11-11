@@ -28,6 +28,7 @@
 /build/
 /target/
 /client/target/
+!/client/Cargo.lock
 __pycache__/
 *.pyc
 .venv/
