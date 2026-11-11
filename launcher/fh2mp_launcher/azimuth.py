@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 
 from . import logs, paths
-from .constants import BUILTIN_AZIMUTH_BUILDS
+from .constants import AZIMUTH_RUNTIME_FILES, AZIMUTH_VERSION, BUILTIN_AZIMUTH_BUILDS
 
 EXE = "azimuth.exe"
 
@@ -22,6 +22,7 @@ class AzimuthInfo:
     game_folder: str = ""
     game_ok: bool = False
     notes: list = field(default_factory=list)
+    runtime_bad: list = field(default_factory=list)   # Azimuth's own DLLs that are not the supported build's (relative paths)
 
     @property
     def exe(self):
@@ -106,6 +107,11 @@ def inspect(folder, builds=None):
             break
     if not info.supported:
         info.notes.append("this Azimuth build has not been tested with FH2MP")
+    elif info.supported_version == AZIMUTH_VERSION:
+        info.runtime_bad = runtime_mismatches(folder)
+        if info.runtime_bad:            # Azimuth would stop at start: not usable until setup installs the supported build over it
+            info.supported = False
+            info.notes.append("Azimuth's own files are from a different Azimuth version: " + ", ".join(info.runtime_bad))
     ini = read_ini(folder)
     title = fh2_title(ini)
     info.game_folder = title.get("folder", "")
@@ -116,6 +122,21 @@ def inspect(folder, builds=None):
     else:
         info.notes.append("Azimuth has no game folder set yet: run Azimuth's own launcher once and point it at Forza Horizon 2")
     return info
+
+
+def runtime_mismatches(folder):
+    """Azimuth's DLLs (AZIMUTH_RUNTIME_FILES) that are missing or not the supported build's, as relative paths. A 1.0.4 azimuth.exe copied over
+    an older install keeps the older data\bin, and Azimuth then stops at start (issue #450)."""
+    bad = []
+    for rel, want in AZIMUTH_RUNTIME_FILES.items():
+        path = os.path.join(folder, *rel.split("/"))
+        try:
+            ok = sha256_file(path) == want
+        except OSError:
+            ok = False
+        if not ok:
+            bad.append(rel)
+    return bad
 
 
 def _game_folder_exists(path):

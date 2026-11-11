@@ -13,6 +13,13 @@ from .settings import Settings
 from .version import __version__
 
 
+def azimuth_files_text(info):
+    """What to tell a player whose Azimuth folder mixes versions (azimuth.inspect runtime_bad)."""
+    names = ", ".join(os.path.basename(p) for p in info.runtime_bad)
+    return (f"Azimuth's own files in {info.folder} come from a different Azimuth version ({names}), so Azimuth would stop at start. "
+            f"Run setup and install Azimuth {AZIMUTH_VERSION} into this folder: your settings, saves and mods stay.")
+
+
 class PlayBlocked(Exception):
     """Something the player has to fix first; the message says what."""
 
@@ -582,7 +589,8 @@ class Launcher:
         if not info.found:
             raise PlayBlocked("azimuth.exe not found.", "no_azimuth")
         if not info.supported:
-            raise PlayBlocked(f"This launcher requires Azimuth {AZIMUTH_VERSION}. Run setup to install the supported combination.", "azimuth_unsupported")
+            raise PlayBlocked(azimuth_files_text(info) if info.runtime_bad else
+                              f"This launcher requires Azimuth {AZIMUTH_VERSION}. Run setup to install the supported combination.", "azimuth_unsupported")
         kind, _v = self.shim_state()
         self.apply_hotfix(_v if kind == "ours" else "")
         if kind == "old":
@@ -931,7 +939,8 @@ class Launcher:
         if not info.found:
             raise PlayBlocked("azimuth.exe not found.", "no_azimuth")
         if not info.supported:
-            raise PlayBlocked(f"This launcher requires Azimuth {AZIMUTH_VERSION}. Run setup to install the supported combination.", "azimuth_unsupported")
+            raise PlayBlocked(azimuth_files_text(info) if info.runtime_bad else
+                              f"This launcher requires Azimuth {AZIMUTH_VERSION}. Run setup to install the supported combination.", "azimuth_unsupported")
         try:
             self.repair_tls_helper()
         except shim.ShimError as e:

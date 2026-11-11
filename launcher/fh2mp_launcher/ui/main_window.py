@@ -290,6 +290,8 @@ class MainWindow(QMainWindow):
         info = lc.azimuth_info()
         if not info.found:
             return "bad", "azimuth.exe not found.", "Change...", self.open_settings
+        if not info.supported and info.runtime_bad:
+            return "warn", "Azimuth's own files here are from a different Azimuth version. Setup repairs them (settings, saves and mods stay).", "Run setup", self.run_wizard
         if not info.supported:
             return "warn", f"This launcher requires Azimuth {AZIMUTH_VERSION} and its supplied mod versions.", "Run setup", self.run_wizard
         if not info.game_folder:
