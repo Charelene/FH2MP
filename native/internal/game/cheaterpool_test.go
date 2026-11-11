@@ -3,6 +3,7 @@ package game
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"fh2mp/internal/omap"
@@ -25,5 +26,16 @@ func TestLoadFlagsReleasesToolReports(t *testing.T) {
 	}
 	if keys := h.Flagged.Keys(); len(keys) != 1 || keys[0] != 2 {
 		t.Errorf("flagged %v, want [2]", keys)
+	}
+}
+
+// The panel's list carries hex xuid, reason and expiry, and drops expired entries.
+func TestFlagStatusListsActiveFlags(t *testing.T) {
+	h := &Hub{Flagged: omap.New[uint64, flagEnt](), Clk: &fakeClock{}}
+	h.Flagged.Set(0x90000b46ba5b3, flagEnt{until: 1e18, reason: "speed 575 km/h"})
+	h.Flagged.Set(0x2, flagEnt{until: -1, reason: "gone"})
+	out := jsonDumps(h.flagStatus())
+	if !strings.Contains(out, `"xuid": "90000b46ba5b3"`) || !strings.Contains(out, "speed 575 km/h") || strings.Contains(out, "gone") {
+		t.Errorf("flag status %s", out)
 	}
 }

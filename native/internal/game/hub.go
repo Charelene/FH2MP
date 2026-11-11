@@ -278,7 +278,7 @@ func parseHex(s string) (uint64, error) {
 	return strconv.ParseUint(s, 16, 64)
 }
 
-// ControlText handles one control message: assign, auth, logout, revoke, allow, unflag, run, tools, pop, lobbies, positions, bots.
+// ControlText handles one control message: assign, auth, logout, revoke, allow, unflag, flags, run, tools, pop, lobbies, positions, bots.
 func (h *Hub) ControlText(text string, replyTo *Addr) {
 	parts := strings.Fields(text)
 	n := len(parts)
@@ -291,6 +291,8 @@ func (h *Hub) ControlText(text string, replyTo *Addr) {
 		h.ctlReply(replyTo, "bots", []byte(h.botsCommand(parts)))
 	case n == 1 && parts[0] == "positions":
 		h.ctlReply(replyTo, "positions", []byte(jsonDumps(h.mapStatus())))
+	case n == 1 && parts[0] == "flags":
+		h.ctlReply(replyTo, "flags", []byte(jsonDumps(h.flagStatus())))
 	case n == 3 && parts[0] == "tools":
 		tools := map[string]bool{}
 		for _, t := range strings.Split(parts[2], ",") {
@@ -716,6 +718,17 @@ func (h *Hub) Flag(xuid uint64, reason string) {
 	h.Flagged.Set(xuid, flagEnt{h.Clk.Wall() + CheaterPoolHours*3600.0, reason})
 	h.saveFlags()
 	h.Log(fmt.Sprintf("control: %#x flagged for %s h (%s): matched only with other flagged players", xuid, pyfmt.FmtG(CheaterPoolHours), reason))
+}
+
+// flagStatus is the cheater pool for the operator panel: who is flagged, why and until when (unix seconds). The empty "lobbies" list is there because
+// the control client's JSON query only accepts a reply that carries one.
+func (h *Hub) flagStatus() pyjson.Obj {
+	list := []any{}
+	for _, x := range h.FlaggedNow() {
+		e, _ := h.Flagged.Get(x)
+		list = append(list, pyjson.Obj{{K: "xuid", V: fmt.Sprintf("%x", x)}, {K: "reason", V: e.reason}, {K: "until", V: e.until}})
+	}
+	return pyjson.Obj{{K: "lobbies", V: []any{}}, {K: "flagged", V: list}}
 }
 
 // FlaggedNow lists the flagged xuids, dropping expired ones.
