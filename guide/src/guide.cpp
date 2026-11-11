@@ -1,10 +1,9 @@
-// The Guide's drawing and navigation, from the design canvas and the 360's own screens: artboard 1 (Guide home: blades); Community (the
-// 360's tabbed Party / Friends / Messages / Players screen, with artboard 4's friend rows); artboard 4 (Invite to Game); artboard 5 and the
-// 360's Message screen (one message); artboard 7 (the notification toast). Everything is laid out in the canvas' 1280x720 units, scaled
-// to the game's frame and centred; the Guide itself is drawn at 0.84 of the canvas and a little higher, so a toast at the canvas' place
-// (y 600) shows under it. Motion follows the canvas' CSS: cubic-bezier(.1,.9,.2,1) for the open (scale .92 -> 1, 0.26 s), the blade
-// widths (0.3 s), the focus bars (0.14 s), the rows sliding in after a blade switch (150 units, 0.32 s, 40 ms + 28 ms per row), a page
-// or tab coming in (110 units, 0.26 s) and the title fading (0.16 s); the toast plays its 7.5 s keyframes once.
+// The Guide's core: the pad reader, the stack of screens, the blades (artboard 1), the header, the 360's message box and toasts
+// (artboard 7), and what the server's answers turn into. The other screens are in community.cpp (Community, a player's profile) and
+// messages.cpp (a message, Create New, recipients, compose, the keyboard). Motion follows the canvas' CSS: cubic-bezier(.1,.9,.2,1) for
+// the open (scale .92 -> 1, 0.26 s), the blade widths (0.3 s), the focus bars (0.14 s), the rows sliding in after a blade switch
+// (150 units, 0.32 s, 40 ms + 28 ms per row), a page or tab coming in (110 units, 0.26 s) and the title fading (0.16 s); the toast plays
+// its 7.5 s keyframes once.
 #include "guide.h"
 
 #include <windows.h>
@@ -14,233 +13,29 @@
 #include <cstdio>
 #include <cstring>
 
+#include "ui.h"
+
+using namespace ui;
+
 namespace {
 
-// Theme "xbox" of the canvas.
-const ImU32 ACCENT = IM_COL32(0x10, 0x8a, 0x10, 255), DARK = IM_COL32(0x0a, 0x4f, 0x0a, 255), BRIGHT = IM_COL32(0x8e, 0xd6, 0x1e, 255),
-            PANEL = IM_COL32(0x2a, 0x2b, 0x2e, 255), PANE = IM_COL32(0x1e, 0x1f, 0x22, 255), LINE = IM_COL32(0x3a, 0x3b, 0x3f, 255),
-            TAB = IM_COL32(0x45, 0x47, 0x4c, 255), RAISED = IM_COL32(0x34, 0x36, 0x3a, 255), MUTED = IM_COL32(0xb4, 0xb6, 0xbb, 255),
-            MUTED2 = IM_COL32(0x9c, 0x9f, 0xa5, 255), TAB_TEXT = IM_COL32(0xd4, 0xd6, 0xda, 255), MUTED3 = IM_COL32(0xc9, 0xcc, 0xd2, 255),
-            WHITE = IM_COL32(255, 255, 255, 255), BLACK = IM_COL32(0, 0, 0, 255), ONLINE = IM_COL32(0xe8, 0xe9, 0xeb, 255),
-            OFFLINE = IM_COL32(0xe0, 0x55, 0x2f, 255);
-const ImU32 PIC_COLORS[] = {IM_COL32(0xc9, 0x66, 0x2f, 255), IM_COL32(0x3f, 0x6f, 0xc4, 255), IM_COL32(0xc4, 0x9a, 0x2b, 255),
-                            IM_COL32(0x3e, 0x9a, 0x5a, 255), IM_COL32(0x2f, 0x8f, 0xa8, 255), IM_COL32(0x9a, 0x4f, 0xb8, 255),
-                            IM_COL32(0xa8, 0x3a, 0x3a, 255)};
-
-// The Guide's size against the canvas and the centre it is drawn around (canvas units).
-const float GUIDE_K = 0.84f, GUIDE_CY = 330;
-
-enum : uint32_t {
-    I_PERSON = 0xe7fd, I_GROUPS = 0xf233, I_MAIL = 0xe158, I_DRAFTS = 0xe151, I_SENSORS = 0xe51e, I_CHAT = 0xe0ca, I_GROUP_ADD = 0xe7f0,
-    I_GAMES = 0xea28, I_TROPHY = 0xea23, I_PALETTE = 0xe40a, I_MIC = 0xe029, I_BELL = 0xe7f4, I_SETTINGS = 0xe8b8, I_FLAG = 0xe153,
-    I_SCHEDULE = 0xe8b5, I_EXPAND_LESS = 0xe5ce, I_EXPAND_MORE = 0xe5cf, I_APPS = 0xe5c3, I_WIFI = 0xe63e, I_PERSON_ADD = 0xe7fe
-};
-
-struct Row {
-    const char* label;
-    uint32_t icon;
-    GuideAction action;
-    Page page;  // where A goes when action is None
-    int tab;    // Community's tab for page Community
-};
-
-// The blades' rows as the canvas has them (artboard 1).
-const Row GAMES[] = {{"Forza Horizon 2", I_GAMES, GuideAction::Resume, Page::Home, 0},
-                     {"Achievements", I_TROPHY, GuideAction::Soon, Page::Home, 0},
-                     {"Game Library", I_APPS, GuideAction::Soon, Page::Home, 0}};
-const Row ME[] = {{"Leave Game", 0, GuideAction::Soon, Page::Home, 0},
-                  {"Friends", I_PERSON, GuideAction::None, Page::Community, TabFriends},
-                  {"Party", I_GROUPS, GuideAction::None, Page::Community, TabParty},
-                  {"Messages", I_MAIL, GuideAction::None, Page::Community, TabMessages},
-                  {"Beacons & Activity", I_SENSORS, GuideAction::Soon, Page::Home, 0},
-                  {"Chat", I_CHAT, GuideAction::Soon, Page::Home, 0},
-                  {"Lobbies", I_FLAG, GuideAction::Soon, Page::Home, 0}};
-const Row SETTINGS[] = {{"Profile", I_PERSON, GuideAction::Soon, Page::Home, 0},  {"Theme", I_PALETTE, GuideAction::Soon, Page::Home, 0},
-                        {"Voice", I_MIC, GuideAction::Soon, Page::Home, 0},       {"Notifications", I_BELL, GuideAction::Soon, Page::Home, 0},
-                        {"Network", I_WIFI, GuideAction::Soon, Page::Home, 0},    {"Controller", I_GAMES, GuideAction::Soon, Page::Home, 0},
-                        {"System", I_SETTINGS, GuideAction::Soon, Page::Home, 0}};
-const Row* ROWS[3] = {GAMES, ME, SETTINGS};
-const int ROW_COUNT[3] = {3, 7, 7};
+enum HomeCmd { HomeNone, HomeResume, HomeFriends, HomeParty, HomeMessages };
 const char* BLADE[3] = {"Games", nullptr, "Settings"};
 
-// Artboard 4's tabs (Invite to Game): widths and icons.
-const float TAB_W[4] = {158, 388, 158, 158};
-const uint32_t TAB_ICON[4] = {I_GROUPS, I_PERSON, I_FLAG, I_SCHEDULE};
-const int LIST_ROWS = 6;
-
-// Community's tabs (the 360's): the chosen one is 388 wide, the others 158.
-const uint32_t COMM_ICON[4] = {I_GROUPS, I_PERSON, I_MAIL, I_GAMES};
-const int MSG_ROWS = 8;                    // 56-unit rows under the tabs
-const char* PARTY_OPTIONS[3] = {"Invite Players to Party", "Invite Party to Game", "Party Options:  Party Chat"};
-
-void utf8(uint32_t cp, char out[5]) {
-    if (cp < 0x80) {
-        out[0] = char(cp), out[1] = 0;
-    } else if (cp < 0x800) {
-        out[0] = char(0xc0 | (cp >> 6)), out[1] = char(0x80 | (cp & 0x3f)), out[2] = 0;
-    } else {
-        out[0] = char(0xe0 | (cp >> 12)), out[1] = char(0x80 | ((cp >> 6) & 0x3f)), out[2] = char(0x80 | (cp & 0x3f)), out[3] = 0;
-    }
-}
-
-ImU32 alpha(ImU32 c, float a) {
-    a = std::clamp(a, 0.0f, 1.0f);
-    unsigned int al = (c >> IM_COL32_A_SHIFT) & 0xff;
-    return (c & ~IM_COL32_A_MASK) | (ImU32(al * a + 0.5f) << IM_COL32_A_SHIFT);
-}
-
-float ease_guide(float t) { return css_bezier(0.1f, 0.9f, 0.2f, 1.0f, t); }
-
-// Where AddText must start (y) so that a line box centred on cy has its baseline where CSS puts it: cy + (ascent - descent) / 2 em,
-// whatever the line-height (the half-leading is shared out evenly). ImGui puts the baseline ascent / (ascent + descent) of the size down.
-float css_top(const FontMetrics& m, float size, float cy) { return cy + size * (m.asc - m.desc) * 0.5f - size * m.asc / (m.asc + m.desc); }
-
-// Where AddText must start so that the capital letters are centred on cy (a word next to a round key looks centred on it).
-float caps_top(const FontMetrics& m, float size, float cy) { return cy + size * m.cap * 0.5f - size * m.asc / (m.asc + m.desc); }
-
-// Text in a line box centred on cy (CSS align-items: center), starting at x or, with right, ending there.
-void text_mid(ImDrawList* dl, ImFont* f, const FontMetrics& m, float size, float x, float cy, ImU32 col, const char* text, bool right = false) {
-    float w = f->CalcTextSizeA(size, FLT_MAX, 0.0f, text).x;
-    dl->AddText(f, size, ImVec2(right ? x - w : x, css_top(m, size, cy)), col, text);
-}
-
-// The same, cut with an ellipsis to fit max_w (CSS text-overflow: ellipsis).
-void text_fit(ImDrawList* dl, ImFont* f, const FontMetrics& m, float size, float x, float cy, float max_w, ImU32 col, const std::string& text) {
-    if (f->CalcTextSizeA(size, FLT_MAX, 0.0f, text.c_str()).x <= max_w) return text_mid(dl, f, m, size, x, cy, col, text.c_str());
-    std::string t = text;
-    while (!t.empty() && f->CalcTextSizeA(size, FLT_MAX, 0.0f, (t + "...").c_str()).x > max_w) {
-        t.pop_back();
-        while (!t.empty() && (t.back() & 0xc0) == 0x80) t.pop_back();
-    }
-    text_mid(dl, f, m, size, x, cy, col, (t + "...").c_str());
-}
-
-void icon_mid(ImDrawList* dl, const GuideAssets& a, float size, float cx, float cy, ImU32 col, uint32_t icon) {
-    if (!a.icons || !icon) return;
-    char ic[5];
-    utf8(icon, ic);
-    float w = a.icons->CalcTextSizeA(size, FLT_MAX, 0, ic).x;
-    dl->AddText(a.icons, size, ImVec2(cx - w * 0.5f, css_top(a.icons_m, size, cy)), col, ic);
-}
-
-// CSS writing-mode: vertical-rl: the text runs down from top, turned a quarter clockwise, its column centred on cx. Laid out without a
-// clip rect (ImGui drops glyphs outside the clip rect before they are turned, which cut the blade names short).
-void vertical_text(ImDrawList* dl, ImFont* f, const FontMetrics& m, float size, float cx, float top, ImU32 col, const char* text) {
-    float baseline_x = cx - size * (m.asc - m.desc) * 0.5f;  // the ascent side faces right
-    ImVec2 at(baseline_x + size * m.asc / (m.asc + m.desc), top);
-    int from = dl->VtxBuffer.Size;
-    dl->PushClipRectFullScreen();
-    dl->AddText(f, size, at, col, text);
-    dl->PopClipRect();
-    for (int i = from; i < dl->VtxBuffer.Size; i++) {
-        ImVec2 p = dl->VtxBuffer[i].pos;
-        float dx = p.x - at.x, dy = p.y - at.y;
-        dl->VtxBuffer[i].pos = ImVec2(at.x - dy, at.y + dx);
-    }
-}
-
-// A key of the hint bar: a 20-unit circle (A, B, X, Y) or a 34x22 rounded box (LB, RB) with a 2-unit ring inside its edge, centred on cy,
-// its letters centred by their capital height. Returns its width in pixels.
-float hint_key(ImDrawList* dl, const GuideAssets& a, const char* key, ImU32 ring, float x, float cy, float s, float op) {
-    bool wide = strlen(key) > 1;
-    float kw = (wide ? 34 : 20) * s, kh = (wide ? 22 : 20) * s, rr = (wide ? 6 : 10) * s;
-    ImVec2 k0(x, cy - kh / 2), k1(x + kw, cy + kh / 2);
-    dl->AddRectFilled(k0, k1, alpha(BLACK, op), rr);
-    dl->AddRect(ImVec2(k0.x + s, k0.y + s), ImVec2(k1.x - s, k1.y - s), alpha(ring, op), rr - s, 0, 2 * s);
-    ImFont* kf = a.text_bold ? a.text_bold : a.text;
-    float size = (wide ? 11 : 12) * s;
-    float tw = kf->CalcTextSizeA(size, FLT_MAX, 0, key).x;
-    dl->AddText(kf, size, ImVec2(x + (kw - tw) * 0.5f, caps_top(a.bold_m, size, cy)), alpha(ring, op), key);
-    return kw;
-}
-
-// Toasts take the theme's accent; only a failure is red.
+// Toasts take the theme's accent; only a warning is red.
 ImU32 toast_color(ToastKind k) { return k == ToastKind::Warning ? IM_COL32(0xee, 0x3b, 0x23, 255) : ACCENT; }
 
-// Canvas units to pixels: the frame's scale, the Guide's size (GUIDE_K around (640, GUIDE_CY)), then its open zoom around that centre.
-struct View {
-    ImVec2 origin;
-    float s, zoom;
-    ImVec2 pt(float x, float y) const {
-        float k = GUIDE_K * zoom;
-        return ImVec2(origin.x + (640 + (x - 640) * k) * s, origin.y + (GUIDE_CY + (y - 360) * k) * s);
-    }
-    float sz(float v) const { return v * s * zoom * GUIDE_K; }
-};
-
-struct Hint {
-    const char* key;
-    const char* label;
-    ImU32 ring;
-};
-const ImU32 RING_A = IM_COL32(0x5f, 0xd1, 0x1c, 255), RING_B = IM_COL32(0xff, 0x4a, 0x4f, 255), RING_X = IM_COL32(0x3c, 0x8c, 0xff, 255),
-            RING_Y = IM_COL32(0xff, 0xb4, 0x1f, 255);
-
-// The hint bar: a flex row 10 units under the panel, 27 in, 19-unit text, gaps 22 between hints and 7 inside one, a hint without a label
-// sits 8 from the next (LB RB). The keys and the words share one centre line (the words by their capitals).
-void hint_bar(ImDrawList* dl, const GuideAssets& a, const View& v, float x, float top, const Hint* hints, int n, float op) {
-    float cy = top + 12.5f;
-    for (int i = 0; i < n; i++) {
-        ImVec2 p = v.pt(x, cy);
-        x += hint_key(dl, a, hints[i].key, hints[i].ring, p.x, p.y, v.sz(1), op) / v.sz(1);
-        if (hints[i].label) {
-            x += 7;
-            ImVec2 q = v.pt(x, cy);
-            dl->AddText(a.text, v.sz(19), ImVec2(q.x, caps_top(a.text_m, v.sz(19), q.y)), alpha(WHITE, op), hints[i].label);
-            x += a.text->CalcTextSizeA(19, FLT_MAX, 0, hints[i].label).x + 22;
-        } else {
-            x += 8;
-        }
-    }
+// The 360's words for a refusal, by the server's error code; fallback when the code has none of its own.
+std::string failure_text(const NetResult& r, const char* fallback) {
+    if (r.code.empty()) return "Connection lost. Please reconnect to FH2MP.";
+    if (r.code == "player_not_found") return "The gamertag you entered does not exist on FH2MP.";
+    if (r.code == "already_friends") return "This person is already on your friends list.";
+    if (r.code == "self_request") return "You can't add yourself as a friend.";
+    if (r.code == "request_limit") return r.message;
+    return fallback;
 }
 
-// A player's picture, or the canvas' stand-in: a coloured square with a person's shape rising from its bottom edge.
-void player_pic(ImDrawList* dl, const GuideAssets& a, ImTextureID pic, uint64_t xuid, ImVec2 p0, ImVec2 p1, float op) {
-    if (pic) {
-        dl->AddImage(pic, p0, p1, ImVec2(0, 0), ImVec2(1, 1), alpha(WHITE, op));
-        return;
-    }
-    dl->AddRectFilled(p0, p1, alpha(PIC_COLORS[xuid % (sizeof PIC_COLORS / sizeof PIC_COLORS[0])], op));
-    float side = p1.x - p0.x;
-    dl->PushClipRect(p0, p1, true);
-    icon_mid(dl, a, side * 1.03f, (p0.x + p1.x) * 0.5f, p1.y - side * 0.38f, alpha(IM_COL32(0, 0, 0, 140), op), I_PERSON);
-    dl->PopClipRect();
-}
-
-bool in_my_game(const Friend& f, const Friend& me) { return !me.lobby_id.empty() && f.lobby_id == me.lobby_id; }
-
-std::string lobby_words(const Friend& f) {
-    if (!f.lobby_status.empty()) return f.lobby_status;
-    if (f.lobby_kind == "freeroam") return "Free Roam";
-    if (f.lobby_kind == "roadtrip") return "Road Trip";
-    return f.lobby_kind;
-}
-
-std::string ago(int secs) {
-    if (secs < 0) return "";
-    if (secs < 60) return "Just now";
-    if (secs < 120) return "1 minute ago";
-    if (secs < 3600) return std::to_string(secs / 60) + " minutes ago";
-    if (secs < 7200) return "1 hour ago";
-    return std::to_string(secs / 3600) + " hours ago";
-}
-
-std::string expires(int secs) {
-    if (secs < 60) return "Expires in under a minute";
-    if (secs < 120) return "Expires in 1 minute";
-    return "Expires in " + std::to_string(secs / 60) + " minutes";
-}
-
-uint32_t kind_icon(MessageItem::Kind k) { return k == MessageItem::GameInvite ? I_GAMES : k == MessageItem::FriendRequest ? I_PERSON_ADD : I_MAIL; }
-
-std::string hidden_key(const MessageItem& m) { return "chat:" + m.chat + ":" + std::to_string(m.id); }
-
-// The scroll arrows at the bottom right of a list: up when rows are above, down when rows are below.
-void scroll_marks(ImDrawList* dl, const GuideAssets& a, const View& v, float right, float cy, bool up, bool down, float op) {
-    ImVec2 p = v.pt(right, cy);
-    if (down) icon_mid(dl, a, v.sz(28), p.x - v.sz(14), p.y, alpha(MUTED, op), I_EXPAND_MORE);
-    if (up) icon_mid(dl, a, v.sz(28), p.x - v.sz(42), p.y, alpha(MUTED, op), I_EXPAND_LESS);
-}
+const char* game_words(const std::string& kind) { return kind == "roadtrip" ? "Road Trip" : "Free Roam"; }
 
 }  // namespace
 
@@ -257,7 +52,7 @@ float css_bezier(float x1, float y1, float x2, float y2, float t) {
     return by(u);
 }
 
-int PadReader::feed(uint16_t buttons, int16_t lx, int16_t ly, uint64_t now_ms, bool open, PadEvent* out) {
+int PadReader::feed(uint16_t buttons, uint8_t lt, uint8_t rt, int16_t lx, int16_t ly, uint64_t now_ms, bool open, PadEvent* out) {
     int n = 0;
     if (buttons & padbits::Guide) {
         if (!guide_down) guide_down = true, guide_since = now_ms;
@@ -266,13 +61,16 @@ int PadReader::feed(uint16_t buttons, int16_t lx, int16_t ly, uint64_t now_ms, b
         if (open && guide_down && !guide_fired) out[n++] = PadEvent::Toggle;  // a short press closes an open Guide
         guide_down = guide_fired = false;
     }
+    bool ltd = lt >= 128, rtd = rt >= 128;
     if (open) {
         uint16_t pressed = buttons & ~prev;
         const struct { uint16_t b; PadEvent e; } map[] = {{padbits::A, PadEvent::A},   {padbits::B, PadEvent::B},   {padbits::X, PadEvent::X},
                                                           {padbits::Y, PadEvent::Y},   {padbits::Lb, PadEvent::Lb}, {padbits::Rb, PadEvent::Rb},
-                                                          {padbits::Start, PadEvent::Start}};
+                                                          {padbits::L3, PadEvent::L3}, {padbits::Start, PadEvent::Start}};
         for (auto& m : map)
             if (pressed & m.b) out[n++] = m.e;
+        if (ltd && !prev_lt) out[n++] = PadEvent::Lt;
+        if (rtd && !prev_rt) out[n++] = PadEvent::Rt;
         int d = -1;
         if (buttons & padbits::Up) d = int(PadEvent::Up);
         else if (buttons & padbits::Down) d = int(PadEvent::Down);
@@ -289,7 +87,7 @@ int PadReader::feed(uint16_t buttons, int16_t lx, int16_t ly, uint64_t now_ms, b
     } else {
         dir = -1;
     }
-    prev = buttons;
+    prev = buttons, prev_lt = ltd, prev_rt = rtd;
     return n;
 }
 
@@ -304,322 +102,279 @@ float Guide::Tween::value(double now) const {
     return from + (to - from) * ease_guide(std::clamp(t, 0.0f, 1.0f));
 }
 
+void Guide::ListFocus::clamp(int n, int visible) {
+    row = std::clamp(row, 0, std::max(0, n - 1));
+    top = std::clamp(top, 0, std::max(0, n - visible));
+    if (row < top) top = row;
+    if (row >= top + visible) top = row - visible + 1;
+    bar.set(float(row - top));
+}
+
+void Guide::ListFocus::move(int dy, int n, int visible, double now) {
+    if (n <= 0) return;
+    row = std::clamp(row + dy, 0, n - 1);
+    if (row < top) top = row;
+    if (row >= top + visible) top = row - visible + 1;
+    bar.go(float(row - top), now, 0.14f);
+}
+
+// ---- the stack of screens
+
 void Guide::toggle(double now) {
     open = !open;
     if (open) {
-        opened_ = now, page_ = Page::Home, page_at_ = -10;
+        opened_ = now, stack_ = {Page::Home}, page_at_ = -10, flow_base_ = -1;
+        if (box_waiting_.on) box_ = box_waiting_, box_.at = now, box_waiting_.on = false;
     } else {
-        closed_ = now, sent_.clear();
+        closed_ = now, sent_.clear(), box_.on = false, draft_ = Draft(), waiting_xuid_ = 0;
     }
     if (!widths_set_) {
-        for (int i = 0; i < 3; i++) width_[i].from = width_[i].to = (i == blade_ ? 832.0f : 64.0f);
-        focus_[1] = 1, bar_[1].from = bar_[1].to = 1;  // canvas: the player's blade opens on Friends
+        for (int i = 0; i < 3; i++) width_[i].set(i == blade_ ? 832.0f : 64.0f);
+        bar_[1].set(1);  // canvas: the player's blade opens on Friends
         widths_set_ = true;
     }
 }
 
-void Guide::open_on(Page p, double now, int tab) {
-    if (p == Page::Invite) tab_ = 1, list_bar_.go(float(row_[1] - top_[1]), now, 0);
-    if (p == Page::Community) comm_tab_ = tab, comm_at_ = -10;
-    if (!open) {
-        toggle(now);
-        page_ = p, page_at_ = -10;
-        go_page(p, 1, now);
-        page_at_ = -10;
-    } else {
-        go_page(p, 1, now);
+void Guide::push(Page p, double now) {
+    stack_.push_back(p), page_dir_ = 1, page_at_ = now;
+    entered(p, now);
+}
+
+void Guide::pop(double now) {
+    if (stack_.size() <= 1) return toggle(now);
+    stack_.pop_back(), page_dir_ = -1, page_at_ = now;
+    entered(page(), now);
+}
+
+void Guide::pop_to(size_t depth, double now) {
+    if (depth == 0) {
+        if (open) toggle(now);
+        return;
+    }
+    if (stack_.size() <= depth) return;
+    stack_.resize(depth), page_dir_ = -1, page_at_ = now;
+    entered(page(), now);
+}
+
+// A screen is on top again: its lists fit what the server has now.
+void Guide::entered(Page p, double now) {
+    (void)now;
+    if (p == Page::Community) {
+        friends_.clamp(1 + int(friend_rows().size()), 6);
+        messages_.clamp(1 + int(messages().size()), 8);
+    } else if (p == Page::Profile) {
+        for (int t = 0; t < 2; t++) {
+            std::vector<Opt> o = profile_options(t);
+            if (prof_row_[t] < 0 || prof_row_[t] >= int(o.size()) || !o[prof_row_[t]].enabled) prof_row_[t] = first_enabled(o);
+        }
+        prof_bar_.set(float(std::max(0, prof_row_[prof_tab_])));
+    } else if (p == Page::Message) {
+        std::vector<Opt> o = message_options(open_msg_);
+        if (msg_opt_ < 0 || msg_opt_ >= int(o.size()) || !o[msg_opt_].enabled) msg_opt_ = first_enabled(o);
+        opt_bar_.set(float(std::max(0, msg_opt_)));
+    } else if (p == Page::CreateNew) {
+        std::vector<Opt> o = create_options();
+        if (new_row_ < 0 || new_row_ >= int(o.size()) || !o[new_row_].enabled) new_row_ = first_enabled(o);
+        new_bar_.set(float(std::max(0, new_row_)));
+    } else if (p == Page::Recipients) {
+        std::vector<const Friend*> rows = pick_rows();
+        pick_.clamp(int(rows.size()), 6);
+        // a game invite: the focus starts on the first friend who is not already in the game
+        if (draft_.kind == Draft::GameInvite && pick_.row < int(rows.size()) && same_game(*rows[pick_.row], social_.me))
+            for (int i = 0; i < int(rows.size()); i++)
+                if (!same_game(*rows[i], social_.me)) {
+                    pick_.row = i, pick_.clamp(int(rows.size()), 6);
+                    break;
+                }
+    } else if (p == Page::Compose) {
+        std::vector<Opt> o = draft_options();
+        if (draft_row_ < 0 || draft_row_ >= int(o.size()) || !o[draft_row_].enabled) draft_row_ = first_enabled(o);
+        draft_bar_.set(float(std::max(0, draft_row_)));
     }
 }
 
-void Guide::go_page(Page p, int dir, double now) {
-    page_ = p, page_dir_ = dir, page_at_ = now;
-    if (p == Page::Community) {
-        int n = 1 + int(messages().size());
-        msg_row_ = std::clamp(msg_row_, 0, n - 1);
-        msg_top_ = std::clamp(msg_top_, 0, std::max(0, n - MSG_ROWS));
-        msg_bar_.go(float(msg_row_ - msg_top_), now, 0);
-        list_bar_.go(float(row_[1] - top_[1]), now, 0);
-        party_bar_.go(float(party_row_), now, 0);
+void Guide::open_community(int tab, double now) {
+    if (!open) toggle(now);
+    stack_ = {Page::Home, Page::Community}, comm_tab_ = tab, comm_at_ = -10, page_at_ = -10;
+    entered(Page::Community, now);
+}
+
+void Guide::open_invite(double now) {
+    bool was = open;
+    if (!open) toggle(now);
+    flow_base_ = was ? int(stack_.size()) : 0;
+    draft_ = Draft();
+    draft_.kind = Draft::GameInvite;
+    pick_many_ = false, pick_ = ListFocus();
+    if (was) {
+        push(Page::Recipients, now);
+    } else {
+        stack_ = {Page::Home, Page::Recipients}, page_at_ = -10;
+        entered(Page::Recipients, now);
     }
-    if (p == Page::Message) msg_opt_ = 0, opt_bar_.go(0, now, 0);
 }
 
 void Guide::set_social(const Social& s) {
     social_ = s;
-    for (int t = 0; t < 4; t++) {
-        int n = int(tab_list(t).size());
-        row_[t] = std::clamp(row_[t], 0, std::max(0, n - 1));
-        top_[t] = std::clamp(top_[t], 0, std::max(0, n - LIST_ROWS));
+    if (!open) return;
+    Page p = page();
+    if (p == Page::Community || p == Page::Recipients || p == Page::Profile || p == Page::Compose) {
+        friends_.clamp(1 + int(friend_rows().size()), 6);
+        messages_.clamp(1 + int(messages().size()), 8);
+        pick_.clamp(int(pick_rows().size()), 6);
+        // an option list can lose or grey the focused entry when the server's state changes
+        if (p == Page::Profile) {
+            std::vector<Opt> o = profile_options(prof_tab_);
+            int& row = prof_row_[prof_tab_];
+            if (row < 0 || row >= int(o.size()) || !o[row].enabled) row = first_enabled(o), prof_bar_.set(float(std::max(0, row)));
+        }
+        if (p == Page::Compose) {
+            std::vector<Opt> o = draft_options();
+            if (draft_row_ < 0 || draft_row_ >= int(o.size()) || !o[draft_row_].enabled) draft_row_ = first_enabled(o), draft_bar_.set(float(std::max(0, draft_row_)));
+        }
     }
-    int n = 1 + int(messages().size());
-    msg_row_ = std::clamp(msg_row_, 0, n - 1);
-    msg_top_ = std::clamp(msg_top_, 0, std::max(0, n - MSG_ROWS));
 }
 
-// The rows of a tab of artboard 4's friend list, sorted by online status: in a game, online, offline; by name within each.
-std::vector<const Friend*> Guide::tab_list(int tab) const {
-    std::vector<const Friend*> out;
-    for (const Friend& f : social_.friends) {
-        bool in = tab == 1 || (tab == 0 && in_my_game(f, social_.me)) ||
-                  (tab == 2 && !social_.me.club.empty() && f.club == social_.me.club);  // tab 3 (recent players) has no source yet
-        if (in) out.push_back(&f);
-    }
-    std::stable_sort(out.begin(), out.end(), [](const Friend* x, const Friend* y) {
-        if (x->state != y->state) return x->state > y->state;
-        return _stricmp(x->tag.c_str(), y->tag.c_str()) < 0;
-    });
-    return out;
+// ---- who is who
+
+const Friend* Guide::find(uint64_t xuid) const {
+    for (const Friend& f : social_.friends)
+        if (f.xuid == xuid) return &f;
+    for (const Friend& f : social_.requests)
+        if (f.xuid == xuid) return &f;
+    for (const Friend& f : social_.outgoing)
+        if (f.xuid == xuid) return &f;
+    return nullptr;
 }
 
-// The Messages tab: game invites (newest first), friend requests, then friends' messages (unread first).
-std::vector<MessageItem> Guide::messages() const {
-    std::vector<MessageItem> out;
-    for (const ReceivedInvite& iv : social_.invites) {
-        MessageItem m;
-        m.kind = MessageItem::GameInvite, m.from = iv.from, m.id = iv.id, m.text = iv.text, m.age = iv.age, m.expires_in = iv.expires_in;
-        m.unread = true;
-        out.push_back(m);
-    }
-    for (const Friend& f : social_.requests) {
-        MessageItem m;
-        m.kind = MessageItem::FriendRequest, m.from = f, m.unread = true;
-        out.push_back(m);
-    }
-    std::vector<MessageItem> texts;
-    for (const ChatThread& c : social_.chats) {
-        if (c.last_incoming <= 0 || c.id == "club") continue;
-        MessageItem m;
-        m.kind = MessageItem::Text, m.chat = c.id, m.id = c.last_incoming, m.text = c.last, m.unread = c.unread > 0;
-        if (hidden_.count(hidden_key(m))) continue;
-        m.from.xuid = strtoull(c.id.c_str(), nullptr, 10), m.from.tag = c.title;
-        for (const Friend& f : social_.friends)
-            if (f.xuid == m.from.xuid) m.from = f;
-        texts.push_back(m);
-    }
-    std::stable_sort(texts.begin(), texts.end(), [](const MessageItem& x, const MessageItem& y) { return x.unread > y.unread; });
-    out.insert(out.end(), texts.begin(), texts.end());
-    return out;
+Relation Guide::relation(uint64_t xuid) const {
+    for (const Friend& f : social_.friends)
+        if (f.xuid == xuid) return Relation::Friend;
+    for (const Friend& f : social_.requests)
+        if (f.xuid == xuid) return Relation::RequestReceived;
+    for (const Friend& f : social_.outgoing)
+        if (f.xuid == xuid) return Relation::RequestSent;
+    return Relation::Stranger;
 }
 
-std::vector<const char*> Guide::message_options(const MessageItem& m) const {
-    switch (m.kind) {
-    case MessageItem::GameInvite: return {"Accept Invite", "Reply", "View Profile", "Delete", "Block Communications"};
-    case MessageItem::FriendRequest: return {"Accept Friend Request", "Decline", "View Profile", "Block Communications"};
-    case MessageItem::Text: return {"Reply", "View Profile", "Delete", "Block Communications"};
-    }
-    return {};
+// This player is in a lobby the server can seat others in (not the game server's fallback world, where nobody can be seated).
+bool Guide::my_game_takes_invites() const { return !social_.me.lobby_id.empty() && social_.me.lobby_id != "default"; }
+
+// The 360's rule for Invite to Game: this player is in a game session the other one is not in. FH2MP sends invites to friends only.
+bool Guide::can_invite(const Friend& f) const {
+    return relation(f.xuid) == Relation::Friend && my_game_takes_invites() && !same_game(f, social_.me);
 }
 
-GuideRequest Guide::handle(PadEvent e, double now) {
+// Join Session In Progress: their game is one others can be seated in (a private Free Roam is not listed by the server at all), it is
+// not this player's, and it has room.
+bool Guide::can_join(const Friend& f) const {
+    if (f.lobby_id.empty() || f.lobby_id == "default" || same_game(f, social_.me)) return false;
+    return f.lobby_capacity <= 0 || f.lobby_players < f.lobby_capacity;
+}
+
+// What is waiting from this player, as the 360 showed it in place of their status.
+std::string Guide::waiting_words(const Friend& f, Relation rel) const {
+    if (rel == Relation::RequestReceived) return "Wants to be your friend";
+    if (rel == Relation::RequestSent) return "Friend request pending";
+    for (const ReceivedInvite& iv : social_.invites)
+        if (iv.from.xuid == f.xuid) return "Wants to play with you";
+    for (const TextMessage& m : social_.texts)
+        if (m.from == f.xuid && m.unread) return "Sent you a message";
+    return "";
+}
+
+// ---- the message box
+
+void Guide::show_box(int tag, const char* title, const std::string& body, std::vector<std::string> buttons, double now) {
+    Box b;
+    b.on = true, b.title = title, b.body = body, b.buttons = std::move(buttons), b.tag = tag, b.at = now;
+    b.bar.set(0);
+    if (open) box_ = b;
+    else box_waiting_ = b;
+}
+
+void Guide::box_done(int tag, int button, std::vector<GuideRequest>& out, double now) {
+    (void)out;
+    box_.on = false;
+    if (tag == BoxDiscard && button == 0) end_flow(now);  // "Yes, discard message"
+}
+
+// ---- events
+
+std::vector<GuideRequest> Guide::handle(PadEvent e, double now) {
+    std::vector<GuideRequest> out;
     if (e == PadEvent::Toggle) {
         toggle(now);
-        return {};
+        return out;
     }
-    switch (page_) {
-    case Page::Home: return handle_home(e, now);
-    case Page::Community: return handle_community(e, now);
-    case Page::Invite: return handle_list(e, now);
-    case Page::Message: return handle_message(e, now);
+    if (box_.on) {
+        int n = int(box_.buttons.size());
+        if (e == PadEvent::Up || e == PadEvent::Down) {
+            box_.focus = std::clamp(box_.focus + (e == PadEvent::Up ? -1 : 1), 0, n - 1);
+            box_.bar.go(float(box_.focus), now, 0.14f);
+        } else if (e == PadEvent::A) {
+            box_done(box_.tag, box_.focus, out, now);
+        } else if (e == PadEvent::B) {
+            box_done(box_.tag, n - 1, out, now);  // B is the last button: OK, or the "No" of a question
+        }
+        return out;
     }
-    return {};
+    switch (page()) {
+    case Page::Home: handle_home(e, out, now); break;
+    case Page::Community: handle_community(e, out, now); break;
+    case Page::Profile: handle_profile(e, out, now); break;
+    case Page::Message: handle_message(e, out, now); break;
+    case Page::CreateNew: handle_create(e, out, now); break;
+    case Page::Recipients: handle_pick(e, out, now); break;
+    case Page::Compose: handle_compose(e, out, now); break;
+    case Page::Keyboard: handle_keyboard(e, out, now); break;
+    }
+    return out;
 }
 
-GuideRequest Guide::handle_home(PadEvent e, double now) {
-    GuideRequest r;
-    int n = ROW_COUNT[blade_];
+// The blades' rows as the canvas has them (artboard 1). A row with no screen behind it yet is greyed.
+std::vector<Opt> Guide::home_rows(int blade) const {
+    if (blade == 0)
+        return {{"Forza Horizon 2", HomeResume, true, I_GAMES}, {"Achievements", HomeNone, false, I_TROPHY}, {"Game Library", HomeNone, false, I_APPS}};
+    if (blade == 1)
+        return {{"Leave Game", HomeNone, false, 0},          {"Friends", HomeFriends, true, I_PERSON},  {"Party", HomeParty, true, I_GROUPS},
+                {"Messages", HomeMessages, true, I_MAIL},    {"Beacons & Activity", HomeNone, false, I_SENSORS},
+                {"Chat", HomeNone, false, I_CHAT},           {"Lobbies", HomeNone, false, I_FLAG}};
+    return {{"Profile", HomeNone, false, I_PERSON},       {"Theme", HomeNone, false, I_PALETTE},  {"Voice", HomeNone, false, I_MIC},
+            {"Notifications", HomeNone, false, I_BELL},   {"Network", HomeNone, false, I_WIFI},   {"Controller", HomeNone, false, I_GAMES},
+            {"System", HomeNone, false, I_SETTINGS}};
+}
+
+void Guide::handle_home(PadEvent e, std::vector<GuideRequest>& out, double now) {
+    std::vector<Opt> rows = home_rows(blade_);
+    int& f = focus_[blade_];
     switch (e) {
     case PadEvent::Up:
-    case PadEvent::Down: {
-        int f = std::clamp(focus_[blade_] + (e == PadEvent::Up ? -1 : 1), 0, n - 1);
-        focus_[blade_] = f;
-        bar_[blade_].go(float(f), now, 0.14f);
+    case PadEvent::Down:
+        f = step_focus(rows, f, e == PadEvent::Up ? -1 : 1);
+        if (f >= 0) bar_[blade_].go(float(f), now, 0.14f);
         break;
-    }
     case PadEvent::Left:
     case PadEvent::Lb: switch_to(blade_ - 1, now); break;
     case PadEvent::Right:
     case PadEvent::Rb: switch_to(blade_ + 1, now); break;
     case PadEvent::B: toggle(now); break;
     case PadEvent::A: {
-        const Row& row = ROWS[blade_][focus_[blade_]];
-        if (row.action == GuideAction::Resume) {
+        if (f < 0 || f >= int(rows.size()) || !rows[f].enabled) break;
+        int cmd = rows[f].cmd;
+        if (cmd == HomeResume) {
             toggle(now);
+            GuideRequest r;
             r.action = GuideAction::Resume;
-        } else if (row.action == GuideAction::None) {
-            if (row.page == Page::Community) comm_tab_ = row.tab, comm_at_ = -10;
-            go_page(row.page, 1, now);
+            out.push_back(r);
         } else {
-            toast(ToastKind::Info, row.label, "Coming in a later build", row.icon ? row.icon : I_GAMES, 0, now);
-            r.action = GuideAction::Soon;
+            comm_tab_ = cmd == HomeParty ? TabParty : cmd == HomeMessages ? TabMessages : TabFriends, comm_at_ = -10;
+            push(Page::Community, now);
         }
         break;
     }
     default: break;
     }
-    return r;
-}
-
-// Invite to Game (artboard 4).
-GuideRequest Guide::handle_list(PadEvent e, double now) {
-    GuideRequest r;
-    std::vector<const Friend*> list = tab_list(tab_);
-    int n = int(list.size());
-    switch (e) {
-    case PadEvent::Up:
-    case PadEvent::Down: {
-        if (!n) break;
-        int f = std::clamp(row_[tab_] + (e == PadEvent::Up ? -1 : 1), 0, n - 1);
-        row_[tab_] = f;
-        if (f < top_[tab_]) top_[tab_] = f;
-        if (f >= top_[tab_] + LIST_ROWS) top_[tab_] = f - LIST_ROWS + 1;
-        list_bar_.go(float(f - top_[tab_]), now, 0.14f);
-        break;
-    }
-    case PadEvent::Left:
-    case PadEvent::Lb:
-    case PadEvent::Right:
-    case PadEvent::Rb: {
-        int d = (e == PadEvent::Left || e == PadEvent::Lb) ? -1 : 1;
-        int t = std::clamp(tab_ + d, 0, 3);
-        if (t != tab_) tab_dir_ = d, tab_ = t, tab_at_ = now, list_bar_.go(float(row_[t] - top_[t]), now, 0);
-        break;
-    }
-    case PadEvent::B: go_page(Page::Home, -1, now); break;
-    case PadEvent::A: {
-        if (!n) break;
-        // any friend but one already in your game (canvas: that row does nothing); an offline friend finds it in Messages later
-        const Friend& f = *list[row_[tab_]];
-        if (!in_my_game(f, social_.me)) r.action = GuideAction::Invite, r.xuid = f.xuid, r.name = f.tag;
-        break;
-    }
-    default: break;
-    }
-    return r;
-}
-
-GuideRequest Guide::delete_message(const MessageItem& m, double now) {
-    GuideRequest r;
-    r.xuid = m.from.xuid, r.name = m.from.tag, r.id = m.id;
-    if (m.kind == MessageItem::GameInvite) {
-        r.action = GuideAction::Decline;
-        for (size_t i = 0; i < social_.invites.size(); i++)
-            if (social_.invites[i].id == m.id) social_.invites.erase(social_.invites.begin() + i);  // until the server's list says so
-    } else if (m.kind == MessageItem::FriendRequest) {
-        r.action = GuideAction::DeclineFriend;
-        for (size_t i = 0; i < social_.requests.size(); i++)
-            if (social_.requests[i].xuid == m.from.xuid) social_.requests.erase(social_.requests.begin() + i);
-    } else {
-        hidden_.insert(hidden_key(m));  // the chat keeps the line; the Message Center stops showing it
-        r.action = GuideAction::None;
-    }
-    int n = 1 + int(messages().size());
-    msg_row_ = std::clamp(msg_row_, 0, n - 1);
-    msg_top_ = std::clamp(msg_top_, 0, std::max(0, n - MSG_ROWS));
-    msg_bar_.go(float(msg_row_ - msg_top_), now, 0.14f);
-    return r;
-}
-
-GuideRequest Guide::handle_community(PadEvent e, double now) {
-    GuideRequest r;
-    if (e == PadEvent::Left || e == PadEvent::Lb || e == PadEvent::Right || e == PadEvent::Rb) {
-        int d = (e == PadEvent::Left || e == PadEvent::Lb) ? -1 : 1;
-        int t = std::clamp(comm_tab_ + d, 0, 3);
-        if (t != comm_tab_) comm_dir_ = d, comm_tab_ = t, comm_at_ = now;
-        return r;
-    }
-    if (e == PadEvent::B) {
-        go_page(Page::Home, -1, now);
-        return r;
-    }
-    int dy = e == PadEvent::Up ? -1 : e == PadEvent::Down ? 1 : 0;
-    switch (comm_tab_) {
-    case TabFriends: {
-        std::vector<const Friend*> list = tab_list(1);
-        int n = int(list.size());
-        if (dy && n) {
-            int f = std::clamp(row_[1] + dy, 0, n - 1);
-            row_[1] = f;
-            if (f < top_[1]) top_[1] = f;
-            if (f >= top_[1] + LIST_ROWS) top_[1] = f - LIST_ROWS + 1;
-            list_bar_.go(float(f - top_[1]), now, 0.14f);
-        } else if (e == PadEvent::A && n) {
-            const Friend& f = *list[row_[1]];
-            if (!in_my_game(f, social_.me)) r.action = GuideAction::Invite, r.xuid = f.xuid, r.name = f.tag;
-        }
-        break;
-    }
-    case TabMessages: {
-        std::vector<MessageItem> list = messages();
-        int n = 1 + int(list.size());
-        if (dy) {
-            int f = std::clamp(msg_row_ + dy, 0, n - 1);
-            msg_row_ = f;
-            if (f < msg_top_) msg_top_ = f;
-            if (f >= msg_top_ + MSG_ROWS) msg_top_ = f - MSG_ROWS + 1;
-            msg_bar_.go(float(f - msg_top_), now, 0.14f);
-        } else if ((e == PadEvent::A && msg_row_ == 0) || e == PadEvent::Y) {
-            toast(ToastKind::Info, "Create New", "Coming in a later build", I_MAIL, 0, now);
-            r.action = GuideAction::Soon;
-        } else if (e == PadEvent::A) {
-            open_msg_ = list[msg_row_ - 1];
-            go_page(Page::Message, 1, now);
-            if (open_msg_.kind == MessageItem::Text && open_msg_.unread) {
-                r.action = GuideAction::ReadChat, r.id = open_msg_.id, r.name = open_msg_.chat;
-                for (ChatThread& c : social_.chats)
-                    if (c.id == open_msg_.chat) c.unread = 0;
-            }
-        } else if (e == PadEvent::X && msg_row_ > 0) {
-            r = delete_message(list[msg_row_ - 1], now);
-        }
-        break;
-    }
-    case TabParty: {
-        if (dy) {
-            party_row_ = std::clamp(party_row_ + dy, 0, 2);
-            party_bar_.go(float(party_row_), now, 0.14f);
-        } else if (e == PadEvent::A) {
-            toast(ToastKind::Info, PARTY_OPTIONS[party_row_], "Coming in a later build", I_GROUPS, 0, now);
-            r.action = GuideAction::Soon;
-        }
-        break;
-    }
-    default: break;
-    }
-    return r;
-}
-
-GuideRequest Guide::handle_message(PadEvent e, double now) {
-    GuideRequest r;
-    std::vector<const char*> opts = message_options(open_msg_);
-    int n = int(opts.size());
-    switch (e) {
-    case PadEvent::Up:
-    case PadEvent::Down:
-        msg_opt_ = std::clamp(msg_opt_ + (e == PadEvent::Up ? -1 : 1), 0, n - 1);
-        opt_bar_.go(float(msg_opt_), now, 0.14f);
-        break;
-    case PadEvent::B: go_page(Page::Community, -1, now); break;
-    case PadEvent::A: {
-        std::string opt = opts[msg_opt_];
-        const MessageItem m = open_msg_;
-        if (opt == "Delete" || opt == "Decline") {
-            r = delete_message(m, now);
-        } else if (opt == "Accept Invite" || opt == "Accept Friend Request") {
-            r.xuid = m.from.xuid, r.name = m.from.tag, r.id = m.id;
-            r.action = opt == "Accept Invite" ? GuideAction::Accept : GuideAction::AcceptFriend;
-            delete_message(m, now);  // it leaves the list
-            r.action = opt == "Accept Invite" ? GuideAction::Accept : GuideAction::AcceptFriend;
-        } else {
-            toast(ToastKind::Info, opt.c_str(), "Coming in a later build", kind_icon(m.kind), 0, now);
-            r.action = GuideAction::Soon;
-            break;
-        }
-        go_page(Page::Community, -1, now);
-        break;
-    }
-    default: break;
-    }
-    return r;
 }
 
 void Guide::switch_to(int b, double now) {
@@ -629,13 +384,108 @@ void Guide::switch_to(int b, double now) {
     for (int i = 0; i < 3; i++) width_[i].go(i == b ? 832.0f : 64.0f, now, 0.3f);
 }
 
-void Guide::toast(ToastKind kind, const char* title, const char* detail, uint32_t icon, ImTextureID pic, double now) {
-    toast_kind_ = kind, toast_title_ = title, toast_detail_ = detail, toast_icon_ = icon, toast_pic_ = pic, toast_at_ = now;
-    for (auto& c : toast_title_) c = char(toupper((unsigned char)c));
-    for (auto& c : toast_detail_) c = char(toupper((unsigned char)c));
+// ---- what the server's answers turn into: the 360's toasts (things that happened) and message boxes (things that could not)
+
+void Guide::on_result(const NetResult& r, const GuideAssets& a, double now) {
+    ImTextureID them = a.pic(r.xuid);
+    bool mine = draft_.sending && ((r.op == NetOp::Invite && draft_.kind == Draft::GameInvite) || (r.op == NetOp::SendText && draft_.kind == Draft::Message) ||
+                                   (r.op == NetOp::FriendRequest && draft_.kind == Draft::FriendRequest));
+    if (mine) {
+        // one answer per recipient of the message being sent
+        if (r.ok && r.op == NetOp::Invite) sent_.insert(r.xuid);
+        if (!r.ok) draft_.failed++, draft_.fail_code = r.code.empty() ? "-" : r.code;
+        if (--draft_.pending > 0) return;
+        draft_.sending = false;
+        if (draft_.failed) {
+            NetResult worst = r;
+            worst.code = draft_.fail_code == "-" ? "" : draft_.fail_code;
+            const char* fallback = draft_.kind == Draft::FriendRequest ? "Can't complete this process. Please try again." : "Your message could not be sent.";
+            show_box(BoxInfo, draft_.kind == Draft::GameInvite ? "Game Invite" : draft_.kind == Draft::FriendRequest ? "Friend Request" : "Message",
+                     failure_text(worst, fallback), {"OK"}, now);
+            draft_.failed = 0;
+            return;
+        }
+        if (draft_.kind == Draft::GameInvite) {
+            bool one = draft_.to.size() == 1;
+            toast(ToastKind::Invite, "Game invite sent", one ? ("To " + draft_.to[0].tag).c_str() : "", I_GAMES, one ? a.pic(draft_.to[0].xuid) : 0, now);
+        }
+        end_flow(now);
+        return;
+    }
+    switch (r.op) {
+    case NetOp::Invite:
+        if (waiting_xuid_ == r.xuid) waiting_xuid_ = 0;
+        if (r.ok) {
+            sent_.insert(r.xuid);
+            toast(ToastKind::Invite, "Game invite sent", ("To " + r.name).c_str(), I_GAMES, them, now);
+        } else {
+            show_box(BoxInfo, "Game Invite", failure_text(r, "Your message could not be sent."), {"OK"}, now);
+        }
+        break;
+    case NetOp::Accept:
+    case NetOp::Join:
+        if (waiting_xuid_ == r.xuid) waiting_xuid_ = 0;
+        if (r.ok) {
+            // until the game joins by itself, the place is held and the player goes online by hand
+            show_box(BoxInfo, r.op == NetOp::Accept ? "Game Invite" : "Join Session In Progress",
+                     "A place in " + r.name + "'s game is held for you. Go online in " + game_words(r.kind) + " to take it.", {"OK"}, now);
+        } else if (r.op == NetOp::Accept) {
+            bool gone = r.code == "invite_gone" || r.code == "lobby_gone";
+            show_box(BoxInfo, "Game Invite", gone ? "Couldn't accept game invite. The invitation is no longer available." : failure_text(r, "Couldn't accept game invite."),
+                     {"OK"}, now);
+        } else {
+            show_box(BoxInfo, "Join Session In Progress", failure_text(r, "Couldn't join the session in progress."), {"OK"}, now);
+        }
+        break;
+    case NetOp::Decline:
+        if (!r.ok) show_box(BoxInfo, "Game Invite", failure_text(r, "Couldn't decline game invite."), {"OK"}, now);
+        break;
+    case NetOp::FriendRequest:
+        if (!r.ok) show_box(BoxInfo, "Friend Request", failure_text(r, "Can't complete this process. Please try again."), {"OK"}, now);
+        break;
+    case NetOp::AcceptFriend:
+        if (!r.ok) show_box(BoxInfo, "Friend Request", failure_text(r, "Couldn't accept friend request."), {"OK"}, now);
+        break;
+    case NetOp::DeclineFriend:
+        if (!r.ok) show_box(BoxInfo, "Friend Request", failure_text(r, "Couldn't delete friend request."), {"OK"}, now);
+        break;
+    case NetOp::RemoveFriend:
+        if (!r.ok) show_box(BoxInfo, "Friends", failure_text(r, "Can't complete this process. Please try again."), {"OK"}, now);
+        break;
+    case NetOp::SendText:
+        if (!r.ok) show_box(BoxInfo, "Message", failure_text(r, "Your message could not be sent."), {"OK"}, now);
+        break;
+    case NetOp::ReadChat: break;
+    case NetOp::Received: toast(ToastKind::Invite, r.name.c_str(), "wants to play Forza Horizon 2", I_GAMES, them, now); break;
+    case NetOp::GotRequest: toast(ToastKind::Info, r.name.c_str(), "wants to be your friend", I_PERSON_ADD, 0, now); break;
+    case NetOp::GotText: toast(ToastKind::Info, r.name.c_str(), "sent you a message", I_MAIL, 0, now); break;
+    case NetOp::Online: toast(ToastKind::Info, r.name.c_str(), "is online", I_PERSON, 0, now); break;
+    }
 }
 
-bool Guide::busy(double now) const { return open || now - toast_at_ < 6.4; }
+// A toast that arrives while another plays waits for it (four at most; the oldest waiting one gives way).
+void Guide::toast(ToastKind kind, const char* title, const char* detail, uint32_t icon, ImTextureID pic, double now) {
+    ToastItem t;
+    t.kind = kind, t.title = title, t.detail = detail, t.icon = icon, t.pic = pic;
+    for (auto& c : t.title) c = char(toupper((unsigned char)c));
+    for (auto& c : t.detail) c = char(toupper((unsigned char)c));
+    if (now - toast_at_ < 6.3) {
+        if (toasts_.size() >= 4) toasts_.pop_front();
+        toasts_.push_back(t);
+        return;
+    }
+    toast_ = t, toast_at_ = now;
+}
+
+bool Guide::busy(double now) const { return open || now - toast_at_ < 6.4 || !toasts_.empty(); }
+
+// ---- drawing
+
+void Guide::page_motion(double now, float op, float* slide, float* pop, float* title_op) const {
+    float pe = page_at_ > 0 ? ease_guide(std::clamp(float((now - page_at_) / 0.26), 0.0f, 1.0f)) : 1;
+    *slide = (1 - pe) * 110 * page_dir_, *pop = op * pe;
+    *title_op = page_at_ > 0 ? ease_guide(std::clamp(float((now - page_at_) / 0.16), 0.0f, 1.0f)) : 1;
+}
 
 bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double now) {
     float s = std::min(w / 1280.0f, h / 720.0f);
@@ -644,12 +494,17 @@ bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double 
         float k = ease_guide(std::clamp(float((now - opened_) / 0.26), 0.0f, 1.0f));
         float zoom = 0.92f + 0.08f * k, op = k;
         dl->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), IM_COL32(0, 0, 0, int(153 * op)));
-        switch (page_) {
+        switch (page()) {
         case Page::Home: draw_home(dl, a, origin, s, zoom, op, now); break;
         case Page::Community: draw_community(dl, a, origin, s, zoom, op, now); break;
-        case Page::Invite: draw_list(dl, a, origin, s, zoom, op, now); break;
+        case Page::Profile: draw_profile(dl, a, origin, s, zoom, op, now); break;
         case Page::Message: draw_message(dl, a, origin, s, zoom, op, now); break;
+        case Page::CreateNew: draw_create(dl, a, origin, s, zoom, op, now); break;
+        case Page::Recipients: draw_pick(dl, a, origin, s, zoom, op, now); break;
+        case Page::Compose: draw_compose(dl, a, origin, s, zoom, op, now); break;
+        case Page::Keyboard: draw_keyboard(dl, a, origin, s, zoom, op, now); break;
         }
+        if (box_.on) draw_box(dl, a, origin, s, w, h, now);
     }
     draw_toast(dl, a, s, origin, now);
     return busy(now);
@@ -676,11 +531,10 @@ void Guide::draw_header(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, flo
 void Guide::draw_home(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now) {
     View v{origin, s, zoom};
     ImFont* tf = a.text;
-    // coming back from a page: the blades slide in like a page does
-    float pe = ease_guide(std::clamp(float((now - page_at_) / 0.26), 0.0f, 1.0f));
-    float pslide = (1 - pe) * 110 * page_dir_, pop = op * (page_at_ > 0 ? pe : 1);
+    float pslide, pop, title_op;
+    page_motion(now, op, &pslide, &pop, &title_op);  // coming back from a page: the blades slide in like a page does
     const char* title = blade_ == 1 ? gamertag.c_str() : BLADE[blade_];
-    draw_header(dl, a, origin, s, zoom, op, 160, 960, title, page_at_ > 0 ? ease_guide(std::clamp(float((now - page_at_) / 0.16), 0.0f, 1.0f)) : 1);
+    draw_header(dl, a, origin, s, zoom, op, 160, 960, title, title_op);
 
     int online = 0, waiting = 0;
     for (const Friend& f : social_.friends) online += f.state != Friend::Offline;
@@ -701,17 +555,19 @@ void Guide::draw_home(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float
         const char* name = bi == 1 ? gamertag.c_str() : BLADE[bi];
         vertical_text(dl, tf, a.text_m, v.sz(26), (l0.x + l1.x) * 0.5f, l0.y + v.sz(24), alpha(on ? WHITE : TAB_TEXT, pop), name);
         if (bw > lw + 1) {
+            std::vector<Opt> rows = home_rows(bi);
             ImVec2 b0 = v.pt(x + lw, top), b1 = v.pt(x + bw, top + bh);
             dl->AddRectFilled(b0, b1, alpha(PANEL, pop));
             dl->PushClipRect(b0, b1, true);
-            if (on) {
+            bool barred = on && focus_[bi] >= 0;
+            if (barred) {
                 float by = top + bar_[bi].value(now) * 66;
                 ImVec2 r0 = v.pt(x + lw, by), r1 = v.pt(x + lw + 736, by + 66);
                 dl->AddRectFilled(r0, r1, alpha(ACCENT, pop));
                 dl->AddLine(ImVec2(r0.x, r1.y - v.sz(0.5f)), ImVec2(r1.x, r1.y - v.sz(0.5f)), alpha(DARK, pop), v.sz(1));
             }
-            for (int i = 0; i < ROW_COUNT[bi]; i++) {
-                const Row& r = ROWS[bi][i];
+            for (int i = 0; i < int(rows.size()); i++) {
+                const Opt& r = rows[i];
                 float slide = 0, rop = 1;
                 if (on && since < 0.7f) {
                     float d = std::clamp((since - 0.04f - 0.028f * i) / 0.32f, 0.0f, 1.0f);
@@ -719,15 +575,16 @@ void Guide::draw_home(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float
                     slide = (1 - e) * 150 * switch_dir_, rop = e;
                 }
                 float y = top + i * 66;
-                bool hi = on && i == focus_[bi];
+                bool hi = barred && i == focus_[bi];
                 ImVec2 r0 = v.pt(x + lw + slide, y), r1 = v.pt(x + lw + 736 + slide, y + 66);
                 if (!hi) dl->AddLine(ImVec2(r0.x, r1.y - v.sz(0.5f)), ImVec2(r1.x, r1.y - v.sz(0.5f)), alpha(LINE, pop * rop), v.sz(1));
                 float cy = (r0.y + r1.y) * 0.5f;
-                text_mid(dl, tf, a.text_m, v.sz(26), r0.x + v.sz(30), cy, alpha(WHITE, pop * rop), r.label);
+                ImU32 fg = alpha(r.enabled ? WHITE : DISABLED, pop * rop);
+                text_mid(dl, tf, a.text_m, v.sz(26), r0.x + v.sz(30), cy, fg, r.label.c_str());
                 float right = r1.x - v.sz(22);
-                if (r.icon) icon_mid(dl, a, v.sz(32), right - v.sz(16), cy, alpha(WHITE, pop * rop), r.icon);
+                if (r.icon) icon_mid(dl, a, v.sz(32), right - v.sz(16), cy, fg, r.icon);
                 right -= v.sz(32 + 16);
-                const char* meta = bi == 1 && i == 1 ? friends_meta : bi == 1 && i == 3 ? messages_meta : bi == 2 && i == 1 ? "Xbox" : bi == 0 && i == 0 ? "Now playing" : "";
+                const char* meta = r.cmd == HomeFriends ? friends_meta : r.cmd == HomeMessages ? messages_meta : r.cmd == HomeResume ? "Now playing" : "";
                 if (*meta) text_mid(dl, tf, a.text_m, v.sz(20), right, cy, alpha(hi ? WHITE : MUTED, pop * rop), meta, true);
             }
             dl->PopClipRect();
@@ -738,310 +595,44 @@ void Guide::draw_home(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float
     hint_bar(dl, a, v, 187, 606, hints, 4, op);
 }
 
-void Guide::friend_rows(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float x, float top, int rows,
-                        const std::vector<const Friend*>& list, int focus, int top_index, float bar_row, float op) const {
-    View v{origin, s, zoom};
-    const float W = 862;
-    float by = top + bar_row * 69;
-    ImVec2 b0 = v.pt(x, by), b1 = v.pt(x + W, by + 69);
-    dl->AddRectFilled(b0, b1, alpha(ACCENT, op));
-    dl->AddLine(ImVec2(b0.x, b1.y - v.sz(0.5f)), ImVec2(b1.x, b1.y - v.sz(0.5f)), alpha(DARK, op), v.sz(1));
-    for (int i = top_index; i < std::min(int(list.size()), top_index + rows); i++) {
-        const Friend& f = *list[i];
-        float y = top + (i - top_index) * 69, cy = y + 34.5f;
-        bool foc = i == focus;
-        bool here = in_my_game(f, social_.me), off = f.state == Friend::Offline, sent = sent_.count(f.xuid) > 0;
-        if (!foc) dl->AddLine(v.pt(x, y + 68.5f), v.pt(x + W, y + 68.5f), alpha(LINE, op), v.sz(1));
-        player_pic(dl, a, a.pic(f.xuid), f.xuid, v.pt(x + 9, y + 4.5f), v.pt(x + 69, y + 64.5f), op);
-        ImU32 fg = foc ? WHITE : off ? MUTED2 : WHITE, sub = foc ? WHITE : MUTED2;
-        // name column: 22 and 20 units, line-height 1.15, 3 apart, centred: the lines' centres 13 above and 14 below the row's
-        ImVec2 n0 = v.pt(x + 78, cy - 13), n1 = v.pt(x + 78, cy + 14.15f);
-        text_fit(dl, a.text, a.text_m, v.sz(22), n0.x, n0.y, v.sz(305), alpha(fg, op), f.tag);
-        std::string second = !f.club.empty() ? "[" + f.club + "]" : f.level > 0 ? "Level " + std::to_string(f.level) : "";
-        if (!second.empty()) text_fit(dl, a.text, a.text_m, v.sz(20), n1.x, n1.y, v.sz(305), alpha(sub, op), second);
-        ImU32 ic = foc ? WHITE : (f.state == Friend::Playing || here) ? BRIGHT : f.state == Friend::Online ? ONLINE : OFFLINE;
-        ImVec2 pi = v.pt(x + 399 + 14, cy);
-        icon_mid(dl, a, v.sz(28), pi.x, pi.y, alpha(ic, op), I_PERSON);
-        std::string status = f.state == Friend::Playing ? "Forza Horizon 2" : f.state == Friend::Online ? "Online" : "Offline";
-        std::string detail = sent ? "Invite sent" : here ? "In your game" : f.state == Friend::Playing ? lobby_words(f) : f.state == Friend::Online ? "In the FH2MP launcher" : "";
-        float sw = W - 445 - 20;
-        ImVec2 s0 = v.pt(x + 445, cy - 13), s1 = v.pt(x + 445, cy + 14.15f);
-        text_fit(dl, a.text, a.text_m, v.sz(22), s0.x, s0.y, v.sz(sw), alpha(fg, op), status);
-        if (!detail.empty()) text_fit(dl, a.text, a.text_m, v.sz(20), s1.x, s1.y, v.sz(sw), alpha(foc ? WHITE : sent ? BRIGHT : MUTED2, op), detail);
-    }
-}
-
-// Artboard 4: Invite to Game. Tabs Party / Friends / Club / Recent (42 units), six 69-unit rows, a 55-unit footer; 862 wide at x 205.
-void Guide::draw_list(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now) {
-    View v{origin, s, zoom};
-    const float L = 205, W = 862;
-    float te = page_at_ > 0 ? ease_guide(std::clamp(float((now - page_at_) / 0.16), 0.0f, 1.0f)) : 1;
-    draw_header(dl, a, origin, s, zoom, op, L, W, "Invite to Game", te);
-    float pe = page_at_ > 0 ? ease_guide(std::clamp(float((now - page_at_) / 0.26), 0.0f, 1.0f)) : 1;
-    float slide = (1 - pe) * 110 * page_dir_, pop = op * pe;
-
-    std::vector<const Friend*> lists[4] = {tab_list(0), tab_list(1), tab_list(2), tab_list(3)};
-    int online = 0;
-    for (const Friend& f : social_.friends) online += f.state != Friend::Offline;
-    float tx = L + slide;
-    for (int t = 0; t < 4; t++) {
-        bool on = t == tab_;
-        ImVec2 t0 = v.pt(tx, 96), t1 = v.pt(tx + TAB_W[t], 138);
-        dl->AddRectFilled(t0, t1, alpha(on ? PANEL : TAB, pop));
-        char label[48];
-        if (t == 1) snprintf(label, sizeof label, "Friends (%d Online)", online);
-        else snprintf(label, sizeof label, "%d", int(lists[t].size()));
-        float lw = a.text->CalcTextSizeA(22, FLT_MAX, 0, label).x, cw = 26 + 12 + lw;
-        float cx = tx + (TAB_W[t] - cw) / 2, cy = 117;
-        ImU32 fg = on ? WHITE : TAB_TEXT;
-        ImVec2 ic = v.pt(cx + 13, cy);
-        icon_mid(dl, a, v.sz(26), ic.x, ic.y, alpha(fg, pop), TAB_ICON[t]);
-        ImVec2 lp = v.pt(cx + 38, cy);
-        text_mid(dl, a.text, a.text_m, v.sz(22), lp.x, lp.y, alpha(fg, pop), label);
-        tx += TAB_W[t];
-    }
-    ImVec2 p0 = v.pt(L + slide, 138), p1 = v.pt(L + W + slide, 552);
-    dl->AddRectFilled(p0, p1, alpha(PANEL, pop));
-    dl->PushClipRect(p0, p1, true);
-    const std::vector<const Friend*>& list = lists[tab_];
-    float le = ease_guide(std::clamp(float((now - tab_at_) / 0.26), 0.0f, 1.0f));
-    float ls = slide + (1 - le) * 110 * tab_dir_, lop = pop * le;
-    if (!social_.session || (!social_.loaded && !social_.error.empty()) || list.empty()) {
-        const char* why = !social_.session ? "Not signed in"
-                          : !social_.loaded && !social_.error.empty() ? "Server unavailable"
-                          : !social_.loaded ? ""
-                          : tab_ == 0 ? "No friends in your game"
-                          : tab_ == 2 ? (social_.me.club.empty() ? "No club" : "No club friends")
-                          : tab_ == 3 ? "No recent players"
-                                      : "No friends";
-        float ww = a.text->CalcTextSizeA(22, FLT_MAX, 0, why).x;
-        ImVec2 c = v.pt(L + ls + (W - ww) / 2, 345);
-        text_mid(dl, a.text, a.text_m, v.sz(22), c.x, c.y, alpha(MUTED, lop), why);
-    } else {
-        friend_rows(dl, a, origin, s, zoom, L + ls, 138, LIST_ROWS, list, row_[tab_], top_[tab_], list_bar_.value(now), lop);
-    }
-    dl->PopClipRect();
-    ImVec2 f0 = v.pt(L + slide, 552), f1 = v.pt(L + W + slide, 607);
-    dl->AddRectFilled(f0, f1, alpha(PANEL, pop));
-    dl->AddLine(ImVec2(f0.x, f0.y + v.sz(0.5f)), ImVec2(f1.x, f0.y + v.sz(0.5f)), alpha(LINE, pop), v.sz(1));
-    ImVec2 fl = v.pt(L + slide + 27, 579.5f);
-    text_mid(dl, a.text, a.text_m, v.sz(20), fl.x, fl.y, alpha(MUTED, pop), "Sorted by online status");
-    ImVec2 fr = v.pt(L + slide + W - 30, 579.5f);
-    icon_mid(dl, a, v.sz(28), fr.x - v.sz(14), fr.y, alpha(MUTED, pop), I_EXPAND_MORE);
-    icon_mid(dl, a, v.sz(28), fr.x - v.sz(42), fr.y, alpha(MUTED, pop), I_EXPAND_LESS);
-    char count[32];
-    snprintf(count, sizeof count, "%d of %d", list.empty() ? 0 : row_[tab_] + 1, int(list.size()));
-    text_mid(dl, a.text, a.text_m, v.sz(20), fr.x - v.sz(64), fr.y, alpha(MUTED, pop), count, true);
-    const Hint hints[] = {{"A", "Invite", RING_A}, {"B", "Back", RING_B}, {"LB", nullptr, MUTED3}, {"RB", "Switch", MUTED3}};
-    hint_bar(dl, a, v, L + 27, 617, hints, 4, op);
-}
-
-// Community, the 360's tabbed screen: Party, Friends, Messages, Players. The chosen tab is 388 wide and named with its count; the others
-// show their icon and count. Under them, 469 units of the chosen tab's rows.
-void Guide::draw_community(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now) {
-    View v{origin, s, zoom};
-    const float L = 205, W = 862;
-    float te = page_at_ > 0 ? ease_guide(std::clamp(float((now - page_at_) / 0.16), 0.0f, 1.0f)) : 1;
-    draw_header(dl, a, origin, s, zoom, op, L, W, "Community", te);
-    float pe = page_at_ > 0 ? ease_guide(std::clamp(float((now - page_at_) / 0.26), 0.0f, 1.0f)) : 1;
-    float x = L + (1 - pe) * 110 * page_dir_, pop = op * pe;
-
-    std::vector<const Friend*> friends = tab_list(1);
-    std::vector<MessageItem> msgs = messages();
-    int online = 0, unread = 0;
-    for (const Friend& f : social_.friends) online += f.state != Friend::Offline;
-    for (const MessageItem& m : msgs) unread += m.unread;
-    int counts[4] = {1, int(friends.size()), int(msgs.size()), 0};
-    float tx = x;
-    for (int t = 0; t < 4; t++) {
-        bool on = t == comm_tab_;
-        float tw = on ? 388 : 158;
-        dl->AddRectFilled(v.pt(tx, 96), v.pt(tx + tw, 138), alpha(on ? PANEL : TAB, pop));
-        char label[48];
-        if (!on) snprintf(label, sizeof label, "%d", counts[t]);
-        else if (t == TabParty) snprintf(label, sizeof label, "Party (%d)", counts[t]);
-        else if (t == TabFriends) snprintf(label, sizeof label, "Friends (%d Online)", online);
-        else if (t == TabMessages) snprintf(label, sizeof label, "Messages (%d New)", unread);
-        else snprintf(label, sizeof label, "Players (%d)", counts[t]);
-        float lw = a.text->CalcTextSizeA(22, FLT_MAX, 0, label).x, cw = 26 + 12 + lw;
-        float cx = tx + (tw - cw) / 2;
-        ImU32 fg = on ? WHITE : TAB_TEXT;
-        ImVec2 ic = v.pt(cx + 13, 117), lp = v.pt(cx + 38, 117);
-        icon_mid(dl, a, v.sz(26), ic.x, ic.y, alpha(fg, pop), COMM_ICON[t]);
-        text_mid(dl, a.text, a.text_m, v.sz(22), lp.x, lp.y, alpha(fg, pop), label);
-        tx += tw;
-    }
-    ImVec2 p0 = v.pt(x, 138), p1 = v.pt(x + W, 607);
-    dl->AddRectFilled(p0, p1, alpha(PANEL, pop));
-    dl->PushClipRect(p0, p1, true);
-    float ce = ease_guide(std::clamp(float((now - comm_at_) / 0.26), 0.0f, 1.0f));
-    float cxs = x + (1 - ce) * 110 * comm_dir_, cop = pop * ce;
-    auto empty = [&](const char* why) {
-        float ww = a.text->CalcTextSizeA(22, FLT_MAX, 0, why).x;
-        ImVec2 c = v.pt(cxs + (W - ww) / 2, 372);
-        text_mid(dl, a.text, a.text_m, v.sz(22), c.x, c.y, alpha(MUTED, cop), why);
-    };
-    auto bar56 = [&](float row) {
-        float by = 138 + row * 56;
-        ImVec2 b0 = v.pt(cxs, by), b1 = v.pt(cxs + W, by + 56);
-        dl->AddRectFilled(b0, b1, alpha(ACCENT, cop));
-        dl->AddLine(ImVec2(b0.x, b1.y - v.sz(0.5f)), ImVec2(b1.x, b1.y - v.sz(0.5f)), alpha(DARK, cop), v.sz(1));
-    };
-    switch (comm_tab_) {
-    case TabFriends:
-        if (!social_.session) empty("Not signed in");
-        else if (!social_.loaded && !social_.error.empty()) empty("Server unavailable");
-        else if (social_.loaded && friends.empty()) empty("No friends");
-        else if (!friends.empty()) {
-            friend_rows(dl, a, origin, s, zoom, cxs, 138, LIST_ROWS, friends, row_[1], top_[1], list_bar_.value(now), cop);
-            scroll_marks(dl, a, v, cxs + W - 30, 579.5f, top_[1] > 0, top_[1] + LIST_ROWS < int(friends.size()), cop);
+// The 360's message box over the page: a heading, the text, the buttons one under another (56-unit rows as the canvas' option lists).
+void Guide::draw_box(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float w, float h, double now) {
+    float k = ease_guide(std::clamp(float((now - box_.at) / 0.2), 0.0f, 1.0f));
+    View v{origin, s, 0.96f + 0.04f * k};
+    dl->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), IM_COL32(0, 0, 0, int(140 * k)));
+    const float W = 560, X = 640 - W / 2, PAD = 27;
+    float text_h = 0;
+    {
+        const char* p = box_.body.c_str();
+        const char* end = p + box_.body.size();
+        while (p < end) {
+            const char* brk = a.text->CalcWordWrapPosition(22, p, end, W - 2 * PAD);
+            if (brk == p) brk = p + 1;
+            for (const char* q = p; q < brk; q++)
+                if (*q == '\n') { brk = q + 1; break; }
+            text_h += 22 * 1.35f, p = brk;
+            while (p < end && *p == ' ') p++;
         }
-        break;
-    case TabMessages: {
-        // the 360's Messages tab: Create New, then the sender (left) and what it is (right: its icon and its subject)
-        bar56(msg_bar_.value(now));
-        int n = 1 + int(msgs.size());
-        for (int i = msg_top_; i < std::min(n, msg_top_ + MSG_ROWS); i++) {
-            float y = 138 + (i - msg_top_) * 56, cy = y + 28;
-            bool foc = i == msg_row_;
-            if (!foc) dl->AddLine(v.pt(cxs, y + 55.5f), v.pt(cxs + W, y + 55.5f), alpha(LINE, cop), v.sz(1));
-            ImVec2 np = v.pt(cxs + 27, cy);
-            if (i == 0) {
-                text_mid(dl, a.text, a.text_m, v.sz(24), np.x, np.y, alpha(WHITE, cop), "Create New");
-                continue;
-            }
-            const MessageItem& m = msgs[i - 1];
-            text_fit(dl, a.text, a.text_m, v.sz(24), np.x, np.y, v.sz(380), alpha(WHITE, cop), m.from.tag);
-            uint32_t icon = m.kind == MessageItem::Text ? (m.unread ? I_MAIL : I_DRAFTS) : kind_icon(m.kind);
-            ImVec2 ip = v.pt(cxs + 431 + 18, cy);
-            icon_mid(dl, a, v.sz(30), ip.x, ip.y, alpha(foc ? WHITE : m.unread ? WHITE : MUTED, cop), icon);
-            std::string subject = m.kind == MessageItem::GameInvite ? "Forza Horizon 2" : m.kind == MessageItem::FriendRequest ? "Friend Request" : m.text;
-            ImVec2 sp = v.pt(cxs + 431 + 46, cy);
-            text_fit(dl, a.text, a.text_m, v.sz(24), sp.x, sp.y, v.sz(W - 431 - 46 - 27), alpha(WHITE, cop), subject);
-        }
-        scroll_marks(dl, a, v, cxs + W - 30, 138 + MSG_ROWS * 56 + 10.5f, msg_top_ > 0, msg_top_ + MSG_ROWS < n, cop);
-        break;
     }
-    case TabParty: {
-        // the 360's party tab: its options, then the members (here: the player)
-        bar56(party_bar_.value(now));
-        for (int i = 0; i < 3; i++) {
-            float y = 138 + i * 56;
-            if (i != party_row_) dl->AddLine(v.pt(cxs, y + 55.5f), v.pt(cxs + W, y + 55.5f), alpha(LINE, cop), v.sz(1));
-            ImVec2 p = v.pt(cxs + 27, y + 28);
-            text_mid(dl, a.text, a.text_m, v.sz(24), p.x, p.y, alpha(WHITE, cop), PARTY_OPTIONS[i]);
-        }
-        float y = 138 + 3 * 56, cy = y + 28;
-        player_pic(dl, a, a.gamerpic, social_.me.xuid, v.pt(cxs + 27, y + 6), v.pt(cxs + 71, y + 50), cop);
-        ImVec2 np = v.pt(cxs + 85, cy);
-        text_mid(dl, a.text, a.text_m, v.sz(24), np.x, np.y, alpha(WHITE, cop), gamertag.c_str());
-        ImVec2 gi = v.pt(cxs + 431 + 18, cy), gp = v.pt(cxs + 431 + 46, cy);
-        icon_mid(dl, a, v.sz(30), gi.x, gi.y, alpha(BRIGHT, cop), I_GAMES);
-        text_mid(dl, a.text, a.text_m, v.sz(24), gp.x, gp.y, alpha(WHITE, cop), "Forza Horizon 2");
-        dl->AddLine(v.pt(cxs, y + 55.5f), v.pt(cxs + W, y + 55.5f), alpha(LINE, cop), v.sz(1));
-        break;
-    }
-    default: empty("No recent players"); break;
-    }
-    dl->PopClipRect();
-    if (comm_tab_ == TabMessages) {
-        const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}, {"X", "Delete", RING_X}, {"Y", "Create New", RING_Y}};
-        hint_bar(dl, a, v, L + 27, 617, hints, 4, op);
-    } else if (comm_tab_ == TabFriends) {
-        const Hint hints[] = {{"A", "Invite to Game", RING_A}, {"B", "Back", RING_B}};
-        hint_bar(dl, a, v, L + 27, 617, hints, 2, op);
-    } else {
-        const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}};
-        hint_bar(dl, a, v, L + 27, 617, hints, comm_tab_ == TabParty ? 2 : 1, op);
-    }
-}
-
-// One message (artboard 5, the 360's Message screen): left, when it came and the options (56-unit rows); right, the sender's card and the
-// message text.
-void Guide::draw_message(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now) {
-    View v{origin, s, zoom};
-    const float L = 205, W = 862;
-    const MessageItem& m = open_msg_;
-    float te = page_at_ > 0 ? ease_guide(std::clamp(float((now - page_at_) / 0.16), 0.0f, 1.0f)) : 1;
-    draw_header(dl, a, origin, s, zoom, op, L, W, "Message", te);
-    float pe = page_at_ > 0 ? ease_guide(std::clamp(float((now - page_at_) / 0.26), 0.0f, 1.0f)) : 1;
-    float x = L + (1 - pe) * 110 * page_dir_, pop = op * pe;
-    dl->AddRectFilled(v.pt(x, 96), v.pt(x + 431, 607), alpha(PANEL, pop));
-    std::vector<std::string> lines = {"Message Received"};
-    if (m.age >= 0) {
-        SYSTEMTIME st;
-        GetLocalTime(&st);
-        FILETIME ft;
-        SystemTimeToFileTime(&st, &ft);
-        ULARGE_INTEGER u;
-        u.LowPart = ft.dwLowDateTime, u.HighPart = ft.dwHighDateTime;
-        u.QuadPart -= ULONGLONG(m.age) * 10000000ULL;
-        ft.dwLowDateTime = u.LowPart, ft.dwHighDateTime = u.HighPart;
-        FileTimeToSystemTime(&ft, &st);
-        char date[32], clock[32];
-        snprintf(date, sizeof date, "%d/%d/%d", st.wMonth, st.wDay, st.wYear);
-        snprintf(clock, sizeof clock, "%d:%02d  %s", st.wHour % 12 == 0 ? 12 : st.wHour % 12, st.wMinute, st.wHour < 12 ? "AM" : "PM");
-        lines.push_back(date), lines.push_back(clock);
-    }
-    if (m.expires_in >= 0) lines.push_back(expires(m.expires_in));
-    for (size_t i = 0; i < lines.size(); i++) {
-        ImVec2 p = v.pt(x + 27, 96 + 26 + 13.2f + i * 32.4f);
-        text_mid(dl, a.text, a.text_m, v.sz(22), p.x, p.y, alpha(i == 0 ? MUTED : WHITE, pop), lines[i].c_str());
-    }
-    std::vector<const char*> opts = message_options(m);
-    float my = 96 + 231;
-    dl->AddLine(v.pt(x, my - 0.5f), v.pt(x + 431, my - 0.5f), alpha(LINE, pop), v.sz(1));
-    float by = my + opt_bar_.value(now) * 56;
-    ImVec2 b0 = v.pt(x, by), b1 = v.pt(x + 431, by + 56);
-    dl->AddRectFilled(b0, b1, alpha(ACCENT, pop));
-    dl->AddLine(ImVec2(b0.x, b1.y - v.sz(0.5f)), ImVec2(b1.x, b1.y - v.sz(0.5f)), alpha(DARK, pop), v.sz(1));
-    for (size_t i = 0; i < opts.size(); i++) {
-        float y = my + i * 56;
-        if (int(i) != msg_opt_) dl->AddLine(v.pt(x, y + 55.5f), v.pt(x + 431, y + 55.5f), alpha(LINE, pop), v.sz(1));
-        ImVec2 p = v.pt(x + 27, y + 28);
-        text_mid(dl, a.text, a.text_m, v.sz(24), p.x, p.y, alpha(WHITE, pop), opts[i]);
-    }
-    float rx = x + 431;
-    dl->AddRectFilled(v.pt(rx, 96), v.pt(rx + 431, 607), alpha(PANE, pop));
-    float cx = rx + 22, cw = 431 - 44, cy0 = 96 + 22;
-    dl->AddRectFilled(v.pt(cx, cy0), v.pt(cx + cw, cy0 + 46 + 128), alpha(PANEL, pop));
-    dl->AddRectFilled(v.pt(cx, cy0), v.pt(cx + cw, cy0 + 46), alpha(ACCENT, pop));
-    ImFont* bf = a.text_bold ? a.text_bold : a.text;
-    ImVec2 np = v.pt(cx + 16, cy0 + 23);
-    text_fit(dl, bf, a.bold_m, v.sz(26), np.x, np.y, v.sz(cw - 32), alpha(WHITE, pop), m.from.tag);
-    player_pic(dl, a, a.pic(m.from.xuid), m.from.xuid, v.pt(cx, cy0 + 46), v.pt(cx + 128, cy0 + 46 + 128), pop);
-    std::string zone = m.kind == MessageItem::GameInvite ? "Free Roam"
-                       : m.from.state == Friend::Playing ? lobby_words(m.from) : m.from.state == Friend::Online ? "Online" : "Offline";
-    std::string facts[3][2] = {{"Club", m.from.club.empty() ? "-" : m.from.club},
-                               {"Level", m.from.level > 0 ? std::to_string(m.from.level) : "-"},
-                               {"Zone", zone}};
-    for (int i = 0; i < 3; i++) {
-        float fy = cy0 + 46 + 64 + (i - 1) * 31.2f;
-        ImVec2 l = v.pt(cx + 128 + 16, fy), r = v.pt(cx + cw - 16, fy);
-        text_mid(dl, a.text, a.text_m, v.sz(21), l.x, l.y, alpha(WHITE, pop), facts[i][0].c_str());
-        text_mid(dl, a.text, a.text_m, v.sz(21), r.x, r.y, alpha(WHITE, pop), facts[i][1].c_str(), true);
-    }
-    float my2 = cy0 + 46 + 128 + 30;
-    ImVec2 mi = v.pt(rx + 32 + 15, my2 + 16);
-    icon_mid(dl, a, v.sz(30), mi.x, mi.y, alpha(MUTED, pop), I_MAIL);
-    ImVec2 mt = v.pt(rx + 32 + 40, my2 + 16);
-    text_mid(dl, a.text, a.text_m, v.sz(24), mt.x, mt.y, alpha(MUTED, pop), "Message Text");
-    std::string body = m.kind == MessageItem::GameInvite      ? m.from.tag + " invites you to play Forza Horizon 2."
-                       : m.kind == MessageItem::FriendRequest ? m.from.tag + " wants to be your friend."
-                                                              : m.text;
-    ImVec2 bp = v.pt(rx + 32, my2 + 32 + 8);
-    dl->AddText(a.text, v.sz(24), bp, alpha(WHITE, pop), body.c_str(), nullptr, v.sz(431 - 64));
-    if (m.kind == MessageItem::GameInvite && !m.text.empty()) {
-        float bh = a.text->CalcTextSizeA(24, FLT_MAX, 431 - 64, body.c_str()).y;
-        ImVec2 tp = v.pt(rx + 32, my2 + 40 + bh + 8);
-        dl->AddText(a.text, v.sz(22), tp, alpha(MUTED, pop), m.text.c_str(), nullptr, v.sz(431 - 64));
-    }
-    const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}};
-    hint_bar(dl, a, v, L + 27, 617, hints, 2, op);
+    float head = 62, body_h = text_h + 2 * 22, rows = 56.0f * box_.buttons.size();
+    float H = head + body_h + rows, Y = 360 - H / 2;
+    dl->AddRectFilled(v.pt(X, Y), v.pt(X + W, Y + head), alpha(RAISED, k));
+    ImVec2 t = v.pt(X + PAD, Y + head / 2);
+    text_mid(dl, a.text, a.text_m, v.sz(24), t.x, t.y, alpha(WHITE, k), box_.title.c_str());
+    dl->AddRectFilled(v.pt(X, Y + head), v.pt(X + W, Y + head + body_h), alpha(PANE, k));
+    wrapped(dl, a, v, 22, 1.35f, X + PAD, Y + head + 22, W - 2 * PAD, alpha(WHITE, k), box_.body);
+    float by = Y + head + body_h;
+    dl->AddRectFilled(v.pt(X, by), v.pt(X + W, by + rows), alpha(PANEL, k));
+    std::vector<Opt> opts;
+    for (const std::string& b : box_.buttons) opts.push_back({b, 0, true, 0});
+    option_list(dl, a, v, X, by, W, 56, 24, PAD, opts, box_.focus, box_.bar.value(now), k);
 }
 
 void Guide::draw_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 origin, double now) {
     float t = float(now - toast_at_);
+    if ((t < 0 || t > 6.3f) && !toasts_.empty()) {
+        toast_ = toasts_.front(), toasts_.pop_front(), toast_at_ = now, t = 0;
+    }
     if (t < 0 || t > 6.3f) return;
     auto seg = [&](float t0, float t1, float x1, float y1, float x2, float y2) {
         return css_bezier(x1, y1, x2, y2, std::clamp((t - t0) / (t1 - t0), 0.0f, 1.0f));
@@ -1062,21 +653,25 @@ void Guide::draw_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 ori
     // nSlide / nUnfold: 0.6 -> 1.05 s open, 5.4 -> 5.85 s close, cubic-bezier(.7,0,.25,1). The panel is as wide as its text (canvas: 269
     // with 22 / 12 padding for its sample text), the whole toast centred; it unfolds from its centre while the square slides half its width.
     ImFont* bf = a.text_bold ? a.text_bold : a.text;
-    float tw = std::max(bf->CalcTextSizeA(17, FLT_MAX, 0, toast_title_.c_str()).x, a.text->CalcTextSizeA(17, FLT_MAX, 0, toast_detail_.c_str()).x);
+    float tw = std::max(bf->CalcTextSizeA(17, FLT_MAX, 0, toast_.title.c_str()).x, a.text->CalcTextSizeA(17, FLT_MAX, 0, toast_.detail.c_str()).x);
     float pw = std::ceil(tw) + 22 + 12, half = pw * 0.5f;
     float unfold = t < 5.4f ? seg(0.6f, 1.05f, 0.7f, 0.0f, 0.25f, 1.0f) : 1 - seg(5.4f, 5.85f, 0.7f, 0.0f, 0.25f, 1.0f);
     float shift = half * (1 - unfold);
     auto at = [&](float x, float y) { return ImVec2(origin.x + x * s, origin.y + y * s); };
     float bx = 640 - (64 + pw) * 0.5f, by = 600;  // canvas: y 600 (the Guide is drawn small enough to end above it)
-    ImU32 kc = toast_color(toast_kind_);
+    ImU32 kc = toast_color(toast_.kind);
     if (unfold > 0.001f) {
         ImVec2 p0 = at(bx + 64 + shift, by), p1 = at(bx + 64 + pw - shift, by + 64);
         dl->AddRectFilled(p0, p1, PANEL);
         dl->PushClipRect(p0, p1, true);
         float x = at(bx + 64 + 22, 0).x;
-        // two 22-unit lines centred in the 64-unit panel: their line boxes are centred on by + 21 and by + 43
-        dl->AddText(bf, 17 * s, ImVec2(x, css_top(a.bold_m, 17 * s, at(0, by + 21).y)), kc, toast_title_.c_str());
-        dl->AddText(a.text, 17 * s, ImVec2(x, css_top(a.text_m, 17 * s, at(0, by + 43).y)), WHITE, toast_detail_.c_str());
+        if (toast_.detail.empty()) {
+            dl->AddText(bf, 17 * s, ImVec2(x, css_top(a.bold_m, 17 * s, at(0, by + 32).y)), kc, toast_.title.c_str());
+        } else {
+            // two 22-unit lines centred in the 64-unit panel: their line boxes are centred on by + 21 and by + 43
+            dl->AddText(bf, 17 * s, ImVec2(x, css_top(a.bold_m, 17 * s, at(0, by + 21).y)), kc, toast_.title.c_str());
+            dl->AddText(a.text, 17 * s, ImVec2(x, css_top(a.text_m, 17 * s, at(0, by + 43).y)), WHITE, toast_.detail.c_str());
+        }
         dl->PopClipRect();
     }
     // the square: slides with the panel, zooms in and out; on an invite its icon slides up at 2.0-2.4 s and the other player's picture
@@ -1086,11 +681,11 @@ void Guide::draw_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 ori
     ImVec2 q0(c.x - side / 2, c.y - side / 2), q1(c.x + side / 2, c.y + side / 2);
     if (side > 0.5f) {
         dl->AddRectFilled(q0, q1, alpha(kc, zop));
-        float up = toast_pic_ ? side * seg(2.0f, 2.4f, 0.3f, 0.0f, 0.2f, 1.0f) : 0;
+        float up = toast_.pic ? side * seg(2.0f, 2.4f, 0.3f, 0.0f, 0.2f, 1.0f) : 0;
         dl->PushClipRect(q0, q1, true);
-        icon_mid(dl, a, 46 * s * zoom, c.x, c.y - up, alpha(WHITE, zop), toast_icon_);
-        if (toast_pic_)
-            dl->AddImage(toast_pic_, ImVec2(q0.x, q0.y + side - up), ImVec2(q1.x, q1.y + side - up), ImVec2(0, 0), ImVec2(1, 1), alpha(WHITE, zop));
+        icon_mid(dl, a, 46 * s * zoom, c.x, c.y - up, alpha(WHITE, zop), toast_.icon);
+        if (toast_.pic)
+            dl->AddImage(toast_.pic, ImVec2(q0.x, q0.y + side - up), ImVec2(q1.x, q1.y + side - up), ImVec2(0, 0), ImVec2(1, 1), alpha(WHITE, zop));
         dl->PopClipRect();
     }
 }

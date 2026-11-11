@@ -1,8 +1,10 @@
 // guide-preview.exe: draws the Guide off screen with the same code the overlay uses (guide.cpp, assets.cpp, Dear ImGui's DX12 backend) and
 // writes a PNG, so the look can be checked against the design canvas without a game.
 //   guide-preview.exe <out.png> <scene> [seconds] [gamerpic.png] [background.png]
-// Scenes: home (the Guide, the player's blade), games, settings, down (focus moved down one row), friends, party, invite, messages, message (sample
-// friends), toast-info, toast-invite.
+// Scenes: home (the Guide, the player's blade), games, settings, down; friends, friends-nogame, party, players, messages; message,
+// message-invite, message-request; profile, profile-nogame, profile-personal, profile-request, profile-sent, profile-here; create,
+// create-nogame; pick, pick-many, compose, compose-invite, discard, keyboard, keyboard-caps, add-friend; box-accept, box-gone;
+// toast-sent, toast-invite, toast-request, toast-message, toast-online. Sample players, not real ones.
 // seconds: time since the Guide opened or the toast started (default 1.5 and 3.0).
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -13,6 +15,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -144,44 +148,95 @@ int main(int argc, char** argv) {
     Guide g;
     g.gamertag = "DebugFox";
     const double t0 = 100.0;
-    // sample friends for the pages (not real players)
+    // sample players for the pages (not real ones)
     Social so;
     so.session = so.loaded = true;
     so.me.xuid = 1, so.me.tag = "DebugFox", so.me.state = Friend::Playing, so.me.lobby_id = "L1", so.me.lobby_kind = "freeroam";
-    auto add = [&](uint64_t x, const char* tag, Friend::State st, const char* lobby, const char* status, const char* club, int level) {
+    auto card = [&](uint64_t x, const char* tag, Friend::State st, const char* lobby, const char* status, const char* club, int level) {
         Friend f;
         f.xuid = x, f.tag = tag, f.state = st, f.lobby_id = lobby, f.lobby_kind = *lobby ? "freeroam" : "", f.lobby_status = status, f.club = club, f.level = level;
-        so.friends.push_back(f);
+        f.lobby_players = *lobby ? 3 : 0, f.lobby_capacity = *lobby ? 12 : 0;
+        return f;
     };
-    add(2, "DebugWolf", Friend::Playing, "L1", "Free roaming", "", 12);
-    add(3, "NightRunR", Friend::Playing, "L2", "Free roaming", "APEX", 41);
-    add(4, "Kestrel 88", Friend::Online, "", "", "", 7);
-    add(5, "torque.tuner", Friend::Playing, "L3", "Road Trip: Nice", "", 29);
-    add(6, "Vellum", Friend::Offline, "", "", "", 3);
-    add(7, "SaltLakeSam", Friend::Offline, "", "", "APEX", 55);
-    add(8, "drift_mum", Friend::Online, "", "", "", 18);
+    so.friends.push_back(card(2, "DebugWolf", Friend::Playing, "L1", "Free Roam", "", 12));
+    so.friends.push_back(card(3, "NightRunR", Friend::Playing, "L2", "Free Roam", "APEX", 41));
+    so.friends.push_back(card(4, "Kestrel 88", Friend::Online, "", "", "", 7));
+    so.friends.push_back(card(5, "torque.tuner", Friend::Playing, "L3", "Road Trip: Nice", "", 29));
+    so.friends.push_back(card(6, "Vellum", Friend::Offline, "", "", "", 3));
+    so.friends.push_back(card(7, "SaltLakeSam", Friend::Offline, "", "", "APEX", 55));
+    so.friends.push_back(card(8, "drift_mum", Friend::Online, "", "", "", 18));
+    so.friends[4].last_seen = 2 * 86400 + 600;
+    so.friends[1].motto = "meet at the nice docks after 9", so.friends[1].location = "Nice, France", so.friends[1].bio = "Drifts mostly. Runs the APEX Thursday bridge meet.";
+    so.requests.push_back(card(9, "PaperLantern", Friend::Online, "", "", "", 22));
+    so.outgoing.push_back(card(10, "Ugandan Hobo", Friend::Offline, "", "", "", 31));
+    if (scene.find("nogame") != std::string::npos) so.me.lobby_id = "", so.me.state = Friend::Online;
     ReceivedInvite iv;
     iv.id = 9, iv.from = so.friends[1], iv.kind = "freeroam", iv.age = 75, iv.expires_in = 525, iv.text = "meet at the docks";
     so.invites.push_back(iv);
-    so.requests.push_back(so.friends[6]);
-    ChatThread ct;
-    ct.id = "4", ct.title = "Kestrel 88", ct.last = "you up for the Castello sprint later? bring the M3", ct.unread = 2, ct.last_incoming = 17;
-    so.chats.push_back(ct);
-    ct.id = "8", ct.title = "drift_mum", ct.last = "gg", ct.unread = 0, ct.last_incoming = 9;
-    so.chats.push_back(ct);
+    TextMessage tm;
+    tm.id = 17, tm.from = 4, tm.tag = "Kestrel 88", tm.body = "you up for the Castello sprint later? bring the M3", tm.chat = "4", tm.created = double(time(nullptr)) - 3 * 3600, tm.unread = true;
+    so.texts.push_back(tm);
+    tm.id = 9, tm.from = 8, tm.tag = "drift_mum", tm.body = "gg", tm.chat = "8", tm.created = double(time(nullptr)) - 30 * 3600, tm.unread = false;
+    so.texts.push_back(tm);
     g.set_social(so);
     if (assets.gamerpic) assets.pics[2] = assets.gamerpic;
-    if (scene == "messages" || scene == "message" || scene == "party" || scene == "friends") {
-        int tab = scene == "party" ? TabParty : scene == "friends" ? TabFriends : TabMessages;
-        g.open_on(Page::Community, t0 - 5, tab);
-        if (scene == "message") g.handle(PadEvent::Down, t0 - 4), g.handle(PadEvent::A, t0);
-        if (scene == "messages") g.handle(PadEvent::Down, t0 - 4), g.handle(PadEvent::Down, t0 - 4);
-    } else if (scene == "invite") {
-        g.open_on(Page::Invite, t0);
-        g.handle(PadEvent::Down, t0 - 0.5), g.handle(PadEvent::Down, t0 - 0.4), g.mark_sent(3);
+    auto press = [&](std::initializer_list<PadEvent> evs, double at = 99.0) {
+        for (PadEvent e : evs) g.handle(e, at);
+    };
+    const PadEvent D = PadEvent::Down, A = PadEvent::A, RB = PadEvent::Rb;
+    NetResult nr;
+    if (scene == "friends" || scene == "friends-nogame") {
+        g.open_community(TabFriends, t0 - 5), press({D, D});
+    } else if (scene == "party") {
+        g.open_community(TabParty, t0 - 5);
+    } else if (scene == "players") {
+        g.open_community(TabPlayers, t0 - 5);
+    } else if (scene == "messages") {
+        g.open_community(TabMessages, t0 - 5), press({D, D});
+    } else if (scene == "message" || scene == "message-invite" || scene == "message-request") {
+        g.open_community(TabMessages, t0 - 5);
+        int downs = scene == "message-request" ? 1 : scene == "message-invite" ? 2 : 3;
+        for (int i = 0; i < downs; i++) g.handle(D, 99.0);
+        g.handle(A, t0);
+    } else if (scene.rfind("profile", 0) == 0) {
+        // friends tab rows: Add Friend, PaperLantern (request), DebugWolf, NightRunR, torque.tuner, drift_mum, Kestrel 88, Ugandan Hobo (sent), ...
+        g.open_community(TabFriends, t0 - 5);
+        int downs = scene == "profile-request" ? 1 : scene == "profile-here" ? 2 : scene == "profile-sent" ? 7 : 3;
+        for (int i = 0; i < downs; i++) g.handle(D, 99.0);
+        g.handle(A, t0);
+        if (scene == "profile-personal") g.handle(RB, t0);
+    } else if (scene == "create" || scene == "create-nogame") {
+        g.open_community(TabMessages, t0 - 5), g.handle(A, t0);
+    } else if (scene == "pick") {
+        g.open_invite(t0);
+    } else if (scene == "pick-many") {
+        g.open_invite(t0 - 5), press({A, D});  // NightRunR, then Edit Recipients
+        g.handle(A, t0), press({D, D, A, D});  // tick torque.tuner as well
+    } else if (scene == "compose-invite") {
+        g.open_invite(t0 - 5), g.handle(A, t0);
+    } else if (scene == "compose" || scene == "discard" || scene == "keyboard" || scene == "keyboard-caps") {
+        g.open_community(TabMessages, t0 - 5), press({A, A, D, D, D}), g.handle(A, t0 - 3);  // Create New, Message, a friend
+        g.handle(D, t0 - 3), g.handle(D, t0 - 3), g.handle(A, t0 - 2);                        // Add Text
+        if (scene == "keyboard-caps") g.handle(PadEvent::L3, t0 - 2), g.handle(PadEvent::Rt, t0 - 2);
+        for (const char* c = "On my way, 5 min"; *c; c++) g.type_char(uint32_t(*c), t0 - 2);
+        if (scene == "compose" || scene == "discard") g.handle(PadEvent::Start, t0);
+        if (scene == "discard") g.handle(PadEvent::B, t0);
+    } else if (scene == "add-friend") {
+        g.open_community(TabFriends, t0 - 5), g.handle(A, t0);
+        for (const char* c = "Charelene"; *c; c++) g.type_char(uint32_t(*c), t0);
+    } else if (scene == "box-accept") {
+        g.toggle(t0 - 5);
+        nr.op = NetOp::Accept, nr.ok = true, nr.xuid = 3, nr.name = "NightRunR", nr.kind = "freeroam";
+        g.on_result(nr, assets, t0);
+    } else if (scene == "box-gone") {
+        g.toggle(t0 - 5);
+        nr.op = NetOp::Accept, nr.ok = false, nr.xuid = 3, nr.name = "NightRunR", nr.code = "lobby_gone";
+        g.on_result(nr, assets, t0);
     } else if (is_toast) {
-        if (scene == "toast-invite") g.toast(ToastKind::Invite, "Game invite sent", "To DebugWolf", 0xea28, assets.gamerpic, t0);
-        else g.toast(ToastKind::Info, "Notifications", "Coming in a later build", 0xe7f4, 0, t0);
+        nr.ok = true, nr.xuid = 2, nr.name = "DebugWolf";
+        nr.op = scene == "toast-sent" ? NetOp::Invite : scene == "toast-invite" ? NetOp::Received : scene == "toast-request" ? NetOp::GotRequest
+                : scene == "toast-message" ? NetOp::GotText : NetOp::Online;
+        g.on_result(nr, assets, t0);
     } else {
         g.toggle(t0 - 10);
         if (scene == "games") g.handle(PadEvent::Lb, t0 - 5);

@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <winhttp.h>
 
+#include <algorithm>
 #include <condition_variable>
 #include <cstdio>
 #include <deque>
@@ -27,10 +28,14 @@ struct Op {
     uint64_t xuid;
     int64_t id;
     std::string name;  // the other player, or the chat id for ReadChat
+    std::string text;  // Invite, SendText: the words; Join: the lobby's id
+    std::string kind;  // Join: the lobby's kind
 };
 std::deque<Op> g_ops;
 std::deque<NetResult> g_results;
 std::deque<PicReady> g_pics;
+std::set<int64_t> g_hidden;  // messages deleted in the Message Center (data/bin/fh2mp-guide-hidden.txt)
+bool g_hidden_dirty;
 
 void logf(const char* fmt, ...) {
     char buf[512];
@@ -57,6 +62,19 @@ bool read_file(const std::wstring& path, std::string* out, FILETIME* written) {
     if (written) GetFileTime(f, nullptr, nullptr, written);
     CloseHandle(f);
     return ok;
+}
+
+// A JSON string literal of UTF-8 text.
+std::string quoted(const std::string& t) {
+    std::string o = "\"";
+    for (unsigned char c : t) {
+        if (c == '"' || c == '\\') o += '\\', o += char(c);
+        else if (c == '\n') o += "\\n";
+        else if (c == '\t') o += "\\t";
+        else if (c < 0x20) o += ' ';
+        else o += char(c);
+    }
+    return o + "\"";
 }
 
 std::string trim(std::string s) {
@@ -149,15 +167,16 @@ int request(const Conn& c, const wchar_t* method, const std::string& path, const
     return status;
 }
 
-// The server's own words for a refusal, else the status.
-std::string refusal(int status, const std::string& body, const std::string& err) {
+// The server's own words for a refusal, else the status. code: the server's error code when it gave one.
+std::string refusal(int status, const std::string& body, const std::string& err, std::string* code = nullptr) {
     if (!status) return err;
     JVal v;
     if (json_parse(body, &v)) {
+        std::string c = v["error"].str();
+        if (code) *code = c;
         std::string m = v["message"].str();
         if (!m.empty()) return m;
-        m = v["error"].str();
-        if (!m.empty()) return m + " (" + std::to_string(status) + ")";
+        if (!c.empty()) return c + " (" + std::to_string(status) + ")";
     }
     if (status == 404) return "This FH2MP server does not have that yet";
     return "the server refused (" + std::to_string(status) + ")";
@@ -174,7 +193,13 @@ Friend card(const JVal& c) {
     const JVal& club = c["club"];
     f.club = club.type == JVal::Obj ? (club["tag"].str().empty() ? club["name"].str() : club["tag"].str()) : club.str();
     const JVal& lobby = c["lobby"];
-    if (lobby.type == JVal::Obj) f.lobby_id = lobby["id"].str(), f.lobby_kind = lobby["kind"].str(), f.lobby_status = lobby["status"].str();
+    if (lobby.type == JVal::Obj) {
+        f.lobby_id = lobby["id"].str(), f.lobby_kind = lobby["kind"].str(), f.lobby_status = lobby["status"].str();
+        f.lobby_players = int(lobby["players"].i64()), f.lobby_capacity = int(lobby["capacity"].i64());
+    }
+    const JVal& seen = c["lastSeenAgo"];
+    if (seen.type == JVal::Num) f.last_seen = int(seen.i64());
+    f.motto = c["motto"].str(), f.name = c["name"].str(), f.location = c["location"].str(), f.bio = c["bio"].str();
     return f;
 }
 
@@ -183,14 +208,57 @@ void push_result(NetResult r) {
     if (g_results.size() < 32) g_results.push_back(std::move(r));
 }
 
+// The messages deleted in the Message Center, one id per line.
+std::wstring hidden_path() { return g_dir + L"\\data\\bin\\fh2mp-guide-hidden.txt"; }
+
+void load_hidden() {
+    std::string text;
+    if (!read_file(hidden_path(), &text, nullptr)) return;
+    size_t at = 0;
+    while (at < text.size()) {
+        int64_t id = strtoll(text.c_str() + at, nullptr, 10);
+        if (id > 0) g_hidden.insert(id);
+        size_t end = text.find('\n', at);
+        at = end == std::string::npos ? text.size() : end + 1;
+    }
+}
+
+// Writes the newest 500 ids (the server drops week-old messages, so older ids mean nothing).
+void save_hidden(const std::set<int64_t>& ids) {
+    std::string text;
+    size_t skip = ids.size() > 500 ? ids.size() - 500 : 0;
+    for (int64_t id : ids) {
+        if (skip) { skip--; continue; }
+        text += std::to_string(id) + "\n";
+    }
+    HANDLE f = CreateFileW(hidden_path().c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) {
+        logf("guide: deleted messages not saved: %ls could not be written (%lu); they show again after a restart", hidden_path().c_str(), GetLastError());
+        return;
+    }
+    DWORD put = 0;
+    WriteFile(f, text.data(), DWORD(text.size()), &put, nullptr);
+    CloseHandle(f);
+}
+
+// One friend's conversation as last read: the messages they sent (the newest 20).
+struct ThreadCache {
+    int64_t fetched = -1;  // the thread's lastIncomingId when it was read
+    std::vector<TextMessage> msgs;
+};
+
 DWORD WINAPI worker(LPVOID) {
     Conn conn;
     bool have = false, reachable = true;
     std::string why_none;
     ULONGLONG next_comm = 0, next_inv = 0, next_session = 0;
     std::set<int64_t> seen_invites;
-    bool first_invites = true;
+    bool first_invites = true, first_comm = true;
     std::map<uint64_t, double> pic_done;  // xuid -> picture version fetched (-1: none on the server)
+    std::map<std::string, ThreadCache> threads;
+    std::map<uint64_t, Friend::State> was_state;
+    std::set<uint64_t> seen_requests;
+    load_hidden();
     for (;;) {
         Op op{};
         bool has_op = false, open = false;
@@ -226,9 +294,20 @@ DWORD WINAPI worker(LPVOID) {
             } else {
                 std::string body, out, err;
                 int status = 0;
+                std::string them = std::to_string(op.xuid);
                 if (op.op == NetOp::Invite) {
-                    body = "{\"player\":\"" + std::to_string(op.xuid) + "\"}";
+                    body = "{\"player\":\"" + them + "\"" + (op.text.empty() ? "" : ",\"text\":" + quoted(op.text)) + "}";
                     status = request(conn, L"POST", "/v1/community/invites", body, &out, &err);
+                } else if (op.op == NetOp::FriendRequest) {
+                    body = "{\"player\":" + quoted(op.name.empty() ? them : op.name) + "}";
+                    status = request(conn, L"POST", "/v1/community/friends", body, &out, &err);
+                } else if (op.op == NetOp::RemoveFriend) {
+                    status = request(conn, L"DELETE", "/v1/community/friends/" + them, "", &out, &err);
+                } else if (op.op == NetOp::SendText) {
+                    status = request(conn, L"POST", "/v1/community/chat/" + them, "{\"text\":" + quoted(op.text) + "}", &out, &err);
+                } else if (op.op == NetOp::Join) {
+                    body = "{\"lobby\":" + quoted(op.text) + ",\"kind\":" + quoted(op.kind) + "}";
+                    status = request(conn, L"POST", "/v1/community/reservation", body, &out, &err);
                 } else if (op.op == NetOp::Accept) {
                     status = request(conn, L"POST", "/v1/community/invites/" + std::to_string(op.id) + "/accept", "{}", &out, &err);
                 } else if (op.op == NetOp::Decline) {
@@ -241,10 +320,16 @@ DWORD WINAPI worker(LPVOID) {
                     status = request(conn, L"PATCH", "/v1/community/chat/" + op.name, "{\"lastId\":" + std::to_string(op.id) + "}", &out, &err);
                 }
                 r.ok = status >= 200 && status < 300;
-                if (!r.ok) r.message = refusal(status, out, err);
+                if (!r.ok) r.message = refusal(status, out, err, &r.code);
+                if (r.ok && (op.op == NetOp::Accept || op.op == NetOp::Join)) {
+                    JVal v;
+                    if (json_parse(out, &v)) r.kind = v["reservation"]["kind"].str();
+                }
                 const char* what = op.op == NetOp::Invite ? "game invite to" : op.op == NetOp::Accept ? "accepting the invite from"
                                    : op.op == NetOp::Decline ? "declining the invite from" : op.op == NetOp::AcceptFriend ? "accepting the friend request from"
-                                   : op.op == NetOp::DeclineFriend ? "declining the friend request from" : "marking read the chat";
+                                   : op.op == NetOp::DeclineFriend ? "declining or cancelling the friend request with"
+                                   : op.op == NetOp::FriendRequest ? "friend request to" : op.op == NetOp::RemoveFriend ? "removing the friend"
+                                   : op.op == NetOp::SendText ? "message to" : op.op == NetOp::Join ? "holding a seat in the game of" : "marking read the chat";
                 if (r.ok) logf("guide: %s %s (%llx) done", what, op.name.c_str(), (unsigned long long)op.xuid);
                 else logf("guide: %s %s (%llx) failed: %s", what, op.name.c_str(), (unsigned long long)op.xuid, r.message.c_str());
                 if (op.op != NetOp::Invite) next_inv = 0;
@@ -259,29 +344,96 @@ DWORD WINAPI worker(LPVOID) {
             std::string out, err;
             int status = request(conn, L"GET", "/v1/community", "", &out, &err);
             JVal v;
-            std::lock_guard<std::mutex> l(g_mu);
             if (status == 200 && json_parse(out, &v)) {
-                g_social.me = card(v["me"]);
-                g_social.friends.clear();
-                for (auto& f : v["friends"].a) g_social.friends.push_back(card(f));
-                g_social.requests.clear();
-                for (auto& f : v["incoming"].a) g_social.requests.push_back(card(f));
-                g_social.chats.clear();
+                Friend me = card(v["me"]);
+                std::vector<Friend> friends, requests, outgoing;
+                std::vector<ChatThread> chats;
+                for (auto& f : v["friends"].a) friends.push_back(card(f));
+                for (auto& f : v["incoming"].a) requests.push_back(card(f));
+                for (auto& f : v["outgoing"].a) outgoing.push_back(card(f));
                 for (auto& c : v["chats"].a) {
                     ChatThread t;
                     const JVal& id = c["id"];
                     t.id = id.type == JVal::Str ? id.s : std::to_string(id.i64());
                     t.title = c["title"].str(), t.last = c["last"].str(), t.unread = int(c["unread"].i64()), t.last_incoming = c["lastIncomingId"].i64();
-                    g_social.chats.push_back(t);
+                    chats.push_back(t);
                 }
+                // what is new since the last read gets a toast (nothing on the first read: it was all there before the game started)
+                for (const Friend& f : friends) {
+                    auto it = was_state.find(f.xuid);
+                    if (!first_comm && it != was_state.end() && it->second == Friend::Offline && f.state != Friend::Offline) {
+                        NetResult r;
+                        r.op = NetOp::Online, r.ok = true, r.xuid = f.xuid, r.name = f.tag;
+                        push_result(r);
+                    }
+                    was_state[f.xuid] = f.state;
+                }
+                for (const Friend& f : requests) {
+                    if (!seen_requests.insert(f.xuid).second || first_comm) continue;
+                    logf("guide: friend request from %s (%llx)", f.tag.c_str(), (unsigned long long)f.xuid);
+                    NetResult r;
+                    r.op = NetOp::GotRequest, r.ok = true, r.xuid = f.xuid, r.name = f.tag;
+                    push_result(r);
+                }
+                // friends' messages: a conversation is read again when its last incoming message changed (four conversations a pass)
+                int fetched = 0;
+                for (const ChatThread& t : chats) {
+                    if (t.id == "club") continue;
+                    ThreadCache& tc = threads[t.id];
+                    if (tc.fetched != t.last_incoming && t.last_incoming > 0 && fetched < (first_comm ? 64 : 4)) {
+                        fetched++;
+                        std::string mo, me2;
+                        JVal mv;
+                        if (request(conn, L"GET", "/v1/community/chat/" + t.id, "", &mo, &me2) == 200 && json_parse(mo, &mv)) {
+                            bool had = tc.fetched >= 0;
+                            int64_t before = tc.msgs.empty() ? 0 : tc.msgs.back().id;
+                            tc.msgs.clear();
+                            for (auto& m : mv["messages"].a) {
+                                if (uint64_t(m["sender"].i64()) == conn.xuid) continue;
+                                TextMessage x;
+                                x.id = m["id"].i64(), x.from = uint64_t(m["sender"].i64()), x.tag = m["gamertag"].str(), x.body = m["body"].str();
+                                x.created = m["created"].num(), x.chat = t.id;
+                                tc.msgs.push_back(x);
+                            }
+                            if (tc.msgs.size() > 20) tc.msgs.erase(tc.msgs.begin(), tc.msgs.end() - 20);
+                            tc.fetched = t.last_incoming;
+                            if ((had || !first_comm) && !tc.msgs.empty() && tc.msgs.back().id > before) {
+                                logf("guide: message %lld from %s (%llx)", (long long)tc.msgs.back().id, tc.msgs.back().tag.c_str(), (unsigned long long)tc.msgs.back().from);
+                                NetResult r;
+                                r.op = NetOp::GotText, r.ok = true, r.xuid = tc.msgs.back().from, r.name = tc.msgs.back().tag, r.id = tc.msgs.back().id;
+                                push_result(r);
+                            }
+                        }
+                    }
+                    int unread = t.unread;  // the newest `unread` of them are unread
+                    for (size_t i = tc.msgs.size(); i-- > 0;) tc.msgs[i].unread = unread-- > 0;
+                }
+                first_comm = false;
+                std::lock_guard<std::mutex> l(g_mu);
+                g_social.me = me, g_social.friends = friends, g_social.requests = requests, g_social.outgoing = outgoing, g_social.chats = chats;
+                g_social.texts.clear();
+                for (const ChatThread& t : chats) {
+                    auto it = threads.find(t.id);
+                    if (it == threads.end()) continue;
+                    for (const TextMessage& m : it->second.msgs)
+                        if (!g_hidden.count(m.id)) g_social.texts.push_back(m);
+                }
+                std::sort(g_social.texts.begin(), g_social.texts.end(), [](const TextMessage& a, const TextMessage& b) { return a.id > b.id; });
                 g_social.loaded = true, g_social.error.clear();
                 if (!reachable) logf("guide: the server answers again"), reachable = true;
             } else {
+                std::lock_guard<std::mutex> l(g_mu);
                 g_social.error = refusal(status, out, err);
                 if (reachable) logf("guide: friends could not be read: %s", g_social.error.c_str()), reachable = false;
                 if (status == 401) have = false, next_session = 0;  // the launcher may have written a new session
             }
-            g_social.version++;
+            std::set<int64_t> to_save;
+            {
+                std::lock_guard<std::mutex> l(g_mu);
+                g_social.version++;
+                if (g_hidden_dirty) to_save = g_hidden, g_hidden_dirty = false;
+            }
+            if (!to_save.empty()) save_hidden(to_save);
         }
         now = GetTickCount64();
         if (have && now >= next_inv) {
@@ -323,6 +475,7 @@ DWORD WINAPI worker(LPVOID) {
             for (auto& f : g_social.friends) want.emplace_back(f.xuid, f.pic_version);
             for (auto& iv : g_social.invites) want.emplace_back(iv.from.xuid, iv.from.pic_version);
             for (auto& f : g_social.requests) want.emplace_back(f.xuid, f.pic_version);
+            for (auto& f : g_social.outgoing) want.emplace_back(f.xuid, f.pic_version);
         }
         for (auto& w : want) {
             auto it = pic_done.find(w.first);
@@ -363,18 +516,32 @@ void net_guide_open(bool open) {
     g_cv.notify_all();
 }
 
-static void push_op(NetOp op, uint64_t xuid, int64_t id, const std::string& name) {
+static void push_op(NetOp op, uint64_t xuid, int64_t id, const std::string& name, const std::string& text = "", const std::string& kind = "") {
     std::lock_guard<std::mutex> l(g_mu);
-    if (g_ops.size() < 16) g_ops.push_back({op, xuid, id, name});
+    if (g_ops.size() < 48) g_ops.push_back({op, xuid, id, name, text, kind});
     g_cv.notify_all();
 }
 
-void net_invite(uint64_t xuid, const std::string& name) { push_op(NetOp::Invite, xuid, 0, name); }
+void net_invite(uint64_t xuid, const std::string& name, const std::string& text) { push_op(NetOp::Invite, xuid, 0, name, text); }
 void net_accept(int64_t id, uint64_t from, const std::string& name) { push_op(NetOp::Accept, from, id, name); }
 void net_decline(int64_t id, uint64_t from, const std::string& name) { push_op(NetOp::Decline, from, id, name); }
+void net_friend_request(const std::string& player, uint64_t xuid) { push_op(NetOp::FriendRequest, xuid, 0, player); }
 void net_accept_friend(uint64_t xuid, const std::string& name) { push_op(NetOp::AcceptFriend, xuid, 0, name); }
 void net_decline_friend(uint64_t xuid, const std::string& name) { push_op(NetOp::DeclineFriend, xuid, 0, name); }
+void net_remove_friend(uint64_t xuid, const std::string& name) { push_op(NetOp::RemoveFriend, xuid, 0, name); }
+void net_send_text(uint64_t xuid, const std::string& name, const std::string& text) { push_op(NetOp::SendText, xuid, 0, name, text); }
 void net_read_chat(const std::string& chat, int64_t last_id) { push_op(NetOp::ReadChat, 0, last_id, chat); }
+void net_join(uint64_t xuid, const std::string& name, const std::string& lobby, const std::string& kind) { push_op(NetOp::Join, xuid, 0, name, lobby, kind); }
+
+void net_hide_text(int64_t id) {
+    std::lock_guard<std::mutex> l(g_mu);
+    g_hidden.insert(id), g_hidden_dirty = true;
+    for (size_t i = 0; i < g_social.texts.size(); i++)
+        if (g_social.texts[i].id == id) g_social.texts.erase(g_social.texts.begin() + i--);
+    g_social.version++;
+    g_wake = true;
+    g_cv.notify_all();
+}
 
 bool net_take_result(NetResult* out) {
     std::lock_guard<std::mutex> l(g_mu);

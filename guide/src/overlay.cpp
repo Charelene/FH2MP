@@ -46,13 +46,22 @@ void logf(const char* fmt, ...) {
 }
 
 // ---- events from the pad thread and the window procedure, used on the render thread
+struct Ev {
+    PadEvent e;
+    uint32_t ch;  // a typed character when not 0 (the Guide's keyboard screen is up)
+};
 std::mutex g_ev_mu;
-std::deque<PadEvent> g_events;
-std::atomic<bool> g_open{false};
+std::deque<Ev> g_events;
+std::atomic<bool> g_open{false}, g_typing{false};
 
 void push(PadEvent e) {
     std::lock_guard<std::mutex> l(g_ev_mu);
-    if (g_events.size() < 64) g_events.push_back(e);
+    if (g_events.size() < 64) g_events.push_back({e, 0});
+}
+
+void push_char(uint32_t ch) {
+    std::lock_guard<std::mutex> l(g_ev_mu);
+    if (g_events.size() < 64) g_events.push_back({PadEvent::A, ch});
 }
 
 double now_s() {
@@ -174,7 +183,7 @@ DWORD WINAPI pad_thread(LPVOID) {
         }
         if (!seen && (st.buttons & padbits::Guide)) seen = true, logf("guide: the pad's Guide button reaches the Guide");
         PadEvent out[16];
-        int n = reader.feed(st.buttons, st.lx, st.ly, now, g_open.load(), out);
+        int n = reader.feed(st.buttons, st.lt, st.rt, st.lx, st.ly, now, g_open.load(), out);
         for (int i = 0; i < n; i++) {
             if (out[i] == PadEvent::Toggle)
                 logf("guide: the Guide button %s (held %llu ms)", reader.guide_fired ? "was held long enough: the Guide toggles" : "was tapped: the open Guide closes",
@@ -195,6 +204,25 @@ LRESULT CALLBACK guide_wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             push(PadEvent::Toggle);
             return 0;
         }
+        if (g_open.load() && g_typing.load()) {
+            // the keyboard screen: the PC's keyboard types into it (the layout's own characters, whatever the game's message loop does)
+            switch (wp) {
+            case VK_ESCAPE: if (!repeat) push(PadEvent::B); return 0;
+            case VK_RETURN: if (!repeat) push_char('\r'); return 0;
+            case VK_BACK: push_char('\b'); return 0;
+            case VK_LEFT: push(PadEvent::Lb); return 0;
+            case VK_RIGHT: push(PadEvent::Rb); return 0;
+            default: break;
+            }
+            BYTE state[256];
+            wchar_t out[4];
+            if (GetKeyboardState(state)) {
+                int n = ToUnicode(UINT(wp), UINT((lp >> 16) & 0xff), state, out, 4, 0);
+                for (int i = 0; i < n; i++)
+                    if (out[i] >= 0x20 && out[i] != 0x7f && (out[i] < 0xd800 || out[i] > 0xdfff)) push_char(out[i]);
+            }
+            return 0;
+        }
         if (g_open.load()) {
             switch (wp) {
             case VK_UP: push(PadEvent::Up); return 0;
@@ -209,6 +237,7 @@ LRESULT CALLBACK guide_wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             }
         }
     }
+    if (g_open.load() && g_typing.load() && (msg == WM_KEYUP || msg == WM_CHAR || msg == WM_SYSKEYUP)) return 0;
     if (g_open.load() && (msg == WM_KEYUP || msg == WM_CHAR) &&
         (wp == VK_UP || wp == VK_DOWN || wp == VK_LEFT || wp == VK_RIGHT || wp == VK_RETURN || wp == VK_ESCAPE || wp == VK_BACK))
         return 0;
@@ -463,37 +492,25 @@ void social_and_toasts(double now) {
         else srv_free(nullptr, cpu, gpu);
     }
     NetResult r;
-    const uint32_t I_GAMES = 0xea28, I_MAIL = 0xe158, I_ERROR = 0xe000;
-    while (net_take_result(&r)) {
-        ImTextureID them = g_assets.pic(r.xuid);
-        switch (r.op) {
-        case NetOp::Invite:
-            if (r.ok) {
-                g_guide.mark_sent(r.xuid);
-                g_guide.toast(ToastKind::Invite, "Game invite sent", ("To " + r.name).c_str(), I_GAMES, them, now);
-            } else {
-                g_guide.toast(ToastKind::Warning, "Invite not sent", r.message.c_str(), I_ERROR, 0, now);
-            }
-            break;
-        case NetOp::Accept:
-            if (r.ok) g_guide.toast(ToastKind::Invite, "Invite accepted", ("Go online in Free Roam to join " + r.name).c_str(), I_GAMES, them, now);
-            else g_guide.toast(ToastKind::Warning, "Could not join", r.message.c_str(), I_ERROR, 0, now);
-            break;
-        case NetOp::Decline:
-            if (!r.ok) g_guide.toast(ToastKind::Warning, "Could not decline", r.message.c_str(), I_ERROR, 0, now);
-            break;
-        case NetOp::Received:
-            g_guide.toast(ToastKind::Invite, "Game invite", ("From " + r.name).c_str(), I_MAIL, them, now);
-            break;
-        case NetOp::AcceptFriend:
-            if (r.ok) g_guide.toast(ToastKind::Invite, "Friend added", r.name.c_str(), 0xe7fe, them, now);
-            else g_guide.toast(ToastKind::Warning, "Friend request failed", r.message.c_str(), I_ERROR, 0, now);
-            break;
-        case NetOp::DeclineFriend:
-        case NetOp::ReadChat:
-            if (!r.ok && r.op == NetOp::DeclineFriend) g_guide.toast(ToastKind::Warning, "Could not decline", r.message.c_str(), I_ERROR, 0, now);
-            break;
-        }
+    while (net_take_result(&r)) g_guide.on_result(r, g_assets, now);
+}
+
+// What the Guide asked of the server after an event.
+void ask(const GuideRequest& r) {
+    switch (r.action) {
+    case GuideAction::Invite: net_invite(r.xuid, r.name, r.text); break;
+    case GuideAction::AcceptInvite: net_accept(r.id, r.xuid, r.name); break;
+    case GuideAction::DeclineInvite: net_decline(r.id, r.xuid, r.name); break;
+    case GuideAction::FriendRequest: net_friend_request(r.name, r.xuid); break;
+    case GuideAction::AcceptFriend: net_accept_friend(r.xuid, r.name); break;
+    case GuideAction::DeclineFriend: net_decline_friend(r.xuid, r.name); break;
+    case GuideAction::RemoveFriend: net_remove_friend(r.xuid, r.name); break;
+    case GuideAction::SendText: net_send_text(r.xuid, r.name, r.text); break;
+    case GuideAction::ReadChat: net_read_chat(r.name, r.id); break;
+    case GuideAction::HideText: net_hide_text(r.id); break;
+    case GuideAction::Join: net_join(r.xuid, r.name, r.text, r.kind); break;
+    case GuideAction::None:
+    case GuideAction::Resume: break;
     }
 }
 
@@ -509,32 +526,33 @@ void render(IDXGISwapChain3* sc) {
     }
     if (sc != g_swapchain) return;  // a second swap chain (a video, say): the Guide only draws on the game's
     double now = now_s();
-    std::deque<PadEvent> evs;
+    std::deque<Ev> evs;
     {
         std::lock_guard<std::mutex> l(g_ev_mu);
         evs.swap(g_events);
     }
-    for (PadEvent e : evs) {
+    for (const Ev& ev : evs) {
         bool was = g_guide.open;
+        if (ev.ch) {
+            if (was) g_guide.type_char(ev.ch, now);
+            continue;
+        }
+        PadEvent e = ev.e;
         if (e == PadEvent::OpenInvite) {
-            g_guide.open_on(Page::Invite, now);
+            g_guide.open_invite(now);
+            if (!was) logf("guide: opened by the game's Invite Friends");
             continue;
         }
         if (!was) {
             if (e == PadEvent::Toggle) g_guide.toggle(now), logf("guide: opened");
             continue;
         }
-        GuideRequest r = g_guide.handle(e, now);
-        if (r.action == GuideAction::Invite) net_invite(r.xuid, r.name);
-        if (r.action == GuideAction::Accept) net_accept(r.id, r.xuid, r.name);
-        if (r.action == GuideAction::Decline) net_decline(r.id, r.xuid, r.name);
-        if (r.action == GuideAction::AcceptFriend) net_accept_friend(r.xuid, r.name);
-        if (r.action == GuideAction::DeclineFriend) net_decline_friend(r.xuid, r.name);
-        if (r.action == GuideAction::ReadChat) net_read_chat(r.name, r.id);
+        for (const GuideRequest& r : g_guide.handle(e, now)) ask(r);
         if (!g_guide.open) logf("guide: closed");
     }
     if (g_open.load() != g_guide.open) net_guide_open(g_guide.open);
     g_open.store(g_guide.open);
+    g_typing.store(g_guide.typing());
     social_and_toasts(now);
     if (!g_guide.busy(now)) return;
     if (!g_buffers_ok && !make_buffers()) return;
