@@ -231,6 +231,28 @@ def handled(settings, crash):
     settings.save()
 
 
+# Causes outside FH2MP that a crash report can name by itself: (what to look for in the failure line or the mod platform's report, what to tell
+# the player). RivaTuner's on-screen display hooks the game's Direct3D calls and crashed it at start (#124, #453).
+KNOWN_CAUSES = (
+    ("RTSSHooks64.dll", "RivaTuner Statistics Server (the on-screen display of MSI Afterburner) crashed the game. Turn it off for azimuth.exe: "
+                        "in RivaTuner, add azimuth.exe and set its Application detection level to None, then play again."),
+    ("avcodec-62.dll is not the one this Azimuth ships", "Azimuth's own files in this folder come from different Azimuth versions. Run the "
+                        "launcher's setup and install Azimuth into this folder again: your settings, saves and mods stay."),
+)
+
+
+def known_cause(crash):
+    """What to tell the player when the crash names a known cause outside FH2MP, else ''."""
+    texts = [crash.line or ""]
+    if crash.mod_crash:
+        texts.append(_read_tail(crash.mod_crash, 64_000))
+    blob = "\n".join(texts)
+    for needle, advice in KNOWN_CAUSES:
+        if needle.lower() in blob.lower():
+            return advice
+    return ""
+
+
 class Report:
     def __init__(self, fields, files, dump, dump_path, dump_note="", attachments=(), notes=()):
         self.fields = fields                  # [(label, value)] in the order the player sees them
@@ -240,6 +262,7 @@ class Report:
         self.dump_note = dump_note
         self.attachments = attachments       # [(name, local path, bytes)] for matching secondary dumps
         self.notes = notes
+        self.hint = ""                       # known_cause(): what the player can do about it, shown above the question
 
     def sizes(self, preview_dir=None):
         """[(label, path, bytes sent)] for the player's list of files. With `preview_dir` the text files are written there exactly as they
@@ -375,7 +398,9 @@ def build(lc, crash):
                         attachments.append(("mod-crash.dmp", path, data))
             except OSError:
                 notes.append("Mod Platform dump could not be read")
-    return Report(fields, files, dump, crash.dump, dump_note if dump is None else "", attachments, notes)
+    report = Report(fields, files, dump, crash.dump, dump_note if dump is None else "", attachments, notes)
+    report.hint = known_cause(crash)
+    return report
 
 
 def human_size(n):
