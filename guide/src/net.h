@@ -23,6 +23,13 @@ struct ReceivedInvite {
     int age = 0, expires_in = 0;  // seconds, when the list was read
 };
 
+// A conversation in the launcher's chat with one friend: its last line and how many are unread.
+struct ChatThread {
+    std::string id, title, last;  // id: the friend's xuid in decimal (or "club")
+    int unread = 0;
+    int64_t last_incoming = 0;    // id of the last message the friend sent, 0 when they never wrote
+};
+
 struct Social {
     bool session = false;  // a session file was found
     bool loaded = false;   // the server answered at least once
@@ -30,10 +37,12 @@ struct Social {
     Friend me;
     std::vector<Friend> friends;
     std::vector<ReceivedInvite> invites;
+    std::vector<Friend> requests;  // friend requests waiting for this player
+    std::vector<ChatThread> chats;
     uint64_t version = 0;  // goes up with every change
 };
 
-enum class NetOp { Invite, Accept, Decline, Received };
+enum class NetOp { Invite, Accept, Decline, Received, AcceptFriend, DeclineFriend, ReadChat };
 
 // What came of an action, or an invite that just arrived (Received).
 struct NetResult {
@@ -58,5 +67,8 @@ void net_guide_open(bool open);  // refreshes at once on open, and every 5 s whi
 void net_invite(uint64_t xuid, const std::string& name);
 void net_accept(int64_t id, uint64_t from, const std::string& name);
 void net_decline(int64_t id, uint64_t from, const std::string& name);
+void net_accept_friend(uint64_t xuid, const std::string& name);
+void net_decline_friend(uint64_t xuid, const std::string& name);
+void net_read_chat(const std::string& chat, int64_t last_id);
 bool net_take_result(NetResult* out);
 bool net_take_pic(PicReady* out);

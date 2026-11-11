@@ -26,7 +26,7 @@ struct Op {
     NetOp op;
     uint64_t xuid;
     int64_t id;
-    std::string name;
+    std::string name;  // the other player, or the chat id for ReadChat
 };
 std::deque<Op> g_ops;
 std::deque<NetResult> g_results;
@@ -159,6 +159,7 @@ std::string refusal(int status, const std::string& body, const std::string& err)
         m = v["error"].str();
         if (!m.empty()) return m + " (" + std::to_string(status) + ")";
     }
+    if (status == 404) return "This FH2MP server does not have that yet";
     return "the server refused (" + std::to_string(status) + ")";
 }
 
@@ -232,10 +233,18 @@ DWORD WINAPI worker(LPVOID) {
                     status = request(conn, L"POST", "/v1/community/invites/" + std::to_string(op.id) + "/accept", "{}", &out, &err);
                 } else if (op.op == NetOp::Decline) {
                     status = request(conn, L"DELETE", "/v1/community/invites/" + std::to_string(op.id), "", &out, &err);
+                } else if (op.op == NetOp::AcceptFriend) {
+                    status = request(conn, L"POST", "/v1/community/friends/" + std::to_string(op.xuid) + "/accept", "{}", &out, &err);
+                } else if (op.op == NetOp::DeclineFriend) {
+                    status = request(conn, L"DELETE", "/v1/community/friends/" + std::to_string(op.xuid) + "/request", "", &out, &err);
+                } else if (op.op == NetOp::ReadChat) {
+                    status = request(conn, L"PATCH", "/v1/community/chat/" + op.name, "{\"lastId\":" + std::to_string(op.id) + "}", &out, &err);
                 }
                 r.ok = status >= 200 && status < 300;
                 if (!r.ok) r.message = refusal(status, out, err);
-                const char* what = op.op == NetOp::Invite ? "game invite to" : op.op == NetOp::Accept ? "accepting the invite from" : "declining the invite from";
+                const char* what = op.op == NetOp::Invite ? "game invite to" : op.op == NetOp::Accept ? "accepting the invite from"
+                                   : op.op == NetOp::Decline ? "declining the invite from" : op.op == NetOp::AcceptFriend ? "accepting the friend request from"
+                                   : op.op == NetOp::DeclineFriend ? "declining the friend request from" : "marking read the chat";
                 if (r.ok) logf("guide: %s %s (%llx) done", what, op.name.c_str(), (unsigned long long)op.xuid);
                 else logf("guide: %s %s (%llx) failed: %s", what, op.name.c_str(), (unsigned long long)op.xuid, r.message.c_str());
                 if (op.op != NetOp::Invite) next_inv = 0;
@@ -255,6 +264,16 @@ DWORD WINAPI worker(LPVOID) {
                 g_social.me = card(v["me"]);
                 g_social.friends.clear();
                 for (auto& f : v["friends"].a) g_social.friends.push_back(card(f));
+                g_social.requests.clear();
+                for (auto& f : v["incoming"].a) g_social.requests.push_back(card(f));
+                g_social.chats.clear();
+                for (auto& c : v["chats"].a) {
+                    ChatThread t;
+                    const JVal& id = c["id"];
+                    t.id = id.type == JVal::Str ? id.s : std::to_string(id.i64());
+                    t.title = c["title"].str(), t.last = c["last"].str(), t.unread = int(c["unread"].i64()), t.last_incoming = c["lastIncomingId"].i64();
+                    g_social.chats.push_back(t);
+                }
                 g_social.loaded = true, g_social.error.clear();
                 if (!reachable) logf("guide: the server answers again"), reachable = true;
             } else {
@@ -303,6 +322,7 @@ DWORD WINAPI worker(LPVOID) {
             std::lock_guard<std::mutex> l(g_mu);
             for (auto& f : g_social.friends) want.emplace_back(f.xuid, f.pic_version);
             for (auto& iv : g_social.invites) want.emplace_back(iv.from.xuid, iv.from.pic_version);
+            for (auto& f : g_social.requests) want.emplace_back(f.xuid, f.pic_version);
         }
         for (auto& w : want) {
             auto it = pic_done.find(w.first);
@@ -352,6 +372,9 @@ static void push_op(NetOp op, uint64_t xuid, int64_t id, const std::string& name
 void net_invite(uint64_t xuid, const std::string& name) { push_op(NetOp::Invite, xuid, 0, name); }
 void net_accept(int64_t id, uint64_t from, const std::string& name) { push_op(NetOp::Accept, from, id, name); }
 void net_decline(int64_t id, uint64_t from, const std::string& name) { push_op(NetOp::Decline, from, id, name); }
+void net_accept_friend(uint64_t xuid, const std::string& name) { push_op(NetOp::AcceptFriend, xuid, 0, name); }
+void net_decline_friend(uint64_t xuid, const std::string& name) { push_op(NetOp::DeclineFriend, xuid, 0, name); }
+void net_read_chat(const std::string& chat, int64_t last_id) { push_op(NetOp::ReadChat, 0, last_id, chat); }
 
 bool net_take_result(NetResult* out) {
     std::lock_guard<std::mutex> l(g_mu);

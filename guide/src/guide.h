@@ -36,6 +36,7 @@ struct PadReader {
 // (Dear ImGui by default makes ascender minus descender N pixels, which drew Segoe UI a quarter smaller than the canvas).
 struct FontMetrics {
     float asc = 0.8f, desc = 0.2f;
+    float cap = 0.7f;  // capital letter height (OS/2 sCapHeight), for centring a word on an icon by its letters
 };
 
 // Fonts and textures the Guide draws with (made by the overlay once Direct3D is ready).
@@ -59,19 +60,30 @@ void load_fonts(GuideAssets& a);
 // The canvas' toast kinds (artboard 7): the square's colour, the title's colour, and whether a player's picture glides in (invites only).
 enum class ToastKind { Invite, Info, Saving, Warning };
 
-enum class GuideAction { None, Resume, Soon, Invite, Accept, Decline };
+enum class GuideAction { None, Resume, Soon, Invite, Accept, Decline, AcceptFriend, DeclineFriend, ReadChat };
 
 // What the overlay must do after an event: the action and whom it is for.
 struct GuideRequest {
     GuideAction action = GuideAction::None;
     uint64_t xuid = 0;
     int64_t id = 0;
-    std::string name;
+    std::string name;  // the other player (the chat's id for ReadChat)
 };
 
-// The Guide's screens: the blades (artboard 1), the friend list as Friends or Invite to Game (artboard 4), a received game invite
-// (artboard 5).
-enum class Page { Home, Friends, Invite, Received };
+// One entry of the Message Center, the way the 360 listed them: a game invite, a friend request, or a friend's message (the launcher's
+// chat: the conversation's last line).
+struct MessageItem {
+    enum Kind { GameInvite, FriendRequest, Text } kind = Text;
+    Friend from;
+    int64_t id = 0;  // the invite's id, or the last incoming message's id
+    std::string text, chat;
+    int age = -1, expires_in = -1;  // seconds when known
+    bool unread = false;
+};
+
+// The Guide's screens: the blades (artboard 1), the friend list as Friends or Invite to Game (artboard 4), the Message Center's list and
+// one message (artboard 5 and the 360's Message screen).
+enum class Page { Home, Friends, Invite, Messages, Message };
 
 class Guide {
 public:
@@ -117,8 +129,9 @@ private:
     double tab_at_ = -10;
     int row_[4] = {0, 0, 0, 0}, top_[4] = {0, 0, 0, 0};
     Tween list_bar_;
-    int received_ = 0, received_opt_ = 0;
-    Tween received_bar_;
+    int msg_row_ = 0, msg_top_ = 0, msg_opt_ = 0;
+    Tween msg_bar_, opt_bar_;
+    MessageItem open_msg_;  // the message on the Message page
     std::set<uint64_t> sent_;
     Social social_;
     // toast
@@ -131,12 +144,16 @@ private:
     void switch_to(int b, double now);
     void go_page(Page p, int dir, double now);
     std::vector<const Friend*> tab_list(int tab) const;
+    std::vector<MessageItem> messages() const;
+    std::vector<const char*> message_options(const MessageItem& m) const;
     GuideRequest handle_home(PadEvent e, double now);
     GuideRequest handle_list(PadEvent e, double now);
-    GuideRequest handle_received(PadEvent e, double now);
+    GuideRequest handle_messages(PadEvent e, double now);
+    GuideRequest handle_message(PadEvent e, double now);
     void draw_home(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
     void draw_list(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
-    void draw_received(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
+    void draw_messages(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
+    void draw_message(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
     void draw_header(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, float left, float width, const char* title,
                      float title_op);
     void draw_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 origin, double now);

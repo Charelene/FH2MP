@@ -1,7 +1,7 @@
 // guide-preview.exe: draws the Guide off screen with the same code the overlay uses (guide.cpp, assets.cpp, Dear ImGui's DX12 backend) and
 // writes a PNG, so the look can be checked against the design canvas without a game.
 //   guide-preview.exe <out.png> <scene> [seconds] [gamerpic.png] [background.png]
-// Scenes: home (the Guide, the player's blade), games, settings, down (focus moved down one row), friends, invite, received (sample
+// Scenes: home (the Guide, the player's blade), games, settings, down (focus moved down one row), friends, invite, messages, message (sample
 // friends), toast-info, toast-invite.
 // seconds: time since the Guide opened or the toast started (default 1.5 and 3.0).
 #define WIN32_LEAN_AND_MEAN
@@ -163,10 +163,19 @@ int main(int argc, char** argv) {
     ReceivedInvite iv;
     iv.id = 9, iv.from = so.friends[1], iv.kind = "freeroam", iv.age = 75, iv.expires_in = 525, iv.text = "meet at the docks";
     so.invites.push_back(iv);
+    so.requests.push_back(so.friends[6]);
+    ChatThread ct;
+    ct.id = "4", ct.title = "Kestrel 88", ct.last = "you up for the Castello sprint later? bring the M3", ct.unread = 2, ct.last_incoming = 17;
+    so.chats.push_back(ct);
+    ct.id = "8", ct.title = "drift_mum", ct.last = "gg", ct.unread = 0, ct.last_incoming = 9;
+    so.chats.push_back(ct);
     g.set_social(so);
     if (assets.gamerpic) assets.pics[2] = assets.gamerpic;
-    if (scene == "friends" || scene == "invite" || scene == "received") {
-        g.open_on(scene == "friends" ? Page::Friends : scene == "invite" ? Page::Invite : Page::Received, t0);
+    if (scene == "messages" || scene == "message") {
+        g.open_on(Page::Messages, t0 - 5);
+        if (scene == "message") g.handle(PadEvent::A, t0);
+    } else if (scene == "friends" || scene == "invite") {
+        g.open_on(scene == "friends" ? Page::Friends : Page::Invite, t0);
         if (scene == "invite") g.handle(PadEvent::Down, t0 - 0.5), g.handle(PadEvent::Down, t0 - 0.4), g.mark_sent(3);
     } else if (is_toast) {
         if (scene == "toast-invite") g.toast(ToastKind::Invite, "Game invite sent", "To DebugWolf", 0xea28, assets.gamerpic, t0);

@@ -20,18 +20,20 @@ bool ttf_metrics(const unsigned char* d, size_t n, FontMetrics* m) {
     auto u16 = [&](size_t o) -> unsigned { return o + 2 <= n ? unsigned(d[o]) << 8 | d[o + 1] : 0u; };
     auto u32 = [&](size_t o) -> size_t { return o + 4 <= n ? size_t(d[o]) << 24 | size_t(d[o + 1]) << 16 | size_t(d[o + 2]) << 8 | d[o + 3] : 0; };
     if (n < 12) return false;
-    size_t head = 0, hhea = 0;
+    size_t head = 0, hhea = 0, os2 = 0;
     for (unsigned i = 0, tables = u16(4); i < tables; i++) {
         size_t r = 12 + 16 * size_t(i);
         if (r + 16 > n) break;
         if (!memcmp(d + r, "head", 4)) head = u32(r + 8);
         if (!memcmp(d + r, "hhea", 4)) hhea = u32(r + 8);
+        if (!memcmp(d + r, "OS/2", 4)) os2 = u32(r + 8);
     }
     if (!head || !hhea) return false;
     unsigned em = u16(head + 18);
     int asc = int16_t(u16(hhea + 4)), desc = int16_t(u16(hhea + 6));
     if (!em || asc - desc <= 0) return false;
     m->asc = float(asc) / float(em), m->desc = float(-desc) / float(em);
+    if (os2 && u16(os2) >= 2 && int16_t(u16(os2 + 88)) > 0) m->cap = float(int16_t(u16(os2 + 88))) / float(em);
     return true;
 }
 

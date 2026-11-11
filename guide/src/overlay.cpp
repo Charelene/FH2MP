@@ -485,6 +485,14 @@ void social_and_toasts(double now) {
         case NetOp::Received:
             g_guide.toast(ToastKind::Invite, "Game invite", ("From " + r.name).c_str(), I_MAIL, them, now);
             break;
+        case NetOp::AcceptFriend:
+            if (r.ok) g_guide.toast(ToastKind::Invite, "Friend added", r.name.c_str(), 0xe7fe, them, now);
+            else g_guide.toast(ToastKind::Warning, "Friend request failed", r.message.c_str(), I_ERROR, 0, now);
+            break;
+        case NetOp::DeclineFriend:
+        case NetOp::ReadChat:
+            if (!r.ok && r.op == NetOp::DeclineFriend) g_guide.toast(ToastKind::Warning, "Could not decline", r.message.c_str(), I_ERROR, 0, now);
+            break;
         }
     }
 }
@@ -520,6 +528,9 @@ void render(IDXGISwapChain3* sc) {
         if (r.action == GuideAction::Invite) net_invite(r.xuid, r.name);
         if (r.action == GuideAction::Accept) net_accept(r.id, r.xuid, r.name);
         if (r.action == GuideAction::Decline) net_decline(r.id, r.xuid, r.name);
+        if (r.action == GuideAction::AcceptFriend) net_accept_friend(r.xuid, r.name);
+        if (r.action == GuideAction::DeclineFriend) net_decline_friend(r.xuid, r.name);
+        if (r.action == GuideAction::ReadChat) net_read_chat(r.name, r.id);
         if (!g_guide.open) logf("guide: closed");
     }
     if (g_open.load() != g_guide.open) net_guide_open(g_guide.open);

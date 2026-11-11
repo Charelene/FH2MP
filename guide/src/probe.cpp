@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <utility>
 
 #include "fh2mod.h"
@@ -44,17 +45,53 @@ void logf(const char* fmt, ...) {
     if (p_log) p_log(buf);
 }
 
+// Call sites seen so far (the game's return addresses): one line when a site is first seen (with the stack above it), then one with its
+// count when it calls again after 3 s of quiet.
+struct Site {
+    std::atomic<uintptr_t> ret{0};
+    std::atomic<ULONGLONG> last{0};
+    std::atomic<unsigned> n{0};
+};
+Site p_sites[1024];
+
+Site* site_of(uintptr_t ret) {
+    size_t i = (ret >> 2) * 2654435761u % 1024;
+    for (size_t k = 0; k < 1024; k++, i = (i + 1) % 1024) {
+        uintptr_t cur = p_sites[i].ret.load();
+        if (cur == ret) return &p_sites[i];
+        if (cur == 0) {
+            uintptr_t expect = 0;
+            if (p_sites[i].ret.compare_exchange_strong(expect, ret) || expect == ret) return &p_sites[i];
+        }
+    }
+    return nullptr;
+}
+
+void where(void* p, char* out, size_t n) {
+    size_t off = size_t((unsigned char*)p - p_game);
+    if (off < p_game_size) snprintf(out, n, "game+0x%zx", off);
+    else snprintf(out, n, "%p", p);
+}
+
 template <int I, int S>
 uint64_t probe_slot(void* self, void* a, void* b, void* c, void* d, void* e) {
     void* ret = __builtin_return_address(0);
-    ULONGLONG now = GetTickCount64(), last = p_last[I][S].exchange(now);
-    unsigned n = ++p_count[I][S];
-    if (last == 0 || now - last > 3000) {
-        size_t off = size_t((unsigned char*)ret - p_game);
-        char from[48];
-        if (off < p_game_size) snprintf(from, sizeof from, "game+0x%zx", off);
-        else snprintf(from, sizeof from, "outside the game (%p)", ret);
-        logf("guide probe: Party %s slot %d called from %s (%u calls so far; args %p %p %p)", IFACE_NAME[I], S, from, n, a, b, c);
+    if (Site* site = site_of(uintptr_t(ret))) {
+        ULONGLONG now = GetTickCount64(), last = site->last.exchange(now);
+        unsigned n = ++site->n;
+        if (n == 1 || now - last > 3000) {
+            void* frames[8] = {};
+            USHORT got = RtlCaptureStackBackTrace(1, 8, frames, nullptr);
+            char stack[400] = "", one[40];
+            for (USHORT f = 0; f < got; f++) {
+                where(frames[f], one, sizeof one);
+                strncat(stack, f ? " < " : "", sizeof stack - strlen(stack) - 1);
+                strncat(stack, one, sizeof stack - strlen(stack) - 1);
+            }
+            char from[40];
+            where(ret, from, sizeof from);
+            logf("guide probe: slot %d from %s (%s, call %u; args %p %p %p) stack: %s", S, from, n == 1 ? "first" : "again", n, a, b, c, stack);
+        }
     }
     return p_orig[I][S](self, a, b, c, d, e);
 }
@@ -87,6 +124,7 @@ void party_probe_start(const FH2ModApi* api, FH2Mod* mod, unsigned char* game, v
     typedef HRESULT(WINAPI * RoInitFn)(int);
     if (HMODULE cb = LoadLibraryW(L"combase.dll"))
         if (auto ro_init = (RoInitFn)(void*)GetProcAddress(cb, "RoInitialize")) ro_init(1);
+    void** hooked_vt[IFACES] = {};
     for (int i = 0; i < IFACES; i++) {
         void** obj = nullptr;
         HRESULT hr = activate(L"Windows.Xbox.Multiplayer.Party", &IFACE_IID[i], (void**)&obj);
@@ -95,6 +133,13 @@ void party_probe_start(const FH2ModApi* api, FH2Mod* mod, unsigned char* game, v
             continue;
         }
         void** vt = *(void***)obj;
+        bool again = false;
+        for (int j = 0; j < i; j++) again = again || hooked_vt[j] == vt;
+        hooked_vt[i] = vt;
+        if (again) {
+            logf("guide probe: Party %s shares the vtable %p already watched", IFACE_NAME[i], (void*)vt);
+            continue;
+        }
         HMODULE owner = nullptr;
         GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)vt[6], &owner);
         int hooked = 0;
