@@ -4,16 +4,19 @@
 //!
 //! One core runs per config dir (instance.rs). `--background` starts it hidden and keeps it running when its window is closed (the launcher
 //! starts it this way so the in-game Guide can reach it during play); `--open [club|requests|friend:<xuid>]` shows the running core's window,
-//! `--quit` closes it.
+//! `--quit` closes it. The in-game Guide (guide.rs, pad.rs) opens over the game on a 1 s hold of the Guide button or Home; `--guide-preview`
+//! shows it in a normal window, FH2MP_NO_GUIDE=1 turns it off.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod guide;
 mod identity;
 mod instance;
 #[allow(dead_code)] // the chat link server that uses it comes with the Guide shell (plan phase 3)
 mod link_wire;
 mod net;
+mod pad;
 mod realm;
 
 use std::fs::OpenOptions;
@@ -98,6 +101,10 @@ fn main() -> eframe::Result {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let (ui_tx, ui_rx) = std::sync::mpsc::channel();
     let (inst_tx, inst_rx) = std::sync::mpsc::channel();
+    let guide_preview = args.iter().any(|a| a == "--guide-preview");
+    let guide_on = std::env::var("FH2MP_NO_GUIDE").as_deref() != Ok("1");
+    let (pad_tx, pad_rx) = std::sync::mpsc::channel();
+    let guide_shown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let open_at = match &request {
         Some(instance::Request::Open(t)) => t.clone(),
         _ => None,
@@ -127,6 +134,20 @@ fn main() -> eframe::Result {
             }
             let mut app = app::App::new(cmd_tx, ui_rx, realm_name, blocked);
             app.set_instance(inst_rx, background, open_at);
+            if guide_on || guide_preview {
+                if !guide::fonts(&cc.egui_ctx) {
+                    tracing::info!("guide: Segoe UI not found, the Guide uses the default font");
+                }
+                if guide_on {
+                    let (ctx, shown) = (cc.egui_ctx.clone(), guide_shown.clone());
+                    pad::start(
+                        pad_tx,
+                        move || ctx.request_repaint(),
+                        move || shown.load(std::sync::atomic::Ordering::Relaxed),
+                    );
+                }
+                app.set_guide(pad_rx, guide_shown, guide_preview);
+            }
             Ok(Box::new(app))
         }),
     );

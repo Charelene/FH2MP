@@ -101,6 +101,14 @@ pub struct App {
     inst: Option<stdmpsc::Receiver<crate::instance::Request>>,
     keep_running: bool,
     quitting: bool,
+    /// The in-game Guide (guide.rs), its pad events (pad.rs), whether it shows (shared with the pad thread), where it goes (points), the clock
+    /// its animations run on, and preview mode (`--guide-preview`: a normal window, no game needed).
+    guide: crate::guide::Guide,
+    pad: Option<stdmpsc::Receiver<crate::pad::PadEvent>>,
+    guide_shown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    guide_rect: Option<egui::Rect>,
+    t0: Instant,
+    guide_preview: bool,
 }
 
 fn user(c: &types::Contact) -> &types::User {
@@ -176,7 +184,145 @@ impl App {
             inst: None,
             keep_running: false,
             quitting: false,
+            guide: crate::guide::Guide::default(),
+            pad: None,
+            guide_shown: Default::default(),
+            guide_rect: None,
+            t0: Instant::now(),
+            guide_preview: false,
         }
+    }
+
+    /// The Guide's pad events and the flag the pad thread reads; `preview` opens it at once in a normal window.
+    pub fn set_guide(&mut self, rx: stdmpsc::Receiver<crate::pad::PadEvent>, shown: std::sync::Arc<std::sync::atomic::AtomicBool>, preview: bool) {
+        self.pad = Some(rx);
+        self.guide_shown = shown;
+        self.guide_preview = preview;
+        if preview {
+            self.guide.toggle(0.0);
+        }
+    }
+
+    fn guide_facts(&self) -> (String, usize, usize) {
+        let tag = self.me.as_ref().map(|m| user(m).gamertag.clone()).unwrap_or_else(|| "FH2MP".into());
+        let online = self.friends.iter().filter(|f| !matches!(f.presence, enums::Presence::Offline)).count();
+        (tag, online, self.incoming.len())
+    }
+
+    /// Pad events: open or close the Guide, navigate it, and what a chosen row asks of the app.
+    fn guide_events(&mut self, ctx: &egui::Context) {
+        let events: Vec<_> = self.pad.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default();
+        let now = self.t0.elapsed().as_secs_f64();
+        let (tag, online, requests) = self.guide_facts();
+        let facts = crate::guide::Facts {
+            gamertag: &tag,
+            friends_online: online,
+            requests,
+        };
+        for e in events {
+            if !self.guide.open {
+                if e == crate::pad::PadEvent::Toggle {
+                    self.guide.toggle(now);
+                    let ppp = ctx.pixels_per_point();
+                    self.guide_rect = crate::pad::game_window().map(|(x, y, w, h)| {
+                        egui::Rect::from_min_size(egui::pos2(x as f32 / ppp, y as f32 / ppp), egui::vec2(w as f32 / ppp, h as f32 / ppp))
+                    });
+                    tracing::info!(over_game = self.guide_rect.is_some(), "guide: opened");
+                }
+                continue;
+            }
+            if let Some(a) = self.guide.handle(e, &facts, now) {
+                self.guide_action(ctx, a);
+            }
+            if !self.guide.open {
+                tracing::info!("guide: closed");
+            }
+        }
+        self.guide_shown.store(self.guide.open, std::sync::atomic::Ordering::Relaxed);
+        if self.guide.open {
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::RequestPaintWhileHidden);
+            ctx.request_repaint();
+        }
+    }
+
+    fn guide_action(&mut self, ctx: &egui::Context, a: crate::guide::Action) {
+        if a == crate::guide::Action::OpenChat {
+            self.view = if self.incoming.is_empty() { View::Club } else { View::Requests };
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+        }
+    }
+
+    /// The Guide's own window: over the game (borderless, transparent, on top) or, in preview, a normal 1280x720 window.
+    fn guide_window(&mut self, ctx: &egui::Context) {
+        if !self.guide.open {
+            return;
+        }
+        let builder = if self.guide_preview {
+            egui::ViewportBuilder::default()
+                .with_title("FH2MP Guide (preview)")
+                .with_inner_size([1280.0, 720.0])
+        } else {
+            let r = self.guide_rect.unwrap_or_else(|| {
+                let size = ctx.input(|i| i.viewport().monitor_size).unwrap_or(egui::vec2(1280.0, 720.0));
+                egui::Rect::from_min_size(egui::Pos2::ZERO, size)
+            });
+            egui::ViewportBuilder::default()
+                .with_title("FH2MP Guide")
+                .with_decorations(false)
+                .with_transparent(true)
+                .with_always_on_top()
+                .with_taskbar(false)
+                .with_position(r.min)
+                .with_inner_size(r.size())
+        };
+        let now = self.t0.elapsed().as_secs_f64();
+        let (tag, online, requests) = self.guide_facts();
+        let mut action = None;
+        let mut closed_by_window = false;
+        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("fh2mp-guide"), builder, |ui, _class| {
+            let facts = crate::guide::Facts {
+                gamertag: &tag,
+                friends_online: online,
+                requests,
+            };
+            use crate::pad::PadEvent as P;
+            let keys = [
+                (Key::ArrowUp, P::Up),
+                (Key::ArrowDown, P::Down),
+                (Key::ArrowLeft, P::Left),
+                (Key::ArrowRight, P::Right),
+                (Key::Enter, P::A),
+                (Key::Space, P::A),
+                (Key::Escape, P::B),
+                (Key::Backspace, P::B),
+                (Key::Q, P::Lb),
+                (Key::E, P::Rb),
+            ];
+            for (k, e) in keys {
+                if ui.input(|i| i.key_pressed(k))
+                    && let Some(a) = self.guide.handle(e, &facts, now)
+                {
+                    action = Some(a);
+                }
+            }
+            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
+                if let Some(a) = self.guide.draw(ui, &facts, now) {
+                    action = Some(a);
+                }
+            });
+            if ui.input(|i| i.viewport().close_requested()) {
+                closed_by_window = true;
+            }
+        });
+        if closed_by_window {
+            self.guide.open = false;
+        }
+        if let Some(a) = action {
+            self.guide_action(ctx, a);
+        }
+        self.guide_shown.store(self.guide.open, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Single-instance mode: requests from later starts, closing hides the window when the launcher started the core (`--background`), and
@@ -644,11 +790,13 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.pump(ctx);
         self.instance(ctx);
+        self.guide_events(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        self.guide_window(&ctx);
         egui::Panel::top("bar")
             .frame(egui::Frame::new().fill(CRUST).inner_margin(8))
             .show(ui, |ui| {
