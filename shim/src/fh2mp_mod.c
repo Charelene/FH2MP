@@ -2321,6 +2321,7 @@ static int patch_online_meet(void)
 #include "remote_prediction_guard.inc"
 #include "picker_pi.inc"
 #include "autodrive_rule.inc"
+#include "tune_gate.inc"
 
 static int patch_torque_load(void)
 {
@@ -5655,6 +5656,9 @@ static DWORD WINAPI late_init(LPVOID unused)
             }
             if (GetEnvironmentVariableW(L"FH2MP_NO_EOROUTES", env, 8) == 0) {
                 patch_eo_routes();
+            }
+            if (GetEnvironmentVariableW(L"FH2MP_NO_TUNEGATE", env, 8) == 0) {
+                patch_tune_gate();
             }
         }
         {
