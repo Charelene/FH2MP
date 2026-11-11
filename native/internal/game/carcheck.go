@@ -452,9 +452,9 @@ func (w *World) CheckParts(peer *Peer, size int, payload bits.Int, oid int) (boo
 			bad, hide, np := w.UnknownCar(peer, payload, decoded[playersetup.Parts].Offset, words)
 			if !hide && UnknownCarPolicy == "standin" {
 				w.standinApplied = true
-				// a stand-in the launcher named is a real car: it gets a complete stock setup. The default stand-in is the game's placeholder car,
-				// which draws whatever the setup says (the recorded traces keep that path)
-				if w.standinFor(peer, car) != StandinCar {
+				// a stand-in gets a complete stock setup: the launcher's own and, with StandinStock, the default placeholder car (the recorded
+				// traces keep the old path, where the placeholder draws whatever the setup says, tune included)
+				if StandinStock || w.standinFor(peer, car) != StandinCar {
 					if n2, p2, ok := w.standinSetup(peer, car, values); ok {
 						return bad, hide, n2, p2
 					}

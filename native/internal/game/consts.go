@@ -168,6 +168,10 @@ var (
 	PartPolicy       = strings.ToLower(strings.TrimSpace(envStr("FH2MP_PART_POLICY", "fix")))
 	UnknownCarPolicy = envStr("FH2MP_UNKNOWN_CAR_POLICY", "standin")
 	StandinCar       = int64(envInt("FH2MP_STANDIN_CAR", 1215))
+	// StandinStock: the default stand-in (StandinCar, the game's placeholder car) gets its complete stock setup like a stand-in the launcher
+	// named, so the custom car's tune never reaches it. Off ("0"), the placeholder keeps the custom car's tune: a car pack car's tune on
+	// NUL_Car_00 can make its physics NaN, and every other client then throws while building its AI driver (game+0xf48fe0, #454-#456).
+	StandinStock     = envStr("FH2MP_STANDIN_STOCK", "1") != "0"
 	SpeedPolicy      = envStr("FH2MP_SPEED_POLICY", "kick")
 	CarCapture       = os.Getenv("FH2MP_CAR_CAPTURE") != ""
 	CheaterPoolHours = envFloat("FH2MP_CHEATER_POOL_HOURS", 24)

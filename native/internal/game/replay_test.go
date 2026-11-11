@@ -144,6 +144,9 @@ func runTraceN(t *testing.T, name string, seed uint64, workers int) {
 		RtClassMode = v
 	}
 	t.Cleanup(func() { RtClassMode = prevRtClass })
+	prevStandinStock := StandinStock
+	StandinStock = tr.Env["FH2MP_STANDIN_STOCK"] == "1" // the traces were recorded when the placeholder stand-in kept the custom car's tune
+	t.Cleanup(func() { StandinStock = prevStandinStock })
 	hub, err := NewHub(HubConfig{Roadtrip: tr.Roadtrip, CtlSend: func(d []byte, _ Addr) { lastCtl = string(d) }, Port: 0, Clock: clk, Rng: pyrand.New(seed), Sock: sock, Out: NewLogOut(logSink), Catalog: cat,
 		Sinks: &Sinks{Gamemode: func(int, []uint64) (string, string, error) { return "session-1", "template-1", nil }}})
 	if err != nil {
