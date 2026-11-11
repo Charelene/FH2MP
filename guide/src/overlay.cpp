@@ -28,6 +28,9 @@
 #include "imgui.h"
 #include "net.h"
 
+// probe.cpp
+void party_probe_start(const FH2ModApi* api, FH2Mod* mod, unsigned char* game, void (*log)(const char*));
+
 namespace {
 
 const FH2ModApi* g_api;
@@ -593,41 +596,8 @@ HRESULT STDMETHODCALLTYPE hk_resize(IDXGISwapChain3* sc, UINT n, UINT w, UINT h,
 
 LRESULT CALLBACK dummy_proc(HWND h, UINT m, WPARAM w, LPARAM l) { return DefWindowProcW(h, m, w, l); }
 
-// The game's own Pause > Game Party > Invite Friends: its PPL task (game+0x179a110, build 1.0.0.64; only that menu calls it, from
-// game+0x1795120) asks Windows.Xbox.Multiplayer.Party (IID e6110c4c-...) for statics slot 10, which Azimuth has no shell for, so nothing
-// showed. The Guide opens Invite to Game when it runs; the game's call goes on as before.
-typedef void*(__fastcall* PartyInviteFn)(void*, void*);
-PartyInviteFn o_party_invite;
-
-// After the press the game calls the task again every frame (2026-11-11 win1: 4761 calls in 80 s, the Party call never finishes under
-// Azimuth), so only the first call of a run opens the Guide: a run ends when the game has not called for 2 s.
-std::atomic<ULONGLONG> g_invite_last{0};
-std::atomic<unsigned> g_invite_calls{0};
-
-void* __fastcall hk_party_invite(void* a, void* b) {
-    ULONGLONG now = GetTickCount64(), last = g_invite_last.exchange(now);
-    if (now - last > 2000) {
-        unsigned before = g_invite_calls.exchange(0);
-        if (before > 1) logf("guide: the game's previous Invite Friends run called the Party task %u times", before);
-        logf("guide: the game's Invite Friends ran: the Guide opens Invite to Game");
-        push(PadEvent::OpenInvite);
-    }
-    g_invite_calls++;
-    return o_party_invite(a, b);
-}
-
-void hook_invite_friends() {
-    unsigned char* base = (unsigned char*)g_api->wait_for_code(180000);
-    if (!base) return logf("guide: the game's code was not ready: Invite Friends does not open the Guide");
-    unsigned char* fn = base + 0x179a110;
-    static const unsigned char head[] = {0x48, 0x8b, 0xc4, 0x57, 0x48, 0x83, 0xec, 0x50};  // mov rax, rsp; push rdi; sub rsp, 0x50
-    static const unsigned char iid[] = {0xc7, 0x40, 0xd0, 0x4c, 0x0c, 0x11, 0xe6};        // mov dword [rax-0x30], 0xe6110c4c
-    if (memcmp(fn, head, sizeof head) || memcmp(fn + 0x1a, iid, sizeof iid))
-        return logf("guide: game+0x179a110 is not the Party invite task this build of the Guide knows: Invite Friends does not open the Guide");
-    FH2Hook* h = g_api->hook_function(g_mod, "guide: the game's Invite Friends (game+0x179a110)", fn, (void*)hk_party_invite, (void**)&o_party_invite);
-    if (!h || !g_api->enable_hooks(g_mod, h)) return logf("guide: the game's Invite Friends could not be hooked: it does not open the Guide");
-    logf("guide: the game's Invite Friends opens the Guide's Invite to Game");
-}
+// The Party probe (probe.cpp), on with FH2MP_GUIDE_PROBE=1: logs the Party statics calls, to find the one behind the game's Invite Friends.
+// (game+0x179a110 is not it: it runs when Free Roam is joined and then every frame, 2026-11-11.)
 
 // DXGI's swap chain makers, hooked as early as possible: they tell which queue each swap chain belongs to.
 bool hook_factory() {
@@ -693,7 +663,10 @@ DWORD WINAPI hook_thread(LPVOID) {
     if (dev) dev->Release();
     DestroyWindow(w);
     if (ok) CloseHandle(CreateThread(nullptr, 0, pad_thread, nullptr, 0, nullptr));
-    if (ok) hook_invite_friends();
+    wchar_t probe[8];
+    if (GetEnvironmentVariableW(L"FH2MP_GUIDE_PROBE", probe, 8) && probe[0] == L'1') {
+        if (unsigned char* base = (unsigned char*)g_api->wait_for_code(180000)) party_probe_start(g_api, g_mod, base, net_log);
+    }
     return 0;
 }
 

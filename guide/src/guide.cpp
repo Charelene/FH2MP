@@ -400,14 +400,9 @@ GuideRequest Guide::handle_list(PadEvent e, double now) {
     case PadEvent::B: go_page(Page::Home, -1, now); break;
     case PadEvent::A: {
         if (!n) break;
+        // any friend but one already in your game (canvas: that row does nothing); an offline friend finds it in Messages later
         const Friend& f = *list[row_[tab_]];
-        if (in_my_game(f, social_.me)) {
-            toast(ToastKind::Info, "Invite to Game", (f.tag + " is already in your game").c_str(), I_GROUP_ADD, 0, now);
-        } else if (f.state == Friend::Offline) {
-            toast(ToastKind::Info, "Invite to Game", (f.tag + " is offline").c_str(), I_GROUP_ADD, 0, now);
-        } else {
-            r.action = GuideAction::Invite, r.xuid = f.xuid, r.name = f.tag;
-        }
+        if (!in_my_game(f, social_.me)) r.action = GuideAction::Invite, r.xuid = f.xuid, r.name = f.tag;
         break;
     }
     default: break;
@@ -789,7 +784,8 @@ void Guide::draw_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 ori
     float unfold = t < 5.4f ? seg(0.6f, 1.05f, 0.7f, 0.0f, 0.25f, 1.0f) : 1 - seg(5.4f, 5.85f, 0.7f, 0.0f, 0.25f, 1.0f);
     float shift = half * (1 - unfold);
     auto at = [&](float x, float y) { return ImVec2(origin.x + x * s, origin.y + y * s); };
-    float bx = 640 - (64 + pw) * 0.5f, by = 600;
+    // canvas: y 600 over the game; while the Guide is open, under its hint bar (which ends at 642) so the two do not run together
+    float bx = 640 - (64 + pw) * 0.5f, by = open ? 650 : 600;
     ImU32 kc = toast_color(toast_kind_);
     if (unfold > 0.001f) {
         ImVec2 p0 = at(bx + 64 + shift, by), p1 = at(bx + 64 + pw - shift, by + 64);
