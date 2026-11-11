@@ -95,7 +95,7 @@ func (l *Launcher) acceptInvite(me, id int64) (any, error) {
 	if !ok {
 		return nil, auth.NewError(404, "invite_gone", "That invite has expired.").WithXuid(me)
 	}
-	h, err := l.C.Xbl.Reserve(fmt.Sprint(me), iv.Lobby, "")
+	h, err := l.C.Xbl.ReserveInvited(fmt.Sprint(me), iv.Lobby)
 	if err != nil {
 		return nil, err
 	}

@@ -1323,7 +1323,7 @@ func (s *Server) lobbyFor(scid, hopper string, attrs *Dict, ref *Dict, xuid stri
 		n, _ := strconv.ParseInt(xuid, 10, 64)
 		mine = flagged[n]
 	}
-	full, pooled, avoidedN := 0, 0, 0
+	full, pooled, avoidedN, private := 0, 0, 0, 0
 	for _, name := range append([]string(nil), names...) {
 		rec := s.lookup(scid, name)
 		if rec == nil {
@@ -1333,6 +1333,10 @@ func (s *Server) lobbyFor(scid, hopper string, attrs *Dict, ref *Dict, xuid stri
 		}
 		if avoid[strings.ToLower(name)] {
 			avoidedN++
+			continue
+		}
+		if name != preferred && s.privateFreeRoamLocked(name, pops) {
+			private++
 			continue
 		}
 		s.prune(rec)
@@ -1401,7 +1405,7 @@ func (s *Server) lobbyFor(scid, hopper string, attrs *Dict, ref *Dict, xuid stri
 		mineFlag = true
 	}
 	matchLog.Info("ticket matched " + kv(f("xuid", nilIfEmpty(xuid)), f("lobby", trunc(name, 8)), f("how", how), f("hopper", hopper), f("location", ToJSON(loc)), f("gsi", nilIfEmpty(gsi)),
-		f("lobbies", len(names)), f("full", nz(full)), f("pool_skipped", nz(pooled)), f("left_or_inside_skipped", nz(avoidedN)), f("released", nz(released)), f("flagged_player", mineFlag),
+		f("lobbies", len(names)), f("full", nz(full)), f("pool_skipped", nz(pooled)), f("left_or_inside_skipped", nz(avoidedN)), f("private_skipped", nz(private)), f("released", nz(released)), f("flagged_player", mineFlag),
 		f("occupancy_source", src)))
 	return name, nil
 }

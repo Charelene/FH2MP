@@ -155,6 +155,9 @@ var (
 	// StartResend: MsgStartRace goes out once as a plain datagram; a participant that has sent no score message StartResendSeconds after it gets it
 	// again with the same start time (prod 2026-11-11: one lost start left the event leader on the grid while seven others raced). "0" = off.
 	StartResend = envStr("FH2MP_START_RESEND", "1") == "1"
+	// PopFreeRoam: the "pop" report also names the lobbies that have a Free Roam world with players (" !freeroam=a,b"), so the LSP can keep a
+	// Car Meet that went to Free Roam (the game's private Free Roam) out of matchmaking and the lobby list. FH2MP_POP_FREEROAM=0 leaves it out.
+	PopFreeRoam = envStr("FH2MP_POP_FREEROAM", "1") == "1"
 	// RtClassMode: a Road Trip car above the trip's class after car select (a tune loaded mid-trip, as FH2 ANNA's Tune Car allowed): "log" (default,
 	// one line per owner and class every 5 min), "enforce" (Ready refused, out of the event at its start) or "off".
 	RtClassMode = strings.ToLower(strings.TrimSpace(envStr("FH2MP_RT_CLASS", "log")))

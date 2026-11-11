@@ -643,7 +643,28 @@ func (h *Hub) populationsText() string {
 		}
 		b.WriteString(" !flagged=" + strings.Join(parts, ","))
 	}
+	if fr := h.freeRoamLobbies(); PopFreeRoam && len(fr) > 0 {
+		b.WriteString(" !freeroam=" + strings.Join(fr, ","))
+	}
 	return b.String()
+}
+
+// freeRoamLobbies are the lobby names that have a Free Roam world (type 2) with a connected player, in world order.
+func (h *Hub) freeRoamLobbies() []string {
+	var out []string
+	for _, key := range h.Worlds.Keys() {
+		if key.Type != LobbyTypeFreeRoam || key.Name == "" {
+			continue
+		}
+		world, _ := h.Worlds.Get(key)
+		for _, p := range world.Peers.Values() {
+			if p.Connected {
+				out = append(out, key.Name)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // ---- cheater pool ----
