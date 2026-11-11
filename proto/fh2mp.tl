@@ -35,6 +35,30 @@ updates#6b9f7239 updates:Vector<Update> pts:int pts_count:int date:int = Updates
 updateShort#78d4dec1 update:Update date:int = Updates;
 updatesTooLong#e317af7e = Updates;
 
+// Friends, presence and club chat (the chat core's friend list and club tab). Club chat stays readable by the server (moderation); direct
+// messages are end-to-end and come in their own part of the schema.
+presenceOffline#5e53c43f = Presence;
+// The chat core or the launcher is open.
+presenceOnline#1622a074 = Presence;
+// In the game; lobby_kind is freeroam or roadtrip when the player is in a lobby, else empty.
+presencePlaying#b935baca lobby_kind:string = Presence;
+
+club#bab49076 id:long tag:string name:string role:string members:int = Club;
+contact#8fdfd8ba flags:# user:User level:int gamerpic_version:long presence:Presence club:flags.0?Club = Contact;
+friends.list#65149329 me:Contact friends:Vector<Contact> incoming:Vector<Contact> outgoing:Vector<Contact> = friends.List;
+
+clubMessage#3a419090 id:long club_id:long sender:User text:string date:int = ClubMessage;
+// read_max_id: the newest message this account has marked read.
+clubs.history#eb4fafe0 messages:Vector<ClubMessage> read_max_id:long = clubs.History;
+
+users.gamerpic#c7416ef9 user_id:long version:long png:bytes = users.Gamerpic;
+
+// Pushed without pts: presence of a friend, a new club message (fetch clubs.getHistory after the last id seen to catch up after a
+// reconnect), a change of the friend list or requests (fetch friends.get).
+updateUserPresence#806504bc user_id:long presence:Presence = Update;
+updateClubMessage#5a6f6195 message:ClubMessage = Update;
+updateFriends#1bfadb02 = Update;
+
 ---functions---
 
 // The first call of every session: names the client's layer. Other API calls before it get 400 INIT_REQUIRED.
@@ -48,3 +72,19 @@ auth.logOut#5717da40 = Bool;
 
 updates.getState#edd4882a = updates.State;
 updates.getDifference#6a5bfec6 pts:int limit:int = updates.Difference;
+
+friends.get#5e6406b0 = friends.List;
+// query: a gamertag, or an id (decimal, or hex with 0x).
+friends.add#46162cb9 query:string = Bool;
+friends.accept#74761aa3 user_id:long = Bool;
+// Declines an incoming request or cancels an outgoing one.
+friends.decline#ae994302 user_id:long = Bool;
+friends.remove#6e78f556 user_id:long = Bool;
+
+// Messages after after_id, oldest first (after_id 0: the newest page). The club must be the caller's.
+clubs.getHistory#4ebf1730 club_id:long after_id:long limit:int = clubs.History;
+// random_id makes a resend after a lost answer post once: the same random_id from the same account answers the first message.
+clubs.sendMessage#17becd97 club_id:long random_id:long text:string = ClubMessage;
+clubs.readHistory#77932beb club_id:long max_id:long = Bool;
+
+users.getGamerpic#9fb5567b user_id:long = users.Gamerpic;

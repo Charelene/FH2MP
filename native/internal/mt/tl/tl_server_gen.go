@@ -162,3 +162,176 @@ func (s *ServerDispatcher) OnUpdatesGetDifference(f func(ctx context.Context, re
 
 	s.handlers[UpdatesGetDifferenceRequestTypeID] = handler
 }
+
+func (s *ServerDispatcher) OnFriendsGet(f func(ctx context.Context) (*FriendsList, error)) {
+	handler := func(ctx context.Context, b *bin.Buffer) (bin.Encoder, error) {
+		var request FriendsGetRequest
+		if err := request.Decode(b); err != nil {
+			return nil, err
+		}
+
+		response, err := f(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return response, nil
+	}
+
+	s.handlers[FriendsGetRequestTypeID] = handler
+}
+
+func (s *ServerDispatcher) OnFriendsAdd(f func(ctx context.Context, query string) (bool, error)) {
+	handler := func(ctx context.Context, b *bin.Buffer) (bin.Encoder, error) {
+		var request FriendsAddRequest
+		if err := request.Decode(b); err != nil {
+			return nil, err
+		}
+
+		response, err := f(ctx, request.Query)
+		if err != nil {
+			return nil, err
+		}
+		if response {
+			return &BoolBox{Bool: &BoolTrue{}}, nil
+		}
+
+		return &BoolBox{Bool: &BoolFalse{}}, nil
+	}
+
+	s.handlers[FriendsAddRequestTypeID] = handler
+}
+
+func (s *ServerDispatcher) OnFriendsAccept(f func(ctx context.Context, userid int64) (bool, error)) {
+	handler := func(ctx context.Context, b *bin.Buffer) (bin.Encoder, error) {
+		var request FriendsAcceptRequest
+		if err := request.Decode(b); err != nil {
+			return nil, err
+		}
+
+		response, err := f(ctx, request.UserID)
+		if err != nil {
+			return nil, err
+		}
+		if response {
+			return &BoolBox{Bool: &BoolTrue{}}, nil
+		}
+
+		return &BoolBox{Bool: &BoolFalse{}}, nil
+	}
+
+	s.handlers[FriendsAcceptRequestTypeID] = handler
+}
+
+func (s *ServerDispatcher) OnFriendsDecline(f func(ctx context.Context, userid int64) (bool, error)) {
+	handler := func(ctx context.Context, b *bin.Buffer) (bin.Encoder, error) {
+		var request FriendsDeclineRequest
+		if err := request.Decode(b); err != nil {
+			return nil, err
+		}
+
+		response, err := f(ctx, request.UserID)
+		if err != nil {
+			return nil, err
+		}
+		if response {
+			return &BoolBox{Bool: &BoolTrue{}}, nil
+		}
+
+		return &BoolBox{Bool: &BoolFalse{}}, nil
+	}
+
+	s.handlers[FriendsDeclineRequestTypeID] = handler
+}
+
+func (s *ServerDispatcher) OnFriendsRemove(f func(ctx context.Context, userid int64) (bool, error)) {
+	handler := func(ctx context.Context, b *bin.Buffer) (bin.Encoder, error) {
+		var request FriendsRemoveRequest
+		if err := request.Decode(b); err != nil {
+			return nil, err
+		}
+
+		response, err := f(ctx, request.UserID)
+		if err != nil {
+			return nil, err
+		}
+		if response {
+			return &BoolBox{Bool: &BoolTrue{}}, nil
+		}
+
+		return &BoolBox{Bool: &BoolFalse{}}, nil
+	}
+
+	s.handlers[FriendsRemoveRequestTypeID] = handler
+}
+
+func (s *ServerDispatcher) OnClubsGetHistory(f func(ctx context.Context, request *ClubsGetHistoryRequest) (*ClubsHistory, error)) {
+	handler := func(ctx context.Context, b *bin.Buffer) (bin.Encoder, error) {
+		var request ClubsGetHistoryRequest
+		if err := request.Decode(b); err != nil {
+			return nil, err
+		}
+
+		response, err := f(ctx, &request)
+		if err != nil {
+			return nil, err
+		}
+		return response, nil
+	}
+
+	s.handlers[ClubsGetHistoryRequestTypeID] = handler
+}
+
+func (s *ServerDispatcher) OnClubsSendMessage(f func(ctx context.Context, request *ClubsSendMessageRequest) (*ClubMessage, error)) {
+	handler := func(ctx context.Context, b *bin.Buffer) (bin.Encoder, error) {
+		var request ClubsSendMessageRequest
+		if err := request.Decode(b); err != nil {
+			return nil, err
+		}
+
+		response, err := f(ctx, &request)
+		if err != nil {
+			return nil, err
+		}
+		return response, nil
+	}
+
+	s.handlers[ClubsSendMessageRequestTypeID] = handler
+}
+
+func (s *ServerDispatcher) OnClubsReadHistory(f func(ctx context.Context, request *ClubsReadHistoryRequest) (bool, error)) {
+	handler := func(ctx context.Context, b *bin.Buffer) (bin.Encoder, error) {
+		var request ClubsReadHistoryRequest
+		if err := request.Decode(b); err != nil {
+			return nil, err
+		}
+
+		response, err := f(ctx, &request)
+		if err != nil {
+			return nil, err
+		}
+		if response {
+			return &BoolBox{Bool: &BoolTrue{}}, nil
+		}
+
+		return &BoolBox{Bool: &BoolFalse{}}, nil
+	}
+
+	s.handlers[ClubsReadHistoryRequestTypeID] = handler
+}
+
+func (s *ServerDispatcher) OnUsersGetGamerpic(f func(ctx context.Context, userid int64) (*UsersGamerpic, error)) {
+	handler := func(ctx context.Context, b *bin.Buffer) (bin.Encoder, error) {
+		var request UsersGetGamerpicRequest
+		if err := request.Decode(b); err != nil {
+			return nil, err
+		}
+
+		response, err := f(ctx, request.UserID)
+		if err != nil {
+			return nil, err
+		}
+		return response, nil
+	}
+
+	s.handlers[UsersGetGamerpicRequestTypeID] = handler
+}

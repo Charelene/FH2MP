@@ -47,6 +47,10 @@ func (c *Core) StartChat() error {
 		return fmt.Errorf("chat server: listen on %s: %w", addr, err)
 	}
 	c.Chat = srv
+	if la, ok := c.Launcher.(*Launcher); ok {
+		srv.SetCommunity(chatCommunity{la})
+		go (&presenceWatch{l: la, last: map[int64]string{}, friends: map[int64]friendsAt{}}).run(5 * time.Second)
+	}
 	go func() {
 		if err := srv.Serve(l); err != nil {
 			c.LogAt(nil, diag.Error, "", fmt.Sprintf("chat server stopped: accept on %s failed: %v; chat is down until the LSP restarts", addr, err))

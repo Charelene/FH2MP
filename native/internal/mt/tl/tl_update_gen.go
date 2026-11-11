@@ -331,6 +331,385 @@ func (u *UpdateLoggedOut) GetReason() (value string) {
 	return u.Reason
 }
 
+// UpdateUserPresence represents TL type `updateUserPresence#806504bc`.
+type UpdateUserPresence struct {
+	// UserID field of UpdateUserPresence.
+	UserID int64
+	// Presence field of UpdateUserPresence.
+	Presence PresenceClass
+}
+
+// UpdateUserPresenceTypeID is TL type id of UpdateUserPresence.
+const UpdateUserPresenceTypeID = 0x806504bc
+
+// construct implements constructor of UpdateClass.
+func (u UpdateUserPresence) construct() UpdateClass { return &u }
+
+// Ensuring interfaces in compile-time for UpdateUserPresence.
+var (
+	_ bin.Encoder     = &UpdateUserPresence{}
+	_ bin.Decoder     = &UpdateUserPresence{}
+	_ bin.BareEncoder = &UpdateUserPresence{}
+	_ bin.BareDecoder = &UpdateUserPresence{}
+
+	_ UpdateClass = &UpdateUserPresence{}
+)
+
+func (u *UpdateUserPresence) Zero() bool {
+	if u == nil {
+		return true
+	}
+	if !(u.UserID == 0) {
+		return false
+	}
+	if !(u.Presence == nil) {
+		return false
+	}
+
+	return true
+}
+
+// String implements fmt.Stringer.
+func (u *UpdateUserPresence) String() string {
+	if u == nil {
+		return "UpdateUserPresence(nil)"
+	}
+	type Alias UpdateUserPresence
+	return fmt.Sprintf("UpdateUserPresence%+v", Alias(*u))
+}
+
+// TypeID returns type id in TL schema.
+//
+// See https://core.telegram.org/mtproto/TL-tl#remarks.
+func (*UpdateUserPresence) TypeID() uint32 {
+	return UpdateUserPresenceTypeID
+}
+
+// TypeName returns name of type in TL schema.
+func (*UpdateUserPresence) TypeName() string {
+	return "updateUserPresence"
+}
+
+// TypeInfo returns info about TL type.
+func (u *UpdateUserPresence) TypeInfo() tdp.Type {
+	typ := tdp.Type{
+		Name: "updateUserPresence",
+		ID:   UpdateUserPresenceTypeID,
+	}
+	if u == nil {
+		typ.Null = true
+		return typ
+	}
+	typ.Fields = []tdp.Field{
+		{
+			Name:       "UserID",
+			SchemaName: "user_id",
+		},
+		{
+			Name:       "Presence",
+			SchemaName: "presence",
+		},
+	}
+	return typ
+}
+
+// Encode implements bin.Encoder.
+func (u *UpdateUserPresence) Encode(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't encode updateUserPresence#806504bc as nil")
+	}
+	b.PutID(UpdateUserPresenceTypeID)
+	return u.EncodeBare(b)
+}
+
+// EncodeBare implements bin.BareEncoder.
+func (u *UpdateUserPresence) EncodeBare(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't encode updateUserPresence#806504bc as nil")
+	}
+	b.PutLong(u.UserID)
+	if u.Presence == nil {
+		return fmt.Errorf("unable to encode updateUserPresence#806504bc: field presence is nil")
+	}
+	if err := u.Presence.Encode(b); err != nil {
+		return fmt.Errorf("unable to encode updateUserPresence#806504bc: field presence: %w", err)
+	}
+	return nil
+}
+
+// Decode implements bin.Decoder.
+func (u *UpdateUserPresence) Decode(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't decode updateUserPresence#806504bc to nil")
+	}
+	if err := b.ConsumeID(UpdateUserPresenceTypeID); err != nil {
+		return fmt.Errorf("unable to decode updateUserPresence#806504bc: %w", err)
+	}
+	return u.DecodeBare(b)
+}
+
+// DecodeBare implements bin.BareDecoder.
+func (u *UpdateUserPresence) DecodeBare(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't decode updateUserPresence#806504bc to nil")
+	}
+	{
+		value, err := b.Long()
+		if err != nil {
+			return fmt.Errorf("unable to decode updateUserPresence#806504bc: field user_id: %w", err)
+		}
+		u.UserID = value
+	}
+	{
+		value, err := DecodePresence(b)
+		if err != nil {
+			return fmt.Errorf("unable to decode updateUserPresence#806504bc: field presence: %w", err)
+		}
+		u.Presence = value
+	}
+	return nil
+}
+
+// GetUserID returns value of UserID field.
+func (u *UpdateUserPresence) GetUserID() (value int64) {
+	if u == nil {
+		return
+	}
+	return u.UserID
+}
+
+// GetPresence returns value of Presence field.
+func (u *UpdateUserPresence) GetPresence() (value PresenceClass) {
+	if u == nil {
+		return
+	}
+	return u.Presence
+}
+
+// UpdateClubMessage represents TL type `updateClubMessage#5a6f6195`.
+type UpdateClubMessage struct {
+	// Message field of UpdateClubMessage.
+	Message ClubMessage
+}
+
+// UpdateClubMessageTypeID is TL type id of UpdateClubMessage.
+const UpdateClubMessageTypeID = 0x5a6f6195
+
+// construct implements constructor of UpdateClass.
+func (u UpdateClubMessage) construct() UpdateClass { return &u }
+
+// Ensuring interfaces in compile-time for UpdateClubMessage.
+var (
+	_ bin.Encoder     = &UpdateClubMessage{}
+	_ bin.Decoder     = &UpdateClubMessage{}
+	_ bin.BareEncoder = &UpdateClubMessage{}
+	_ bin.BareDecoder = &UpdateClubMessage{}
+
+	_ UpdateClass = &UpdateClubMessage{}
+)
+
+func (u *UpdateClubMessage) Zero() bool {
+	if u == nil {
+		return true
+	}
+	if !(u.Message.Zero()) {
+		return false
+	}
+
+	return true
+}
+
+// String implements fmt.Stringer.
+func (u *UpdateClubMessage) String() string {
+	if u == nil {
+		return "UpdateClubMessage(nil)"
+	}
+	type Alias UpdateClubMessage
+	return fmt.Sprintf("UpdateClubMessage%+v", Alias(*u))
+}
+
+// TypeID returns type id in TL schema.
+//
+// See https://core.telegram.org/mtproto/TL-tl#remarks.
+func (*UpdateClubMessage) TypeID() uint32 {
+	return UpdateClubMessageTypeID
+}
+
+// TypeName returns name of type in TL schema.
+func (*UpdateClubMessage) TypeName() string {
+	return "updateClubMessage"
+}
+
+// TypeInfo returns info about TL type.
+func (u *UpdateClubMessage) TypeInfo() tdp.Type {
+	typ := tdp.Type{
+		Name: "updateClubMessage",
+		ID:   UpdateClubMessageTypeID,
+	}
+	if u == nil {
+		typ.Null = true
+		return typ
+	}
+	typ.Fields = []tdp.Field{
+		{
+			Name:       "Message",
+			SchemaName: "message",
+		},
+	}
+	return typ
+}
+
+// Encode implements bin.Encoder.
+func (u *UpdateClubMessage) Encode(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't encode updateClubMessage#5a6f6195 as nil")
+	}
+	b.PutID(UpdateClubMessageTypeID)
+	return u.EncodeBare(b)
+}
+
+// EncodeBare implements bin.BareEncoder.
+func (u *UpdateClubMessage) EncodeBare(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't encode updateClubMessage#5a6f6195 as nil")
+	}
+	if err := u.Message.Encode(b); err != nil {
+		return fmt.Errorf("unable to encode updateClubMessage#5a6f6195: field message: %w", err)
+	}
+	return nil
+}
+
+// Decode implements bin.Decoder.
+func (u *UpdateClubMessage) Decode(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't decode updateClubMessage#5a6f6195 to nil")
+	}
+	if err := b.ConsumeID(UpdateClubMessageTypeID); err != nil {
+		return fmt.Errorf("unable to decode updateClubMessage#5a6f6195: %w", err)
+	}
+	return u.DecodeBare(b)
+}
+
+// DecodeBare implements bin.BareDecoder.
+func (u *UpdateClubMessage) DecodeBare(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't decode updateClubMessage#5a6f6195 to nil")
+	}
+	{
+		if err := u.Message.Decode(b); err != nil {
+			return fmt.Errorf("unable to decode updateClubMessage#5a6f6195: field message: %w", err)
+		}
+	}
+	return nil
+}
+
+// GetMessage returns value of Message field.
+func (u *UpdateClubMessage) GetMessage() (value ClubMessage) {
+	if u == nil {
+		return
+	}
+	return u.Message
+}
+
+// UpdateFriends represents TL type `updateFriends#1bfadb02`.
+type UpdateFriends struct {
+}
+
+// UpdateFriendsTypeID is TL type id of UpdateFriends.
+const UpdateFriendsTypeID = 0x1bfadb02
+
+// construct implements constructor of UpdateClass.
+func (u UpdateFriends) construct() UpdateClass { return &u }
+
+// Ensuring interfaces in compile-time for UpdateFriends.
+var (
+	_ bin.Encoder     = &UpdateFriends{}
+	_ bin.Decoder     = &UpdateFriends{}
+	_ bin.BareEncoder = &UpdateFriends{}
+	_ bin.BareDecoder = &UpdateFriends{}
+
+	_ UpdateClass = &UpdateFriends{}
+)
+
+func (u *UpdateFriends) Zero() bool {
+	if u == nil {
+		return true
+	}
+
+	return true
+}
+
+// String implements fmt.Stringer.
+func (u *UpdateFriends) String() string {
+	if u == nil {
+		return "UpdateFriends(nil)"
+	}
+	type Alias UpdateFriends
+	return fmt.Sprintf("UpdateFriends%+v", Alias(*u))
+}
+
+// TypeID returns type id in TL schema.
+//
+// See https://core.telegram.org/mtproto/TL-tl#remarks.
+func (*UpdateFriends) TypeID() uint32 {
+	return UpdateFriendsTypeID
+}
+
+// TypeName returns name of type in TL schema.
+func (*UpdateFriends) TypeName() string {
+	return "updateFriends"
+}
+
+// TypeInfo returns info about TL type.
+func (u *UpdateFriends) TypeInfo() tdp.Type {
+	typ := tdp.Type{
+		Name: "updateFriends",
+		ID:   UpdateFriendsTypeID,
+	}
+	if u == nil {
+		typ.Null = true
+		return typ
+	}
+	typ.Fields = []tdp.Field{}
+	return typ
+}
+
+// Encode implements bin.Encoder.
+func (u *UpdateFriends) Encode(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't encode updateFriends#1bfadb02 as nil")
+	}
+	b.PutID(UpdateFriendsTypeID)
+	return u.EncodeBare(b)
+}
+
+// EncodeBare implements bin.BareEncoder.
+func (u *UpdateFriends) EncodeBare(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't encode updateFriends#1bfadb02 as nil")
+	}
+	return nil
+}
+
+// Decode implements bin.Decoder.
+func (u *UpdateFriends) Decode(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't decode updateFriends#1bfadb02 to nil")
+	}
+	if err := b.ConsumeID(UpdateFriendsTypeID); err != nil {
+		return fmt.Errorf("unable to decode updateFriends#1bfadb02: %w", err)
+	}
+	return u.DecodeBare(b)
+}
+
+// DecodeBare implements bin.BareDecoder.
+func (u *UpdateFriends) DecodeBare(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't decode updateFriends#1bfadb02 to nil")
+	}
+	return nil
+}
+
 // UpdateClassName is schema name of UpdateClass.
 const UpdateClassName = "Update"
 
@@ -339,6 +718,9 @@ const UpdateClassName = "Update"
 // Constructors:
 //   - [UpdateNotice]
 //   - [UpdateLoggedOut]
+//   - [UpdateUserPresence]
+//   - [UpdateClubMessage]
+//   - [UpdateFriends]
 //
 // Example:
 //
@@ -349,6 +731,9 @@ const UpdateClassName = "Update"
 //	switch v := g.(type) {
 //	case *tl.UpdateNotice: // updateNotice#bb869d86
 //	case *tl.UpdateLoggedOut: // updateLoggedOut#c33bab82
+//	case *tl.UpdateUserPresence: // updateUserPresence#806504bc
+//	case *tl.UpdateClubMessage: // updateClubMessage#5a6f6195
+//	case *tl.UpdateFriends: // updateFriends#1bfadb02
 //	default: panic(v)
 //	}
 type UpdateClass interface {
@@ -387,6 +772,27 @@ func DecodeUpdate(buf *bin.Buffer) (UpdateClass, error) {
 	case UpdateLoggedOutTypeID:
 		// Decoding updateLoggedOut#c33bab82.
 		v := UpdateLoggedOut{}
+		if err := v.Decode(buf); err != nil {
+			return nil, fmt.Errorf("unable to decode UpdateClass: %w", err)
+		}
+		return &v, nil
+	case UpdateUserPresenceTypeID:
+		// Decoding updateUserPresence#806504bc.
+		v := UpdateUserPresence{}
+		if err := v.Decode(buf); err != nil {
+			return nil, fmt.Errorf("unable to decode UpdateClass: %w", err)
+		}
+		return &v, nil
+	case UpdateClubMessageTypeID:
+		// Decoding updateClubMessage#5a6f6195.
+		v := UpdateClubMessage{}
+		if err := v.Decode(buf); err != nil {
+			return nil, fmt.Errorf("unable to decode UpdateClass: %w", err)
+		}
+		return &v, nil
+	case UpdateFriendsTypeID:
+		// Decoding updateFriends#1bfadb02.
+		v := UpdateFriends{}
 		if err := v.Decode(buf); err != nil {
 			return nil, fmt.Errorf("unable to decode UpdateClass: %w", err)
 		}

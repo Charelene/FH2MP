@@ -191,6 +191,8 @@ type Server struct {
 	limits     *auth.RateLimiter
 	xcfg       exchangeConfig
 	nextConn   atomic.Uint64
+	community  Community
+	sent       sentClub
 
 	mu      sync.Mutex
 	ln      net.Listener
@@ -226,6 +228,7 @@ func New(cfg Config, key *ServerKey, accounts Accounts, store UpdateStore) (*Ser
 		return nil, rpcErr(400, "INPUT_METHOD_INVALID", fmt.Sprintf("no method %#08x in layer %d", id, Layer))
 	})
 	s.registerAPI()
+	s.registerCommunity()
 	if err := checkDHPrime(); err != nil {
 		return nil, fmt.Errorf("mt: dh_prime: %w", err)
 	}

@@ -198,33 +198,7 @@ func (l *Launcher) card(xuid int64, row, club *db.Row, lobbies []any) (card, err
 	} else {
 		tag, level, version = row.Str("gamertag"), row.Int("career_level"), row.Any("gamerpic_version")
 	}
-	hex := fmt.Sprintf("%x", xuid)
-	var lobby pyjson.Obj
-	for _, lv := range lobbies {
-		lo, _ := lv.(pyjson.Obj)
-		mv, _ := lo.Get("memberXuids")
-		for _, m := range anyList(mv) {
-			if s, _ := m.(string); s == hex {
-				lobby = lo
-				break
-			}
-		}
-		if lobby != nil {
-			break
-		}
-	}
-	playing := lobby != nil || social.Online(xuid)
-	state := "offline"
-	cs := l.cstate()
-	cs.mu.Lock()
-	seen := cs.seen[xuid]
-	cs.mu.Unlock()
-	switch {
-	case playing:
-		state = "playing"
-	case nowF()-seen < 40:
-		state = "online"
-	}
+	state, lobby := l.presence(xuid, lobbies)
 	var clubV any
 	if club != nil {
 		clubV = pyjson.Obj{{K: "id", V: club.Any("id")}, {K: "tag", V: club.Any("tag")}, {K: "name", V: club.Any("name")}, {K: "role", V: club.Any("role")}, {K: "members", V: club.Any("members")}}
@@ -241,6 +215,36 @@ func (l *Launcher) card(xuid int64, row, club *db.Row, lobbies []any) (card, err
 	}
 	return pyjson.Obj{{K: "xuid", V: xuid}, {K: "gamertag", V: tag}, {K: "level", V: db.DisplayLevel(level)}, {K: "gamerpicVersion", V: version}, {K: "state", V: state},
 		{K: "club", V: clubV}, {K: "lobby", V: lobbyV}}, nil
+}
+
+// presence is what a player is doing as friends see it: playing (in a hub lobby, or a game polled lately), online (the launcher polled in the
+// last 40 s, or the chat core is signed in) or offline; lobby is the hub lobby the player is in (nil = none).
+func (l *Launcher) presence(xuid int64, lobbies []any) (state string, lobby pyjson.Obj) {
+	hex := fmt.Sprintf("%x", xuid)
+	for _, lv := range lobbies {
+		lo, _ := lv.(pyjson.Obj)
+		mv, _ := lo.Get("memberXuids")
+		for _, m := range anyList(mv) {
+			if s, _ := m.(string); s == hex {
+				lobby = lo
+				break
+			}
+		}
+		if lobby != nil {
+			break
+		}
+	}
+	cs := l.cstate()
+	cs.mu.Lock()
+	seen := cs.seen[xuid]
+	cs.mu.Unlock()
+	switch {
+	case lobby != nil || social.Online(xuid):
+		return "playing", lobby
+	case nowF()-seen < 40 || (l.C.Chat != nil && l.C.Chat.Online(xuid)):
+		return "online", lobby
+	}
+	return "offline", lobby
 }
 
 // hubLobbies is the hub's answer, shared for a moment: a launcher open means one UDP query every 5 s, up to 0.3 s each.
@@ -358,6 +362,7 @@ func (l *Launcher) request(me int64, value string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	l.friendsChanged(me, target)
 	return ok1(), nil
 }
 
@@ -381,6 +386,7 @@ func (l *Launcher) respond(me, target int64, accept bool) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	l.friendsChanged(me, target)
 	return ok1(), nil
 }
 
@@ -395,6 +401,7 @@ func (l *Launcher) remove(me, target int64) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	l.friendsChanged(me, target)
 	return ok1(), nil
 }
 
@@ -560,6 +567,19 @@ func (l *Launcher) messages(me int64, ref string, after int64) (any, error) {
 }
 
 func (l *Launcher) send(me int64, ref string, body any) (any, error) {
+	text, err := checkMessage(me, body)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := l.post(me, ref, text, 0); err != nil {
+		return nil, err
+	}
+	return ok1(), nil
+}
+
+// checkMessage is the message rule of both chat paths: a string of 1-2000 characters after stripping, no control characters but newline and
+// tab. Returns the stripped text.
+func checkMessage(me int64, body any) (string, error) {
 	s, isStr := body.(string)
 	bad := !isStr
 	if isStr {
@@ -576,20 +596,43 @@ func (l *Launcher) send(me int64, ref string, body any) (any, error) {
 		if isStr {
 			detail += fmt.Sprintf(" of %d characters", utf8.RuneCountInString(pyStrip(s)))
 		}
-		return nil, auth.NewError(400, "bad_message", "Messages must contain 1–2000 characters.").WithXuid(me).WithDetail(detail)
+		return "", auth.NewError(400, "bad_message", "Messages must contain 1–2000 characters.").WithXuid(me).WithDetail(detail)
 	}
+	return pyStrip(s), nil
+}
+
+// posted is a stored chat message.
+type posted struct {
+	id      int64
+	channel string
+	created float64
+	text    string
+}
+
+// post stores a checked message in the channel of ref and pushes a club message to the members' chat sessions (all but skip, the sender
+// that gets it as its answer; 0 = everyone).
+func (l *Launcher) post(me int64, ref, text string, skip int64) (*posted, error) {
+	var p posted
 	err := l.C.DB.Do(func(t *db.Tx) error {
 		ch, err := l.channel(me, ref, t.One)
 		if err != nil {
 			return err
 		}
-		_, err = t.Exec("INSERT INTO launcher_messages(sender,channel,body,created) VALUES (?,?,?,?)", me, ch, pyStrip(s), nowF())
-		return err
+		p.channel, p.created, p.text = ch, nowF(), text
+		row, err := t.One("INSERT INTO launcher_messages(sender,channel,body,created) VALUES (?,?,?,?) RETURNING id", me, ch, text, p.created)
+		if err != nil {
+			return err
+		}
+		p.id = row.IntAt(0)
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return ok1(), nil
+	if strings.HasPrefix(p.channel, "club:") && l.C.Chat != nil {
+		l.pushClubMessage(me, &p, skip)
+	}
+	return &p, nil
 }
 
 func (l *Launcher) readMark(me int64, ref string, last int64) (any, error) {
