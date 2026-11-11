@@ -356,7 +356,8 @@ std::vector<Opt> Guide::draft_options() const {
         if (!d.xuid) o.push_back({"Edit Recipient", DRecipients, !d.sending, I_PERSON});
         return o;
     }
-    bool ready = !d.to.empty() && (d.kind == Draft::GameInvite || !d.text.empty());
+    // a game invite needs a game others can be seated in (it can stop being one while the invite is written)
+    bool ready = !d.to.empty() && (d.kind == Draft::GameInvite ? my_game_takes_invites() : !d.text.empty());
     o.push_back({d.sending ? "Sending" : d.kind == Draft::GameInvite ? "Send Invite" : "Send Message", DSend, ready && !d.sending, I_SEND});
     o.push_back({"Edit Recipients", DRecipients, !d.sending, I_PERSON});
     o.push_back({d.text.empty() ? "Add Text" : "Edit Text", DText, !d.sending, I_EDIT});

@@ -208,7 +208,7 @@ int main(int argc, char** argv) {
         if (scene == "profile-personal") g.handle(RB, t0);
     } else if (scene == "create" || scene == "create-nogame") {
         g.open_community(TabMessages, t0 - 5), g.handle(A, t0);
-    } else if (scene == "pick") {
+    } else if (scene == "pick" || scene == "invite-nogame") {
         g.open_invite(t0);
     } else if (scene == "pick-many") {
         g.open_invite(t0 - 5), press({A, D});  // NightRunR, then Edit Recipients

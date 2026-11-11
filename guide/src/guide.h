@@ -103,7 +103,8 @@ struct Opt {
 enum class Page { Home, Community, Profile, EditProfile, Message, CreateNew, Recipients, Compose, Keyboard };
 enum CommunityTab { TabParty = 0, TabFriends = 1, TabMessages = 2, TabPlayers = 3 };
 // What a message box was shown for: just to tell (OK), or the question before a written message is dropped.
-enum BoxTag { BoxInfo = 0, BoxDiscard = 1 };
+// BoxThenClose: told from a closed Guide (the game's own Invite Friends), so OK closes it again.
+enum BoxTag { BoxInfo = 0, BoxDiscard = 1, BoxThenClose = 2 };
 
 class Guide {
 public:

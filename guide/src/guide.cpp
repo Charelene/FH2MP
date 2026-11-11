@@ -25,6 +25,10 @@ const char* BLADE[3] = {"Games", nullptr, "Settings"};
 // Toasts take the theme's accent; only a warning is red.
 ImU32 toast_color(ToastKind k) { return k == ToastKind::Warning ? IM_COL32(0xee, 0x3b, 0x23, 255) : ACCENT; }
 
+// The 360's words when the player's game cannot take others (its "Can't invite party. Start a new game, or set up your current game so
+// others can join."): the player is in no lobby, or in the game server's fallback world after it lost the lobby.
+const char* NO_GAME = "Can't send game invite. Start a new game, or set up your current game so others can join.";
+
 // The 360's words for a refusal, by the server's error code; fallback when the code has none of its own.
 std::string failure_text(const NetResult& r, const char* fallback) {
     if (r.code.empty()) return "Connection lost. Please reconnect to FH2MP.";
@@ -32,6 +36,7 @@ std::string failure_text(const NetResult& r, const char* fallback) {
     if (r.code == "already_friends") return "This person is already on your friends list.";
     if (r.code == "self_request") return "You can't add yourself as a friend.";
     if (r.code == "request_limit") return r.message;
+    if (r.code == "not_in_lobby" || r.code == "not_in_game") return NO_GAME;
     return fallback;
 }
 
@@ -207,6 +212,11 @@ void Guide::open_community(int tab, double now) {
 void Guide::open_invite(double now) {
     bool was = open;
     if (!open) toggle(now);
+    if (!my_game_takes_invites()) {
+        // nobody can be seated in this player's game: said at once, not after a recipient was picked
+        show_box(was ? BoxInfo : BoxThenClose, "Game Invite", NO_GAME, {"OK"}, now);
+        return;
+    }
     flow_base_ = was ? int(stack_.size()) : 0;
     draft_ = Draft();
     draft_.kind = Draft::GameInvite;
@@ -304,6 +314,7 @@ void Guide::box_done(int tag, int button, std::vector<GuideRequest>& out, double
     (void)out;
     box_.on = false;
     if (tag == BoxDiscard && button == 0) end_flow(now);  // "Yes, discard message"
+    if (tag == BoxThenClose && open) toggle(now);
 }
 
 // ---- events
