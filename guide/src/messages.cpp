@@ -252,13 +252,69 @@ void Guide::draw_create(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, flo
 // Who a message or a game invite can go to: friends (the server's rule), in the Friends tab's order.
 std::vector<const Friend*> Guide::pick_rows() const {
     std::vector<const Friend*> out;
+    if (game_pick_.on) {
+        // the game's people picker: the players the game named, in its order, each once the Guide knows who they are
+        game_people_.clear();
+        for (uint64_t x : game_pick_.people)
+            if (const Friend* f = find(x))
+                if (!f->tag.empty()) game_people_.push_back(*f);
+        for (const Friend& f : game_people_) out.push_back(&f);
+        return out;
+    }
     for (const FriendRow& r : friend_rows())
         if (r.rel == Relation::Friend) out.push_back(r.f);
     return out;
 }
 
+// The game's people picker. One player wanted: A chooses and the list closes. More: A ticks (a full list greys the rest), X finishes.
+// B gives the game no players.
+void Guide::handle_game_pick(PadEvent e, double now) {
+    std::vector<const Friend*> rows = pick_rows();
+    int n = int(rows.size());
+    GamePick& g = game_pick_;
+    auto ticked = [&](uint64_t x) { return std::find(g.chosen.begin(), g.chosen.end(), x) != g.chosen.end(); };
+    bool one = g.max <= 1, full = !one && g.chosen.size() >= g.max;
+    auto ok = [&](int i) { return !full || ticked(rows[i]->xuid); };
+    switch (e) {
+    case PadEvent::Up:
+    case PadEvent::Down: {
+        int d = e == PadEvent::Up ? -1 : 1;
+        for (int i = pick_.row + d; i >= 0 && i < n; i += d)
+            if (ok(i)) {
+                pick_.move(i - pick_.row, n, PICK_ROWS, now);
+                break;
+            }
+        break;
+    }
+    case PadEvent::B:
+        g.chosen.clear(), g.done = false;
+        toggle(now);
+        break;
+    case PadEvent::A: {
+        if (pick_.row >= n || !ok(pick_.row)) break;
+        uint64_t x = rows[pick_.row]->xuid;
+        if (one) {
+            g.chosen = {x}, g.done = true;
+            toggle(now);
+            break;
+        }
+        auto it = std::find(g.chosen.begin(), g.chosen.end(), x);
+        if (it != g.chosen.end()) g.chosen.erase(it);
+        else g.chosen.push_back(x);
+        break;
+    }
+    case PadEvent::X:
+        if (one || g.chosen.size() < std::max(1u, g.min)) break;
+        g.done = true;
+        toggle(now);
+        break;
+    default: break;
+    }
+}
+
 void Guide::handle_pick(PadEvent e, std::vector<GuideRequest>& out, double now) {
     (void)out;
+    if (game_pick_.on) return handle_game_pick(e, now);
     std::vector<const Friend*> rows = pick_rows();
     int n = int(rows.size());
     // a game invite cannot go to someone already in the game: the row is greyed and the focus passes over it
@@ -307,7 +363,13 @@ void Guide::draw_pick(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float
     const float L = PAGE_L, W = PAGE_W;
     float slide, pop, title_op;
     page_motion(now, op, &slide, &pop, &title_op);
-    draw_header(dl, a, origin, s, zoom, op, L, W, pick_many_ ? "Edit Recipients" : "Select Gamertag", title_op);
+    const GamePick& g = game_pick_;
+    bool one = g.max <= 1, full = g.on && !one && g.chosen.size() >= g.max;
+    auto ticked = [&](uint64_t xuid) { return std::find(g.chosen.begin(), g.chosen.end(), xuid) != g.chosen.end(); };
+    // a row that cannot be chosen: a game invite to someone already in the game; the game's list once it is full
+    auto grey = [&](const Friend& f) { return g.on ? full && !ticked(f.xuid) : draft_.kind == Draft::GameInvite && same_game(f, social_.me); };
+    bool ticks = g.on ? !one : pick_many_;
+    draw_header(dl, a, origin, s, zoom, op, L, W, g.on && !g.prompt.empty() ? g.prompt.c_str() : ticks && !g.on ? "Edit Recipients" : "Select Gamertag", title_op);
     float x = L + slide;
     std::vector<const Friend*> rows = pick_rows();
     int n = int(rows.size());
@@ -315,12 +377,12 @@ void Guide::draw_pick(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float
     dl->AddRectFilled(p0, p1, alpha(PANEL, pop));
     dl->PushClipRect(p0, p1, true);
     if (!n) {
-        const char* why = !social_.session ? "Not signed in" : !social_.loaded && !social_.error.empty() ? "Server unavailable" : social_.loaded ? "No friends" : "";
+        const char* why = !social_.session ? "Not signed in" : !social_.loaded && !social_.error.empty() ? "Server unavailable" : g.on ? "" : social_.loaded ? "No friends" : "";
         float ww = a.text->CalcTextSizeA(22, FLT_MAX, 0, why).x;
         ImVec2 c = v.pt(x + (W - ww) / 2, 324);
         text_mid(dl, a.text, a.text_m, v.sz(22), c.x, c.y, alpha(MUTED, pop), why);
     } else {
-        bool grey_focus = draft_.kind == Draft::GameInvite && pick_.row < n && same_game(*rows[pick_.row], social_.me);
+        bool grey_focus = pick_.row < n && grey(*rows[pick_.row]);
         if (!grey_focus) {
             float by = 96 + pick_.bar.value(now) * 69;
             ImVec2 b0 = v.pt(x, by), b1 = v.pt(x + W, by + 69);
@@ -329,13 +391,14 @@ void Guide::draw_pick(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float
         }
         for (int i = pick_.top; i < std::min(n, pick_.top + PICK_ROWS); i++) {
             const Friend& f = *rows[i];
-            bool greyed = draft_.kind == Draft::GameInvite && same_game(f, social_.me);
+            bool greyed = grey(f);
             int check = -1;
-            if (pick_many_) {
-                check = 0;
+            if (ticks) {
+                check = g.on && ticked(f.xuid);
                 for (const Friend& t : draft_.to) check |= t.xuid == f.xuid;
             }
-            player_row(dl, a, origin, s, zoom, x, 96 + (i - pick_.top) * 69, f, Relation::Friend, i == pick_.row && !greyed, greyed, check, pop);
+            player_row(dl, a, origin, s, zoom, x, 96 + (i - pick_.top) * 69, f, g.on ? relation(f.xuid) : Relation::Friend, i == pick_.row && !greyed, greyed,
+                       check, pop);
         }
     }
     dl->PopClipRect();
@@ -348,8 +411,13 @@ void Guide::draw_pick(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float
     char count[32];
     snprintf(count, sizeof count, "%d of %d", n ? pick_.row + 1 : 0, n);
     text_mid(dl, a.text, a.text_m, v.sz(20), fr.x - v.sz(64), fr.y, alpha(MUTED, pop), count, true);
-    const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}};
-    hint_bar(dl, a, v, L + 27, 617, hints, 2, op);
+    if (g.on && !one && g.chosen.size() >= std::max(1u, g.min)) {
+        const Hint hints[] = {{"A", "Select", RING_A}, {"X", "Done", RING_X}, {"B", "Back", RING_B}};
+        hint_bar(dl, a, v, L + 27, 617, hints, 3, op);
+    } else {
+        const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}};
+        hint_bar(dl, a, v, L + 27, 617, hints, 2, op);
+    }
 }
 
 // ---- compose
@@ -364,8 +432,9 @@ std::vector<Opt> Guide::draft_options() const {
         if (!d.xuid) o.push_back({"Edit Recipient", DRecipients, !d.sending, I_PERSON});
         return o;
     }
-    // a game invite needs a game others can be seated in (it can stop being one while the invite is written)
-    bool ready = !d.to.empty() && (d.kind == Draft::GameInvite ? my_game_takes_invites() : !d.text.empty());
+    // a game invite needs a game others can be seated in (it can stop being one while the invite is written); one the game itself
+    // asked for is the server's to refuse
+    bool ready = !d.to.empty() && (d.kind == Draft::GameInvite ? d.by_game || my_game_takes_invites() : !d.text.empty());
     o.push_back({d.sending ? "Sending" : d.kind == Draft::GameInvite ? "Send Invite" : "Send Message", DSend, ready && !d.sending, I_SEND});
     o.push_back({"Edit Recipients", DRecipients, !d.sending, I_PERSON});
     o.push_back({d.text.empty() ? "Add Text" : "Edit Text", DText, !d.sending, I_EDIT});

@@ -291,17 +291,48 @@ bool Guide::take_game_text(std::string* text) {
     return done;
 }
 
+void Guide::open_people_for_game(const std::string& prompt, const std::vector<uint64_t>& people, const std::vector<uint64_t>& chosen, unsigned min,
+                                 unsigned max, double now) {
+    if (!open) toggle(now);
+    game_pick_ = GamePick();
+    game_pick_.on = true, game_pick_.prompt = prompt, game_pick_.people = people, game_pick_.min = min, game_pick_.max = std::max(1u, max);
+    for (uint64_t x : chosen)
+        if (std::find(people.begin(), people.end(), x) != people.end() && game_pick_.chosen.size() < game_pick_.max) game_pick_.chosen.push_back(x);
+    draft_ = Draft(), pick_many_ = false, pick_ = ListFocus();
+    stack_ = {Page::Recipients}, page_at_ = -10, box_.on = false, flow_base_ = -1;
+    entered(Page::Recipients, now);
+    if (game_pick_.max > 1 && game_pick_.chosen.size() >= game_pick_.max) {
+        // a list that starts full: the focus goes to a ticked player (the others are greyed)
+        std::vector<const Friend*> rows = pick_rows();
+        for (int i = 0; i < int(rows.size()); i++)
+            if (std::find(game_pick_.chosen.begin(), game_pick_.chosen.end(), rows[i]->xuid) != game_pick_.chosen.end()) {
+                pick_.row = i, pick_.clamp(int(rows.size()), 6);
+                break;
+            }
+    }
+    // players the friend list does not have: the server is asked who they are (a row shows once it answered)
+    int asked = 0;
+    for (uint64_t x : people)
+        if (!find(x) && asked++ < 20) {
+            GuideRequest r;
+            r.action = GuideAction::Lookup, r.xuid = x;
+            wanted_.push_back(r);
+        }
+}
+
+bool Guide::take_game_people(std::vector<uint64_t>* chosen) {
+    bool done = game_pick_.on && game_pick_.done;
+    if (done && chosen) *chosen = game_pick_.chosen;
+    game_pick_ = GamePick();
+    return done;
+}
+
 void Guide::open_invite(double now) {
     bool was = open;
     if (!open) toggle(now);
-    if (!my_game_takes_invites()) {
-        // nobody can be seated in this player's game: said at once, not after a recipient was picked
-        show_box(was ? BoxInfo : BoxThenClose, "Game Invite", NO_GAME, {"OK"}, now);
-        return;
-    }
     flow_base_ = was ? int(stack_.size()) : 0;
     draft_ = Draft();
-    draft_.kind = Draft::GameInvite;
+    draft_.kind = Draft::GameInvite, draft_.by_game = true;
     pick_many_ = false, pick_ = ListFocus();
     if (was) {
         push(Page::Recipients, now);
@@ -606,8 +637,12 @@ void Guide::on_result(const NetResult& r, const GuideAssets& a, double now) {
         // the server words its refusal as the 360 did ("Your motto contains a word or phrase that isn't allowed. Please try again.")
         if (!r.ok) show_box(BoxInfo, "Edit Profile", r.code == "bad_profile_text" ? r.message : failure_text(r, "Can't complete this process. Please try again."), {"OK"}, now);
         break;
-    case NetOp::ReadChat:
-    case NetOp::Lookup: break;
+    case NetOp::ReadChat: break;
+    case NetOp::Lookup:
+        // the game's gamercard for a player the server could not give: said in a box, and the game gets its screen back
+        if (!r.ok && open && stack_.size() == 1 && page() == Page::Profile && prof_.xuid == r.xuid && !find(r.xuid))
+            show_box(BoxThenClose, "Profile", "Can't retrieve information from FH2MP. Please try again later.", {"OK"}, now);
+        break;
     case NetOp::Received: toast_to(ToInvite, r.xuid, r.id, ToastKind::Invite, r.name.c_str(), "wants to play Forza Horizon 2", I_GAMES, them, now); break;
     case NetOp::GotRequest: toast_to(ToFriendRequest, r.xuid, 0, ToastKind::Info, r.name.c_str(), "wants to be your friend", I_PERSON_ADD, 0, now); break;
     case NetOp::GotText: toast_to(ToText, r.xuid, r.id, ToastKind::Info, r.name.c_str(), "sent you a message", I_MAIL, 0, now); break;
@@ -674,7 +709,7 @@ void Guide::draw_header(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, flo
                         float title_op) {
     View v{origin, s, zoom};
     ImVec2 t = v.pt(left + 27, 72);
-    text_mid(dl, a.text, a.text_m, v.sz(22), t.x, t.y, alpha(WHITE, op * title_op), title);
+    text_fit(dl, a.text, a.text_m, v.sz(22), t.x, t.y, v.sz(width / 2 - 24 - 27 - 14), alpha(WHITE, op * title_op), title);  // up to the picture
     ImVec2 pic0 = v.pt(left + width / 2 - 24, 41), pic1 = v.pt(left + width / 2 + 24, 89);
     player_pic(dl, a, a.gamerpic, social_.me.xuid, pic0, pic1, op);
     SYSTEMTIME st;

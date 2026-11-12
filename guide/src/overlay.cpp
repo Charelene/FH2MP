@@ -577,18 +577,23 @@ void render(IDXGISwapChain3* sc) {
     static int sys_kind;
     SysAsk sys;
     while (sysui_take(&sys)) {
-        if (sys_op) sysui_complete(sys_op, false, "");
+        if (sys_op) sysui_complete(sys_op, false, "", {});
         if (sys.kind == SysAsk::ProfileCard) g_guide.open_profile_for_game(sys.xuid, now);
+        else if (sys.kind == SysAsk::People) g_guide.open_people_for_game(sys.title, sys.people, sys.chosen, sys.min, sys.max, now);
         else g_guide.open_keyboard_for_game(sys.text, sys.title, sys.description, now);
         sys_op = sys.op, sys_kind = sys.kind;
     }
     if (sys_op && !g_guide.open) {
         std::string text;
-        bool done = sys_kind == SysAsk::Keyboard ? g_guide.take_game_text(&text) : true;
+        std::vector<uint64_t> people;
+        bool done = sys_kind == SysAsk::Keyboard ? g_guide.take_game_text(&text) : sys_kind == SysAsk::People ? g_guide.take_game_people(&people) : true;
+        if (sys_kind == SysAsk::People)
+            logf(done ? "guide: the people picker's choice goes back to the game (%d players)" : "guide: the people picker was dismissed: the game gets no players (%d)",
+                 int(people.size()));
         if (sys_kind == SysAsk::Keyboard)
             logf(done ? "guide: the keyboard's text goes back to the game (%d bytes)" : "guide: the keyboard was dismissed: the game keeps its own text (%d bytes typed)",
                  int(text.size()));
-        sysui_complete(sys_op, done, text);
+        sysui_complete(sys_op, done, text, people);
         sys_op = nullptr;
     }
     for (const GuideRequest& r : g_guide.take_requests()) ask(r);

@@ -119,6 +119,9 @@ public:
 
     void toggle(double now);
     // The game's own Invite Friends: the Guide opens on a game invite's recipients; sending it closes the Guide again.
+    // The game's own Invite Friends: a game invite's recipients. The game offers it only in a session of its own, so nothing is refused
+    // here from the Guide's picture of the player's game, which can be half a minute old (win1 2026-11-11: refused twice right after a
+    // private Free Roam started); the server refuses at Send when nobody can be seated.
     void open_invite(double now);
     // Opens straight on Community's tab (the preview tool).
     void open_community(int tab, double now);
@@ -128,6 +131,12 @@ public:
     void open_keyboard_for_game(const std::string& text, const std::string& title, const std::string& description, double now);
     // After that keyboard closed: true and the text when the player chose Done, false when they backed out.
     bool take_game_text(std::string* text);
+    // The game asked for the system people picker: the Guide opens on its player list alone, with the game's prompt and the players the
+    // game named. max 1: A chooses the player; more: A ticks, X finishes once at least min (and at least one) are ticked.
+    void open_people_for_game(const std::string& prompt, const std::vector<uint64_t>& people, const std::vector<uint64_t>& chosen, unsigned min,
+                              unsigned max, double now);
+    // After that list closed: true and the chosen players when the player finished, false when they backed out.
+    bool take_game_people(std::vector<uint64_t>* chosen);
     // One pad or key event while open; what the overlay must ask of the server.
     std::vector<GuideRequest> handle(PadEvent e, double now);
     // The keyboard screen is up: typed characters go to type_char ('\b' backspace, '\r' done).
@@ -183,6 +192,7 @@ private:
         std::string gamertag;    // FriendRequest: the gamertag asked for
         uint64_t xuid = 0;       // FriendRequest from a profile: the player
         std::string text;
+        bool by_game = false;    // GameInvite the game's own Invite Friends asked for
         bool sending = false;
         int pending = 0, failed = 0;
         std::string fail_code;
@@ -248,6 +258,15 @@ private:
     Keys keys_;
     std::string game_title_, game_description_, game_text_;  // the game's keyboard request and its answer
     bool game_done_ = false;
+    // the game's people picker request and its answer
+    struct GamePick {
+        bool on = false, done = false;
+        std::string prompt;
+        std::vector<uint64_t> people, chosen;
+        unsigned min = 0, max = 0;
+    };
+    GamePick game_pick_;
+    mutable std::vector<Friend> game_people_;  // the rows of that list (pick_rows)
     // the message box (shown over the page; one that arrives while the Guide is closed waits for the next opening)
     Box box_, box_waiting_;
     // a join held back by the Exit Session question: the invite to accept, or the player whose game to join
@@ -295,6 +314,7 @@ private:
     };
     std::vector<FriendRow> friend_rows() const;        // the Friends tab under its Add Friend row
     std::vector<const Friend*> pick_rows() const;      // the recipients list
+    void handle_game_pick(PadEvent e, double now);
     std::vector<MessageItem> messages() const;
     std::vector<Opt> home_rows(int blade) const;
     std::vector<Opt> profile_options(int tab) const;

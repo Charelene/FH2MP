@@ -209,8 +209,11 @@ int main(int argc, char** argv) {
         if (scene == "profile-personal") g.handle(RB, t0);
     } else if (scene == "create" || scene == "create-nogame") {
         g.open_community(TabMessages, t0 - 5), g.handle(A, t0);
-    } else if (scene == "pick" || scene == "invite-nogame") {
+    } else if (scene == "pick") {
         g.open_invite(t0);
+    } else if (scene == "invite-nogame") {
+        // the game's Invite Friends while the Guide's picture says "no game": the invite is written all the same
+        g.open_invite(t0 - 5), g.handle(A, t0);
     } else if (scene == "pick-many") {
         g.open_invite(t0 - 5), press({A, D});  // NightRunR, then Edit Recipients
         g.handle(A, t0), press({D, D, A, D});  // tick torque.tuner as well
@@ -241,6 +244,12 @@ int main(int argc, char** argv) {
         g.on_result(nr, assets, t0);
     } else if (scene == "game-card" || scene == "game-card-unknown") {
         g.open_profile_for_game(scene == "game-card" ? 3 : 77, t0);
+    } else if (scene == "game-people" || scene == "game-people-full" || scene == "game-people-one") {
+        // the game's Car Club invite: three friends to choose from, two at most (or one)
+        bool one = scene == "game-people-one";
+        g.open_people_for_game("Invite friends to your club", {3, 2, 4}, scene == "game-people-full" ? std::vector<uint64_t>{3, 4} : std::vector<uint64_t>{3}, 1,
+                               one ? 1 : 2, t0);
+        if (scene == "game-people-full") g.handle(PadEvent::Down, t0), g.handle(PadEvent::Down, t0);
     } else if (scene == "game-keyboard") {
         g.open_keyboard_for_game("APEX", "Club Tag", "Enter a tag for your club.", t0);
     } else if (scene == "open-on-toast") {
