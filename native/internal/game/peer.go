@@ -162,6 +162,10 @@ type Peer struct {
 	Honk             *HonkState
 	HonkLoggedAt     float64
 	Carsel           *CarselState
+	Mods             *ModState // add-on mods' state (modsync.go)
+	ModsChanges      int
+	ModsLoggedAt     float64
+	ModsNosWarnedAt  float64
 	ClientReports    ClientReports // what this client's shim told the server about why it waits (carsel.go)
 	Extra            map[string]any
 	TeamID           int
