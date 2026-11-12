@@ -1069,32 +1069,30 @@ func storeRemove(c *Core, r *Req, req *xls.Struct) (*xls.Struct, error) {
 	return nil, nil
 }
 
+// featuredPick is the featured liveries' choice: at most n, one per car, in the order given. A livery without a car is left out: the game
+// shows it as a car card with no car, and its drivetrain converter reads NULL for that card (#412, game+0xb99cd3).
+func featuredPick(files []*ugc.File, n int) []*ugc.File {
+	seen := map[int64]bool{}
+	var out []*ugc.File
+	for _, f := range files {
+		if len(out) >= n {
+			break
+		}
+		if f.CarID == nil || *f.CarID <= 0 || seen[*f.CarID] {
+			continue
+		}
+		seen[*f.CarID] = true
+		out = append(out, f)
+	}
+	return out
+}
+
 func storeFeaturedLiveries(c *Core, r *Req, req *xls.Struct) (*xls.Struct, error) {
 	all, err := c.Ugc.Search(ugc.SearchSpec{Kind: "livery", Limit: 200})
 	if err != nil {
 		return nil, err
 	}
-	seen := map[int64]bool{}
-	hasNil := false
-	var files []*ugc.File
-	for _, f := range c.shown(r, all) {
-		key := int64(-1)
-		if f.CarID != nil {
-			key = *f.CarID
-		}
-		dup := seen[key]
-		if f.CarID == nil {
-			dup, hasNil = hasNil, true
-		} else {
-			seen[key] = true
-		}
-		if !dup {
-			files = append(files, f)
-		}
-		if len(files) >= int(max(1, req.Int("numCars"))) {
-			break
-		}
-	}
+	files := featuredPick(c.shown(r, all), int(max(1, req.Int("numCars"))))
 	tmpl := c.elemTemplate("ForzaStorefrontGetFeaturedLiveriesForRandomCars_Results", "liveryData")
 	rows := []any{}
 	for _, f := range files {
