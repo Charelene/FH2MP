@@ -674,6 +674,13 @@ func (s *Server) putSession(path string, body []byte, xuid string) (int, pyjson.
 					joining = true
 				}
 			}
+			if !isMember && !joining && len(req.Keys()) == 1 && req.Has("members") && membersReq.Len() > 0 {
+				// "me": null from a player who is not in the session: MPSD changes nothing and answers with the session. The game's
+				// session-ready join sends it for the session it is about to join (dev 2026-11-11: the invitee's GET 200, then this
+				// PUT); the 403 it got made the game say "The session you were trying to join no longer exists."
+				s.every(mpsdLog, "info", "leave/not-member", RefusalLogSeconds, fmt.Sprintf("PUT leave from a non-member: nothing to change, the session is answered as it is %s/%.8s ", key[1], key[2])+kv(f("xuid", xuid)))
+				return 200, ToJSON(s.SessionDocument(cur)).(pyjson.Obj), nil
+			}
 			if !isMember && !joining {
 				st, _ := s.refuse(403, &key, xuid, "not a member of this session and not joining it", f("owner", nilIfEmpty(cur.Owner)), f("members", cur.Members.Len()))
 				return st, nil, nil

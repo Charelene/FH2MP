@@ -35,6 +35,30 @@ func TestSessionOfFollowsThePlayerFromLobbyToPrivateSession(t *testing.T) {
 	}
 }
 
+// The game's session-ready join (an accepted invite) reads the host's session and then sends "me": null for it before it joins. A player
+// who is not in a session leaving it changes nothing: MPSD answers with the session, and so does this server (it answered 403, and the
+// invitee's game said "The session you were trying to join no longer exists").
+func TestANonMembersLeaveIsAnsweredWithTheSession(t *testing.T) {
+	r := newHeldSeatRig(t)
+	s := r.s
+	put(t, s, "defaultTemplate_qos", "private1", joinBody, "2001")
+	st, doc := s.PutSession("/serviceconfigs/s/sessionTemplates/defaultTemplate_qos/sessions/private1", []byte(leaveBody), "2002")
+	if st != 200 || doc == nil {
+		t.Fatalf("a non-member's leave: status %d, doc %v", st, doc)
+	}
+	if _, _, name, ok := s.SessionOf("2001"); !ok || name != "private1" {
+		t.Fatalf("the host is no longer in its session: %s %v", name, ok)
+	}
+	if _, _, name, ok := s.SessionOf("2002"); ok {
+		t.Fatalf("the leaver is now in %s", name)
+	}
+	// anything more than a leave from a non-member is still refused
+	if st, _ := s.PutSession("/serviceconfigs/s/sessionTemplates/defaultTemplate_qos/sessions/private1",
+		[]byte(`{"members": {"me": null}, "properties": {"system": {"joinRestriction": "open"}}}`), "2002"); st != 403 {
+		t.Fatalf("a non-member's leave that also rewrites the session: status %d", st)
+	}
+}
+
 func TestSessionOfIgnoresAnotherPlayersLeave(t *testing.T) {
 	r := newHeldSeatRig(t)
 	s := r.s
