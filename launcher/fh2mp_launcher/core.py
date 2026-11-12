@@ -690,6 +690,12 @@ class Launcher:
         except Exception as e:  # noqa: BLE001       # not worth stopping a game over: this game then has no achievements
             from .api import log_failure
             log_failure("PLAY", "achievements", e, str(e))
+        for what, ensure in (("nitro_system", self.ensure_nitro_system), ("underglow", self.ensure_underglow)):
+            try:
+                ensure()
+            except Exception as e:  # noqa: BLE001   # optional add-ons: the game starts without them
+                from .api import log_failure
+                log_failure("PLAY", what, e, str(e))
         try:
             self.ensure_ach_toast()
         except Exception as e:  # noqa: BLE001       # not worth stopping a game over: the Guide's toast is then drawn without them
@@ -1169,6 +1175,29 @@ class Launcher:
         except upstream.UpstreamError as e:
             raise updater.UpdateError(str(e)) from None
         return shim.install_achievements(d, files)
+
+    # ---- NitroSystem and Underglow (optional, off until ticked in Settings)
+    def ensure_nitro_system(self, progress=None, cancelled=lambda: False):
+        """Install the pinned NitroSystem when the player wants it (Settings) and has none, or one without its off switch. -> list of things done."""
+        d = self.settings["azimuth_dir"]
+        if not self.settings["nitro_system"] or not d or not os.path.isdir(d) or shim.nitro_installed(d)[0] == "switch":
+            return []
+        try:
+            files = upstream.fetch("nitroSystem", updater.Updater(channel=self.settings["channel"]), progress, cancelled)
+        except upstream.UpstreamError as e:
+            raise updater.UpdateError(str(e)) from None
+        return shim.install_nitro(d, files)
+
+    def ensure_underglow(self, progress=None, cancelled=lambda: False):
+        """Install the pinned Underglow when the player wants it (Settings) and has no Underglow.dll; one they have stays. -> list of things done."""
+        d = self.settings["azimuth_dir"]
+        if not self.settings["underglow"] or not d or not os.path.isdir(d) or shim.underglow_installed(d)[0]:
+            return []
+        try:
+            files = upstream.fetch("underglow", updater.Updater(channel=self.settings["channel"]), progress, cancelled)
+        except upstream.UpstreamError as e:
+            raise updater.UpdateError(str(e)) from None
+        return shim.install_underglow(d, files)
 
     def ensure_ach_toast(self, progress=None, cancelled=lambda: False):
         """The achievement toast's sounds and pictures (constants.ACH_TOAST) from the FH2MP mirror, each checked by size and SHA-256, where

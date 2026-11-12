@@ -34,6 +34,8 @@ DEFAULTS = {
     "nitro_online_written": "",     # the value this launcher last wrote for NitroSystem in fh2-mods\platform-online.txt ("" none; shim.nitro_online)
     "extra_options": True,          # put FH2 Extra Options (GPL-3.0, RokkuDayo) next to the shim when the player has no copy
     "achievements": True,           # put the Achievements mod (GPL-3.0, Trinculo54) into fh2-mods when the player has no copy
+    "nitro_system": False,          # put NitroSystem (MIT, qiangqiang101) into fh2-mods when the player has none, or one without its off switch
+    "underglow": False,             # put Underglow (MIT, qiangqiang101) into fh2-mods when the player has none
     # developer options (the dev launcher's panel; harmless elsewhere)
     "pin_shim": False,              # never replace the installed shim automatically (local / debug builds)
     "extra_env": "",                # KEY=VALUE lines added to the game's environment (FH2MP_NET_TRAFFIC=1, FH2MP_XUID=..., ...)

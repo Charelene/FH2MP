@@ -1058,6 +1058,58 @@ def underglow_installed(folder):
     return os.path.isfile(os.path.join(folder, MODS_DIR, UNDERGLOW_DLL)), _mods_txt_version(folder, UNDERGLOW_DLL)
 
 
+def nitro_version():
+    return UPSTREAM["nitroSystem"]["version"]
+
+
+def underglow_version():
+    return UPSTREAM["underglow"]["version"]
+
+
+def _put_mod_dll(folder, dll, data, name, keep_old):
+    """Writes fh2-mods\\<dll>; with keep_old the file there is first copied to <dll>.before-fh2mp-setup (-2, -3 ... when taken)."""
+    target = os.path.join(folder, MODS_DIR, dll)
+    try:
+        if keep_old and os.path.exists(target):
+            saved = target + ".before-fh2mp-setup"
+            n = 1
+            while os.path.lexists(saved):
+                n += 1
+                saved = f"{target}.before-fh2mp-setup-{n}"
+            shutil.copy2(target, saved)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        paths.atomic_write(target, data, 0o755, busy_ok=True)
+    except OSError as e:
+        raise ShimError(f"could not install {name}: {e.strerror or e}. Is the game still running?") from None
+
+
+def install_nitro(folder, files):
+    """Installs NitroSystem from its release (`files` = upstream.fetch("nitroSystem"): the DLL only) where there is none, or where the one there
+    has no off switch (before 2.0.0, so it cannot load online); that one is kept as FnFNitro.dll.before-fh2mp-setup. A NitroSystem with the
+    switch, whatever build, is the player's and stays. -> list of things done."""
+    data = files.get(f"{MODS_DIR}/{NITRO_DLL}")
+    if data is None:
+        raise ShimError("the NitroSystem release has no FnFNitro.dll")
+    kind = nitro_installed(folder)[0]
+    if kind == "switch":
+        return []
+    _put_mod_dll(folder, NITRO_DLL, data, "NitroSystem", keep_old=kind != "none")
+    return [f"installed NitroSystem {nitro_version()} (qiangqiang101, MIT) from its GitHub release"
+            + ("" if kind == "none" else ", replacing a build without the off switch (kept as FnFNitro.dll.before-fh2mp-setup)")]
+
+
+def install_underglow(folder, files):
+    """Installs Underglow from its release (`files` = upstream.fetch("underglow"): the DLL only) where there is none; an Underglow.dll already
+    there, whatever build, is the player's and stays. -> list of things done."""
+    data = files.get(f"{MODS_DIR}/{UNDERGLOW_DLL}")
+    if data is None:
+        raise ShimError("the Underglow release has no Underglow.dll")
+    if underglow_installed(folder)[0]:
+        return []
+    _put_mod_dll(folder, UNDERGLOW_DLL, data, "Underglow", keep_old=False)
+    return [f"installed Underglow {underglow_version()} (qiangqiang101, MIT) from its GitHub release"]
+
+
 def online_value(folder, dll):
     """`dll`'s value in platform-online.txt ("0", "1", ...), None when it has no line."""
     try:

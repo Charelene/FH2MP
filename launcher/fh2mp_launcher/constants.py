@@ -158,6 +158,35 @@ UPSTREAM = {
             "fh2-mods/Achievements.dll": "4b487ee0fc825bfd22ad13e638b051a1b16fa822815f92554dd8274e6bedb316",
         },
     },
+    # Not required to play either (user decision 2026-11-12): NitroSystem, whose NOS the shim keeps to Free Roam online (src/mods_sync.inc), and
+    # Underglow, whose neon the other players see. Installed only when the player ticks them in Settings. Only each mod's DLL is taken: both
+    # zips also carry a build of the FH2 Mod Platform (DWrite.dll), which stays the pinned one above.
+    "nitroSystem": {
+        "name": "NitroSystem", "author": "qiangqiang101", "license": "MIT", "version": "2.0.0",
+        "url": "https://github.com/qiangqiang101/FH2-NitroSystem/releases/download/2.0.0/FnFNitro-2.0.0.zip",
+        "mirror": MIRROR_BASE + "FnFNitro-2.0.0.zip",
+        "sha256": "24ad49c4472387b61ec9ad638f8e4f0b5cfd7ceedf2fecb0948aa9e7fb5ea7af", "size": 2573107,
+        "dll": "FnFNitro-2.0.0/azimuth-windows/fh2-mods/FnFNitro.dll", "dllSha256": "a695c4a858e949001fab185db56e5f0365d14061dd3bcb6dfe0a5b3179c37325",
+        "files": {
+            "FnFNitro-2.0.0/azimuth-windows/fh2-mods/FnFNitro.dll": "fh2-mods/FnFNitro.dll",
+        },
+        "fileSha256": {
+            "fh2-mods/FnFNitro.dll": "a695c4a858e949001fab185db56e5f0365d14061dd3bcb6dfe0a5b3179c37325",
+        },
+    },
+    "underglow": {
+        "name": "Underglow", "author": "qiangqiang101", "license": "MIT", "version": "1.1.0",
+        "url": "https://github.com/qiangqiang101/FH2-Underglow/releases/download/1.1.0/Underglow-1.1.0.zip",
+        "mirror": MIRROR_BASE + "Underglow-1.1.0.zip",
+        "sha256": "085063290b3973efe7474ef4973b75f7d48f224bc6b97dd8c541fff413814a3d", "size": 1884126,
+        "dll": "fh2-mods/Underglow.dll", "dllSha256": "6c37dd4384b6e94007574c0f69631957a7a30a3da489d570c068ee13ee880faa",
+        "files": {
+            "fh2-mods/Underglow.dll": "fh2-mods/Underglow.dll",
+        },
+        "fileSha256": {
+            "fh2-mods/Underglow.dll": "6c37dd4384b6e94007574c0f69631957a7a30a3da489d570c068ee13ee880faa",
+        },
+    },
 }
 # The Guide's achievement toast: the Xbox app's and Game Bar's sounds and pictures for it (Microsoft's files, mirrored on the FH2MP website
 # at the user's decision 2026-11-11), put into the Azimuth folder's data/bin/achievement-toast by name -> (SHA-256, size). The sounds are

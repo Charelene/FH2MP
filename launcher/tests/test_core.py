@@ -1139,7 +1139,7 @@ class ExtraOptionsTests(unittest.TestCase):
 
     def test_only_one_extra_options_pin_is_supplied(self):
         from fh2mp_launcher.constants import UPSTREAM
-        self.assertEqual(set(UPSTREAM), {'platform', 'extraOptions', 'honkHonk', 'anna', 'achievements'})
+        self.assertEqual(set(UPSTREAM), {'platform', 'extraOptions', 'honkHonk', 'anna', 'achievements', 'nitroSystem', 'underglow'})
         self.assertEqual(UPSTREAM['extraOptions']['version'], '0.6.0')
         self.assertEqual(UPSTREAM['extraOptions']['dll'], 'winmm.dll')
         with tempfile.TemporaryDirectory() as az:
@@ -1824,7 +1824,7 @@ class MirroredDownloads(unittest.TestCase):
 
     def test_the_pins_name_the_mirror_first_and_the_same_hashes(self):
         from fh2mp_launcher.constants import AZIMUTH_ARCHIVE, MIRROR_BASE, UPSTREAM
-        for kind in ('platform', 'extraOptions', 'honkHonk'):
+        for kind in ('platform', 'extraOptions', 'honkHonk', 'anna', 'achievements', 'nitroSystem', 'underglow'):
             self.assertTrue(UPSTREAM[kind]['mirror'].startswith(MIRROR_BASE))
             self.assertEqual(UPSTREAM[kind]['mirror'].rsplit('/', 1)[1], UPSTREAM[kind]['url'].rsplit('/', 1)[1])
         self.assertTrue(AZIMUTH_ARCHIVE['url'].startswith(MIRROR_BASE))
@@ -2061,6 +2061,86 @@ class HonkHonkTests(unittest.TestCase):
             with mock.patch.object(core.upstream, "fetch", return_value=self.files):
                 self.assertTrue(lc.ensure_honk())
             self.assertEqual(lc.honk_state(), (True, shim.honk_version()))
+
+
+class OptionalModTests(unittest.TestCase):
+    """NitroSystem and Underglow (shim.install_nitro / install_underglow, Launcher.ensure_nitro_system / ensure_underglow): optional, off until the
+    player ticks them. Only each mod's DLL comes from its release; a NitroSystem with the off switch and any Underglow the player has stay, a
+    NitroSystem without the switch is replaced and kept aside."""
+
+    def setUp(self):
+        self.az = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.az, "fh2-mods"))
+
+    def path(self, name):
+        return os.path.join(self.az, "fh2-mods", name)
+
+    def put(self, name, data):
+        with open(self.path(name), "wb") as f:
+            f.write(data)
+
+    def read(self, name):
+        with open(self.path(name), "rb") as f:
+            return f.read()
+
+    def test_the_pins_take_the_dll_only(self):
+        from fh2mp_launcher import upstream
+        from fh2mp_launcher.constants import UPSTREAM
+        nos = UPSTREAM["nitroSystem"]
+        self.assertTrue(nos["url"].startswith("https://github.com/qiangqiang101/FH2-NitroSystem/releases/download/2.0.0/"))
+        self.assertEqual(list(nos["files"].values()), ["fh2-mods/FnFNitro.dll"])
+        inner = "FnFNitro-2.0.0/azimuth-windows/"
+        data, pin = fake_release("nitroSystem", {inner + "fh2-mods/FnFNitro.dll": b"MZ-nos", inner + "DWrite.dll": b"MZ-platform",
+                                                 "FnFNitro-2.0.0/README.md": b"r"}, inner + "fh2-mods/FnFNitro.dll")
+        self.assertEqual(upstream.extract("nitroSystem", data, pin), {"fh2-mods/FnFNitro.dll": b"MZ-nos"})
+        ug = UPSTREAM["underglow"]
+        self.assertTrue(ug["url"].startswith("https://github.com/qiangqiang101/FH2-Underglow/releases/download/1.1.0/"))
+        data, pin = fake_release("underglow", {"fh2-mods/Underglow.dll": b"MZ-ug", "DWrite.dll": b"MZ-platform"}, "fh2-mods/Underglow.dll")
+        self.assertEqual(upstream.extract("underglow", data, pin), {"fh2-mods/Underglow.dll": b"MZ-ug"})
+
+    def test_nitro_replaces_only_a_build_without_the_switch(self):
+        new = b"MZ-nos-2 FnFNitro_SetBlocked\x00"
+        files = {"fh2-mods/FnFNitro.dll": new}
+        self.assertTrue(shim.install_nitro(self.az, files))
+        self.assertEqual(self.read("FnFNitro.dll"), new)
+        self.assertEqual(shim.install_nitro(self.az, files), [])
+        self.put("FnFNitro.dll", b"MZ-nos-1.6")                                    # an old build: no off switch, cannot load online
+        did = shim.install_nitro(self.az, files)
+        self.assertIn("replacing a build without the off switch", did[0])
+        self.assertEqual(self.read("FnFNitro.dll"), new)
+        self.assertEqual(self.read("FnFNitro.dll.before-fh2mp-setup"), b"MZ-nos-1.6")
+        mine = b"MZ-nos-2.1 FnFNitro_SetBlocked\x00"
+        self.put("FnFNitro.dll", mine)                                              # the player's newer build with the switch stays
+        self.assertEqual(shim.install_nitro(self.az, files), [])
+        self.assertEqual(self.read("FnFNitro.dll"), mine)
+
+    def test_underglow_keeps_the_players_copy(self):
+        self.assertTrue(shim.install_underglow(self.az, {"fh2-mods/Underglow.dll": b"MZ-ug"}))
+        self.put("Underglow.dll", b"MZ-ug-mine")
+        self.assertEqual(shim.install_underglow(self.az, {"fh2-mods/Underglow.dll": b"MZ-ug"}), [])
+        self.assertEqual(self.read("Underglow.dll"), b"MZ-ug-mine")
+        self.assertFalse(os.path.exists(os.path.join(self.az, "DWrite.dll")))
+
+    def test_the_launcher_installs_them_only_when_ticked(self):
+        from fh2mp_launcher import core, upstream
+        from fh2mp_launcher.settings import Settings
+        lc = core.Launcher(Settings(os.path.join(self.az, "settings.json")), load_identity=False)   # never the player's own settings file
+        lc.settings["azimuth_dir"] = self.az
+        self.assertFalse(lc.settings["nitro_system"] or lc.settings["underglow"])                  # off by default
+        fetched = []
+        got = {"nitroSystem": {"fh2-mods/FnFNitro.dll": b"MZ FnFNitro_SetBlocked\x00"}, "underglow": {"fh2-mods/Underglow.dll": b"MZ-ug"}}
+
+        def fetch(kind, *a, **k):
+            fetched.append(kind)
+            return got[kind]
+        with mock.patch.object(upstream, "fetch", side_effect=fetch):
+            self.assertEqual((lc.ensure_nitro_system(), lc.ensure_underglow()), ([], []))
+            self.assertEqual(fetched, [])
+            lc.settings["nitro_system"] = lc.settings["underglow"] = True
+            self.assertTrue(lc.ensure_nitro_system())
+            self.assertTrue(lc.ensure_underglow())
+            self.assertEqual((lc.ensure_nitro_system(), lc.ensure_underglow()), ([], []))
+        self.assertEqual(fetched, ["nitroSystem", "underglow"])
 
 
 class AchievementsModTests(unittest.TestCase):

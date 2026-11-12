@@ -15,8 +15,8 @@ import (
 
 const (
 	inviteKeep      = 3600.0 // seconds an invite stays pending (accepting fails once its lobby is gone)
-	inviteGap       = 10.0  // seconds between two invites from one player to the same friend
-	invitePending   = 10    // pending invites per recipient
+	inviteGap       = 10.0   // seconds between two invites from one player to the same friend
+	invitePending   = 10     // pending invites per recipient
 	inviteTextRunes = 256
 	inviteSenderCap = 30 // invites one player may send per inviteKeep window
 )

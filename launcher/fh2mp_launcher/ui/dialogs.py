@@ -683,6 +683,12 @@ class SettingsDialog(QDialog):
         self.achievements = QCheckBox("Install Achievements if it is missing (by Trinculo54, GPL-3.0)")
         self.achievements.setChecked(s["achievements"])
         lay.addWidget(self.achievements)
+        self.nitro = QCheckBox("Install NitroSystem if it is missing (by qiangqiang101, MIT)")
+        self.nitro.setChecked(s["nitro_system"])
+        lay.addWidget(self.nitro)
+        self.underglow = QCheckBox("Install Underglow if it is missing (by qiangqiang101, MIT)")
+        self.underglow.setChecked(s["underglow"])
+        lay.addWidget(self.underglow)
         self.packs = QCheckBox("Keep my car packs (custom cars stay out of online events)")
         self.packs.setToolTip("You play online with your own car database and the car packs in it. In Free Roam the others see your custom "
                               "cars as a stand-in car. Online events and Road Trip take only cars from the game, and parts from outside the "
@@ -879,6 +885,8 @@ class SettingsDialog(QDialog):
         s["offline_mode"] = self.offline.isChecked()
         s["extra_options"] = self.extra_opts.isChecked()
         s["achievements"] = self.achievements.isChecked()
+        s["nitro_system"] = self.nitro.isChecked()
+        s["underglow"] = self.underglow.isChecked()
         s["keep_car_packs"] = self.packs.isChecked()
         s["tcp_fallback"] = self.tcp.isChecked()
         s["crash_report_ask"] = self.crash_ask.isChecked()
