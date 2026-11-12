@@ -231,24 +231,52 @@ def handled(settings, crash):
     settings.save()
 
 
-# Causes outside FH2MP that a crash report can name by itself: (what to look for in the failure line or the mod platform's report, what to tell
-# the player). RivaTuner's on-screen display hooks the game's Direct3D calls and crashed it at start (#124, #453).
+# Causes outside FH2MP that a crash report can name by itself: (where to look, patterns that must all match there, what to tell the player).
+# Where: "crash" = the failure line and the mod platform's report, "stack" = only the call stack frames of that report, "log" = the last
+# session of azimuth.log. The first rule that matches wins, so the ones that name the faulting code come before the circumstantial ones.
+_STACK_FRAME = re.compile(r"^\s*\d+\s+(\S+)", re.M)
 KNOWN_CAUSES = (
-    ("RTSSHooks64.dll", "RivaTuner Statistics Server (the on-screen display of MSI Afterburner) crashed the game. Turn it off for azimuth.exe: "
-                        "in RivaTuner, add azimuth.exe and set its Application detection level to None, then play again."),
-    ("avcodec-62.dll is not the one this Azimuth ships", "Azimuth's own files in this folder come from different Azimuth versions. Run the "
-                        "launcher's setup and install Azimuth into this folder again: your settings, saves and mods stay."),
+    # RivaTuner's on-screen display hooks the game's Direct3D calls and crashed it at start (#124, #453).
+    ("crash", (r"RTSSHooks64\.dll",),
+     "RivaTuner Statistics Server (the on-screen display of MSI Afterburner) crashed the game. Turn it off for azimuth.exe: "
+     "in RivaTuner, add azimuth.exe and set its Application detection level to None, then play again."),
+    # A 1.0.4 azimuth.exe copied over another build's data\bin (#450).
+    ("crash", (r"avcodec-62\.dll is not the one this Azimuth ships",),
+     "Azimuth's own files in this folder come from different Azimuth versions. Run the launcher's setup and install Azimuth into this "
+     "folder again: your settings, saves and mods stay."),
+    # A third-party wheel mod's DLL writes into the game's code from its own thread a few seconds after start (#436, #457).
+    ("crash", (r"fh2wheels\.dll",),
+     "The wheel mod that installs fh2wheels.dll crashed the game. Remove that mod or update it, then play again."),
+    # The torque-curve constructor (game+0x12E0A50) underflows on a curve with no samples while the save load rates a garage car
+    # (CarPerformance_BuildSnapshotForGarageCar game+0x2D0160..0x2D0610 on the stack): every start ends the same way (heap corruption
+    # family, report 2cb2ec5004c023d3). Usually a car pack car whose data is gone.
+    ("stack", (r"^game\+0x12E0[A-F][0-9A-F]{2}$", r"^game\+0x2D0[1-6][0-9A-F]{2}$"),
+     "A car in your garage has no engine data, so the game crashes while it loads your save. This happens when a car pack is removed "
+     "after you bought one of its cars. Put that car pack back, then play again."),
+    # Azimuth stops when Direct3D 12 loses the graphics device: a driver reset or a GPU hang (#458, #462).
+    ("crash", (r"\bD3D12 device removed\b",),
+     "The graphics driver reset while the game ran. Update the graphics driver, remove any GPU overclock and close overlays and "
+     "other heavy programs, then play again."),
+    # Windows error 112 (ERROR_DISK_FULL) on saves and caches; a crash in the CRT's memcpy followed (#463, #464).
+    ("log", (r"\berror 112\b",),
+     "The drive with Azimuth or the game is full, so saves and caches could not be written. Free some space on it, then play again."),
 )
+
+
+def _frames(mod_text):
+    i = mod_text.find("call stack:")
+    return [] if i < 0 else _STACK_FRAME.findall(mod_text[i:])
 
 
 def known_cause(crash):
     """What to tell the player when the crash names a known cause outside FH2MP, else ''."""
-    texts = [crash.line or ""]
-    if crash.mod_crash:
-        texts.append(_read_tail(crash.mod_crash, 64_000))
-    blob = "\n".join(texts)
-    for needle, advice in KNOWN_CAUSES:
-        if needle.lower() in blob.lower():
+    mod_text = _read_tail(crash.mod_crash, 64_000) if crash.mod_crash else ""
+    texts = {"crash": "\n".join((crash.line or "", mod_text)), "stack": "\n".join(_frames(mod_text))}
+    for where, patterns, advice in KNOWN_CAUSES:
+        if where == "log" and "log" not in texts:
+            texts["log"] = "\n".join(_last_session(_read_tail(os.path.join(logs_dir(crash.folder), "azimuth.log"), LIMITS["azimuth.log"])))
+        flags = re.I | (re.M if where == "stack" else 0)
+        if all(re.search(p, texts[where], flags) for p in patterns):
             return advice
     return ""
 
