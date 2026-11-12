@@ -100,6 +100,13 @@ def main(argv=None):
     from . import chatcore
     if chatcore.start_background():                 # hidden for the whole session, so the in-game Guide can reach it; closed with the launcher
         app.aboutToQuit.connect(chatcore.quit_core)
+    from . import gamepad
+    pad = gamepad.install(app, win, home=win.play, suppressed=lc.game_running)
+    if pad is not None:
+        app._gamepad = pad
+        pad.play.connect(lambda: win.play.animateClick() if win.play.isEnabled() and win.play.isVisible() else None)
+        pad.friends.connect(win._toggle_friends)
+        pad.shoulder.connect(lambda step: win.cards.flip(step) if win.cards.isVisible() else None)
     if "--screenshot" in argv:                      # headless smoke test: render, save, quit
         from PySide6.QtCore import QTimer
         out = argv[argv.index("--screenshot") + 1]
