@@ -19,7 +19,7 @@ using namespace ui;
 
 namespace {
 
-enum HomeCmd { HomeNone, HomeResume, HomeFriends, HomeParty, HomeMessages, HomeProfile, HomeAchievements };
+enum HomeCmd { HomeNone, HomeResume, HomeFriends, HomeParty, HomeMessages, HomeProfile, HomeAchievements, HomeTheme };
 const char* BLADE[3] = {"Games", nullptr, "Settings"};
 
 // Toasts take the theme's accent; only a warning is red.
@@ -498,6 +498,7 @@ std::vector<GuideRequest> Guide::handle(PadEvent e, double now) {
     case Page::Achievements: handle_achievements(e, now); break;
     case Page::Compare: handle_compare(e, now); break;
     case Page::AchDetail: handle_ach_detail(e, now); break;
+    case Page::Theme: handle_theme(e, out, now); break;
     }
     return out;
 }
@@ -510,7 +511,7 @@ std::vector<Opt> Guide::home_rows(int blade) const {
         return {{"Leave Game", HomeNone, false, 0},          {"Friends", HomeFriends, true, I_PERSON},  {"Party", HomeParty, true, I_GROUPS},
                 {"Messages", HomeMessages, true, I_MAIL},    {"Beacons & Activity", HomeNone, false, I_SENSORS},
                 {"Chat", HomeNone, false, I_CHAT},           {"Lobbies", HomeNone, false, I_FLAG}};
-    return {{"Profile", HomeProfile, social_.loaded, I_PERSON}, {"Theme", HomeNone, false, I_PALETTE},  {"Voice", HomeNone, false, I_MIC},
+    return {{"Profile", HomeProfile, social_.loaded, I_PERSON}, {"Theme", HomeTheme, true, I_PALETTE},  {"Voice", HomeNone, false, I_MIC},
             {"Notifications", HomeNone, false, I_BELL},   {"Network", HomeNone, false, I_WIFI},   {"Controller", HomeNone, false, I_GAMES},
             {"System", HomeNone, false, I_SETTINGS}};
 }
@@ -540,6 +541,8 @@ void Guide::handle_home(PadEvent e, std::vector<GuideRequest>& out, double now) 
         } else if (cmd == HomeAchievements) {
             ach_focus_ = ach_top_ = 0;
             push(Page::Achievements, now);
+        } else if (cmd == HomeTheme) {
+            open_theme(now);
         } else if (cmd == HomeProfile) {
             prof_ = social_.me;
             if (prof_.tag.empty()) prof_.tag = gamertag;
@@ -693,6 +696,12 @@ void Guide::toast_to(ToastTarget target, uint64_t xuid, int64_t id, ToastKind ki
         return;
     }
     toast_ = t, toast_at_ = now;
+    toast_sound();
+}
+
+// Every toast plays the achievement toast's regular sound as it starts (user 2026-11-12), unless an achievement's own is waiting.
+void Guide::toast_sound() {
+    if (!ach_sound_) ach_sound_ = int(AchTier::Normal) + 1;
 }
 
 bool Guide::busy(double now) const { return open || now - toast_at_ < 6.4 || !toasts_.empty() || ach_toast_showing(now) || !ach_toasts_.empty(); }
@@ -725,6 +734,7 @@ bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double 
         case Page::Achievements: draw_achievements(dl, a, origin, s, zoom, op, now); break;
         case Page::Compare: draw_compare(dl, a, origin, s, zoom, op, now); break;
         case Page::AchDetail: draw_ach_detail(dl, a, origin, s, zoom, op, now); break;
+        case Page::Theme: draw_theme(dl, a, origin, s, zoom, op, now); break;
         }
         if (box_.on) draw_box(dl, a, origin, s, w, h, now);
     }
@@ -858,6 +868,7 @@ void Guide::draw_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 ori
     float t = float(now - toast_at_);
     if ((t < 0 || t > 6.3f) && !toasts_.empty()) {
         toast_ = toasts_.front(), toasts_.pop_front(), toast_at_ = now, t = 0;
+        toast_sound();
     }
     if (t < 0 || t > 6.3f) return;
     auto seg = [&](float t0, float t1, float x1, float y1, float x2, float y2) {

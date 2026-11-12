@@ -13,6 +13,7 @@
 #include "achievements.h"
 #include "imgui.h"
 #include "net.h"
+#include "theme.h"
 
 enum class PadEvent { Toggle, Up, Down, Left, Right, A, B, X, Y, Lb, Rb, Lt, Rt, L3, Start, OpenInvite };
 
@@ -91,7 +92,7 @@ enum class ToastKind { Invite, Info, Saving, Warning };
 
 enum class GuideAction {
     None, Resume, Invite, AcceptInvite, DeclineInvite, FriendRequest, AcceptFriend, DeclineFriend, RemoveFriend, SendText, ReadChat,
-    HideText, Join, SetProfile, JoinGame, Lookup, Achievements
+    HideText, Join, SetProfile, JoinGame, Lookup, Achievements, SetTheme
 };
 
 // What the overlay must ask of the server after an event.
@@ -127,7 +128,7 @@ struct Opt {
     uint32_t icon = 0;
 };
 
-enum class Page { Home, Community, Profile, EditProfile, Message, CreateNew, Recipients, Compose, Keyboard, Achievements, Compare, AchDetail };
+enum class Page { Home, Community, Profile, EditProfile, Message, CreateNew, Recipients, Compose, Keyboard, Achievements, Compare, AchDetail, Theme };
 enum CommunityTab { TabParty = 0, TabFriends = 1, TabMessages = 2, TabPlayers = 3 };
 // What a message box was shown for: just to tell (OK), or the question before a written message is dropped.
 // BoxThenClose: told from a closed Guide (the game's own Invite Friends), so OK closes it again.
@@ -169,6 +170,8 @@ public:
     std::vector<GuideRequest> type_char(uint32_t cp, double now);
     // The friend list, invites and messages as the server last gave them.
     void set_social(const Social& s);
+    // Settings > Theme, opened on the theme in use (theme_page.cpp).
+    void open_theme(double now);
     // Who is talking right now (the voice engine's list: xuids, 0 for this player): the Players tab marks them.
     void set_talking(const uint64_t* ids, int n) { talking_.assign(ids, ids + n); }
     // This player's unlocked achievements as the Achievements mod's file has them (not known: the Achievements row is greyed).
@@ -276,6 +279,13 @@ private:
     double prof_at_ = -10;
     int prof_row_[2] = {0, 0};
     Tween prof_bar_;
+    // Settings > Theme (theme_page.cpp): the tab (0 Themes, 1 Plastic), the focus in each, and the theme kept when the page opened
+    int theme_tab_ = 0, theme_dir_ = 1, theme_row_[2] = {0, 0};
+    double theme_at_ = -10;
+    Tween theme_bar_;
+    std::string theme_kept_;
+    void handle_theme(PadEvent e, std::vector<GuideRequest>& out, double now);
+    void draw_theme(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
     uint64_t waiting_xuid_ = 0;  // an option of this profile is on its way to the server
     int edit_row_ = 0;           // Edit Profile's focus
     Tween edit_bar_;
@@ -307,6 +317,7 @@ private:
     double ach_at_ = -100;
     float ach_lift_ = 0;
     int ach_sound_ = 0;  // 1 + the tier whose sound is to be played
+    void toast_sound();
     // Compare Games: the other player, the list's focus, and the achievement whose details are open
     Friend cmp_;
     ListFocus cmp_list_;

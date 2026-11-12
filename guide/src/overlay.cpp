@@ -17,6 +17,7 @@
 #include <atomic>
 #include <cstdio>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -444,6 +445,32 @@ void play_ach_sound(AchTier tier) {
     if (play && !wav.empty()) play((LPCWSTR)wav.data(), nullptr, 0x0004 /* SND_MEMORY */ | 0x0001 /* SND_ASYNC */ | 0x0002 /* SND_NODEFAULT */);
 }
 
+// The player's Guide theme: data\bin\fh2mp-guide-theme.txt (its key), so the Guide has it from the first frame; the server keeps it too,
+// for the player's gamercard as others see it. A Guide with no file takes the server's when the profile arrives (social_and_toasts).
+std::wstring theme_file() { return std::wstring(g_api->azimuth_dir) + L"\\data\\bin\\fh2mp-guide-theme.txt"; }
+bool g_theme_from_file;
+
+void load_theme() {
+    std::vector<unsigned char> b = read_file(theme_file());
+    std::string key(b.begin(), b.end());
+    while (!key.empty() && (key.back() == '\n' || key.back() == '\r' || key.back() == ' ')) key.pop_back();
+    if (key.empty()) return;
+    theme_apply(key);
+    g_theme_from_file = true;
+    logf("guide: theme %s (data\\bin\\fh2mp-guide-theme.txt)", theme_name(theme_current()).c_str());
+}
+
+void save_theme(const std::string& key) {
+    HANDLE f = CreateFileW(theme_file().c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f != INVALID_HANDLE_VALUE) {
+        DWORD wrote = 0;
+        std::string line = key + "\n";
+        WriteFile(f, line.data(), DWORD(line.size()), &wrote, nullptr);
+        CloseHandle(f);
+    }
+    g_theme_from_file = true;
+}
+
 // The player's picture: Azimuth's data/player.png (256x256 RGBA, written by the launcher), uploaded once into a shader-visible texture.
 ImTextureID load_gamerpic() {
     std::wstring path = std::wstring(g_api->azimuth_dir) + L"\\data\\player.png";
@@ -530,6 +557,7 @@ bool setup(IDXGISwapChain3* sc) {
 
     g_assets.gamerpic = load_gamerpic();
     load_ach_art();
+    load_theme();
     g_guide.gamertag = read_gamertag();
     g_hwnd = desc.OutputWindow;
     if (g_hwnd && !g_old_proc) g_old_proc = (WNDPROC)SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC, (LONG_PTR)guide_wndproc);
@@ -545,7 +573,15 @@ void social_and_toasts(double now) {
     if (now - last_read > 0.5) {
         last_read = now;
         Social so = net_social();
-        if (so.version != version) version = so.version, g_guide.set_social(so);
+        if (so.version != version) {
+            version = so.version, g_guide.set_social(so);
+            // no theme file on this PC (a new install): the one the server keeps for the player
+            if (!g_theme_from_file && so.loaded && !so.me.theme.empty() && so.me.theme != theme_current()) {
+                theme_apply(so.me.theme);
+                save_theme(so.me.theme);
+                logf("guide: theme %s, as the player's profile on the server has it", theme_name(so.me.theme).c_str());
+            }
+        }
     }
     uint64_t talkers[16];
     g_guide.set_talking(talkers, voice_talking(talkers, 16));  // every frame: a talker's mark follows the voice
@@ -565,15 +601,27 @@ void social_and_toasts(double now) {
             if (read_once && before.known && u.known) {
                 const std::vector<AchDef>& defs = ach_defs();
                 int base_before = 0, base_after = 0, base_all = 0;
+                // The mod's first look at a save unlocks everything the save already earned, all at one second (win1 2026-11-12: 18 at
+                // 06:05:50 UTC, 18 toasts): three or more new ones with one time are that catch-up, not achievements earned now.
+                std::vector<int> fresh;
+                std::map<std::string, int> per_time;
+                for (int i = 0; i < int(defs.size()); i++)
+                    if (u.has(defs[i].id) && !before.has(defs[i].id)) fresh.push_back(i), per_time[u.when.at(defs[i].id)]++;
+                bool catch_up = per_time.size() == 1 && fresh.size() >= 3;
+                if (catch_up)
+                    logf("guide: %d achievements unlocked at once (%s): the Achievements mod caught up with the save, no toasts",
+                         int(fresh.size()), per_time.begin()->first.c_str());
                 for (int i = 0; i < int(defs.size()); i++) {
                     const AchDef& d = defs[i];
                     if (d.group == 0) base_all++, base_before += before.has(d.id), base_after += u.has(d.id);
-                    if (u.has(d.id) && !before.has(d.id)) {
-                        logf("guide: achievement unlocked: %s (%dG): its toast", d.name, d.g);
-                        g_guide.ach_toast(AchTier::Normal, d.g, d.name, d.desc, -1, i, now);
-                    }
                 }
-                if (base_after == base_all && base_before < base_all) {
+                for (int i : catch_up ? std::vector<int>() : fresh) {
+                    const AchDef& d = defs[i];
+                    float rare = net_ach_rare_percent(d.id);
+                    logf("guide: achievement unlocked: %s (%dG)%s: its toast", d.name, d.g, rare >= 0 ? ", a rare one" : "");
+                    g_guide.ach_toast(rare >= 0 ? AchTier::Rare : AchTier::Normal, d.g, d.name, d.desc, rare, i, now);
+                }
+                if (base_after == base_all && base_before < base_all && !catch_up) {
                     char words[48];
                     snprintf(words, sizeof words, "%d of %d Achievements", base_all, base_all);
                     logf("guide: all %d of the game's own achievements unlocked: the Mythic Achievement's toast", base_all);
@@ -624,6 +672,11 @@ void ask(const GuideRequest& r) {
     case GuideAction::HideText: net_hide_text(r.id); break;
     case GuideAction::Join: net_join(r.xuid, r.name, r.text, r.kind); break;
     case GuideAction::SetProfile: net_set_profile(r.name, r.text); break;
+    case GuideAction::SetTheme:
+        save_theme(r.name);
+        net_set_profile("theme", r.name);
+        logf("guide: theme set to %s: kept in data\\bin\\fh2mp-guide-theme.txt and on the player's profile", theme_name(r.name).c_str());
+        break;
     case GuideAction::JoinGame: join_request(r.scid, r.kind, r.text, r.name); break;
     case GuideAction::Lookup: net_lookup(r.xuid); break;
     case GuideAction::Achievements: net_achievements(r.xuid, r.name); break;

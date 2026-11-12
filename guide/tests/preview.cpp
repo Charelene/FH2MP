@@ -234,6 +234,13 @@ int main(int argc, char** argv) {
     NetResult nr;
     if (scene == "friends" || scene == "friends-nogame") {
         g.open_community(TabFriends, t0 - 5), press({D, D});
+    } else if (scene == "theme" || scene == "theme-plastic" || scene == "theme-fh2mp") {
+        // Settings > Theme with the focus moved: Orange on the first tab, Blue Plastic on the second, FH2MP
+        // Settings > Theme as the player gets there: the Guide, RB to Settings, down to Theme, A
+        g.toggle(t0 - 10), g.handle(RB, t0 - 9), g.handle(D, t0 - 8), g.handle(A, t0 - 7);
+        if (scene == "theme") press({D, D, D});
+        if (scene == "theme-plastic") g.handle(RB, t0 - 6), press({D, D, D, D});
+        if (scene == "theme-fh2mp") press({D});
     } else if (scene == "party") {
         g.open_community(TabParty, t0 - 5);
     } else if (scene == "players") {

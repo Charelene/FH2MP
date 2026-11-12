@@ -192,13 +192,13 @@ void Guide::player_row(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, floa
     bool here = same_game(f, social_.me), off = f.state == Friend::Offline, sent = sent_.count(f.xuid) > 0;
     if (!focused) dl->AddLine(v.pt(x, y + 68.5f), v.pt(x + W, y + 68.5f), alpha(LINE, op), v.sz(1));
     player_pic(dl, a, a.pic(f.xuid), f.xuid, v.pt(x + 9, y + 4.5f), v.pt(x + 69, y + 64.5f), greyed ? op * 0.45f : op);
-    ImU32 fg = greyed ? DISABLED : focused ? WHITE : off ? MUTED2 : WHITE, sub = greyed ? DISABLED : focused ? WHITE : MUTED2;
+    ImU32 fg = greyed ? DISABLED : focused ? INK : off ? MUTED2 : WHITE, sub = greyed ? DISABLED : focused ? INK : MUTED2;
     // name column: 22 and 20 units, line-height 1.15, 3 apart, centred: the lines' centres 13 above and 14 below the row's
     std::string second = !f.motto.empty() ? f.motto : !f.club.empty() ? "[" + f.club + "]" : f.level > 0 ? "Level " + std::to_string(f.level) : "";
     ImVec2 n0 = v.pt(x + 78, second.empty() ? cy : cy - 13), n1 = v.pt(x + 78, cy + 14.15f);
     text_fit(dl, a.text, a.text_m, v.sz(22), n0.x, n0.y, v.sz(305), alpha(fg, op), f.tag);
     if (!second.empty()) text_fit(dl, a.text, a.text_m, v.sz(20), n1.x, n1.y, v.sz(305), alpha(sub, op), second);
-    ImU32 ic = greyed ? DISABLED : focused ? WHITE : (f.state == Friend::Playing || here) ? BRIGHT : f.state == Friend::Online ? ONLINE : OFFLINE;
+    ImU32 ic = greyed ? DISABLED : focused ? INK : (f.state == Friend::Playing || here) ? BRIGHT : f.state == Friend::Online ? ONLINE : OFFLINE;
     ImVec2 pi = v.pt(x + 399 + 14, cy);
     icon_mid(dl, a, v.sz(28), pi.x, pi.y, alpha(ic, op), I_PERSON);
     std::string waiting = waiting_words(f, rel);
@@ -338,7 +338,7 @@ void Guide::draw_community(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, 
             if (std::find(talking_.begin(), talking_.end(), f.xuid) != talking_.end()) {
                 // heard right now: a microphone at the row's end
                 ImVec2 mp = v.pt(cxs + W - 20 - 16, y + 34.5f);
-                icon_mid(dl, a, v.sz(30), mp.x, mp.y, alpha(i == players_.row ? WHITE : BRIGHT, cop), I_MIC);
+                icon_mid(dl, a, v.sz(30), mp.x, mp.y, alpha(i == players_.row ? INK : BRIGHT, cop), I_MIC);
             }
         }
         scroll_marks(dl, a, v, cxs + W - 30, 579.5f, players_.top > 0, players_.top + FRIEND_ROWS < n, cop);
@@ -539,18 +539,21 @@ void Guide::profile_side(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
     bool me = p.xuid && p.xuid == social_.me.xuid;
     float cx = x + 431 + 14, cw = 431 - 28, cy0 = top + 14;
     dl->AddRectFilled(v.pt(cx, cy0), v.pt(cx + cw, cy0 + 46 + 112), alpha(RAISED, pop));
-    dl->AddRectFilled(v.pt(cx, cy0), v.pt(cx + cw, cy0 + 46), alpha(ACCENT, pop));
+    // the title bar in the card owner's theme (the player's own: the one in use, which the Theme screen previews)
+    const ThemeDef& own = theme_preset(p.theme);
+    ImU32 bar_col = me ? ACCENT : own.accent, ink = me ? INK : own.ink;
+    dl->AddRectFilled(v.pt(cx, cy0), v.pt(cx + cw, cy0 + 46), alpha(bar_col, pop));
     float name_w = cw - 16 - 14;
     if (p.level > 0) {
         std::string lv = std::to_string(p.level);
         float lw = bf->CalcTextSizeA(32, FLT_MAX, 0, lv.c_str()).x, tw = bf->CalcTextSizeA(13, FLT_MAX, 0, "LVL").x;
         ImVec2 lp = v.pt(cx + cw - 14, cy0 + 23), tp = v.pt(cx + cw - 14 - lw - 12, cy0 + 23);
-        text_mid(dl, bf, a.bold_m, v.sz(32), lp.x, lp.y, alpha(WHITE, pop), lv.c_str(), true);
-        text_mid(dl, bf, a.bold_m, v.sz(13), tp.x, tp.y, alpha(WHITE, pop * 0.85f), "LVL", true);
+        text_mid(dl, bf, a.bold_m, v.sz(32), lp.x, lp.y, alpha(ink, pop), lv.c_str(), true);
+        text_mid(dl, bf, a.bold_m, v.sz(13), tp.x, tp.y, alpha(ink, pop * 0.85f), "LVL", true);
         name_w -= lw + 12 + tw + 12;
     }
     ImVec2 np = v.pt(cx + 16, cy0 + 23);
-    text_fit(dl, bf, a.bold_m, v.sz(25), np.x, np.y, v.sz(name_w), alpha(WHITE, pop), p.tag);
+    text_fit(dl, bf, a.bold_m, v.sz(25), np.x, np.y, v.sz(name_w), alpha(ink, pop), p.tag);
     player_pic(dl, a, me ? a.gamerpic : a.pic(p.xuid), p.xuid, v.pt(cx, cy0 + 46), v.pt(cx + 112, cy0 + 46 + 112), pop);
     std::vector<std::pair<std::string, std::string>> facts = {{"Club", p.club.empty() ? "-" : p.club}};
     // Gamerscore, as on the 360's gamercard: this player's from the Achievements mod's file, another player's from the server

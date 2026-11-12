@@ -162,10 +162,13 @@ void Guide::draw_message(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
     dl->AddRectFilled(v.pt(rx, 96), v.pt(rx + 431, 607), alpha(PANE, pop));
     float cx = rx + 22, cw = 431 - 44, cy0 = 96 + 22;
     dl->AddRectFilled(v.pt(cx, cy0), v.pt(cx + cw, cy0 + 46 + 128), alpha(PANEL, pop));
-    dl->AddRectFilled(v.pt(cx, cy0), v.pt(cx + cw, cy0 + 46), alpha(ACCENT, pop));
+    // the sender's card: its title bar in the sender's theme
+    const Friend* sender = find(m.from.xuid);
+    const ThemeDef& own = theme_preset(sender ? sender->theme : m.from.theme);
+    dl->AddRectFilled(v.pt(cx, cy0), v.pt(cx + cw, cy0 + 46), alpha(own.accent, pop));
     ImFont* bf = a.text_bold ? a.text_bold : a.text;
     ImVec2 np = v.pt(cx + 16, cy0 + 23);
-    text_fit(dl, bf, a.bold_m, v.sz(26), np.x, np.y, v.sz(cw - 32), alpha(WHITE, pop), m.from.tag);
+    text_fit(dl, bf, a.bold_m, v.sz(26), np.x, np.y, v.sz(cw - 32), alpha(own.ink, pop), m.from.tag);
     player_pic(dl, a, a.pic(m.from.xuid), m.from.xuid, v.pt(cx, cy0 + 46), v.pt(cx + 128, cy0 + 46 + 128), pop);
     const Friend* live = find(m.from.xuid);
     const Friend& from = live ? *live : m.from;

@@ -37,6 +37,7 @@ std::deque<PicReady> g_pics;
 std::map<uint64_t, Friend> g_others;  // players looked up by xuid
 std::map<uint64_t, AchUnlocks> g_ach_of;  // other players' achievements, as read for Compare Games
 std::string g_ach_report;  // this player's achievements as the body to tell the server, and whether it still has to be told
+std::map<std::string, float> g_ach_rare;  // id -> share of players, for the rare ones (the server's rarity, its last answer)
 bool g_ach_pending;
 std::set<int64_t> g_hidden;  // messages deleted in the Message Center (data/bin/fh2mp-guide-hidden.txt)
 bool g_hidden_dirty;
@@ -206,6 +207,7 @@ Friend card(const JVal& c) {
     f.motto = c["motto"].str(), f.name = c["name"].str(), f.location = c["location"].str(), f.bio = c["bio"].str();
     f.has_profile = c["motto"].type == JVal::Str;
     if (c["gamerscore"].type == JVal::Num) f.gamerscore = int(c["gamerscore"].i64());
+    f.theme = c["theme"].str();
     return f;
 }
 
@@ -394,9 +396,19 @@ DWORD WINAPI worker(LPVOID) {
             JVal v;
             if (status >= 200 && status < 300) {
                 json_parse(out, &v);
-                logf("guide: achievements told to the server: it has %d unlocked for %dG", int(v["count"].i64()), int(v["gamerscore"].i64()));
+                // which achievements are rare among FH2MP's players: under rareBelow percent, with minPlayers or more reporting
+                std::map<std::string, float> rare;
+                const JVal& r = v["rarity"];
+                int players = int(r["players"].i64()), min_players = int(r["minPlayers"].i64());
+                double below = r["rareBelow"].type == JVal::Num ? r["rareBelow"].n : 0;
+                if (r.type == JVal::Obj && players >= min_players && min_players > 0)
+                    for (auto& kv : r["percent"].o)
+                        if (kv.second.type == JVal::Num && kv.second.n < below) rare[kv.first] = float(kv.second.n);
+                logf("guide: achievements told to the server: it has %d unlocked for %dG; %d of the game's achievements are rare among its %d players",
+                     int(v["count"].i64()), int(v["gamerscore"].i64()), int(rare.size()), players);
                 ach_fail.clear();
                 std::lock_guard<std::mutex> l(g_mu);
+                g_ach_rare = rare;
                 if (g_ach_report == report) g_ach_pending = false;
             } else {
                 std::string why = status == 404 ? "this server keeps no achievements" : refusal(status, out, err);
@@ -618,6 +630,12 @@ void net_set_profile(const std::string& field, const std::string& text) { push_o
 void net_lookup(uint64_t xuid) { push_op(NetOp::Lookup, xuid, 0, ""); }
 
 void net_achievements(uint64_t xuid, const std::string& name) { push_op(NetOp::Achievements, xuid, 0, name); }
+
+float net_ach_rare_percent(const std::string& id) {
+    std::lock_guard<std::mutex> l(g_mu);
+    auto it = g_ach_rare.find(id);
+    return it == g_ach_rare.end() ? -1 : it->second;
+}
 
 void net_report_achievements(const AchUnlocks& u) {
     if (!u.known) return;

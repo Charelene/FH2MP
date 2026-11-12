@@ -14,13 +14,15 @@
 
 namespace ui {
 
-// Theme "xbox" of the canvas.
-const ImU32 ACCENT = IM_COL32(0x10, 0x8a, 0x10, 255), DARK = IM_COL32(0x0a, 0x4f, 0x0a, 255), BRIGHT = IM_COL32(0x8e, 0xd6, 0x1e, 255),
-            PANEL = IM_COL32(0x2a, 0x2b, 0x2e, 255), PANE = IM_COL32(0x1e, 0x1f, 0x22, 255), LINE = IM_COL32(0x3a, 0x3b, 0x3f, 255),
-            TAB = IM_COL32(0x45, 0x47, 0x4c, 255), RAISED = IM_COL32(0x34, 0x36, 0x3a, 255), MUTED = IM_COL32(0xb4, 0xb6, 0xbb, 255),
-            MUTED2 = IM_COL32(0x9c, 0x9f, 0xa5, 255), TAB_TEXT = IM_COL32(0xd4, 0xd6, 0xda, 255), MUTED3 = IM_COL32(0xc9, 0xcc, 0xd2, 255),
-            DISABLED = IM_COL32(0x6e, 0x70, 0x76, 255), KEY = IM_COL32(0x2f, 0x30, 0x34, 255), KEY_LINE = IM_COL32(0x48, 0x49, 0x4e, 255),
-            WHITE = IM_COL32(255, 255, 255, 255), BLACK = IM_COL32(0, 0, 0, 255), ONLINE = IM_COL32(0xe8, 0xe9, 0xeb, 255),
+// The theme's colours (theme.cpp sets them; these are Xbox's): the accent, a bright and a dark of it, the ink for text on the accent, and the
+// surfaces. White, black and the presence colours stay.
+inline ImU32 ACCENT = IM_COL32(0x10, 0x8a, 0x10, 255), DARK = IM_COL32(0x0a, 0x4f, 0x0a, 255), BRIGHT = IM_COL32(0x8e, 0xd6, 0x1e, 255),
+             INK = IM_COL32(255, 255, 255, 255), PANEL = IM_COL32(0x2a, 0x2b, 0x2e, 255), PANE = IM_COL32(0x1e, 0x1f, 0x22, 255),
+             LINE = IM_COL32(0x3a, 0x3b, 0x3f, 255), TAB = IM_COL32(0x45, 0x47, 0x4c, 255), RAISED = IM_COL32(0x34, 0x36, 0x3a, 255),
+             MUTED = IM_COL32(0xb4, 0xb6, 0xbb, 255), MUTED2 = IM_COL32(0x9c, 0x9f, 0xa5, 255), TAB_TEXT = IM_COL32(0xd4, 0xd6, 0xda, 255),
+             MUTED3 = IM_COL32(0xc9, 0xcc, 0xd2, 255), DISABLED = IM_COL32(0x6e, 0x70, 0x76, 255), KEY = IM_COL32(0x2f, 0x30, 0x34, 255),
+             KEY_LINE = IM_COL32(0x48, 0x49, 0x4e, 255);
+const ImU32 WHITE = IM_COL32(255, 255, 255, 255), BLACK = IM_COL32(0, 0, 0, 255), ONLINE = IM_COL32(0xe8, 0xe9, 0xeb, 255),
             OFFLINE = IM_COL32(0xe0, 0x55, 0x2f, 255);
 const ImU32 PIC_COLORS[] = {IM_COL32(0xc9, 0x66, 0x2f, 255), IM_COL32(0x3f, 0x6f, 0xc4, 255), IM_COL32(0xc4, 0x9a, 0x2b, 255),
                             IM_COL32(0x3e, 0x9a, 0x5a, 255), IM_COL32(0x2f, 0x8f, 0xa8, 255), IM_COL32(0x9a, 0x4f, 0xb8, 255),
@@ -224,7 +226,7 @@ inline void option_list(ImDrawList* dl, const GuideAssets& a, const View& v, flo
     for (size_t i = 0; i < opts.size(); i++) {
         float y = top + i * row_h, cy = y + row_h * 0.5f;
         if (int(i) != focus) dl->AddLine(v.pt(x, y + row_h - 0.5f), v.pt(x + w, y + row_h - 0.5f), alpha(LINE, op), v.sz(1));
-        ImU32 fg = alpha(opts[i].enabled ? WHITE : DISABLED, op);
+        ImU32 fg = alpha(!opts[i].enabled ? DISABLED : int(i) == focus ? INK : WHITE, op);
         float tx = x + pad;
         if (icon_size > 0) {
             ImVec2 ip = v.pt(tx + icon_w * 0.5f, cy);

@@ -19,7 +19,7 @@ imgui=$root/third_party/imgui
 flags=(-O2 -std=c++17 -static -static-libgcc -static-libstdc++ -DWIDL_EXPLICIT_AGGREGATE_RETURNS -DNOMINMAX
        -Wall -Wno-unused-function -Wno-missing-field-initializers
        -I src -I "$imgui" -I "$root/third_party/fh2-mod-platform" -I "$root/third_party/stb")
-common=(src/guide.cpp src/community.cpp src/messages.cpp src/achievements.cpp src/assets.cpp src/gfx.cpp src/net.cpp src/probe.cpp src/join.cpp src/sysui.cpp src/d3dcompile.cpp
+common=(src/guide.cpp src/theme.cpp src/theme_page.cpp src/community.cpp src/messages.cpp src/achievements.cpp src/assets.cpp src/gfx.cpp src/net.cpp src/probe.cpp src/join.cpp src/sysui.cpp src/d3dcompile.cpp
         "$imgui/imgui.cpp" "$imgui/imgui_draw.cpp" "$imgui/imgui_tables.cpp" "$imgui/imgui_widgets.cpp" "$imgui/backends/imgui_impl_dx12.cpp"
         build/icons.o)
 libs=(-ld3d12 -ldxgi -ldxguid -luuid -lole32 -luser32 -lgdi32 -lwinhttp)

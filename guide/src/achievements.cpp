@@ -323,10 +323,10 @@ void Guide::draw_compare(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
         ImVec2 n0 = v.pt(x + 74, cy - 13), n1 = v.pt(x + 74, cy + 14.15f);
         float room = col_me - 74 - 40;
         text_fit(dl, a.text, a.text_m, v.sz(22), n0.x, n0.y, v.sz(room), alpha(WHITE, pop), d.name);
-        text_fit(dl, a.text, a.text_m, v.sz(18), n1.x, n1.y, v.sz(room), alpha(foc ? WHITE : MUTED2, pop), d.desc);
+        text_fit(dl, a.text, a.text_m, v.sz(18), n1.x, n1.y, v.sz(room), alpha(foc ? INK : MUTED2, pop), d.desc);
         auto mark = [&](float cx, bool got) {
             ImVec2 c = v.pt(x + cx, cy);
-            icon_mid(dl, a, v.sz(got ? 30 : 24), c.x, c.y, alpha(got ? (foc ? WHITE : BRIGHT) : (foc ? DARK : DISABLED), pop), got ? I_CHECK : I_LOCK);
+            icon_mid(dl, a, v.sz(got ? 30 : 24), c.x, c.y, alpha(got ? (foc ? INK : BRIGHT) : (foc ? DARK : DISABLED), pop), got ? I_CHECK : I_LOCK);
         };
         mark(col_me, got_me);
         if (theirs) mark(col_them, got_them);

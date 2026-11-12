@@ -24,6 +24,7 @@ struct Friend {
     bool has_profile = false;                 // the server keeps profile texts (it sent them with this card)
     std::string relation;                     // a looked-up player: "friend", "incoming", "outgoing", "none" or "self"
     int gamerscore = -1;                      // from their unlocked achievements, -1 when the server does not say
+    std::string theme;                        // the Guide theme they picked ("" = Xbox), their gamercard's title bar shows it
 };
 
 struct ReceivedInvite {
@@ -104,7 +105,10 @@ void net_send_text(uint64_t xuid, const std::string& name, const std::string& te
 void net_read_chat(const std::string& chat, int64_t last_id);
 void net_hide_text(int64_t id);  // a message deleted in the Message Center: the chat keeps it, the Guide stops listing it
 void net_join(uint64_t xuid, const std::string& name, const std::string& lobby, const std::string& kind);
-void net_set_profile(const std::string& field, const std::string& text);  // field: "motto", "name", "location" or "bio"
+void net_set_profile(const std::string& field, const std::string& text);
+// The share of FH2MP's players who have an achievement, as the server last said (its answer to this player's achievements report), when it
+// is rare: under the server's line (Xbox Live's: 10%) with enough players for a share to mean something. -1: not rare, or not known yet.
+float net_ach_rare_percent(const std::string& id);  // field: "motto", "name", "location" or "bio"
 void net_lookup(uint64_t xuid);  // any player's card, into Social::others
 void net_achievements(uint64_t xuid, const std::string& name);  // a player's unlocked achievements, into Social::ach_of
 // This player's unlocked achievements (the Achievements mod's file): told to the server when they changed, again until it took them.
