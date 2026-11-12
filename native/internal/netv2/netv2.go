@@ -40,6 +40,7 @@ const (
 	MsgLapScore                = 44
 	MsgScoreKeyframe           = 45
 	MsgRequestRace             = 38
+	MsgVoteToKick              = 46 // a lobby key and the u64 id of the player to remove (the popup's Kick From Session / Vote To Kick)
 	MsgRequestLeaderChange     = 59 // "a request to change the leader to the player specified": a player key (the popup's Make Session Leader)
 	MsgDropLeadership          = 60
 	MsgReadyRequest            = 41

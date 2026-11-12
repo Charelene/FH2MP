@@ -120,8 +120,11 @@ const (
 	SHRaceReady                = 4
 	SHRaceParticipantsSelected = 5
 	SHInRace                   = 6
-	SHLobbyType                = 0
-	SHLobbyTypeBits            = 3
+	// CloseConnection's reason for a player its leader removed: NetworkDisconnectType::PlayerKick (game+0x10fd80: 1 LiveFailure, 2 Network,
+	// 3 PlayerKick, 4 PlayerInactive, 5 PlayerChoice) [I: that the transport's 3-bit reason is that enum]
+	CloseReasonPlayerKick = 3
+	SHLobbyType           = 0
+	SHLobbyTypeBits       = 3
 	// SessionHostSynced.PrivacyMode (var 1, SyncedEnum<SessionPrivacy,0,2,0>: 2 bits): 0 Public, 1 InviteOnly. The game's session object reads
 	// it (States::NetworkGetSessionPrivacy, game+0x8c80c0); InviteOnly shows the leader's crown in the HUD list and lets only the leader
 	// start events (NotPrivateLeader for everybody else), docs/protocol.md "Event leader".

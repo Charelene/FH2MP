@@ -102,3 +102,32 @@ func TestPublicWorldHasNoStandingLeader(t *testing.T) {
 	}
 	_ = host
 }
+
+// The leader of a private game removes a player (message 46, the popup's Kick From Session); nobody else can.
+func TestPrivateGameLeaderKicks(t *testing.T) {
+	r, host, guest := privateRig(t)
+	r.w.KickFromPrivate(guest, host.Xuid)
+	if _, still := r.w.Peers.Get(host.Addr); !still {
+		t.Fatal("a guest kicked the leader")
+	}
+	r.w.KickFromPrivate(host, 0x1234)
+	if r.w.Peers.Len() != 2 {
+		t.Fatal("a kick of an id nobody has removed someone")
+	}
+	r.w.KickFromPrivate(host, guest.Xuid)
+	if _, still := r.w.Peers.Get(guest.Addr); still {
+		t.Fatal("the leader's kick left the player in the game")
+	}
+	if !r.logHas("removed from the private game by its leader, owner 1") {
+		t.Errorf("no kick line in %q", r.log)
+	}
+	// the kicked player's game was told why: CloseConnection with the reason PlayerKick
+	sent := sentTo(r, guest.Addr)
+	if len(sent) == 0 {
+		t.Fatal("the kicked player's game got nothing")
+	}
+	last := sent[len(sent)-1]
+	if last[8] != 1 || last[11]&0x7f != netv2.MsgCloseConnection || (uint16(last[11])|uint16(last[12])<<8)>>7&7 != CloseReasonPlayerKick {
+		t.Errorf("the last datagram to the kicked player is not CloseConnection(PlayerKick): %x", last)
+	}
+}

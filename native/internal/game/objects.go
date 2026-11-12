@@ -785,6 +785,34 @@ func (w *World) RequestLeaderChange(peer *Peer, kind string, owner int) {
 	}
 }
 
+// KickFromPrivate handles message 46 in a private game: its leader removes a player (the popup's Kick From Session). The player's
+// connection is closed with the reason PlayerKick and the hub forgets that the player belongs here, so only a new invite brings them back.
+func (w *World) KickFromPrivate(peer *Peer, target uint64) {
+	var q *Peer
+	for _, c := range w.Peers.Values() {
+		if c.Xuid == target && c.Connected {
+			q = c
+		}
+	}
+	switch {
+	case w.Leader != peer:
+		w.Logf("%d kick of %#x (owner %d) ignored: only the private game's leader removes players", peer.Addr.Port, target, peer.Owner)
+	case q == nil || q == peer:
+		w.Logf("%d kick of %#x (owner %d) ignored: no other player here has that id", peer.Addr.Port, target, peer.Owner)
+	default:
+		w.Logf("kick: owner %d xuid %#x removed from the private game by its leader, owner %d; it comes back only by a new invite", q.Owner, q.Xuid, peer.Owner)
+		w.Send(q, false, netv2.CloseConnection(CloseReasonPlayerKick, q.ClientCounter, w.ServerCounter))
+		w.DropPeer(q, "kicked by the private game's leader")
+		if w.Hub != nil {
+			hub, xuid := w.Hub, target
+			hub.Defer(func() {
+				delete(hub.Assign, xuid)
+				delete(hub.Follow, xuid)
+			})
+		}
+	}
+}
+
 // SendLeaderFlag writes IsLeader of a player.
 func (w *World) SendLeaderFlag(peer *Peer, flag int) {
 	w.SendPlayerVar(peer, PlayerVarIsLeader, 1, uint64(flag), true)

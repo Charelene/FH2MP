@@ -727,6 +727,15 @@ loop:
 			}
 			w.blApply(peer, fmt.Sprintf("ChallengeEnded ok=%d", ok), out, "partner "+partner)
 			w.ev("bucketlist_end", kv("owner", peer.Owner), kv("ok", ok != 0), kv("partner", partnerV))
+		case mtype == netv2.MsgVoteToKick && w.Private:
+			if err := netv2.SkipKey(br, netv2.RouterBits[netv2.RouterLobby][0]); err != nil {
+				panic(err)
+			}
+			target := r.bits(32) | r.bits(32)<<32
+			if !w.admit(peer, mtype) {
+				continue
+			}
+			w.KickFromPrivate(peer, target)
 		case mtype == netv2.MsgRequestLeaderChange && w.Private:
 			kind, _, owner, err := netv2.ReadCarKey(br)
 			if err != nil {

@@ -546,6 +546,13 @@ func (h *Hub) lobbyStatus() pyjson.Obj {
 		} else {
 			obj = append(obj, pyjson.Pair{K: "status", V: "Free roaming"})
 		}
+		if world.Private {
+			// a private game: the players' Guides show it as their party, with its leader
+			obj = append(obj, pyjson.Pair{K: "private", V: true})
+			if world.Leader != nil && world.Leader.Xuid != 0 {
+				obj = append(obj, pyjson.Pair{K: "leader", V: fmt.Sprintf("%x", world.Leader.Xuid)})
+			}
+		}
 		out = append(out, row{id, kind, len(peers), obj})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
