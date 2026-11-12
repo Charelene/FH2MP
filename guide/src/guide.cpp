@@ -19,7 +19,7 @@ using namespace ui;
 
 namespace {
 
-enum HomeCmd { HomeNone, HomeResume, HomeFriends, HomeParty, HomeMessages, HomeProfile, HomeAchievements, HomeTheme };
+enum HomeCmd { HomeNone, HomeResume, HomeFriends, HomeParty, HomeMessages, HomeProfile, HomeAchievements, HomeTheme, HomeVoice };
 const char* BLADE[3] = {"Games", nullptr, "Settings"};
 
 // Toasts take the theme's accent; only a warning is red.
@@ -228,6 +228,7 @@ void Guide::entered(Page p, double now) {
         friends_.clamp(1 + int(friend_rows().size()), 6);
         messages_.clamp(1 + int(messages().size()), 8);
         players_.clamp(int(social_.players.size()), 6);
+        party_.clamp(int(party_rows().size()), 6);
     } else if (p == Page::Profile) {
         for (int t = 0; t < 2; t++) {
             std::vector<Opt> o = profile_options(t);
@@ -360,6 +361,7 @@ void Guide::set_social(const Social& s) {
         friends_.clamp(1 + int(friend_rows().size()), 6);
         messages_.clamp(1 + int(messages().size()), 8);
         players_.clamp(int(social_.players.size()), 6);
+        party_.clamp(int(party_rows().size()), 6);
         pick_.clamp(int(pick_rows().size()), 6);
         // an option list can lose or grey the focused entry when the server's state changes
         if (p == Page::Profile) {
@@ -499,6 +501,7 @@ std::vector<GuideRequest> Guide::handle(PadEvent e, double now) {
     case Page::Compare: handle_compare(e, now); break;
     case Page::AchDetail: handle_ach_detail(e, now); break;
     case Page::Theme: handle_theme(e, out, now); break;
+    case Page::Voice: handle_voice(e, out, now); break;
     }
     return out;
 }
@@ -511,7 +514,7 @@ std::vector<Opt> Guide::home_rows(int blade) const {
         return {{"Leave Game", HomeNone, false, 0},          {"Friends", HomeFriends, true, I_PERSON},  {"Party", HomeParty, true, I_GROUPS},
                 {"Messages", HomeMessages, true, I_MAIL},    {"Beacons & Activity", HomeNone, false, I_SENSORS},
                 {"Chat", HomeNone, false, I_CHAT},           {"Lobbies", HomeNone, false, I_FLAG}};
-    return {{"Profile", HomeProfile, social_.loaded, I_PERSON}, {"Theme", HomeTheme, true, I_PALETTE},  {"Voice", HomeNone, false, I_MIC},
+    return {{"Profile", HomeProfile, social_.loaded, I_PERSON}, {"Theme", HomeTheme, true, I_PALETTE},  {"Voice", HomeVoice, true, I_MIC},
             {"Notifications", HomeNone, false, I_BELL},   {"Network", HomeNone, false, I_WIFI},   {"Controller", HomeNone, false, I_GAMES},
             {"System", HomeNone, false, I_SETTINGS}};
 }
@@ -543,6 +546,8 @@ void Guide::handle_home(PadEvent e, std::vector<GuideRequest>& out, double now) 
             push(Page::Achievements, now);
         } else if (cmd == HomeTheme) {
             open_theme(now);
+        } else if (cmd == HomeVoice) {
+            open_voice(now);
         } else if (cmd == HomeProfile) {
             prof_ = social_.me;
             if (prof_.tag.empty()) prof_.tag = gamertag;
@@ -735,6 +740,7 @@ bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double 
         case Page::Compare: draw_compare(dl, a, origin, s, zoom, op, now); break;
         case Page::AchDetail: draw_ach_detail(dl, a, origin, s, zoom, op, now); break;
         case Page::Theme: draw_theme(dl, a, origin, s, zoom, op, now); break;
+        case Page::Voice: draw_voice(dl, a, origin, s, zoom, op, now); break;
         }
         if (box_.on) draw_box(dl, a, origin, s, w, h, now);
     }

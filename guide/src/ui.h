@@ -38,7 +38,7 @@ enum : uint32_t {
     I_PERSON = 0xe7fd, I_GROUPS = 0xf233, I_MAIL = 0xe158, I_DRAFTS = 0xe151, I_SENSORS = 0xe51e, I_CHAT = 0xe0ca, I_GROUP_ADD = 0xe7f0,
     I_GAMES = 0xea28, I_TROPHY = 0xea23, I_PALETTE = 0xe40a, I_MIC = 0xe029, I_BELL = 0xe7f4, I_SETTINGS = 0xe8b8, I_FLAG = 0xe153,
     I_SCHEDULE = 0xe8b5, I_EXPAND_LESS = 0xe5ce, I_EXPAND_MORE = 0xe5cf, I_APPS = 0xe5c3, I_WIFI = 0xe63e, I_PERSON_ADD = 0xe7fe,
-    I_SEND = 0xe163, I_EDIT = 0xe3c9, I_CHECK_BOX = 0xe834, I_CHECK_BLANK = 0xe835, I_PLAY_CIRCLE = 0xe1c4, I_CAR = 0xe531
+    I_STAR = 0xe838, I_VOLUME = 0xe050, I_SEND = 0xe163, I_EDIT = 0xe3c9, I_CHECK_BOX = 0xe834, I_CHECK_BLANK = 0xe835, I_PLAY_CIRCLE = 0xe1c4, I_CAR = 0xe531
 };
 
 inline void utf8(uint32_t cp, char out[5]) {

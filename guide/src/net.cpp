@@ -201,6 +201,8 @@ Friend card(const JVal& c) {
     if (lobby.type == JVal::Obj) {
         f.lobby_id = lobby["id"].str(), f.lobby_kind = lobby["kind"].str(), f.lobby_status = lobby["status"].str();
         f.lobby_players = int(lobby["players"].i64()), f.lobby_capacity = int(lobby["capacity"].i64());
+        f.lobby_private = lobby["private"].type == JVal::Bool && lobby["private"].b;
+        f.lobby_leader = strtoull(lobby["leader"].str().c_str(), nullptr, 16);
     }
     const JVal& seen = c["lastSeenAgo"];
     if (seen.type == JVal::Num) f.last_seen = int(seen.i64());

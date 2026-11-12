@@ -16,6 +16,8 @@ struct Friend {
     uint64_t xuid = 0;
     std::string tag, club, lobby_id, lobby_kind, lobby_status;
     int lobby_players = 0, lobby_capacity = 0;
+    bool lobby_private = false;               // their game is a private one (invite only): its players are a party
+    uint64_t lobby_leader = 0;                // that private game's leader, 0 when the server does not say
     int level = 0;
     State state = Offline;
     double pic_version = 0;

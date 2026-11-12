@@ -14,6 +14,7 @@
 #include <hstring.h>
 #include <roapi.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <deque>
@@ -471,6 +472,33 @@ void save_theme(const std::string& key) {
     g_theme_from_file = true;
 }
 
+// The player's voice settings: data\bin\fh2mp-guide-voice.txt, three numbers (microphone 0/1, voice chat 0/1, volume 0..4). Without the
+// file: microphone on, voice chat on, volume 2.
+std::wstring voice_file() { return std::wstring(g_api->azimuth_dir) + L"\\data\\bin\\fh2mp-guide-voice.txt"; }
+
+void apply_voice(bool mic, bool chat, int volume) {
+    voice_settings(mic, chat, volume);
+    g_guide.set_voice(mic, chat, volume);
+}
+
+void load_voice() {
+    std::vector<unsigned char> b = read_file(voice_file());
+    std::string text(b.begin(), b.end());
+    int mic = 1, chat = 1, volume = 2;
+    if (sscanf(text.c_str(), "%d %d %d", &mic, &chat, &volume) != 3) mic = 1, chat = 1, volume = 2;
+    apply_voice(mic != 0, chat != 0, std::clamp(volume, 0, 4));
+}
+
+void save_voice(bool mic, bool chat, int volume) {
+    HANDLE f = CreateFileW(voice_file().c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    char line[32];
+    int n = snprintf(line, sizeof line, "%d %d %d\n", mic ? 1 : 0, chat ? 1 : 0, volume);
+    DWORD wrote = 0;
+    WriteFile(f, line, DWORD(n), &wrote, nullptr);
+    CloseHandle(f);
+}
+
 // The player's picture: Azimuth's data/player.png (256x256 RGBA, written by the launcher), uploaded once into a shader-visible texture.
 ImTextureID load_gamerpic() {
     std::wstring path = std::wstring(g_api->azimuth_dir) + L"\\data\\player.png";
@@ -558,6 +586,7 @@ bool setup(IDXGISwapChain3* sc) {
     g_assets.gamerpic = load_gamerpic();
     load_ach_art();
     load_theme();
+    load_voice();
     g_guide.gamertag = read_gamertag();
     g_hwnd = desc.OutputWindow;
     if (g_hwnd && !g_old_proc) g_old_proc = (WNDPROC)SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC, (LONG_PTR)guide_wndproc);
@@ -672,6 +701,13 @@ void ask(const GuideRequest& r) {
     case GuideAction::HideText: net_hide_text(r.id); break;
     case GuideAction::Join: net_join(r.xuid, r.name, r.text, r.kind); break;
     case GuideAction::SetProfile: net_set_profile(r.name, r.text); break;
+    case GuideAction::SetVoice: {
+        bool mic = r.id & 1, chat = r.id & 2;
+        int volume = int(r.id >> 2);
+        apply_voice(mic, chat, volume);
+        save_voice(mic, chat, volume);
+        break;
+    }
     case GuideAction::SetTheme:
         save_theme(r.name);
         net_set_profile("theme", r.name);

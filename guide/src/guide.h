@@ -92,7 +92,7 @@ enum class ToastKind { Invite, Info, Saving, Warning };
 
 enum class GuideAction {
     None, Resume, Invite, AcceptInvite, DeclineInvite, FriendRequest, AcceptFriend, DeclineFriend, RemoveFriend, SendText, ReadChat,
-    HideText, Join, SetProfile, JoinGame, Lookup, Achievements, SetTheme
+    HideText, Join, SetProfile, JoinGame, Lookup, Achievements, SetTheme, SetVoice
 };
 
 // What the overlay must ask of the server after an event.
@@ -128,7 +128,7 @@ struct Opt {
     uint32_t icon = 0;
 };
 
-enum class Page { Home, Community, Profile, EditProfile, Message, CreateNew, Recipients, Compose, Keyboard, Achievements, Compare, AchDetail, Theme };
+enum class Page { Home, Community, Profile, EditProfile, Message, CreateNew, Recipients, Compose, Keyboard, Achievements, Compare, AchDetail, Theme, Voice };
 enum CommunityTab { TabParty = 0, TabFriends = 1, TabMessages = 2, TabPlayers = 3 };
 // What a message box was shown for: just to tell (OK), or the question before a written message is dropped.
 // BoxThenClose: told from a closed Guide (the game's own Invite Friends), so OK closes it again.
@@ -170,6 +170,10 @@ public:
     std::vector<GuideRequest> type_char(uint32_t cp, double now);
     // The friend list, invites and messages as the server last gave them.
     void set_social(const Social& s);
+    // Settings > Voice as the overlay keeps it (voice_page.cpp): microphone, voice chat, volume 0..4. A change comes back as SetVoice
+    // (id: bit 0 mic, bit 1 chat, the volume from bit 2).
+    void set_voice(bool mic, bool chat, int volume) { voice_mic_ = mic, voice_chat_ = chat, voice_volume_ = volume; }
+    void open_voice(double now);
     // Settings > Theme, opened on the theme in use (theme_page.cpp).
     void open_theme(double now);
     // Who is talking right now (the voice engine's list: xuids, 0 for this player): the Players tab marks them.
@@ -284,6 +288,13 @@ private:
     double theme_at_ = -10;
     Tween theme_bar_;
     std::string theme_kept_;
+    bool voice_mic_ = true, voice_chat_ = true;
+    int voice_volume_ = 2, voice_row_ = 0;
+    Tween voice_bar_;
+    ListFocus party_;
+    void handle_voice(PadEvent e, std::vector<GuideRequest>& out, double now);
+    void draw_voice(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
+    std::vector<const Friend*> party_rows() const;     // the Party tab: this player's private game, this player first; empty when in none
     void handle_theme(PadEvent e, std::vector<GuideRequest>& out, double now);
     void draw_theme(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
     uint64_t waiting_xuid_ = 0;  // an option of this profile is on its way to the server

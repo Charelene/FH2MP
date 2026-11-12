@@ -74,6 +74,17 @@ std::vector<const Friend*> Guide::player_rows() const {
     return out;
 }
 
+// The Party tab: the players of this player's private game (an invite-only game is the party: its leader starts the events and can
+// remove players), this player first, then the others by gamertag. Empty when the player is in no private game.
+std::vector<const Friend*> Guide::party_rows() const {
+    std::vector<const Friend*> out;
+    if (!social_.me.lobby_private || social_.me.lobby_id.empty()) return out;
+    std::vector<const Friend*> others = player_rows();
+    out.push_back(&social_.me);
+    out.insert(out.end(), others.begin(), others.end());
+    return out;
+}
+
 // The Messages tab: friend requests, then game invites and friends' messages, newest first.
 std::vector<MessageItem> Guide::messages() const {
     std::vector<MessageItem> out, dated;
@@ -145,6 +156,17 @@ void Guide::handle_community(PadEvent e, std::vector<GuideRequest>& out, double 
             open_keyboard(Keys::Gamertag, "", now);
         } else if (e == PadEvent::A && friends_.row < n) {
             prof_ = *rows[friends_.row - 1].f;
+            prof_tab_ = 0, prof_at_ = -10, prof_row_[0] = prof_row_[1] = -1;
+            push(Page::Profile, now);
+        }
+    } else if (comm_tab_ == TabParty) {
+        std::vector<const Friend*> rows = party_rows();
+        int n = int(rows.size());
+        if (dy && n) {
+            party_.move(dy, n, FRIEND_ROWS, now);
+        } else if (e == PadEvent::A && party_.row < n) {
+            prof_ = *rows[party_.row];
+            if (prof_.tag.empty()) prof_.tag = gamertag;
             prof_tab_ = 0, prof_at_ = -10, prof_row_[0] = prof_row_[1] = -1;
             push(Page::Profile, now);
         }
@@ -230,7 +252,8 @@ void Guide::draw_community(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, 
     for (const Friend& f : social_.friends) online += f.state != Friend::Offline;
     for (const MessageItem& m : msgs) unread += m.unread;
     std::vector<const Friend*> players = player_rows();
-    int counts[4] = {0, online, int(msgs.size()), int(players.size())};
+    std::vector<const Friend*> party = party_rows();
+    int counts[4] = {int(party.size()), online, int(msgs.size()), int(players.size())};
     float tx = x;
     for (int t = 0; t < 4; t++) {
         bool on = t == comm_tab_;
@@ -322,9 +345,34 @@ void Guide::draw_community(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, 
         break;
     }
     case TabParty: {
-        // not in a party: the 360's one entry (parties come later, so it is greyed)
-        std::vector<Opt> opts = {{"Start a Party", 0, false, 0}};
-        option_list(dl, a, v, cxs, 138, W, 46, 22, 27, opts, -1, 0, cop);
+        int n = int(party.size());
+        if (!n) {
+            // not in a party: the 360's one entry (a party is started by inviting friends to a private game, so it is greyed here)
+            std::vector<Opt> opts = {{"Start a Party", 0, false, 0}};
+            option_list(dl, a, v, cxs, 138, W, 46, 22, 27, opts, -1, 0, cop);
+            break;
+        }
+        bar(party_.bar.value(now), 69);
+        for (int i = party_.top; i < std::min(n, party_.top + FRIEND_ROWS); i++) {
+            float y = 138 + (i - party_.top) * 69;
+            Friend f = *party[i];
+            if (f.tag.empty()) f.tag = gamertag;
+            bool foc = i == party_.row, mine = f.xuid == social_.me.xuid;
+            player_row(dl, a, origin, s, zoom, cxs, y, f, mine ? Relation::Friend : relation(f.xuid), foc, false, -1, cop);
+            float ex = cxs + W - 20 - 16;
+            bool talks = std::find(talking_.begin(), talking_.end(), mine ? 0 : f.xuid) != talking_.end();
+            if (talks) {
+                ImVec2 mp = v.pt(ex, y + 34.5f);
+                icon_mid(dl, a, v.sz(30), mp.x, mp.y, alpha(foc ? INK : BRIGHT, cop), I_MIC);
+                ex -= 38;
+            }
+            if (social_.me.lobby_leader && f.xuid == social_.me.lobby_leader) {
+                // the party's leader
+                ImVec2 sp = v.pt(ex, y + 34.5f);
+                icon_mid(dl, a, v.sz(30), sp.x, sp.y, alpha(foc ? INK : BRIGHT, cop), I_STAR);
+            }
+        }
+        scroll_marks(dl, a, v, cxs + W - 30, 579.5f, party_.top > 0, party_.top + FRIEND_ROWS < n, cop);
         break;
     }
     default: {
@@ -349,7 +397,7 @@ void Guide::draw_community(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, 
     if (comm_tab_ == TabMessages) {
         const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}, {"X", "Delete", RING_X}, {"Y", "Create New", RING_Y}};
         hint_bar(dl, a, v, L + 27, 617, hints, 4, op);
-    } else if (comm_tab_ == TabFriends || (comm_tab_ == TabPlayers && !social_.players.empty())) {
+    } else if (comm_tab_ == TabFriends || (comm_tab_ == TabPlayers && !social_.players.empty()) || (comm_tab_ == TabParty && !party.empty())) {
         const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}};
         hint_bar(dl, a, v, L + 27, 617, hints, 2, op);
     } else {

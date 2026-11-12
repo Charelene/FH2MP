@@ -26,6 +26,7 @@
 
 #include <opus/opus.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdarg>
@@ -398,7 +399,9 @@ struct Engine {
     std::atomic<bool> running{false};
     std::atomic<DWORD> mic_loud{0};  // GetTickCount when the gate was last open
     int out_rate = 8000;
-    bool mic = true;
+    bool mic = true;  // the microphone may be opened (FH2MP_VOICE_MIC is not 0)
+    std::atomic<bool> mic_user{true}, chat_user{true};  // Settings > Voice: Microphone, Voice Chat
+    std::atomic<int> volume{2};                         // Settings > Voice: Volume, 0..4
     std::set<uint64_t> muted;  // the players this one muted (the game's Mute: MuteUserFromAllChannels with their ChatUser)
 } g_engine;
 
@@ -503,7 +506,7 @@ void capture_thread() {
                 floor_rms = rms < floor_rms ? floor_rms * 0.8 + rms * 0.2 : floor_rms * 0.998 + rms * 0.002;
                 bool loud = rms > floor_rms * 3 && rms > 250;
                 hang = loud ? 10 : hang > 0 ? hang - 1 : 0;  // 400 ms after the last loud frame
-                if (hang > 0 && g_engine.mic) {
+                if (hang > 0 && g_engine.mic && g_engine.mic_user && g_engine.chat_user) {
                     g_engine.mic_loud = GetTickCount();
                     unsigned char out[kMaxFrameBytes];
                     int len = opus_encode(enc, s, n, out, kMaxFrameBytes);
@@ -528,6 +531,8 @@ void capture_thread() {
 // One 40 ms block of everyone heard, through the 360 chain.
 void mix_block(std::vector<float>& acc, int n) {
     std::fill(acc.begin(), acc.end(), 0.0f);
+    static const float kGain[5] = {0.4f, 0.7f, 1.0f, 1.5f, 2.2f};
+    const float gain = kGain[std::clamp(g_engine.volume.load(), 0, 4)];
     std::vector<opus_int16> pcm((size_t)n);
     std::lock_guard<std::mutex> l(g_engine.mu);
     DWORD now = GetTickCount();
@@ -567,7 +572,7 @@ void mix_block(std::vector<float>& acc, int n) {
             }
             for (int i = 0; i < got && i < n; i++) {
                 double x = t.lp.run(t.hp.run(pcm[size_t(i)] / 32768.0)) * 1.6;
-                acc[size_t(i)] += float(mulaw_round_trip(tanh(1.5 * x) / tanh(1.5)));
+                acc[size_t(i)] += float(mulaw_round_trip(tanh(1.5 * x) / tanh(1.5))) * gain;
             }
         }
         ++it;
@@ -662,6 +667,7 @@ void take_packet(uint64_t from, const BYTE* p, UINT32 n) {
         frames.emplace_back(p + at + 1, p + at + 1 + p[at]);
         at += 1 + p[at];
     }
+    if (!g_engine.chat_user) return;  // Voice Chat is off
     std::lock_guard<std::mutex> l(g_engine.mu);
     if (g_engine.muted.count(from)) return;  // the server leaves them out too; this covers a server that does not
     auto found = g_engine.talkers.find(from);
@@ -856,7 +862,7 @@ ULONG STDMETHODCALLTYPE uv_release(UserView* self) {
 HRESULT STDMETHODCALLTYPE uv_audio_devices(UserView*, IInspectable** out) {
     if (!out) return E_POINTER;
     std::vector<IInspectable*> devices;
-    if (g_engine.mic && have_microphone()) devices.push_back(new CaptureDevice());
+    if (g_engine.mic && g_engine.mic_user && g_engine.chat_user && have_microphone()) devices.push_back(new CaptureDevice());
     *out = new ObjView(std::move(devices));
     return S_OK;
 }
@@ -954,7 +960,7 @@ private:
     }
     bool talking() const {
         DWORD now = GetTickCount();
-        if (user_) return g_engine.mic && now - g_engine.mic_loud < 300;
+        if (user_) return g_engine.mic && g_engine.mic_user && now - g_engine.mic_loud < 300;
         std::lock_guard<std::mutex> l(g_engine.mu);
         auto t = g_engine.talkers.find(xuid_);
         return t != g_engine.talkers.end() && now - t->second.heard < 300;
@@ -1201,10 +1207,22 @@ bool voice_install(const FH2ModApi* api, FH2Mod* mod, unsigned char* base, void 
     return true;
 }
 
+void voice_settings(bool mic, bool chat, int volume) {
+    volume = std::clamp(volume, 0, 4);
+    bool was_mic = g_engine.mic_user.exchange(mic), was_chat = g_engine.chat_user.exchange(chat);
+    int was_volume = g_engine.volume.exchange(volume);
+    if (was_mic != mic || was_chat != chat || was_volume != volume)
+        logf("voice: settings: microphone %s, voice chat %s, volume %d of 5", mic ? "on" : "off (muted)", chat ? "on" : "off (nothing heard or sent)", volume + 1);
+    if (!chat) {
+        std::lock_guard<std::mutex> l(g_engine.mu);
+        for (auto& kv : g_engine.talkers) kv.second.frames.clear();
+    }
+}
+
 int voice_talking(uint64_t* ids, int max) {
     int k = 0;
     DWORD now = GetTickCount();
-    if (k < max && g_engine.mic && now - g_engine.mic_loud < 500) ids[k++] = 0;
+    if (k < max && g_engine.mic && g_engine.mic_user && now - g_engine.mic_loud < 500) ids[k++] = 0;
     std::lock_guard<std::mutex> l(g_engine.mu);
     for (auto& kv : g_engine.talkers)
         if (k < max && now - kv.second.heard < 500) ids[k++] = kv.first;

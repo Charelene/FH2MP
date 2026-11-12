@@ -187,6 +187,14 @@ int main(int argc, char** argv) {
     so.requests.push_back(card(9, "PaperLantern", Friend::Online, "", "", "", 22));
     so.outgoing.push_back(card(10, "Ugandan Hobo", Friend::Offline, "", "", "", 31));
     if (scene.find("nogame") != std::string::npos) so.me.lobby_id = "", so.me.state = Friend::Online;
+    if (scene == "party-private") {
+        // DebugFox's private game: DebugWolf leads it, apex hunter 7 is talking
+        so.me.lobby_private = true, so.me.lobby_leader = 2;
+        so.players.push_back(so.friends[0]);
+        so.players.push_back(card(11, "apex hunter 7", Friend::Playing, "L1", "Free Roam", "APEX", 44));
+        const uint64_t talking[] = {11};
+        g.set_talking(talking, 1);
+    }
     if (scene == "players") {
         // who is in DebugFox's game: a friend, a stranger and someone who asked to be a friend; the stranger is talking
         so.players.push_back(so.friends[0]);
@@ -241,7 +249,11 @@ int main(int argc, char** argv) {
         if (scene == "theme") press({D, D, D});
         if (scene == "theme-plastic") g.handle(RB, t0 - 6), press({D, D, D, D});
         if (scene == "theme-fh2mp") press({D});
-    } else if (scene == "party") {
+    } else if (scene == "voice") {
+        // Settings > Voice with the microphone muted and the focus on Volume
+        g.set_voice(false, true, 3);
+        g.toggle(t0 - 10), g.handle(RB, t0 - 9), g.handle(D, t0 - 8), g.handle(D, t0 - 7.5), g.handle(A, t0 - 7), press({D, D});
+    } else if (scene == "party" || scene == "party-private") {
         g.open_community(TabParty, t0 - 5);
     } else if (scene == "players") {
         g.open_community(TabPlayers, t0 - 5);
