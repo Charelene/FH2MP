@@ -381,23 +381,25 @@ void Guide::draw_ach_detail(ImDrawList* dl, const GuideAssets& a, ImVec2 origin,
 
 // ---- the achievement toast
 //
-// Game Bar's achievement toast, redrawn: Microsoft.XboxGamingOverlay 7.326's GameBar.exe shows an achievement with
-// Widgets/Toasts/EnhancedToastPanel.xaml, a rare one with EnhancedGleamToastPanel.xaml and the Mythic Achievement with
-// EnhancedAuroraToastPanel.xaml. Their storyboards and layout were read out of the compiled XAML in Game Bar's resources.pri, their timers
-// out of the panels' code (2026-11-11). One Game Bar pixel is D/100 canvas units here: the circle and the pill are 100 px high there.
-//   Show, from 0: four rings grow out of the toast's centre 0.1 s apart (light, medium, dark, medium again; 0 -> 1.12 -> 1); the icon's
-//     circle grows 0.667-1.433 s; the icon pops in 0.7-1.333 s (0 -> 1.2 -> 1); the pill opens 1.433-2.433 s while the circle slides to
-//     its left end; the text slides in from the right 1.333-2.333 s and fades in 1.733-2.333 s.
-//   The text turns over at 4 s, when Show's 4 s storyboard has run (inferred: the panel goes there from an event, not a timer); the hint
+// The Guide's toast (an accent square, a dark panel unfolding from it, the title in the accent over a white line) moving on Game Bar's
+// times: Microsoft.XboxGamingOverlay 7.326's GameBar.exe shows an achievement with Widgets/Toasts/EnhancedToastPanel.xaml, a rare one
+// with EnhancedGleamToastPanel.xaml and the Mythic Achievement with EnhancedAuroraToastPanel.xaml; their storyboards were read out of
+// the compiled XAML in Game Bar's resources.pri, their timers out of the panels' code (2026-11-11). The user asked for the Guide's square
+// style on those times (2026-11-11), so Game Bar's circle and pill are the square and the panel here, and what was sized to them is
+// scaled to the square (64 units for Game Bar's 100 px).
+//   Show, from 0: four squares grow out of the toast's centre 0.1 s apart (light, medium, dark, medium again; 0 -> 1.12 -> 1); the icon's
+//     square grows 0.667-1.433 s; the icon pops in 0.7-1.333 s (0 -> 1.2 -> 1); the panel unfolds 1.433-2.433 s while the square slides
+//     to its left; the text comes in 1.333-2.333 s and fades in 1.733-2.333 s.
+//   The text turns over at 4 s, when Show's 4 s storyboard has run (inferred: Game Bar goes there from an event, not a timer); the hint
 //     replaces it at 7.133 s (8 s for the mythic); Hide starts at 8.467 s (10 s for the mythic).
-//   Hide, 1.633 s: the pill folds into the centre and the circle slides back over 0.667 s, the icon plays its exit and shrinks
-//     0.767-1.367 s, the rings go last (dark 0.866-1.366 s, medium 0.9-1.5 s, light 0.933-1.633 s).
-//   Rare: from 2.433 s a gleam crosses the pill, twice. Mythic: from 2.433 s two pulses and two turning glows behind and over the icon, a
-//     ripple at 4.433 s, the aurora haze fading in 2.433-3.433 s (8 frames a second, back and forth), the gleam with six sparkles on the
-//     pill's edges from 5.064 s; on Hide the haze shrinks to 0.3 and fades, the glows to 0.75.
+//   Hide, 1.633 s: the panel folds and the square slides back over 0.667 s, the icon plays its exit and shrinks 0.767-1.367 s, the
+//     squares go last (dark 0.866-1.366 s, medium 0.9-1.5 s, light 0.933-1.633 s).
+//   Rare: from 2.433 s a gleam crosses the panel, twice. Mythic: from 2.433 s two pulses and two turning glows behind and over the icon, a
+//     ripple at 4.433 s, the gleam with six sparkles on the panel's edges from 5.064 s. Game Bar's aurora haze is cut to its pill's shape
+//     and is left out.
 // The icon sheets are played at 30 frames a second, as Game Bar's flip books are. The plain and rare ones start and end with the
 // console's emblem turning; those frames are replaced by the Guide's emblem (a white disc with the trophy of the icon font) making the
-// same turn. The mythic icon's laurels are Game Bar code (LaurelHalf), not art: drawn here after the user's capture of a console.
+// same turn.
 
 namespace {
 
@@ -496,41 +498,6 @@ void emblem(ImDrawList* dl, const GuideAssets& a, ImVec2 c, float d, ImU32 ink, 
     squeeze(dl, from, c.x, face, (turn > 0 ? 1 : -1) * (1 - face) * d * 0.22f);
 }
 
-// Laurel branches up both sides of the mythic icon's circle (r: its radius on screen), after a console's capture: a stem along the circle
-// from the bottom, leaves in pairs along it, bigger towards the bottom.
-void laurels(ImDrawList* dl, ImVec2 c, float r, ImU32 col) {
-    if (r < 2) return;
-    const float R = r * 1.1f;
-    for (int side = -1; side <= 1; side += 2) {
-        ImVec2 stem[24];
-        for (int i = 0; i < 24; i++) {
-            float th = (8 + i * 5.0f) * PI / 180;
-            stem[i] = ImVec2(c.x + side * R * sinf(th), c.y + R * cosf(th));
-        }
-        dl->AddPolyline(stem, 24, col, 0, r * 0.045f);
-        for (int i = 0; i < 6; i++) {
-            float th = (20 + i * 19.0f) * PI / 180, big = 1 - i * 0.07f;
-            ImVec2 at(c.x + side * R * sinf(th), c.y + R * cosf(th));
-            ImVec2 along(side * cosf(th), -sinf(th)), out(side * sinf(th), cosf(th));
-            for (int w = -1; w <= 1; w += 2) {
-                // a leaf: from the stem, pointing up the stem and away from it
-                float tilt = w * 0.55f;
-                ImVec2 dir(along.x + out.x * tilt, along.y + out.y * tilt);
-                float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
-                dir = ImVec2(dir.x / len, dir.y / len);
-                ImVec2 nrm(-dir.y, dir.x);
-                float L = r * 0.36f * big, W = r * 0.13f * big;
-                ImVec2 pts[14];
-                for (int j = 0; j < 14; j++) {
-                    float u = j / 13.0f * 2 * PI, x = (1 - cosf(u)) * 0.5f * L, y = sinf(u) * W * 0.5f * std::sin(std::min(1.0f, x / L) * PI);
-                    pts[j] = ImVec2(at.x + dir.x * x + nrm.x * y, at.y + dir.y * x + nrm.y * y);
-                }
-                dl->AddConvexPolyFilled(pts, 14, col);
-            }
-        }
-    }
-}
-
 // When Hide starts (the panels' timers).
 float hide_at(int tier) { return tier == 2 ? 10.0f : 8.467f; }
 
@@ -548,7 +515,7 @@ void ach_art_set(AchToastArt* art, const char* file, ImTextureID tex) {
         {"DiamondIntroV2.png", nullptr, 1, 6, 8, 42},   {"DiamondIdleV2.png", nullptr, 1, 4, 5, 20},    {"DiamondOutroV2.png", nullptr, 1, 5, 7, 32},
         {"MythicV2Intro.png", nullptr, 2, 10, 12, 120}, {"MythicV2Idle.png", nullptr, 2, 7, 9, 60},     {"MythicV2Outro.png", nullptr, 2, 6, 7, 41},
         {"MythicV2IntroHighlights.png", &AchToastArt::intro_hi, -1, 10, 12, 120}, {"MythicV2IdleHighlights.png", &AchToastArt::idle_hi, -1, 7, 9, 60},
-        {"MythicV2OutroHighlights.png", &AchToastArt::outro_hi, -1, 6, 7, 41},    {"Aurora.png", &AchToastArt::aurora, -1, 7, 9, 60},
+        {"MythicV2OutroHighlights.png", &AchToastArt::outro_hi, -1, 6, 7, 41},
     };
     for (const Slot& sl : sheets) {
         if (strcmp(sl.name, file)) continue;
@@ -572,7 +539,7 @@ const char* const* ach_art_files(int where) {
     static const char* const notifications[] = {"TrophyIntro.png",   "TrophyIdle.png",   "TrophyOutro.png",   "DiamondIntroV2.png", "DiamondIdleV2.png",
                                                 "DiamondOutroV2.png", "MythicV2Intro.png", "MythicV2Idle.png", "MythicV2Outro.png",  "MythicV2IntroHighlights.png",
                                                 "MythicV2IdleHighlights.png", "MythicV2OutroHighlights.png", nullptr};
-    static const char* const game_bar[] = {"Aurora.png", "gleam.png", "ShimmerSparkle.png", "Ripple.png", "MythicGlowA.png", "MythicGlowB.png", "MythicPulse.png", nullptr};
+    static const char* const game_bar[] = {"gleam.png", "ShimmerSparkle.png", "Ripple.png", "MythicGlowA.png", "MythicGlowB.png", "MythicPulse.png", nullptr};
     return where == 0 ? notifications : game_bar;
 }
 
@@ -607,64 +574,41 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
     const float TR = 4.0f, TS = mythic ? 8.0f : 7.133f, TH = hide_at(tier), TE = 2.433f;
     const float h = t - TH;  // into Hide
     const bool hiding = h >= 0;
+    auto at = [&](float x, float y) { return ImVec2(origin.x + x * s, origin.y + y * s); };
 
-    // Game Bar pixels from the toast's centre to the screen
-    const float k = 72.0f / 100;
-    float lift = now - toast_at_ >= 0 && now - toast_at_ < 6.3 ? 84.0f : 0.0f;  // an ordinary toast showing: this one stands above it
+    // the Guide's toast: a 64-unit square and a panel as wide as its words (here the widest of its three turns), centred, at y 600
+    const float Q = 64, k = Q / 100, TSZ = 17;  // k: Game Bar pixels (its circle is 100 px) to canvas units
+    ImFont* bf = a.text_bold ? a.text_bold : a.text;
+    std::string title = mythic ? "Mythic Achievement unlocked" : rare ? "Rare Achievement unlocked" : "Achievement unlocked";
+    if (rare && n.percent >= 0) {
+        char pc[24];
+        snprintf(pc, sizeof pc, " - %.2f%%", n.percent);
+        title += pc;
+    }
+    std::string second = n.g >= 0 ? std::to_string(n.g) + " - " + n.name : n.name;
+    const float gmark = n.g >= 0 ? TSZ * 0.82f + 6 : 0;
+    const float ed = 18, gap = 6;  // the hint's emblem
+    float wa = a.text->CalcTextSizeA(TSZ, FLT_MAX, 0, "Hold").x, wb = a.text->CalcTextSizeA(TSZ, FLT_MAX, 0, "to open").x;
+    float words = std::max({bf->CalcTextSizeA(TSZ, FLT_MAX, 0, title.c_str()).x, a.text->CalcTextSizeA(TSZ, FLT_MAX, 0, second.c_str()).x + gmark,
+                            std::min(380.0f, a.text->CalcTextSizeA(TSZ, FLT_MAX, 0, n.desc.c_str()).x), wa + gap + ed + gap + wb});
+    const float pw = std::clamp(std::ceil(words) + 22 + 12, 220.0f, 440.0f), half = pw * 0.5f, area = pw - 22 - 12;
+    float lift = now - toast_at_ >= 0 && now - toast_at_ < 6.3 ? 74.0f : 0.0f;  // an ordinary toast showing: this one stands above it
     ach_lift_ += (lift - ach_lift_) * 0.2f;
-    const float cy = 620 - ach_lift_, px = k * s;
-    auto P = [&](float x, float y) { return ImVec2(origin.x + (640 + x * k) * s, origin.y + (cy + y * k) * s); };
+    const float bx = 640 - (Q + pw) * 0.5f, by = 600 - ach_lift_;
 
-    // Game Bar's brushes in the accent's shades: the pill is its dark one, the circle the accent, the rings light, medium, dark, medium
-    const ImU32 pill_col = ACCENT, circle_col = mix(ACCENT, WHITE, 0.3f), light_col = mix(ACCENT, WHITE, 0.52f);
-    const ImU32 ring_col[4] = {light_col, circle_col, pill_col, circle_col};
+    const ImU32 sq_col = ACCENT, light_col = mix(ACCENT, WHITE, 0.5f), medium_col = mix(ACCENT, WHITE, 0.25f), dark_col = mix(ACCENT, BLACK, 0.3f);
+    const ImU32 ring_col[4] = {light_col, medium_col, dark_col, medium_col};
 
-    float pill = !hiding ? track({kf(1.433f, 0), kfeo(2.433f, 1)}, t) : h < 0.65f ? track({kf(0, 1), kfei(0.667f, 0)}, h) : 0;
-    float slide = !hiding ? track({kf(1.433f, 0), kfeo(2.433f, -280)}, t) : track({kf(0, -280), kfei(0.667f, 0)}, h);
-    ImVec2 ic = P(slide, 0), mid = P(0, 0);
+    float unfold = !hiding ? track({kf(1.433f, 0), kfeo(2.433f, 1)}, t) : h < 0.667f ? track({kf(0, 1), kfei(0.667f, 0)}, h) : 0;
+    float shift = half * (1 - unfold);
+    ImVec2 ic = at(bx + Q / 2 + shift, by + Q / 2), mid = at(640, by + Q / 2);
     float bg_scale = !hiding ? track({kf(0.667f, 0), kfs(1.433f, 1, .36f, .12f, .5f, 1)}, t) : 1;
     float bg_op = !hiding ? track({kf(0, 0), kf(0.167f, 1)}, t) : h < 0.8f ? track({kf(0, 1), kfei(0.8f, 0)}, h) : 0;
+    auto square = [&](ImVec2 c, float side, ImU32 col) {
+        if (side > 0.5f) dl->AddRectFilled(ImVec2(c.x - side / 2, c.y - side / 2), ImVec2(c.x + side / 2, c.y + side / 2), col);
+    };
 
-    // the aurora haze (mythic): 260x120 cells shown 2.4 x 2.8 times, 30 px above the toast's centre; on Hide it shrinks about the centre
-    if (mythic && art.aurora.tex) {
-        float op = !hiding ? track({kf(2.433f, 0), kfeio(3.433f, 1)}, t) : track({kf(0, 1), kfeio(0.75f, 0)}, h);
-        float sc = !hiding ? 1 : track({kf(0, 1), kfeio(0.75f, 0.3f)}, h);
-        if (op > 0.004f) {
-            int i = int(t * 8) % 118, f = i < 60 ? i : 118 - i;  // 8 frames a second, there and back
-            cell(dl, art.aurora, f, P(0, -30 * sc), 624 * sc * px, 336 * sc * px, alpha(WHITE, op));
-        }
-    }
-
-    // the pill (630 x 100, a radius of 50), and what runs over it
-    if (pill > 0.002f) {
-        int from = dl->VtxBuffer.Size;
-        dl->AddRectFilled(P(-315, -50), P(315, 50), pill_col, 50 * px);
-        squeeze(dl, from, mid.x, pill);
-        float tg = mythic ? TE + 2.631f : TE, len = mythic ? 3.95f : 3.0f, tau = (t - tg) * 1.3f;  // twice, 1.3 times as fast
-        if ((rare || mythic) && tau >= 0 && tau < 2 * len) {
-            float u = fmodf(tau, len);
-            if (art.gleam && u >= 1 && u < 3) {
-                // the gleam: a 430 x 100 band of gleam.png, across the middle of the pill, from 100 px left of it to 100 px right
-                float gx = track({kf(1, -100), kf(3, 100)}, u), gop = track({kf(1, 0), kf(2, 0.8f), kf(3, 0)}, u);
-                dl->PushClipRect(P(-265 * pill, -50), P(265 * pill, 50), true);
-                dl->AddImage(art.gleam, P((gx - 215) * pill, -50), P((gx + 215) * pill, 50), ImVec2(0, 0), ImVec2(1, 1), alpha(WHITE, gop));
-                dl->PopClipRect();
-            }
-            if (mythic && art.sparkle) {
-                // six sparkles on the pill's top and bottom edges (x from its centre), each in its own time
-                static const float sp[6][7] = {{-122.5f, -50, 1, 1.85f, 2.75f, 2, 1.6f},   {-89, 50, 1.3f, 2.1f, 2.9f, 1.6f, 2.4f}, {-15, -50, 1.4f, 2.35f, 3.3f, 3, 3},
-                                               {23, 50, 1.75f, 2.55f, 3.4f, 2.2f, 1.6f}, {203, -50, 1.95f, 2.85f, 3.75f, 2.4f, 1.8f}, {228, 50, 2.2f, 3.05f, 3.95f, 2.7f, 3}};
-                for (const float* q : sp) {
-                    if (u < q[2] || u >= q[4]) continue;
-                    float op = track({kf(q[2], 0), kf(q[3], 1), kf(q[4], 0)}, u);
-                    float sx = track({kf(q[2], 0.3f), kfei(q[3], q[5]), kf(q[4], 0.3f)}, u), sy = track({kf(q[2], 0.3f), kfei(q[3], q[6]), kf(q[4], 0.3f)}, u);
-                    picture(dl, art.sparkle, P(q[0] * pill, q[1]), 14 * px * sx, 24 * px * sy, alpha(WHITE, op));
-                }
-            }
-        }
-    }
-
-    // the rings, at the toast's centre
+    // the squares, at the toast's centre (behind the panel: on Hide they are under it while it folds)
     if (!hiding) {
         static const float delay[4] = {0, 0.1f, 0.2f, 0.3f}, gone[4] = {0.967f, 1.067f, 1.167f, 1.433f};
         for (int i = 0; i < 4; i++) {
@@ -672,75 +616,89 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
             float d0 = delay[i];
             float sc = i == 0 ? track({kf(0, 0), kfs(0.533f, 1.12f, .54f, 0, .81f, 1), kfs(0.867f, 1, .36f, .12f, .5f, 1)}, t)
                               : track({kf(0, 0), kfs(d0, 0, .71f, 0, 1, 1), kfs(d0 + 0.533f, 1.12f, .54f, 0, .81f, 1), kfs(d0 + 0.867f, 1, .36f, .12f, .5f, 1)}, t);
-            if (sc > 0.003f) dl->AddCircleFilled(mid, 50 * px * sc, ring_col[i], 64);
+            square(mid, Q * s * sc, ring_col[i]);
         }
     } else {
-        if (h >= 0.933f && h < 1.633f) dl->AddCircleFilled(mid, 50 * px * track({kf(0.933f, 0.97f), kfbi(1.633f, 0, 0.5f)}, h), ring_col[0], 64);
-        if (h >= 0.9f && h < 1.5f) dl->AddCircleFilled(mid, 50 * px * track({kf(0.9f, 0.97f), kfbi(1.5f, 0, 0.5f)}, h), ring_col[1], 64);
-        if (h >= 0.267f && h < 1.366f) dl->AddCircleFilled(mid, 50 * px * track({kf(0.866f, 1), kfei(1.366f, 0)}, h), ring_col[2], 64);
+        if (h >= 0.933f && h < 1.633f) square(mid, Q * s * track({kf(0.933f, 0.97f), kfbi(1.633f, 0, 0.5f)}, h), ring_col[0]);
+        if (h >= 0.9f && h < 1.5f) square(mid, Q * s * track({kf(0.9f, 0.97f), kfbi(1.5f, 0, 0.5f)}, h), ring_col[1]);
+        if (h >= 0.267f && h < 1.366f) square(mid, Q * s * track({kf(0.866f, 1), kfei(1.366f, 0)}, h), ring_col[2]);
     }
 
-    // the hint, in the place of the text from 7.133 s (8 s): "Hold (the emblem) to open"
-    float hint_op = 0, hint_dx = 0;
-    if (!hiding && t >= TS) hint_op = track({kf(0.066f, 0), kf(0.267f, 1)}, t - TS);
-    else if (hiding) hint_op = track({kf(0, 1), kfei(0.5f, 0)}, h), hint_dx = track({kf(0, 0), kfei(0.6f, -100)}, h);
-    const float fs = 26 * px;  // Game Bar's 26 px text
-    if (hint_op > 0.004f) {
-        float wa = a.text->CalcTextSizeA(fs, FLT_MAX, 0, "Hold").x, wb = a.text->CalcTextSizeA(fs, FLT_MAX, 0, "to open").x, ed = 28 * px, gap = 9 * px;
-        ImVec2 c = P(35 + hint_dx, 3);
-        float x = c.x - (wa + gap + ed + gap + wb) / 2;
-        text_mid(dl, a.text, a.text_m, fs, x, c.y, alpha(WHITE, hint_op), "Hold");
-        emblem(dl, a, ImVec2(x + wa + gap + ed / 2, c.y), ed, pill_col, 0, hint_op);
-        text_mid(dl, a.text, a.text_m, fs, x + wa + gap + ed + gap, c.y, alpha(WHITE, hint_op), "to open");
-    }
-
-    // the text: what was unlocked over its Gamerscore and name; from 4 s the description in its place
-    float text_op = !hiding && t < TS ? track({kf(1.733f, 0), kf(2.333f, 1)}, t) : 0;
-    if (text_op > 0.004f) {
-        float dx = track({kf(1.333f, 900), kfeo(2.333f, 0)}, t), rt = t - TR;
-        float front_y = rt < 0 ? 0 : track({kf(0, 0), kfei(0.267f, -100)}, rt), back_y = rt < 0 ? 100 : track({kf(0, 100), kf(0.233f, 100), kfeo(0.833f, 0)}, rt);
-        const float area = 460 * px;
-        float x = P(-197 + dx, 0).x;
-        ImU32 col = alpha(WHITE, text_op);
-        dl->PushClipRect(P(-265, -50), P(315, 50), true);
-        if (front_y > -99) {
-            std::string title = mythic ? "Mythic Achievement unlocked" : rare ? "Rare Achievement unlocked" : "Achievement unlocked";
-            if (rare && n.percent >= 0) {
-                char p[24];
-                snprintf(p, sizeof p, " - %.2f%%", n.percent);
-                title += p;
+    // the panel, and what runs over it
+    ImVec2 p0 = at(bx + Q + shift, by), p1 = at(bx + Q + pw - shift, by + Q);
+    if (unfold > 0.002f) {
+        dl->AddRectFilled(p0, p1, PANEL);
+        dl->PushClipRect(p0, p1, true);
+        float tg = mythic ? TE + 2.631f : TE, len = mythic ? 3.95f : 3.0f, tau = (t - tg) * 1.3f;  // twice, 1.3 times as fast
+        if ((rare || mythic) && tau >= 0 && tau < 2 * len) {
+            float u = fmodf(tau, len), pc = bx + Q + half, ps = pw / 630;  // Game Bar's pill is 630 px: its places scale to the panel
+            if (art.gleam && u >= 1 && u < 3) {
+                float gx = track({kf(1, -100), kf(3, 100)}, u), gop = track({kf(1, 0), kf(2, 0.8f), kf(3, 0)}, u);
+                dl->AddImage(art.gleam, at(pc + (gx - 215) * ps, by), at(pc + (gx + 215) * ps, by + Q), ImVec2(0, 0), ImVec2(1, 1), alpha(WHITE, gop * 0.6f));
             }
-            text_fit(dl, a.text, a.text_m, fs, x, P(0, -19.3f + front_y).y, area, col, title);
-            float y2 = P(0, 19.3f + front_y).y, x2 = x;
-            std::string second = n.name;
-            if (n.g >= 0) {
-                // the Gamerscore mark as the console draws it here: a white disc with the G cut out
-                float gd = fs * 0.82f;
-                dl->AddCircleFilled(ImVec2(x2 + gd / 2, y2), gd / 2, col, 32);
-                ImFont* bf = a.text_bold ? a.text_bold : a.text;
-                float gsz = gd * 0.66f, gw = bf->CalcTextSizeA(gsz, FLT_MAX, 0, "G").x;
-                dl->AddText(bf, gsz, ImVec2(x2 + gd / 2 - gw / 2, caps_top(a.bold_m, gsz, y2)), alpha(pill_col, text_op), "G");
-                x2 += gd + 8 * px;
-                second = std::to_string(n.g) + " - " + n.name;
+            if (mythic && art.sparkle) {
+                // six sparkles on the panel's top and bottom edges, each in its own time
+                static const float sp[6][7] = {{-122.5f, 0, 1, 1.85f, 2.75f, 2, 1.6f},   {-89, 1, 1.3f, 2.1f, 2.9f, 1.6f, 2.4f}, {-15, 0, 1.4f, 2.35f, 3.3f, 3, 3},
+                                               {23, 1, 1.75f, 2.55f, 3.4f, 2.2f, 1.6f}, {203, 0, 1.95f, 2.85f, 3.75f, 2.4f, 1.8f}, {228, 1, 2.2f, 3.05f, 3.95f, 2.7f, 3}};
+                dl->PopClipRect();
+                for (const float* q : sp) {
+                    if (u < q[2] || u >= q[4]) continue;
+                    float op = track({kf(q[2], 0), kf(q[3], 1), kf(q[4], 0)}, u) * unfold;
+                    float sx = track({kf(q[2], 0.3f), kfei(q[3], q[5]), kf(q[4], 0.3f)}, u), sy = track({kf(q[2], 0.3f), kfei(q[3], q[6]), kf(q[4], 0.3f)}, u);
+                    picture(dl, art.sparkle, at(pc + q[0] * ps, by + q[1] * Q), 14 * k * s * sx, 24 * k * s * sy, alpha(WHITE, op));
+                }
+                dl->PushClipRect(p0, p1, true);
             }
-            text_fit(dl, a.text, a.text_m, fs, x2, y2, area - (x2 - x), col, second);
         }
-        if (back_y < 99 && !n.desc.empty()) {
-            // two lines at most, 34 px apart; the second cut with an ellipsis
-            const char* b = n.desc.c_str();
-            const char* e = b + n.desc.size();
-            const char* br = a.text->CalcWordWrapPosition(fs, b, e, area);
-            if (br == b) br = e;
-            std::string first(b, br), rest(br < e && *br == ' ' ? br + 1 : br, e);
-            float ly = rest.empty() ? 0 : -17;
-            text_mid(dl, a.text, a.text_m, fs, x, P(0, ly + back_y).y, col, first.c_str());
-            if (!rest.empty()) text_fit(dl, a.text, a.text_m, fs, x, P(0, 17 + back_y).y, area, col, rest);
+
+        // the words: the title in the accent over the Gamerscore and name; from 4 s the description; from 7.133 s (8 s) the hint
+        const float x = bx + Q + 22 - 0.6f * half * (1 - unfold);
+        float text_op = !hiding && t < TS ? track({kf(1.733f, 0), kf(2.333f, 1)}, t) : 0;
+        if (text_op > 0.004f) {
+            float dx = track({kf(1.333f, 60), kfeo(2.333f, 0)}, t), rt = t - TR;
+            float front = rt < 0 ? 0 : track({kf(0, 0), kfei(0.267f, -Q)}, rt), back = rt < 0 ? Q : track({kf(0, Q), kf(0.233f, Q), kfeo(0.833f, 0)}, rt);
+            ImU32 col = alpha(WHITE, text_op);
+            if (front > -Q + 1) {
+                text_fit(dl, bf, a.bold_m, TSZ * s, at(x + dx, 0).x, at(0, by + 21 + front).y, area * s, alpha(ACCENT, text_op), title);
+                float y2 = at(0, by + 43 + front).y, x2 = at(x + dx, 0).x;
+                if (n.g >= 0) {
+                    // the Gamerscore mark: a white disc with the G cut out
+                    float gd = TSZ * 0.82f * s;
+                    dl->AddCircleFilled(ImVec2(x2 + gd / 2, y2), gd / 2, col, 32);
+                    float gsz = gd * 0.66f, gw = bf->CalcTextSizeA(gsz, FLT_MAX, 0, "G").x;
+                    dl->AddText(bf, gsz, ImVec2(x2 + gd / 2 - gw / 2, caps_top(a.bold_m, gsz, y2)), alpha(PANEL, text_op), "G");
+                    x2 += gd + 6 * s;
+                }
+                text_fit(dl, a.text, a.text_m, TSZ * s, x2, y2, (area - gmark) * s, col, second);
+            }
+            if (back < Q - 1 && !n.desc.empty()) {
+                // two lines at most, the second cut with an ellipsis
+                const char* b = n.desc.c_str();
+                const char* e = b + n.desc.size();
+                const char* br = a.text->CalcWordWrapPosition(TSZ, b, e, area);
+                if (br == b) br = e;
+                std::string first(b, br), rest(br < e && *br == ' ' ? br + 1 : br, e);
+                float xs = at(x + dx, 0).x;
+                text_mid(dl, a.text, a.text_m, TSZ * s, xs, at(0, by + (rest.empty() ? 32 : 21) + back).y, col, first.c_str());
+                if (!rest.empty()) text_fit(dl, a.text, a.text_m, TSZ * s, xs, at(0, by + 43 + back).y, area * s, col, rest);
+            }
+        }
+        float hint_op = 0, hint_dx = 0;
+        if (!hiding && t >= TS) hint_op = track({kf(0.066f, 0), kf(0.267f, 1)}, t - TS);
+        else if (hiding) hint_op = track({kf(0, 1), kfei(0.5f, 0)}, h), hint_dx = track({kf(0, 0), kfei(0.6f, -40)}, h);
+        if (hint_op > 0.004f) {
+            // "Hold (the emblem) to open", in the middle of the panel
+            float w = wa + gap + ed + gap + wb, hx = bx + Q + half - w / 2 + hint_dx;
+            float cy = at(0, by + Q / 2).y;
+            text_mid(dl, a.text, a.text_m, TSZ * s, at(hx, 0).x, cy, alpha(WHITE, hint_op), "Hold");
+            emblem(dl, a, ImVec2(at(hx + wa + gap + ed / 2, 0).x, cy), ed * s, PANEL, 0, hint_op);
+            text_mid(dl, a.text, a.text_m, TSZ * s, at(hx + wa + gap + ed + gap, 0).x, cy, alpha(WHITE, hint_op), "to open");
         }
         dl->PopClipRect();
     }
 
-    // the icon's circle
-    if (bg_op > 0.004f && bg_scale > 0.003f) dl->AddCircleFilled(ic, 50 * px * bg_scale, alpha(circle_col, bg_op), 64);
+    // the icon's square
+    if (bg_op > 0.004f) square(ic, Q * s * bg_scale, alpha(sq_col, bg_op));
 
     // the mythic's pulses behind the icon (two, 0.35 s apart, from 2.433 s)
     if (mythic && art.pulse)
@@ -748,23 +706,25 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
             float u = t - TE - 0.35f * j;
             if (u < 0 || u >= 1.2f) continue;
             float sc = track({kf(0, 0.6f), kfs(0.667f, 1.35f, .6f, 0, .1f, 1)}, u), op = track({kf(0, 0), kf(0.1f, 0.9f), kf(0.667f, 0.7f), kf(1.2f, 0)}, u);
-            picture(dl, art.pulse, ic, 130 * px * sc, 130 * px * sc, alpha(WHITE, op));
+            picture(dl, art.pulse, ic, 130 * k * s * sc, 130 * k * s * sc, alpha(WHITE, op));
         }
 
     // the icon: its intro (the emblem's frames replaced), its loop, and from Hide its exit
-    const float cellpx = mythic ? 160.0f : rare ? 84.0f : 68.0f;
-    const int x_end = rare ? 11 : 12, x_start = rare ? 21 : 20;  // the console's emblem: in the intro before x_end, in the exit from x_start
-    const float held = 38 / 30.0f;                               // frame 1 held for 36 more frames (plain, rare)
+    const float cellq = mythic ? Q * 0.86f * 160 / 105 : (rare ? 84.0f : 68.0f) * k;  // the mythic's ring (105 of 160 px) inside the square
+    const int x_end = rare ? 11 : 12, x_start = rare ? 21 : 20;                      // the console's emblem: intro before x_end, exit from x_start
+    const float held = 38 / 30.0f;                                                   // frame 1 held for 36 more frames (plain, rare)
+    const float disc = 60 * k;                                                       // the sheets' disc
     float iscale = !hiding ? track({kf(0.7f, 0), kfs(1.067f, 1.2f, .52f, 0, .59f, 1), kfs(1.333f, 1, .34f, .05f, .69f, 1)}, t)
                            : track({kf(0.767f, 1), kfei(1.367f, 0)}, h);
     float iop = !hiding ? track({kf(0, 0), kfei(0.667f, 1)}, t) : 1;
     const SpriteSheet &in = art.intro[tier], &loop = art.idle[tier], &out = art.outro[tier];
     const bool have = in.tex && loop.tex && out.tex;
     auto sheet = [&](const SpriteSheet& sh, const SpriteSheet& hi, int f, float op) {
-        float side = cellpx * px * iscale;
+        float side = cellq * s * iscale;
         cell(dl, sh, f, ic, side, side, alpha(WHITE, op));
         if (mythic) cell(dl, hi, f, ic, side, side, alpha(WHITE, op));
     };
+    const uint32_t glyph = mythic ? 0xe65fu : rare ? 0xead5u : uint32_t(I_TROPHY);  // without the art: "auto_awesome", "diamond", the trophy
     float in_op = !hiding ? iop * (mythic ? (t < 4.0f ? 1.0f : 0.0f) : track({kf(2.6f, 1), kf(2.7f, 0)}, t)) : 0;
     float loop_op = (!hiding ? (mythic ? (t >= 4.0f ? 1.0f : 0.0f) : track({kf(2.5f, 0), kf(2.6f, 1)}, t)) : track({kf(0, 1), kfei(0.5f, 0)}, h)) * iop;
     float loop_from = mythic ? 4.0f : 2.5f;
@@ -773,34 +733,31 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
             sheet(in, art.intro_hi, std::min(int(t * 30), in.frames - 1), in_op);
         } else {
             int f = t < 1 / 30.0f ? 0 : t < held ? 1 : 2 + int((t - held) * 30);
-            if (f < x_end || !have) {
+            if (f < x_end) {
                 // the emblem faces until frame 2, then turns away to the right by frame x_end (1.6 s: the sounds' peak)
-                float turn = std::clamp((t - held) * 30 / float(x_end - 2), 0.0f, 1.0f);
-                if (f < x_end) emblem(dl, a, ic, 60 * px * iscale, circle_col, turn, in_op);
-                if (!have && f >= x_end) {
-                    float g = std::clamp((t - (held + (x_end - 2) / 30.0f)) / 0.35f, 0.0f, 1.0f);
-                    icon_mid(dl, a, 60 * px * iscale * css_bezier(.2f, .8f, .3f, 1.2f, g), ic.x, ic.y, alpha(WHITE, in_op), rare ? 0xead5u : uint32_t(I_TROPHY));
-                }
-            } else {
+                emblem(dl, a, ic, disc * s * iscale, sq_col, std::clamp((t - held) * 30 / float(x_end - 2), 0.0f, 1.0f), in_op);
+            } else if (have) {
                 sheet(in, art.intro_hi, std::min(f, in.frames - 1), in_op);
+            } else {
+                float g = std::clamp((t - (held + (x_end - 2) / 30.0f)) / 0.35f, 0.0f, 1.0f);
+                icon_mid(dl, a, disc * s * iscale * css_bezier(.2f, .8f, .3f, 1.2f, g), ic.x, ic.y, alpha(WHITE, in_op), glyph);
             }
         }
     }
     if (loop_op > 0.004f && t >= loop_from) {
         if (have) sheet(loop, art.idle_hi, int((t - loop_from) * 30) % std::max(1, loop.frames), loop_op);
-        else icon_mid(dl, a, (mythic ? 66 : 60) * px * iscale, ic.x, ic.y, alpha(WHITE, loop_op), mythic ? 0xe65fu : rare ? 0xead5u : uint32_t(I_TROPHY));
+        else icon_mid(dl, a, disc * s * iscale, ic.x, ic.y, alpha(WHITE, loop_op), glyph);
     }
     if (hiding && iscale > 0.003f) {
         int f = std::min(int(h * 30), have ? out.frames - 1 : 31);
         if (!mythic && f >= x_start) {
             // the emblem turns in from the left by frame 31 and stays
-            float turn = -(1 - std::clamp((h * 30 - x_start) / float(31 - x_start), 0.0f, 1.0f));
-            emblem(dl, a, ic, 60 * px * iscale, circle_col, turn, 1);
+            emblem(dl, a, ic, disc * s * iscale, sq_col, -(1 - std::clamp((h * 30 - x_start) / float(31 - x_start), 0.0f, 1.0f)), 1);
         } else if (have) {
             sheet(out, art.outro_hi, f, 1);
         } else {
             float g = 1 - std::clamp(h / 0.6f, 0.0f, 1.0f);
-            icon_mid(dl, a, (mythic ? 66 : 60) * px * iscale * g, ic.x, ic.y, alpha(WHITE, g), mythic ? 0xe65fu : rare ? 0xead5u : uint32_t(I_TROPHY));
+            icon_mid(dl, a, disc * s * iscale * g, ic.x, ic.y, alpha(WHITE, g), glyph);
         }
     }
 
@@ -809,18 +766,16 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
         float u = t - TE - 2;
         if (art.ripple && u >= 0 && u < 1.5f) {
             float sc = track({kf(0, 0), kfs(1.5f, 1.2f, 0, 0, 0, 1)}, u), op = track({kf(0, 1), kfs(1.4f, 0, .4f, 0, .2f, 1)}, u);
-            picture(dl, art.ripple, ic, 200 * px * sc, 200 * px * sc, alpha(WHITE, op));
+            picture(dl, art.ripple, ic, 200 * k * s * sc, 200 * k * s * sc, alpha(WHITE, op));
         }
         float g = t - TE;
         float layer = !hiding ? track({kf(0, 0), kfs(4.5f, 0.8f, .4f, 0, .2f, 1)}, g) : track({kf(0, 0.8f), kfei(0.733f, 0)}, h);
         float gsc = !hiding ? 1 : track({kf(0, 1), kfeio(0.733f, 0.75f)}, h);
         if (g > 0 && layer > 0.004f) {
-            turned(dl, art.glow_a, ic, 270 * px * gsc * (0.92f + 0.16f * back_and_forth(g, 2.5f)), g / 9 * 2 * PI,
+            turned(dl, art.glow_a, ic, 270 * k * s * gsc * (0.92f + 0.16f * back_and_forth(g, 2.5f)), g / 9 * 2 * PI,
                    alpha(WHITE, layer * (0.55f + 0.3f * back_and_forth(g, 3.3f))));
-            turned(dl, art.glow_b, ic, 270 * px * gsc * (1.08f - 0.16f * back_and_forth(g, 2.0f)), -g / 7 * 2 * PI,
+            turned(dl, art.glow_b, ic, 270 * k * s * gsc * (1.08f - 0.16f * back_and_forth(g, 2.0f)), -g / 7 * 2 * PI,
                    alpha(WHITE, layer * (1 - 0.45f * back_and_forth(g, 2.3f))));
         }
-        // the laurels, with the circle
-        if (bg_op > 0.004f && bg_scale > 0.05f) laurels(dl, ic, 50 * px * bg_scale, alpha(light_col, bg_op * 0.95f));
     }
 }
