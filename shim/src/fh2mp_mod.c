@@ -3206,6 +3206,7 @@ static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *
 #include "lighting_sync.inc"
 #include "honk_sync.inc"
 #include "carsel_sync.inc"
+#include "race_wait.inc"
 #include "event_stock.inc"
 #include "stall_trace.inc"
 
@@ -5578,6 +5579,7 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_HONK", env, 8) == 0) patch_honk(g_exe_dir, g_dir);
             else honk_switched_off(g_exe_dir, g_dir);
             if (GetEnvironmentVariableW(L"FH2MP_NO_CARSELECT_HOLD", env, 8) == 0) patch_carsel();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_RACEWAIT", env, 8) == 0) patch_race_wait();
         }
         {
             wchar_t env[8];
