@@ -1045,3 +1045,37 @@ def nitro_online(folder, written):
                "it has no off switch (2.0.0 and newer have one), so its NOS would also burn in events")
         return want, f"{name} {'loads' if want == '1' else 'stays off'} for online play ({why})"
     return written, ""          # the player turned it off for online play on the MODS tab: theirs to change
+
+
+NITRO_INI = "fh2-mods/FnFNitro.ini"
+
+
+def nitro_hud_default(folder):
+    """NitroSystem's HUD theme defaults to "Fast & Furious" (cyan gear numbers and NOS bar); FH2MP players get the game's own yellow HUD unless they
+    chose a theme: when FnFNitro.ini has no HudTheme line, `HudTheme=Original` is written (user decision 2026-11-12). The mod applies it at the next
+    game start; a theme the player picks later on the MODS page is theirs. -> a note for the log, "" when nothing was written."""
+    if nitro_installed(folder)[0] == "none":
+        return ""
+    path = os.path.join(folder, *NITRO_INI.split("/"))
+    try:
+        with open(path, encoding="utf-8-sig", newline="") as f:
+            text = f.read()
+    except FileNotFoundError:
+        text = None
+    except OSError as e:
+        raise ShimError(f"could not read FnFNitro.ini: {e.strerror or e}") from None
+    if text is not None and re.search(r"^\s*HudTheme\s*=", text, re.MULTILINE | re.IGNORECASE):
+        return ""
+    eol = "\r\n" if text is None or "\r\n" in text else "\n"
+    if text is None:
+        new = f"[Settings]{eol}HudTheme=Original{eol}"
+    elif re.search(r"^\[Settings\]\s*$", text, re.MULTILINE | re.IGNORECASE):
+        new = re.sub(r"^(\[Settings\][ \t]*\r?\n)", lambda m: m.group(1) + f"HudTheme=Original{eol}", text, count=1, flags=re.MULTILINE | re.IGNORECASE)
+    else:
+        new = f"[Settings]{eol}HudTheme=Original{eol}{eol}" + text
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        paths.atomic_write(path, new.encode("utf-8"), 0o644)
+    except OSError as e:
+        raise ShimError(f"could not write FnFNitro.ini: {e.strerror or e}. Is the game still running?") from None
+    return "NitroSystem's HUD theme set to Original (the game's own yellow gear numbers); the Mods page changes it"

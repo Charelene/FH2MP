@@ -1102,6 +1102,9 @@ class Launcher:
         if written != self.settings["nitro_online_written"]:
             self.settings["nitro_online_written"] = written
             self.settings.save()
+        hud = shim.nitro_hud_default(d)
+        if hud:
+            note = (note + "; " if note else "") + hud
         if note:
             from .api import log_note
             log_note("PLAY " + note)

@@ -237,12 +237,17 @@ int main(int argc, char **argv)
     assert(g_blocked == 0 && g_nos_allowed && strstr(g_log, "nitro: NOS on (online Free Roam"));
     g_burning = 1; assert(nos_flags() == (MODS_NOS_SWITCH | MODS_NOS_ALLOWED | MODS_NOS_BURNING)); g_burning = 0;
     n = (unsigned)g_block_calls; Sleep(110); nos_rule_tick(); assert(g_block_calls == (int)n);   /* nothing changed: not called again */
-    g_ctx = 5; Sleep(110); nos_rule_tick(); assert(g_blocked == 1 && strstr(g_log, "the event context is not free roam"));
+    g_ctx = 5; Sleep(110); nos_rule_tick(); assert(g_blocked == 1 && strstr(g_log, "in a session, and the event context is not free roam"));
+    g_ctx = 3; InterlockedExchange64(&g_nos_server_at, (LONG64)GetTickCount64()); Sleep(110); nos_rule_tick();
+    assert(g_blocked == 0 && strstr(g_log, "event context 3"));                     /* an online Free Roam lobby says 3: the server decides */
     g_ctx = AD_FREE_ROAM; InterlockedExchange64(&g_nos_server_at, (LONG64)GetTickCount64()); Sleep(110); nos_rule_tick(); assert(g_blocked == 0);
     g_rt = 1; Sleep(110); nos_rule_tick(); assert(g_blocked == 1);
     g_rt = -1; InterlockedExchange64(&g_nos_server_at, (LONG64)GetTickCount64()); Sleep(110); nos_rule_tick(); assert(g_blocked == 1);   /* unreadable: off */
     g_rt = 0; InterlockedExchange64(&g_nos_server_at, (LONG64)GetTickCount64()); Sleep(110); nos_rule_tick(); assert(g_blocked == 0);
-    g_sess = 0; Sleep(110); nos_rule_tick(); assert(g_blocked == 1 && strstr(g_log, "not in a network session"));
+    g_sess = 0; g_ctx = 3; Sleep(110); nos_rule_tick(); assert(g_blocked == 1 && strstr(g_log, "solo, and the event context is not free roam"));   /* solo: the context alone */
+    g_ctx = AD_FREE_ROAM; InterlockedExchange(&g_nos_server_ok, 0); Sleep(110); nos_rule_tick();
+    assert(g_blocked == 0 && g_nos_allowed && strstr(g_log, "solo Free Roam"));       /* solo Free Roam: no server needed */
+    InterlockedExchange(&g_nos_server_ok, 1);
     g_sess = 1; InterlockedExchange(&g_nos_server_ok, 0); InterlockedExchange64(&g_nos_server_at, (LONG64)GetTickCount64()); Sleep(110); nos_rule_tick();
     assert(g_blocked == 1);                                                         /* the server says event / Road Trip */
     InterlockedExchange(&g_nos_server_ok, 1); InterlockedExchange64(&g_nos_server_at, (LONG64)GetTickCount64() - NOS_SERVER_FRESH_MS - 10); Sleep(110); nos_rule_tick();

@@ -87,6 +87,30 @@ class NitroOnlineTests(unittest.TestCase):
         self.assertEqual(shim.nitro_installed(self.az), ("switch", "2.0.0"))
         self.assertEqual(shim.underglow_installed(self.az), (True, "1.1.0"))
 
+    def ini(self):
+        with open(os.path.join(self.az, "fh2-mods", "FnFNitro.ini"), encoding="utf-8", newline="") as f:
+            return f.read()
+
+    def put_ini(self, text):
+        with open(os.path.join(self.az, "fh2-mods", "FnFNitro.ini"), "w", newline="") as f:
+            f.write(text)
+
+    def test_the_hud_theme_defaults_to_the_games_own_yellow_one(self):
+        self.assertEqual(shim.nitro_hud_default(self.az), "")                       # no NitroSystem: nothing written
+        self.nitro(WITH_SWITCH)
+        self.assertTrue(shim.nitro_hud_default(self.az))
+        self.assertEqual(self.ini(), "[Settings]\r\nHudTheme=Original\r\n")
+        self.assertEqual(shim.nitro_hud_default(self.az), "")                       # once
+        self.put_ini("[Settings]\r\nNitroEnabled=1\r\nHudTheme=FF\r\n")            # the player chose Fast & Furious
+        self.assertEqual(shim.nitro_hud_default(self.az), "")
+        self.assertIn("HudTheme=FF", self.ini())
+
+    def test_the_hud_theme_goes_into_an_ini_that_has_none(self):
+        self.nitro(WITH_SWITCH)
+        self.put_ini("[Settings]\r\nNitroButton=LB\r\n\r\n[Upgrade]\r\nArea=1\r\n")
+        shim.nitro_hud_default(self.az)
+        self.assertEqual(self.ini(), "[Settings]\r\nHudTheme=Original\r\nNitroButton=LB\r\n\r\n[Upgrade]\r\nArea=1\r\n")
+
     def test_play_step_remembers_what_it_wrote(self):
         self.nitro(WITH_SWITCH)
         lc = core.Launcher(Settings(os.path.join(self.az, "settings.json")), load_identity=False)   # never the player's own settings file

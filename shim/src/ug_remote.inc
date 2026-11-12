@@ -55,6 +55,7 @@
 #define UGR_POOL 192               /* lights for every other player's car together */
 #define UGR_CARS 8                 /* the nearest cars that get neon */
 #define UGR_RANGE 150.0f           /* metres: a car further away gets none */
+#define UGR_PREBUILD 64            /* lights made ahead as soon as the local car is known: the game makes lights only now and then, so waiting for a lit car came too late */
 #define UGR_BUILD_BATCH 32         /* lights made in one game CreateLight call */
 #define UGR_RESOLVE_MS 500u
 #define UGR_VALIDATE_MS 500u        /* how often the pool's lights are checked to still be ours (each check costs two reads per light) */
@@ -181,7 +182,8 @@ static void ugr_resolve(ULONG_PTR system, ULONGLONG now)
     if (!read_game_memory((void *)(manager + UGR_MGR_GLOWS), &glows, 8) || !read_game_memory(pres + UGR_PRES_ASSET, &asset, 8) || !asset ||
         !ugr_read_vec((ULONG_PTR)asset + UGR_ASSET_INSTANCES, 8, 512, &inst, &ninst)) return;
     if (manager != g_ugr.manager || beams != g_ugr.beams) {          /* another light manager: start over (its lights are gone with it) */
-        g_ugr.count = g_ugr.spares = g_ugr.want = g_ugr.nplaced = 0;
+        g_ugr.count = g_ugr.spares = g_ugr.nplaced = 0;
+        g_ugr.want = UGR_PREBUILD;
         g_ugr.manager = manager; g_ugr.beams = beams;
     }
     g_ugr.glows = glows;
@@ -200,6 +202,7 @@ static void ugr_resolve(ULONG_PTR system, ULONGLONG now)
         InterlockedExchange(&g_ugr_trigger, (LONG)(handle + 1));
         if (handle < UGR_HANDLES && g_ugr_mgr[handle] == manager) {
             g_ugr.tkey = g_ugr_key[handle]; g_ugr.tindex = g_ugr_index[handle]; g_ugr.tpreset = preset; g_ugr.tok = 1;
+            if (g_ugr.want < UGR_PREBUILD && g_mods_share) g_ugr.want = UGR_PREBUILD;
         } else if (!g_ugr.tok && !(g_ugr.problems & 1)) {
             g_ugr.problems |= 1;
             log_begin(); log_raw("underglow: other players' neon waits: this car's lights were made before the shim watched (change car or fast travel once)\n");
@@ -232,7 +235,7 @@ static void ugr_frame(void)
         for (j = 0; j < g_ugr.count; j++) any |= g_ugr.light[j].lit;
         if (any && ugr_tables_read(&t)) for (j = 0; j < g_ugr.count; j++) { if (g_ugr.light[j].lit) ugr_dark(&t, &g_ugr.light[j]); g_ugr.light[j].owner = 0; }
         g_ugr.nplaced = 0;
-        g_ugr.want = 0;
+        g_ugr.want = UGR_PREBUILD;
         return;
     }
     if (!ugr_tables_read(&t)) return;
@@ -297,7 +300,7 @@ static void ugr_frame(void)
                 used[i][idx] = 1;
             }
         }
-        g_ugr.want = want < UGR_POOL ? want : UGR_POOL;
+        g_ugr.want = want < UGR_PREBUILD ? UGR_PREBUILD : want < UGR_POOL ? want : UGR_POOL;
     }
     /* each car's ring */
     g_ugr.nplaced = 0;

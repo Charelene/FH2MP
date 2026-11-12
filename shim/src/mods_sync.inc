@@ -1,17 +1,17 @@
 /* Add-on mods online (user request 2026-11-12): NitroSystem (qiangqiang101/FH2-NitroSystem, fh2-mods\FnFNitro.dll) and FH2-Underglow
  * (qiangqiang101/FH2-Underglow, fh2-mods\Underglow.dll). Both are MIT licensed and are not changed, on disk or in memory.
  *
- * NOS rule (user decision): NitroSystem's NOS is on in online Free Roam lobbies only, off in events, Rivals, Road Trip and everywhere else online.
+ * NOS rule (user decisions 2026-11-12): NitroSystem's NOS is on in Free Roam (solo and in online lobbies), off in events, Rivals and Road Trip.
  * NitroSystem 2.0.0 publishes its off switch as the platform interface "NitroSystem.Control" v1 (its docs/MOD_CONTROL.md, include/
  * NitroSystemControl.h: set_blocked(who, 0|1), is_blocked, is_active, nitro_percent; also exported by FnFNitro.dll as FnFNitro_SetBlocked ...).
- * When this game plays online the shim blocks NOS under the name "FH2MP" as soon as it finds the switch, and lifts the block only while all of
- * these hold, checked every 100 ms on the game's logic thread (the frame step game+0xFA78A0, nos_flames.inc): the game is in a network session
- * (picker_pi.inc ppi_in_session), its event context says free roam and no Road Trip is on (the tests of autodrive_rule.inc), and the game server's
- * reply on the mod state channel (mods_wire.h), at most 1.5 s old, says this player is in a Free Roam world and not in its event. Anything that
- * cannot be read, a server without the channel, or no reply: NOS stays off. NitroSystem sets offline_only, so FH2 Mod Platform 2.8.0 does not load
- * it online unless fh2-mods\platform-online.txt says so (the launcher writes FnFNitro.dll<TAB>1 there for a NitroSystem that has the switch, and
- * 0 for one without it: launcher/fh2mp_launcher/platform_online.py). A NitroSystem without the switch that is loaded anyway is reported (flag
- * MODS_NOS_NOSWITCH) and said once in the log.
+ * When this game plays online the shim blocks NOS under the name "FH2MP" as soon as it finds the switch, and lifts the block only while these
+ * hold, checked every 100 ms on the game's logic thread (the frame step game+0xFA78A0, nos_flames.inc): no Road Trip is on (autodrive_rule.inc's
+ * read), and either the game is not in a network session (picker_pi.inc ppi_in_session) and its event context says free roam (2), or it is in a
+ * session, the context is 2 or 3 (an online Free Roam lobby says 3) and the game server's reply on the mod state channel (mods_wire.h), at most
+ * 1.5 s old, says this player is in a Free Roam world and not in its event. Anything that cannot be read, or in a session a server without the
+ * channel or no reply: NOS stays off. NitroSystem sets offline_only, so FH2 Mod Platform 2.8.0 does not load it online unless
+ * fh2-mods\platform-online.txt says so (the launcher writes FnFNitro.dll<TAB>1 there for a NitroSystem that has the switch, and 0 for one
+ * without it: shim.nitro_online). A NitroSystem without the switch that is loaded anyway is reported (flag MODS_NOS_NOSWITCH) and said once.
  *
  * Visible to others: a worker thread polls the game server's mod state channel (its own magic FH2MPMD1, native/internal/game/modsync.go) with this
  * player's NOS (burning or not) and underglow (what Underglow's own `status` command says, read through the platform's command pipe once a second,
@@ -23,6 +23,7 @@
 
 #define NOS_WHO "FH2MP"
 #define NOS_RULE_MS 100u
+#define NOS_LOBBY_CONTEXT 3         /* the event context in an online Free Roam lobby (and maybe its events: the server tells them apart) */
 #define NOS_SERVER_FRESH_MS 1500u
 #define MODS_FRESH_MS 600u          /* the other players' states are shown while the newest reply is this recent */
 #define MODS_POLL_BUSY_MS 50u       /* while any NOS burns (ours or another's) */
@@ -107,13 +108,14 @@ static void nos_rule_tick(void)
     if (g_nos_kind != NOS_SWITCH || now - last < NOS_RULE_MS) return;
     last = now;
     in_session = ppi_in_session(g_mods_img);
-    if (in_session) {
-        context = ad_context_type(g_mods_img);
-        road_trip = ad_road_trip(g_mods_img);
-    }
+    context = ad_context_type(g_mods_img);
+    road_trip = ad_road_trip(g_mods_img);
     server_at = (ULONGLONG)g_nos_server_at;
     server = g_nos_server_ok && server_at && now - server_at <= NOS_SERVER_FRESH_MS;
-    allowed = in_session && context == AD_FREE_ROAM && road_trip == 0 && server;
+    /* Solo, the game's event context alone (2 free roam; events and Rivals are others). In a network session the context of a Free Roam lobby
+     * is 3 (seen on dev 2026-11-12, FH2 ANNA's log: 2 solo, 3 after joining the lobby), which cannot tell the lobby from its events, so there
+     * the server decides (a Free Roam world, not in its event). */
+    allowed = road_trip == 0 && (in_session ? (context == AD_FREE_ROAM || context == NOS_LOBBY_CONTEXT) && server : context == AD_FREE_ROAM);
     if (allowed != g_nos_allowed) {
         g_nos_set(NOS_WHO, !allowed);
         InterlockedExchange(&g_nos_allowed, allowed);
@@ -132,12 +134,15 @@ static void nos_rule_tick(void)
         n = InterlockedIncrement(&transitions);
         if (n > 40 && n % 100) return;
         log_begin();
-        log_raw(allowed ? "nitro: NOS on (online Free Roam" : "nitro: NOS off (");
+        log_raw(allowed ? (in_session ? "nitro: NOS on (online Free Roam" : "nitro: NOS on (solo Free Roam") : "nitro: NOS off (");
         if (!allowed) {
-            log_raw(!in_session ? "not in a network session" : context != AD_FREE_ROAM ? "the event context is not free roam" :
-                    road_trip != 0 ? "a Road Trip is on, or unreadable" : "the server does not say Free Roam");
+            log_raw(road_trip != 0 ? "a Road Trip is on, or unreadable" :
+                    !in_session ? "solo, and the event context is not free roam (an event, Rivals, a menu)" :
+                    context != AD_FREE_ROAM && context != NOS_LOBBY_CONTEXT ? "in a session, and the event context is not free roam" :
+                    "in a session, and the server does not say Free Roam");
         }
-        log_raw("; event context ");
+        log_raw(in_session ? "; in a network session" : "; solo");
+        log_raw(", event context ");
         if (context < 0) log_raw("unreadable"); else log_dec((unsigned long)context);
         log_raw(", Road Trip ");
         log_raw(road_trip < 0 ? "unreadable" : road_trip ? "on" : "off");
