@@ -1464,7 +1464,7 @@ func (s *Server) lobbyFor(scid, hopper string, attrs *Dict, ref *Dict, xuid stri
 		n, _ := strconv.ParseInt(xuid, 10, 64)
 		mine = flagged[n]
 	}
-	full, pooled, avoidedN, private := 0, 0, 0, 0
+	full, pooled, avoidedN, private, closed := 0, 0, 0, 0, 0
 	for _, name := range append([]string(nil), names...) {
 		rec := s.lookup(scid, name)
 		if rec == nil {
@@ -1483,6 +1483,17 @@ func (s *Server) lobbyFor(scid, hopper string, attrs *Dict, ref *Dict, xuid stri
 		s.prune(rec)
 		cp := min(maxPlayers(rec, lobbyMax), lobbyMax)
 		n := s.lobbyOccupancy(name, rec, pops, havePops)
+		if CloseEmptyLobbies && havePops && n == 0 && name != preferred && rec.HasSeen && !hasPlayerMember(rec) {
+			// Everybody left this lobby: it is over, as on Xbox Live, whose session directory deleted a session with its last member.
+			// A game matched into such a lobby reads it and leaves without joining, and nothing it tries afterwards works (dev
+			// 2026-11-12 17:29: DebugFox was given the Car Meet DebugWolf had left 30 s before, 'fullest with room (0 of 12)', did not
+			// join it, and its private Free Roam after that never connected).
+			delete(s.sessions, [3]string{strings.ToLower(scid), strings.ToLower(TargetTemplate), strings.ToLower(name)})
+			names = removeName(names, name)
+			delete(s.reserved, name)
+			closed++
+			continue
+		}
 		if len(flagged) > 0 && !s.poolFits(name, pops, flagged, mine) {
 			pooled++
 			continue
@@ -1546,9 +1557,23 @@ func (s *Server) lobbyFor(scid, hopper string, attrs *Dict, ref *Dict, xuid stri
 		mineFlag = true
 	}
 	matchLog.Info("ticket matched " + kv(f("xuid", nilIfEmpty(xuid)), f("lobby", trunc(name, 8)), f("how", how), f("hopper", hopper), f("location", ToJSON(loc)), f("gsi", nilIfEmpty(gsi)),
-		f("lobbies", len(names)), f("full", nz(full)), f("pool_skipped", nz(pooled)), f("left_or_inside_skipped", nz(avoidedN)), f("private_skipped", nz(private)), f("released", nz(released)), f("flagged_player", mineFlag),
+		f("lobbies", len(names)), f("full", nz(full)), f("pool_skipped", nz(pooled)), f("left_or_inside_skipped", nz(avoidedN)), f("private_skipped", nz(private)), f("empty_closed", nz(closed)), f("released", nz(released)), f("flagged_player", mineFlag),
 		f("occupancy_source", src)))
 	return name, nil
+}
+
+// CloseEmptyLobbies: a lobby everybody left is closed at the next match instead of being matched again (lobbyFor). The Python server
+// matched it again, which the frozen vectors still hold; FH2MP_LOBBY_CLOSE_EMPTY=0 brings that back.
+var CloseEmptyLobbies = os.Getenv("FH2MP_LOBBY_CLOSE_EMPTY") != "0"
+
+// hasPlayerMember says whether a session has a player in it (active or reserved).
+func hasPlayerMember(rec *Session) bool {
+	for _, k := range rec.Members.Keys() {
+		if isDigits(k) {
+			return true
+		}
+	}
+	return false
 }
 
 func lastN(s string, n int) string {

@@ -162,3 +162,30 @@ func TestAnInvitedFriendIsAReservedMemberOfTheHostsSession(t *testing.T) {
 		t.Fatal("a member already there is reported as no session")
 	}
 }
+
+// Dev 2026-11-12 17:29: DebugWolf entered a Car Meet and left it for a private Free Roam; 30 s later DebugFox's ticket was matched into
+// that empty Car Meet ('fullest with room (0 of 12)'). Its game read the lobby and left without joining, and the private Free Roam it made
+// next never connected. A lobby everybody left is over: the next player gets a new one, and the old session is gone.
+func TestALobbyEverybodyLeftIsNotMatchedAgain(t *testing.T) {
+	r := newHeldSeatRig(t)
+	first := r.carMeet("2001", "5", true)
+	r.put(first, joinBody, "2001")
+	// while the first player is there, the second joins it
+	if got := r.carMeet("2002", "5", true); got != first {
+		t.Fatalf("with a player in the Car Meet the next one got %s, want the same %s", got, first)
+	}
+	r.put(first, joinBody, "2002")
+	// both leave (their games close the connection and leave the session)
+	r.disconnect("2001")
+	r.disconnect("2002")
+	r.put(first, leaveBody, "2001")
+	r.put(first, leaveBody, "2002")
+	r.clock += 2 * ReserveSeconds // their reservations are long over
+	next := r.carMeet("2003", "5", false)
+	if next == first {
+		t.Fatalf("the Car Meet everybody left was matched again (%s)", next)
+	}
+	if st, _ := r.s.GetSession(r.path(first), "2003"); st != 404 {
+		t.Fatalf("the abandoned lobby's session answers %d, want 404 (gone)", st)
+	}
+}

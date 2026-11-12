@@ -161,6 +161,8 @@ func (s *Server) snapshot() pyjson.Obj {
 
 func TestMatchesPython(t *testing.T) {
 	ops, results := load(t)
+	CloseEmptyLobbies = false // the recorded Python server matched players into lobbies everybody had left
+	defer func() { CloseEmptyLobbies = true }()
 	hub := &fakeHub{}
 	s := New(hub)
 	clock, mono := 1_700_000_000.0, 1000.0
