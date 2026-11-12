@@ -3,6 +3,7 @@ package game
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"testing"
 
 	"fh2mp/internal/bits"
@@ -173,5 +174,38 @@ func TestVoiceRelayHonoursTheListenersMute(t *testing.T) {
 	r.w.Handle(clientVoice(bytes.Repeat([]byte{1}, 30)), a.Addr)
 	if n := len(sentTo(r, b.Addr)); n != 1 {
 		t.Fatalf("after unmuting %d relayed, want 1", n)
+	}
+}
+
+// Dev 2026-11-12 17:00: voice came after the messages of ordinary datagrams, padded to a byte, and was not relayed ("426 bits left after
+// 1 messages"). This is that datagram's tail as the server logged it (2 padding bits, then 0xC4A7, 49 bytes), behind 6 message bits.
+func TestVoiceAfterMessagesIsReadFromTheNextByte(t *testing.T) {
+	r, a, b, _ := voiceRig(t)
+	tail, _ := hex.DecodeString("9c12c70058050c00086040242f7cc37abcded28eb3c475978c8bbaceba0908e7b580484004bb570a6ead21eddb373ed37996737c1a01")
+	body, err := bits.FromBytes(tail).Lsh(6).Or(bits.FromUint64(0x2a)).Bytes(len(tail)) // 6 bits of a message, then the logged tail (426 bits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := append(make([]byte, 11), body...)
+	br := bits.NewReader(data)
+	br.Pos = 88 + 6
+	r.w.relayVoice(a, br)
+	got := sentTo(r, b.Addr)
+	if len(got) != 1 {
+		t.Fatalf("relayed %d datagrams, want the one chat packet", len(got))
+	}
+	p := got[0][23:]
+	if len(p) != 49 || p[0] != 'V' || p[1] != 1 || p[4] != 2 {
+		t.Fatalf("payload of %d bytes starting %x: want the Guide's 49-byte packet 'V' 1 .. with 2 frames", len(p), p[:5])
+	}
+	if left := br.Size - br.Pos; left >= 8 {
+		t.Errorf("%d bits left unread after the chat packet", left)
+	}
+	// messages that end on a byte, and a datagram with no chat packet, as before
+	br = bits.NewReader(append(make([]byte, 11), 0x15, 0x00, 0x00, 0x00, 0x00))
+	br.Pos = 88 + 3
+	r.w.relayVoice(a, br)
+	if br.Pos != 91 || len(sentTo(r, b.Addr)) != 1 {
+		t.Errorf("a datagram without a chat packet moved the reader to %d or was relayed", br.Pos)
 	}
 }

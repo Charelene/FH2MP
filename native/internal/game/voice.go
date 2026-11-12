@@ -3,8 +3,8 @@ package game
 // Voice relay (RE 2026-11-12, Notion "Voice A0: Microsoft's GameChat engine, read for its wire format"; the client side is the Guide's
 // ChatManager, guide/src/voice.cpp on feature/mtproto).
 //
-// The game sends unreliable chat packets after the messages of a datagram, each as `0xC4A7:16 | size:16 | payload` (HeaderToServer,
-// game+0x176a860; the game's own voice datagrams carry no messages), and reads what the server relays as `0xC4A7:16 | size:16 | source
+// The game sends unreliable chat packets after the messages of a datagram, from the next byte boundary, each as `0xC4A7:16 | size:16 |
+// payload` (HeaderToServer, game+0x176a860), and reads what the server relays as `0xC4A7:16 | size:16 | source
 // console id:64 | payload` (HeaderFromServer, game+0x1767030; size below 0x55d, game+0x1763ab0). It never decodes a payload: the engines
 // on both ends do. So the server copies each payload, unread, to the other entered players of the sender's world, stamped with the
 // sender's xuid as its console id.
@@ -150,15 +150,20 @@ func (p *Peer) voiceAllowed(now float64) bool {
 
 // relayVoice relays the chat packets at the end of a datagram from peer; it moves br past them.
 func (w *World) relayVoice(peer *Peer, br *bits.Reader) {
-	if br.Size-br.Pos < 32 {
+	// The game writes its chat packets after the messages of an ordinary datagram, at the next byte boundary (game+0x37f860 aligns the
+	// stream, game+0x141760000, before game+0xa48b20 writes them): up to 7 padding bits come first. Dev 2026-11-12: looked for at the bit
+	// where the messages ended, the magic was found only in the datagrams that happened to end on a byte, one packet in many.
+	at := br.Pos
+	aligned := (at + 7) &^ 7
+	if br.Size-aligned < 32 {
 		return
 	}
-	at := br.Pos
+	br.Pos = aligned
 	if magic, _ := br.Bits(16); magic != VoiceMagic {
 		br.Pos = at
 		return
 	}
-	br.Pos = at
+	br.Pos = aligned
 	payloads, bad := readVoiceTails(br)
 	if bad != "" && !peer.VoiceBadLogged {
 		peer.VoiceBadLogged = true
