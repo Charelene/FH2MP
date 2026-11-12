@@ -161,7 +161,7 @@ func (l *Launcher) profiles(xuids []int64, lobbies []any) (map[int64]card, error
 	in := marks(len(xuids))
 	rows, err := l.C.DB.Query("SELECT a.xuid, a.gamertag, p.career_level, COALESCE(g.gamerpic_at,0) AS gamerpic_version, "+
 		"GREATEST(a.last_login, COALESCE(p.last_seen,0)) AS last_seen, COALESCE(g.motto,'') AS motto, COALESCE(g.real_name,'') AS real_name, "+
-		"COALESCE(g.location,'') AS location, COALESCE(g.bio,'') AS bio FROM accounts a LEFT JOIN players p ON p.xuid=a.xuid "+
+		"COALESCE(g.location,'') AS location, COALESCE(g.bio,'') AS bio, COALESCE(g.theme,'') AS theme FROM accounts a LEFT JOIN players p ON p.xuid=a.xuid "+
 		"LEFT JOIN player_profiles g ON g.xuid=a.xuid WHERE a.xuid IN ("+in+")", int64Args(xuids)...)
 	if err != nil {
 		return nil, err
@@ -255,6 +255,7 @@ func (l *Launcher) card(xuid int64, row, club *db.Row, lobbies []any) (card, err
 		{K: "club", V: clubV}, {K: "lobby", V: lobbyV}}
 	if row != nil {
 		// the Guide's profile: the four texts, and for a player who is offline how long ago they were last here
+		out = append(out, pyjson.Pair{K: "theme", V: row.Str("theme")})
 		out = append(out, pyjson.Pair{K: "motto", V: row.Str("motto")}, pyjson.Pair{K: "name", V: row.Str("real_name")},
 			pyjson.Pair{K: "location", V: row.Str("location")}, pyjson.Pair{K: "bio", V: row.Str("bio")})
 		if last := row.Float("last_seen"); state == "offline" && last > 0 {

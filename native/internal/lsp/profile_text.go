@@ -22,6 +22,16 @@ type profileField struct {
 
 var profileFields = []profileField{{"motto", "motto", 21}, {"name", "real_name", 40}, {"location", "location", 40}, {"bio", "bio", 500}}
 
+// GuideThemes are the Guide's themes (the design canvas's Themes boards): "" is the default (Xbox green); a colour with "-plastic" tints
+// every surface in its hue. The theme rides on the player's card, so other players' Guides show this player's gamercard in it.
+var GuideThemes = map[string]bool{"": true, "xbox": true, "fh2mp": true}
+
+func init() {
+	for _, c := range []string{"red", "orange", "yellow", "green", "blue", "pink"} {
+		GuideThemes[c], GuideThemes[c+"-plastic"] = true, true
+	}
+}
+
 // cleanProfileText is the text as stored: trimmed, inner runs of spaces as one; an error when it is too long, has control characters, or
 // holds a blocked fragment or word. The refusal's words are the 360's.
 func cleanProfileText(f profileField, value string, blocked, blockedWords []string) (string, error) {
@@ -56,7 +66,7 @@ func cleanProfileText(f profileField, value string, blocked, blockedWords []stri
 
 // ownProfile is GET /v1/community/profile: the player's own four texts.
 func (l *Launcher) ownProfile(me int64) (any, error) {
-	row, err := l.C.DB.One("SELECT motto, real_name, location, bio FROM player_profiles WHERE xuid=?", me)
+	row, err := l.C.DB.One("SELECT motto, real_name, location, bio, theme FROM player_profiles WHERE xuid=?", me)
 	if err != nil {
 		return nil, err
 	}
@@ -68,11 +78,15 @@ func (l *Launcher) ownProfile(me int64) (any, error) {
 		}
 		out = append(out, pyjson.Pair{K: f.key, V: v})
 	}
-	return out, nil
+	theme := ""
+	if row != nil {
+		theme = row.Str("theme")
+	}
+	return append(out, pyjson.Pair{K: "theme", V: theme}), nil
 }
 
-// setProfile is POST /v1/community/profile {"motto"?, "name"?, "location"?, "bio"?}: the texts named are replaced (an empty one clears
-// it), the others stay. Nothing is stored when one of them is refused.
+// setProfile is POST /v1/community/profile {"motto"?, "name"?, "location"?, "bio"?, "theme"?}: the texts named are replaced (an empty one
+// clears it), the others stay; theme is one of GuideThemes. Nothing is stored when one of them is refused.
 func (l *Launcher) setProfile(me int64, body pyjson.Obj) (any, error) {
 	type change struct {
 		f    profileField
@@ -96,6 +110,13 @@ func (l *Launcher) setProfile(me int64, body pyjson.Obj) (any, error) {
 			return nil, err
 		}
 		changes = append(changes, change{f, text})
+	}
+	if v, has := body.Get("theme"); has {
+		s, isStr := v.(string)
+		if !isStr || !GuideThemes[s] {
+			return nil, auth.NewError(400, "bad_request", "").WithXuid(me).WithDetail(fmt.Sprintf("theme %v is not one of the Guide's", v))
+		}
+		changes = append(changes, change{profileField{"theme", "theme", 20}, s})
 	}
 	if len(changes) == 0 {
 		return nil, auth.NewError(400, "bad_request", "").WithXuid(me).WithDetail("no profile text named")
