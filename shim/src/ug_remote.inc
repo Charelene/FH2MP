@@ -57,6 +57,7 @@
 #define UGR_RANGE 150.0f           /* metres: a car further away gets none */
 #define UGR_BUILD_BATCH 32         /* lights made in one game CreateLight call */
 #define UGR_RESOLVE_MS 500u
+#define UGR_VALIDATE_MS 500u        /* how often the pool's lights are checked to still be ours (each check costs two reads per light) */
 #define UGR_DARK_MS 250u
 #define UGR_SEEN_MS 1000u
 
@@ -97,7 +98,7 @@ static struct {
     ULONG_PTR pres, manager, beams, glows;               /* the local car's (the reference) */
     unsigned tkey, tindex, tpreset;
     int tok;
-    ULONGLONG resolved_at, frame_at;
+    ULONGLONG resolved_at, frame_at, validated_at;
     ugr_light light[UGR_POOL];
     int count, want;
     unsigned spare[UGR_POOL];
@@ -223,20 +224,33 @@ static void ugr_frame(void)
     unsigned k, n;
     int i, j, ncars = 0, want = 0, dirty = 0;
     g_ugr.frame_at = now;
-    if (!g_ugr.tok || !ugr_tables_read(&t)) return;
-    /* lights the game took back (their records no longer use our preset) are forgotten; their presets kept for new lights */
-    for (i = j = 0; i < g_ugr.count; i++) {
-        ugr_light *l = &g_ugr.light[i];
-        unsigned beam, glow, preset = ~0u;
-        if (ugr_mapping(&t, l->handle, &beam, &glow) && beam < t.nrec &&
-            read_game_memory((void *)(t.rec.begin + (ULONG_PTR)beam * UGR_RECORD + UGR_REC_PRESET), &preset, 4) && preset == l->preset) g_ugr.light[j++] = *l;
-        else if (l->preset < t.npre && g_ugr.spares < UGR_POOL) g_ugr.spare[g_ugr.spares++] = l->preset;
+    if (!g_ugr.tok) return;
+    n = g_mods_share ? mods_snapshot(records, now) : 0;
+    for (k = 0; k < n && !(records[k].ug[0] & 1); k++) {}
+    if (k == n) {                                      /* nobody's underglow is lit (the usual case): no reads, only lights left lit go dark */
+        int any = 0;
+        for (j = 0; j < g_ugr.count; j++) any |= g_ugr.light[j].lit;
+        if (any && ugr_tables_read(&t)) for (j = 0; j < g_ugr.count; j++) { if (g_ugr.light[j].lit) ugr_dark(&t, &g_ugr.light[j]); g_ugr.light[j].owner = 0; }
+        g_ugr.nplaced = 0;
+        g_ugr.want = 0;
+        return;
     }
-    g_ugr.count = j;
+    if (!ugr_tables_read(&t)) return;
+    if (now - g_ugr.validated_at >= UGR_VALIDATE_MS) {
+        /* lights the game took back (their records no longer use our preset) are forgotten; their presets kept for new lights */
+        g_ugr.validated_at = now;
+        for (i = j = 0; i < g_ugr.count; i++) {
+            ugr_light *l = &g_ugr.light[i];
+            unsigned beam, glow, preset = ~0u;
+            if (ugr_mapping(&t, l->handle, &beam, &glow) && beam < t.nrec &&
+                read_game_memory((void *)(t.rec.begin + (ULONG_PTR)beam * UGR_RECORD + UGR_REC_PRESET), &preset, 4) && preset == l->preset) g_ugr.light[j++] = *l;
+            else if (l->preset < t.npre && g_ugr.spares < UGR_POOL) g_ugr.spare[g_ugr.spares++] = l->preset;
+        }
+        g_ugr.count = j;
+    }
     /* the cars: lit underglow, mapped, within range, the nearest first */
     if (!read_game_memory((void *)(g_ugr.pres + UGR_PRES_WORLD), world, sizeof world) || !ugr_finite(world, 16)) return;
     me[0] = world[12]; me[1] = world[13]; me[2] = world[14];
-    n = g_mods_share ? mods_snapshot(records, now) : 0;
     for (k = 0; k < n; k++) {
         const unsigned char *ug = records[k].ug;
         void *car;
