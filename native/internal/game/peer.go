@@ -126,8 +126,11 @@ type Peer struct {
 	VoicePackets, VoiceDropped  int
 	VoiceLogged, VoiceBadLogged bool
 	// LobbyPlayer.PlayerChatStates as this client wrote them (vars 41..76: id, Muted, Friend for 12 players): whom its player muted
-	ChatIDs                 [ChatStates]uint64
-	ChatMuted               [ChatStates]bool
+	ChatIDs   [ChatStates]uint64
+	ChatMuted [ChatStates]bool
+	// the lobby type the game asked for in its OpenConnection when the hub sent it to a world of another type (a private game's member);
+	// 0 = the same
+	ClaimedLobbyType        int
 	MalformedLogged         bool
 	MalformedCount          int
 	OpenedAt                float64

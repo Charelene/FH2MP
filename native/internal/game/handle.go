@@ -271,7 +271,7 @@ loop:
 			case (a == 1 || a == 2 || a == 3) && w.HubKey != nil && w.HubKey.Type >= 1 && w.HubKey.Type <= 3 && w.HubKey.Type != int(a):
 				// the hub sent a private game's member here although its game asked for another lobby type (followType): this world's
 				// type is what the handshake tells it
-				peer.LobbyType = w.HubKey.Type
+				peer.LobbyType, peer.ClaimedLobbyType = w.HubKey.Type, int(a)
 				w.Logf("%d OpenConnection asks for lobby type %d; this world is lobby type %d, which the handshake tells the game", addr.Port, a, w.HubKey.Type)
 			case a == 1 || a == 2 || a == 3:
 				peer.LobbyType = int(a)
@@ -341,6 +341,12 @@ loop:
 					replies = append(replies, netv2.SessionHostCreate(1, func(b *bits.Writer) {
 						b.Bits(0, netv2.SessionHostVarBits)
 						b.Bits(lobby, 3)
+					}))
+				} else if peer.ClaimedLobbyType != 0 && peer.ClaimedLobbyType != peer.LobbyType {
+					// a game that came in as another lobby type (an accepted invite enters through a Car Meet) is told this is Free Roam
+					replies = append(replies, netv2.SessionHostCreate(1, func(b *bits.Writer) {
+						b.Bits(0, netv2.SessionHostVarBits)
+						b.Bits(uint64(peer.LobbyType), 3)
 					}))
 				} else {
 					replies = append(replies, netv2.SessionHostCreate(1, nil))
