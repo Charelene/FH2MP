@@ -7,6 +7,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <signal.h>
 #include <string.h>
 #include "fh2mod.h"
 #include "src/sha256.inc"
@@ -19,9 +20,19 @@ static int read_game_memory(const void *p, void *out, SIZE_T n) { if (!p) return
 static void mem_copy(void *to, const void *from, SIZE_T n) { memcpy(to, from, n); }
 static unsigned char *find_fh2_image(void) { return NULL; }
 static int plat_hook(const char *name, void *target, void *detour, void **original) { (void)name; (void)target; (void)detour; (void)original; return 0; }
-static char g_log[8192];
+static char g_log[1 << 16];
 static void log_begin(void) {}
-static void log_raw(const char *s) { if (strlen(g_log) + strlen(s) < sizeof g_log) strcat(g_log, s); }
+/* the newest lines stay: a full log drops its older half (Wine writes more than a native run) */
+static void log_raw(const char *s)
+{
+    size_t have = strlen(g_log), add = strlen(s);
+    if (add >= sizeof g_log / 2) return;
+    if (have + add >= sizeof g_log) {
+        memmove(g_log, g_log + have - sizeof g_log / 4, sizeof g_log / 4 + 1);
+        have = strlen(g_log);
+    }
+    memcpy(g_log + have, s, add + 1);
+}
 static void log_hex(unsigned long long value, int digits) { (void)value; (void)digits; }
 static void log_hexbytes(const unsigned char *p, unsigned n) { (void)p; (void)n; }
 static void log_dec(unsigned long value) { char b[24]; sprintf(b, "%lu", value); log_raw(b); }
@@ -113,6 +124,23 @@ static void vec_ug(unsigned char ug[MODS_UG])
     memcpy(ug, v, MODS_UG);
 }
 
+/* a failed assert says what the code logged last */
+static void on_abort(int sig)
+{
+    size_t n = strlen(g_log);
+    (void)sig;
+    fprintf(stderr, "--- log tail ---\n%s\n", g_log + (n > 2000 ? n - 2000 : 0));
+}
+
+/* The rule runs at most every NOS_RULE_MS by GetTickCount64, which under a busy Wine can lag behind Sleep: wait until the tick count itself
+ * has moved on, then tick. */
+static void tick_later(void)
+{
+    ULONGLONG t0 = GetTickCount64();
+    do Sleep(20); while (GetTickCount64() - t0 < NOS_RULE_MS + 10);
+    nos_rule_tick();
+}
+
 int main(int argc, char **argv)
 {
     unsigned char packet[MODS_LIMIT], epoch[16], ug[MODS_UG], server = 0;
@@ -121,6 +149,7 @@ int main(int argc, char **argv)
     const char *why;
     ug_customs cc;
     static FH2ModApi api;
+    signal(SIGABRT, on_abort);
     for (i = 0; i < 32; i++) g_ticket_key[i] = (unsigned char)i;
     for (i = 0; i < 16; i++) epoch[i] = (unsigned char)(16 + i);
     g_xuid = 0x9000123456789ull;
@@ -233,24 +262,24 @@ int main(int argc, char **argv)
     nos_rule_tick();
     assert(g_blocked == 1 && !g_nos_allowed);                                       /* the server has not said so */
     InterlockedExchange(&g_nos_server_ok, 1); InterlockedExchange64(&g_nos_server_at, (LONG64)GetTickCount64());
-    Sleep(110); nos_rule_tick();
+    tick_later();
     assert(g_blocked == 0 && g_nos_allowed && strstr(g_log, "nitro: NOS on (online Free Roam"));
     g_burning = 1; assert(nos_flags() == (MODS_NOS_SWITCH | MODS_NOS_ALLOWED | MODS_NOS_BURNING)); g_burning = 0;
-    n = (unsigned)g_block_calls; Sleep(110); nos_rule_tick(); assert(g_block_calls == (int)n);   /* nothing changed: not called again */
-    g_ctx = 5; Sleep(110); nos_rule_tick(); assert(g_blocked == 1 && strstr(g_log, "in a session, and the event context is not free roam"));
-    g_ctx = 3; InterlockedExchange64(&g_nos_server_at, (LONG64)GetTickCount64()); Sleep(110); nos_rule_tick();
+    n = (unsigned)g_block_calls; tick_later(); assert(g_block_calls == (int)n);   /* nothing changed: not called again */
+    g_ctx = 5; tick_later(); assert(g_blocked == 1 && strstr(g_log, "in a session, and the event context is not free roam"));
+    g_ctx = 3; InterlockedExchange64(&g_nos_server_at, (LONG64)GetTickCount64()); tick_later();
     assert(g_blocked == 0 && strstr(g_log, "event context 3"));                     /* an online Free Roam lobby says 3: the server decides */
-    g_ctx = AD_FREE_ROAM; InterlockedExchange64(&g_nos_server_at, (LONG64)GetTickCount64()); Sleep(110); nos_rule_tick(); assert(g_blocked == 0);
-    g_rt = 1; Sleep(110); nos_rule_tick(); assert(g_blocked == 1);
-    g_rt = -1; InterlockedExchange64(&g_nos_server_at, (LONG64)GetTickCount64()); Sleep(110); nos_rule_tick(); assert(g_blocked == 1);   /* unreadable: off */
-    g_rt = 0; InterlockedExchange64(&g_nos_server_at, (LONG64)GetTickCount64()); Sleep(110); nos_rule_tick(); assert(g_blocked == 0);
-    g_sess = 0; g_ctx = 3; Sleep(110); nos_rule_tick(); assert(g_blocked == 1 && strstr(g_log, "solo, and the event context is not free roam"));   /* solo: the context alone */
-    g_ctx = AD_FREE_ROAM; InterlockedExchange(&g_nos_server_ok, 0); Sleep(110); nos_rule_tick();
+    g_ctx = AD_FREE_ROAM; InterlockedExchange64(&g_nos_server_at, (LONG64)GetTickCount64()); tick_later(); assert(g_blocked == 0);
+    g_rt = 1; tick_later(); assert(g_blocked == 1);
+    g_rt = -1; InterlockedExchange64(&g_nos_server_at, (LONG64)GetTickCount64()); tick_later(); assert(g_blocked == 1);   /* unreadable: off */
+    g_rt = 0; InterlockedExchange64(&g_nos_server_at, (LONG64)GetTickCount64()); tick_later(); assert(g_blocked == 0);
+    g_sess = 0; g_ctx = 3; tick_later(); assert(g_blocked == 1 && strstr(g_log, "solo, and the event context is not free roam"));   /* solo: the context alone */
+    g_ctx = AD_FREE_ROAM; InterlockedExchange(&g_nos_server_ok, 0); tick_later();
     assert(g_blocked == 0 && g_nos_allowed && strstr(g_log, "solo Free Roam"));       /* solo Free Roam: no server needed */
     InterlockedExchange(&g_nos_server_ok, 1);
-    g_sess = 1; InterlockedExchange(&g_nos_server_ok, 0); InterlockedExchange64(&g_nos_server_at, (LONG64)GetTickCount64()); Sleep(110); nos_rule_tick();
+    g_sess = 1; InterlockedExchange(&g_nos_server_ok, 0); InterlockedExchange64(&g_nos_server_at, (LONG64)GetTickCount64()); tick_later();
     assert(g_blocked == 1);                                                         /* the server says event / Road Trip */
-    InterlockedExchange(&g_nos_server_ok, 1); InterlockedExchange64(&g_nos_server_at, (LONG64)GetTickCount64() - NOS_SERVER_FRESH_MS - 10); Sleep(110); nos_rule_tick();
+    InterlockedExchange(&g_nos_server_ok, 1); InterlockedExchange64(&g_nos_server_at, (LONG64)GetTickCount64() - NOS_SERVER_FRESH_MS - 10); tick_later();
     assert(g_blocked == 1);                                                         /* an old reply says nothing */
     /* no NitroSystem: nothing to switch, no flags */
     g_have_nos = 0; g_nos_set = NULL; g_nos_active = NULL; g_log[0] = 0;
