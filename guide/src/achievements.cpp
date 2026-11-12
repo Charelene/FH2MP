@@ -239,3 +239,141 @@ void Guide::draw_achievements(ImDrawList* dl, const GuideAssets& a, ImVec2 origi
     const Hint hints[] = {{"B", "Back", RING_B}};
     hint_bar(dl, a, v, L + 27, 617, hints, 1, op);
 }
+
+// ---- Compare Games (a player's options): this player and the other, achievement by achievement. The 360's gp\826-7_GameAchievStatsYou.xur:
+// both pictures with their Gamerscore, the list with one mark for each of the two, and gp\828_AchievDetails.xur behind A (the picture,
+// the title, the points, "Achievement Description" and the text). One game, so the 360's list of the games both played
+// (gp\825_GameShowcaseCompare.xur) is skipped. The other player's unlocks are what their Guide reported to the server.
+
+namespace {
+const int CMP_ROWS = 6;
+const uint32_t I_CHECK = 0xe5ca;  // Material Icons "check"
+}  // namespace
+
+void Guide::open_compare(const Friend& them, std::vector<GuideRequest>& out, double now) {
+    cmp_ = them, cmp_list_ = ListFocus();
+    GuideRequest r;
+    r.action = GuideAction::Achievements, r.xuid = them.xuid, r.name = them.tag;
+    out.push_back(r);
+    push(Page::Compare, now);
+}
+
+void Guide::handle_compare(PadEvent e, double now) {
+    int n = int(DEFS.size());
+    switch (e) {
+    case PadEvent::Up: cmp_list_.move(-1, n, CMP_ROWS, now); break;
+    case PadEvent::Down: cmp_list_.move(1, n, CMP_ROWS, now); break;
+    case PadEvent::A:
+        ach_detail_ = cmp_list_.row;
+        push(Page::AchDetail, now);
+        break;
+    case PadEvent::B: pop(now); break;
+    default: break;
+    }
+}
+
+void Guide::draw_compare(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now) {
+    View v{origin, s, zoom};
+    const float L = PAGE_L, W = PAGE_W;
+    float slide, pop, title_op;
+    page_motion(now, op, &slide, &pop, &title_op);
+    draw_header(dl, a, origin, s, zoom, op, L, W, "Compare Games", title_op);
+    float x = L + slide;
+    int n = int(DEFS.size());
+    auto it = social_.ach_of.find(cmp_.xuid);
+    const AchUnlocks* theirs = it == social_.ach_of.end() ? nullptr : &it->second;  // null until the server answered
+
+    // the two players: this one at the left, the other at the right, as their marks in the rows below
+    dl->AddRectFilled(v.pt(x, 96), v.pt(x + W, 164), alpha(PANEL, pop));
+    player_pic(dl, a, a.gamerpic, social_.me.xuid, v.pt(x + 14, 106), v.pt(x + 62, 154), pop);
+    ImVec2 mn = v.pt(x + 74, 118), mg = v.pt(x + 74 + 10, 142);
+    text_fit(dl, a.text, a.text_m, v.sz(20), mn.x, mn.y, v.sz(250), alpha(WHITE, pop), gamertag);
+    g_mark(dl, a, mg.x, mg.y, v.sz(20), alpha(MUTED, pop));
+    char mine[16];
+    snprintf(mine, sizeof mine, "%d", ach_.gamerscore());
+    text_mid(dl, a.text, a.text_m, v.sz(20), mg.x + v.sz(10 + 7), mg.y, alpha(MUTED, pop), mine);
+    player_pic(dl, a, a.pic(cmp_.xuid), cmp_.xuid, v.pt(x + W - 62, 106), v.pt(x + W - 14, 154), pop);
+    ImVec2 tn = v.pt(x + W - 74, 118), tg = v.pt(x + W - 74, 142);
+    float tw = a.text->CalcTextSizeA(20, FLT_MAX, 0, cmp_.tag.c_str()).x;
+    if (tw <= 250) text_mid(dl, a.text, a.text_m, v.sz(20), tn.x, tn.y, alpha(WHITE, pop), cmp_.tag.c_str(), true);
+    else text_fit(dl, a.text, a.text_m, v.sz(20), tn.x - v.sz(250), tn.y, v.sz(250), alpha(WHITE, pop), cmp_.tag);
+    int their_score = theirs ? theirs->gamerscore() : cmp_.gamerscore;
+    if (their_score >= 0) g_score(dl, a, v, tg.x, tg.y, 20, alpha(MUTED, pop), their_score);
+    float gw = a.text->CalcTextSizeA(20, FLT_MAX, 0, "Forza Horizon 2").x;
+    ImVec2 gp = v.pt(x + (W - gw) / 2, 130);
+    text_mid(dl, a.text, a.text_m, v.sz(20), gp.x, gp.y, alpha(MUTED, pop), "Forza Horizon 2");
+
+    // the achievements: tile, name over description, then this player's mark and the other's
+    const float top = 164, RH = 69, col_me = W - 112, col_them = W - 44;
+    ImVec2 p0 = v.pt(x, top), p1 = v.pt(x + W, top + CMP_ROWS * RH);
+    dl->AddRectFilled(p0, p1, alpha(PANEL, pop));
+    dl->AddLine(v.pt(x, top), v.pt(x + W, top), alpha(LINE, pop), v.sz(1));
+    dl->PushClipRect(p0, p1, true);
+    float by = top + cmp_list_.bar.value(now) * RH;
+    dl->AddRectFilled(v.pt(x, by), v.pt(x + W, by + RH), alpha(ACCENT, pop));
+    for (int i = cmp_list_.top; i < std::min(n, cmp_list_.top + CMP_ROWS); i++) {
+        const AchDef& d = DEFS[i];
+        float y = top + (i - cmp_list_.top) * RH, cy = y + RH / 2;
+        bool foc = i == cmp_list_.row, got_me = ach_.has(d.id), got_them = theirs && theirs->has(d.id);
+        if (!foc) dl->AddLine(v.pt(x, y + RH - 0.5f), v.pt(x + W, y + RH - 0.5f), alpha(LINE, pop), v.sz(1));
+        ImVec2 t0 = v.pt(x + 12, y + 10.5f), t1 = v.pt(x + 60, y + 58.5f);
+        dl->AddRectFilled(t0, t1, alpha(foc ? DARK : RAISED, pop));
+        icon_mid(dl, a, v.sz(28), (t0.x + t1.x) * 0.5f, (t0.y + t1.y) * 0.5f, alpha(got_me || got_them ? WHITE : DISABLED, pop), I_TROPHY);
+        ImVec2 n0 = v.pt(x + 74, cy - 13), n1 = v.pt(x + 74, cy + 14.15f);
+        float room = col_me - 74 - 40;
+        text_fit(dl, a.text, a.text_m, v.sz(22), n0.x, n0.y, v.sz(room), alpha(WHITE, pop), d.name);
+        text_fit(dl, a.text, a.text_m, v.sz(18), n1.x, n1.y, v.sz(room), alpha(foc ? WHITE : MUTED2, pop), d.desc);
+        auto mark = [&](float cx, bool got) {
+            ImVec2 c = v.pt(x + cx, cy);
+            icon_mid(dl, a, v.sz(got ? 30 : 24), c.x, c.y, alpha(got ? (foc ? WHITE : BRIGHT) : (foc ? DARK : DISABLED), pop), got ? I_CHECK : I_LOCK);
+        };
+        mark(col_me, got_me);
+        if (theirs) mark(col_them, got_them);
+    }
+    dl->PopClipRect();
+    ImVec2 f0 = v.pt(x, top + CMP_ROWS * RH), f1 = v.pt(x + W, 607);
+    dl->AddRectFilled(f0, f1, alpha(PANEL, pop));
+    dl->AddLine(ImVec2(f0.x, f0.y + v.sz(0.5f)), ImVec2(f1.x, f0.y + v.sz(0.5f)), alpha(LINE, pop), v.sz(1));
+    ImVec2 fr = v.pt(x + W - 30, (top + CMP_ROWS * RH + 607) / 2);
+    icon_mid(dl, a, v.sz(24), fr.x - v.sz(12), fr.y, alpha(cmp_list_.top + CMP_ROWS < n ? MUTED : DISABLED, pop), I_EXPAND_MORE);
+    icon_mid(dl, a, v.sz(24), fr.x - v.sz(36), fr.y, alpha(cmp_list_.top > 0 ? MUTED : DISABLED, pop), I_EXPAND_LESS);
+    char count[32];
+    snprintf(count, sizeof count, "%d of %d", cmp_list_.row + 1, n);
+    text_mid(dl, a.text, a.text_m, v.sz(18), fr.x - v.sz(56), fr.y, alpha(MUTED, pop), count, true);
+    const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}};
+    hint_bar(dl, a, v, L + 27, 617, hints, 2, op);
+}
+
+void Guide::handle_ach_detail(PadEvent e, double now) {
+    if (e == PadEvent::B) pop(now);
+}
+
+void Guide::draw_ach_detail(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now) {
+    View v{origin, s, zoom};
+    ImFont* bf = a.text_bold ? a.text_bold : a.text;
+    const float L = PAGE_L, W = PAGE_W;
+    float slide, pop, title_op;
+    page_motion(now, op, &slide, &pop, &title_op);
+    draw_header(dl, a, origin, s, zoom, op, L, W, "Compare Games", title_op);
+    float x = L + slide;
+    dl->AddRectFilled(v.pt(x, 96), v.pt(x + W, 607), alpha(PANEL, pop));
+    if (ach_detail_ >= 0 && ach_detail_ < int(DEFS.size())) {
+        const AchDef& d = DEFS[ach_detail_];
+        auto it = social_.ach_of.find(cmp_.xuid);
+        bool got = ach_.has(d.id) || (it != social_.ach_of.end() && it->second.has(d.id));
+        const float y0 = 96 + 27, tx = x + 27, side = 96, ix = tx + side + 22, right = x + W - 30;
+        tile(dl, a, v.pt(tx, y0), v.pt(tx + side, y0 + side), got, pop);
+        ImVec2 np = v.pt(ix, y0 + 30);
+        text_fit(dl, bf, a.bold_m, v.sz(26), np.x, np.y, v.sz(right - ix), alpha(WHITE, pop), d.name);
+        ImVec2 gp = v.pt(ix + 11, y0 + 68);
+        g_mark(dl, a, gp.x, gp.y, v.sz(22), alpha(WHITE, pop));
+        char pts[16];
+        snprintf(pts, sizeof pts, "%d", d.g);
+        text_mid(dl, a.text, a.text_m, v.sz(22), gp.x + v.sz(11 + 8), gp.y, alpha(WHITE, pop), pts);
+        ImVec2 lp = v.pt(tx, y0 + side + 38);
+        text_mid(dl, a.text, a.text_m, v.sz(18), lp.x, lp.y, alpha(MUTED, pop), "Achievement Description");
+        wrapped(dl, a, v, 22, 1.4f, tx, y0 + side + 60, W - 54, alpha(WHITE, pop), d.desc);
+    }
+    const Hint hints[] = {{"B", "Back", RING_B}};
+    hint_bar(dl, a, v, L + 27, 617, hints, 1, op);
+}

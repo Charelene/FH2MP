@@ -18,7 +18,7 @@ const int FRIEND_ROWS = 6;  // 69-unit rows under the tabs
 const int MSG_ROWS = 8;     // 56-unit rows
 const uint32_t COMM_ICON[4] = {I_GROUPS, I_PERSON, I_MAIL, I_GAMES};
 
-enum ProfileCmd { PInvite, PJoin, PMessage, PAddFriend, PAccept, PDecline, PCancel, PRemove, PBio, PEdit };
+enum ProfileCmd { PInvite, PJoin, PMessage, PAddFriend, PAccept, PDecline, PCancel, PRemove, PBio, PEdit, PCompare };
 
 // The profile texts a player can set, as the server names them, and how long each may be.
 const char* FIELD_NAME[4] = {"Motto", "Name", "Location", "Bio"};
@@ -347,6 +347,8 @@ std::vector<Opt> Guide::profile_options(int tab) const {
     o.push_back({"Invite to Game", PInvite, can_invite(p) && idle, 0});
     if (can_join(p)) o.push_back({"Join Session In Progress", PJoin, idle, 0});
     o.push_back({"Send Message", PMessage, rel == Relation::Friend, 0});
+    // the 360's Compare Games: their achievements beside this player's; greyed while neither side has any to show
+    o.push_back({"Compare Games", PCompare, p.gamerscore >= 0 || ach_.known, 0});
     if (rel == Relation::Friend) o.push_back({"Remove Friend", PRemove, true, 0});
     if (rel == Relation::RequestSent) o.push_back({"Cancel Friend Request", PCancel, true, 0});
     return o;
@@ -430,6 +432,7 @@ void Guide::handle_profile(PadEvent e, std::vector<GuideRequest>& out, double no
             drop(social_.friends);
             break;
         case PBio: show_box(0, (p.tag + "'s bio").c_str(), p.bio, {"Back"}, now); break;
+        case PCompare: open_compare(p, out, now); return;
         case PEdit:
             edit_row_ = -1;
             push(Page::EditProfile, now);

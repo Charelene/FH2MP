@@ -179,6 +179,14 @@ int main(int argc, char** argv) {
     so.texts.push_back(tm);
     tm.id = 9, tm.from = 8, tm.tag = "drift_mum", tm.body = "gg", tm.chat = "8", tm.created = double(time(nullptr)) - 30 * 3600, tm.unread = false;
     so.texts.push_back(tm);
+    // NightRunR's achievements as the server has them (their Guide reported them)
+    so.friends[1].gamerscore = 160;
+    if (scene != "compare-loading")
+        ach_parse("[unlocked]\nwelcome_festival=2026-09-01 10:00:00 UTC\nwelcome_sisteron=2026-09-01 11:00:00 UTC\nwelcome_castelletto=2026-09-02 11:00:00 UTC\n"
+                  "horizon_leader=2026-09-02 12:00:00 UTC\nwristband_yellow=2026-09-01 10:30:00 UTC\nwristband_green=2026-09-03 10:30:00 UTC\n"
+                  "wristband_pink=2026-09-05 10:30:00 UTC\nfirst_of_many=2026-09-01 10:40:00 UTC\nnew_car_smell=2026-09-01 10:10:00 UTC\ncar_lover=2026-10-01 10:10:00 UTC\n",
+                  &so.ach_of[3]),
+            so.ach_of[3].known = true;
     g.set_social(so);
     if (scene.find("noach") == std::string::npos) {
         // the Achievements mod's file, as it writes it
@@ -214,6 +222,14 @@ int main(int argc, char** argv) {
         for (int i = 0; i < downs; i++) g.handle(D, 99.0);
         g.handle(A, scene == "exit-session" ? t0 - 3 : t0);
         if (scene == "exit-session") g.handle(A, t0);  // Accept Game Invite while in a game
+    } else if (scene == "compare" || scene == "compare-loading" || scene == "compare-down" || scene == "ach-detail") {
+        // Friends > NightRunR > Compare Games (after Invite to Game, Join Session In Progress, Send Message)
+        g.open_community(TabFriends, t0 - 5);
+        for (int i = 0; i < 3; i++) g.handle(D, 99.0);
+        g.handle(A, t0 - 4), press({D, D, D});
+        g.handle(A, scene == "ach-detail" ? t0 - 3 : t0);
+        if (scene == "compare-down") press({D, D, D, D, D, D, D, D, D});
+        if (scene == "ach-detail") press({D, D, D, D, D, D}), g.handle(A, t0);
     } else if (scene.rfind("profile", 0) == 0) {
         // friends tab rows: Add Friend, PaperLantern (request), DebugWolf, NightRunR, torque.tuner, drift_mum, Kestrel 88, Ugandan Hobo (sent), ...
         g.open_community(TabFriends, t0 - 5);

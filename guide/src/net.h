@@ -3,9 +3,12 @@
 // does all requests; the render thread only takes copies and results.
 #pragma once
 
+#include <map>
 #include <cstdint>
 #include <string>
 #include <vector>
+
+#include "achievements.h"
 
 // A player's card as the server gives it (a friend, or anyone else the Guide shows).
 struct Friend {
@@ -58,12 +61,13 @@ struct Social {
     std::vector<ChatThread> chats;
     std::vector<TextMessage> texts;  // friends' messages, newest first, without the ones deleted here
     std::vector<Friend> others;      // players looked up by xuid (the game asked for their gamercard)
+    std::map<uint64_t, AchUnlocks> ach_of;  // other players' achievements as the server gave them (Compare Games)
     uint64_t version = 0;  // goes up with every change
 };
 
 // Actions (Invite .. Join) and what the worker noticed on its own (Received: a game invite; GotRequest: a friend request; GotText: a
 // message; Online: a friend came online).
-enum class NetOp { Invite, Accept, Decline, FriendRequest, AcceptFriend, DeclineFriend, RemoveFriend, SendText, ReadChat, Join, SetProfile, Lookup, Received, GotRequest, GotText, Online };
+enum class NetOp { Invite, Accept, Decline, FriendRequest, AcceptFriend, DeclineFriend, RemoveFriend, SendText, ReadChat, Join, SetProfile, Lookup, Achievements, Received, GotRequest, GotText, Online };
 
 // What came of an action, or what arrived.
 struct NetResult {
@@ -101,5 +105,8 @@ void net_hide_text(int64_t id);  // a message deleted in the Message Center: the
 void net_join(uint64_t xuid, const std::string& name, const std::string& lobby, const std::string& kind);
 void net_set_profile(const std::string& field, const std::string& text);  // field: "motto", "name", "location" or "bio"
 void net_lookup(uint64_t xuid);  // any player's card, into Social::others
+void net_achievements(uint64_t xuid, const std::string& name);  // a player's unlocked achievements, into Social::ach_of
+// This player's unlocked achievements (the Achievements mod's file): told to the server when they changed, again until it took them.
+void net_report_achievements(const AchUnlocks& u);
 bool net_take_result(NetResult* out);
 bool net_take_pic(PicReady* out);

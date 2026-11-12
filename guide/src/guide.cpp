@@ -484,6 +484,8 @@ std::vector<GuideRequest> Guide::handle(PadEvent e, double now) {
     case Page::Compose: handle_compose(e, out, now); break;
     case Page::Keyboard: handle_keyboard(e, out, now); break;
     case Page::Achievements: handle_achievements(e, now); break;
+    case Page::Compare: handle_compare(e, now); break;
+    case Page::AchDetail: handle_ach_detail(e, now); break;
     }
     return out;
 }
@@ -642,6 +644,14 @@ void Guide::on_result(const NetResult& r, const GuideAssets& a, double now) {
         if (!r.ok) show_box(BoxInfo, "Edit Profile", r.code == "bad_profile_text" ? r.message : failure_text(r, "Can't complete this process. Please try again."), {"OK"}, now);
         break;
     case NetOp::ReadChat: break;
+    case NetOp::Achievements:
+        // Compare Games without the other player's achievements: said in a box, back on their profile
+        if (!r.ok && open && cmp_.xuid == r.xuid && (page() == Page::Compare || page() == Page::AchDetail)) {
+            while (page() != Page::Compare) stack_.pop_back();
+            pop(now);
+            show_box(BoxInfo, "Compare Games", "Can't retrieve information from FH2MP. Please try again later.", {"OK"}, now);
+        }
+        break;
     case NetOp::Lookup:
         // the game's gamercard for a player the server could not give: said in a box, and the game gets its screen back
         if (!r.ok && open && stack_.size() == 1 && page() == Page::Profile && prof_.xuid == r.xuid && !find(r.xuid))
@@ -701,6 +711,8 @@ bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double 
         case Page::Compose: draw_compose(dl, a, origin, s, zoom, op, now); break;
         case Page::Keyboard: draw_keyboard(dl, a, origin, s, zoom, op, now); break;
         case Page::Achievements: draw_achievements(dl, a, origin, s, zoom, op, now); break;
+        case Page::Compare: draw_compare(dl, a, origin, s, zoom, op, now); break;
+        case Page::AchDetail: draw_ach_detail(dl, a, origin, s, zoom, op, now); break;
         }
         if (box_.on) draw_box(dl, a, origin, s, w, h, now);
     }

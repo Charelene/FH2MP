@@ -35,6 +35,9 @@ std::deque<Op> g_ops;
 std::deque<NetResult> g_results;
 std::deque<PicReady> g_pics;
 std::map<uint64_t, Friend> g_others;  // players looked up by xuid
+std::map<uint64_t, AchUnlocks> g_ach_of;  // other players' achievements, as read for Compare Games
+std::string g_ach_report;  // this player's achievements as the body to tell the server, and whether it still has to be told
+bool g_ach_pending;
 std::set<int64_t> g_hidden;  // messages deleted in the Message Center (data/bin/fh2mp-guide-hidden.txt)
 bool g_hidden_dirty;
 
@@ -254,7 +257,8 @@ DWORD WINAPI worker(LPVOID) {
     Conn conn;
     bool have = false, reachable = true;
     std::string why_none;
-    ULONGLONG next_comm = 0, next_inv = 0, next_session = 0;
+    ULONGLONG next_comm = 0, next_inv = 0, next_session = 0, next_ach = 0;
+    std::string ach_fail;  // why the last report of the achievements failed (said once)
     std::set<int64_t> seen_invites;
     bool first_invites = true, first_comm = true;
     std::map<uint64_t, double> pic_done;  // xuid -> picture version fetched (-1: none on the server)
@@ -322,6 +326,18 @@ DWORD WINAPI worker(LPVOID) {
                         if (g_others.size() > 64) g_others.clear();
                         g_others[f.xuid] = f;
                     }
+                } else if (op.op == NetOp::Achievements) {
+                    status = request(conn, L"GET", "/v1/community/player/" + them + "/achievements", "", &out, &err);
+                    JVal v;
+                    if (status == 200 && json_parse(out, &v)) {
+                        AchUnlocks u;
+                        u.known = true;
+                        for (auto& kv : v["unlocked"].o) u.when[kv.first] = kv.second.str();
+                        std::lock_guard<std::mutex> l(g_mu);
+                        if (g_ach_of.size() > 32) g_ach_of.clear();
+                        g_ach_of[op.xuid] = u;
+                        g_social.ach_of = g_ach_of, g_social.version++;
+                    }
                 } else if (op.op == NetOp::SetProfile) {
                     status = request(conn, L"POST", "/v1/community/profile", "{" + quoted(op.name) + ":" + quoted(op.text) + "}", &out, &err);
                 } else if (op.op == NetOp::Accept) {
@@ -356,7 +372,7 @@ DWORD WINAPI worker(LPVOID) {
                                    : op.op == NetOp::FriendRequest ? "friend request to" : op.op == NetOp::RemoveFriend ? "removing the friend"
                                    : op.op == NetOp::SendText ? "message to" : op.op == NetOp::Join ? "holding a seat in the game of"
                                    : op.op == NetOp::SetProfile ? "setting the profile text" : op.op == NetOp::Lookup ? "looking up the player"
-                                   : "marking read the chat";
+                                   : op.op == NetOp::Achievements ? "reading the achievements of" : "marking read the chat";
                 if (r.ok) logf("guide: %s %s (%llx) done", what, op.name.c_str(), (unsigned long long)op.xuid);
                 else logf("guide: %s %s (%llx) failed: %s", what, op.name.c_str(), (unsigned long long)op.xuid, r.message.c_str());
                 if (op.op != NetOp::Invite) next_inv = 0;
@@ -366,6 +382,33 @@ DWORD WINAPI worker(LPVOID) {
         }
         if (!have) continue;
         now = GetTickCount64();
+        // this player's achievements, when the Achievements mod's file changed: told until the server took them (a minute between tries)
+        std::string report;
+        {
+            std::lock_guard<std::mutex> l(g_mu);
+            if (g_ach_pending && now >= next_ach) report = g_ach_report;
+        }
+        if (!report.empty()) {
+            std::string out, err;
+            int status = request(conn, L"POST", "/v1/community/achievements", report, &out, &err);
+            JVal v;
+            if (status >= 200 && status < 300) {
+                json_parse(out, &v);
+                logf("guide: achievements told to the server: it has %d unlocked for %dG", int(v["count"].i64()), int(v["gamerscore"].i64()));
+                ach_fail.clear();
+                std::lock_guard<std::mutex> l(g_mu);
+                if (g_ach_report == report) g_ach_pending = false;
+            } else {
+                std::string why = status == 404 ? "this server keeps no achievements" : refusal(status, out, err);
+                if (why != ach_fail) logf("guide: achievements not told to the server (%s): %s", why.c_str(), status == 404 ? "not tried again this run" : "tried again every minute");
+                ach_fail = why;
+                next_ach = now + 60000;
+                if (status == 404) {
+                    std::lock_guard<std::mutex> l(g_mu);
+                    g_ach_pending = false;
+                }
+            }
+        }
         if (now >= next_comm) {
             next_comm = now + (open ? 5000 : 30000);
             std::string out, err;
@@ -451,6 +494,7 @@ DWORD WINAPI worker(LPVOID) {
                 std::sort(g_social.texts.begin(), g_social.texts.end(), [](const TextMessage& a, const TextMessage& b) { return a.id > b.id; });
                 g_social.others.clear();
                 for (auto& kv : g_others) g_social.others.push_back(kv.second);
+                g_social.ach_of = g_ach_of;
                 g_social.loaded = true, g_social.error.clear();
                 if (!reachable) logf("guide: the server answers again"), reachable = true;
             } else {
@@ -569,6 +613,23 @@ void net_join(uint64_t xuid, const std::string& name, const std::string& lobby, 
 void net_set_profile(const std::string& field, const std::string& text) { push_op(NetOp::SetProfile, 0, 0, field, text); }
 
 void net_lookup(uint64_t xuid) { push_op(NetOp::Lookup, xuid, 0, ""); }
+
+void net_achievements(uint64_t xuid, const std::string& name) { push_op(NetOp::Achievements, xuid, 0, name); }
+
+void net_report_achievements(const AchUnlocks& u) {
+    if (!u.known) return;
+    std::string body = "{\"unlocked\":{";
+    bool first = true;
+    for (const auto& kv : u.when) {
+        body += (first ? "" : ",") + quoted(kv.first) + ":" + quoted(kv.second);
+        first = false;
+    }
+    body += "}}";
+    std::lock_guard<std::mutex> l(g_mu);
+    if (body == g_ach_report) return;
+    g_ach_report = body, g_ach_pending = true;
+    g_cv.notify_all();
+}
 
 void net_hide_text(int64_t id) {
     std::lock_guard<std::mutex> l(g_mu);

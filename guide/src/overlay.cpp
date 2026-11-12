@@ -495,6 +495,7 @@ void social_and_toasts(double now) {
             if (u.known) logf("guide: achievements read from the Achievements mod's unlock file (%d of %d unlocked, %dG)", u.count(), int(ach_defs().size()), u.gamerscore());
             else logf("guide: the Achievements mod has no unlock file (fh2-mods\\Achievements\\User_*.ini): the Guide's Achievements stay off");
             g_guide.set_achievements(u);
+            net_report_achievements(u);
         }
     }
     PicReady pic;
@@ -537,6 +538,7 @@ void ask(const GuideRequest& r) {
     case GuideAction::SetProfile: net_set_profile(r.name, r.text); break;
     case GuideAction::JoinGame: join_request(r.scid, r.kind, r.text, r.name); break;
     case GuideAction::Lookup: net_lookup(r.xuid); break;
+    case GuideAction::Achievements: net_achievements(r.xuid, r.name); break;
     case GuideAction::None:
     case GuideAction::Resume: break;
     }
