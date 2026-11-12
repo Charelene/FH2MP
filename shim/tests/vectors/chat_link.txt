@@ -1,0 +1,22 @@
+# Chat link v1 (shim <-> chat core, loopback TCP): one frame per line, "<name> <hex>". All little-endian.
+# Frame: u32 length of what follows (2 + payload, at most 65536), u16 type, payload. Unknown types are skipped by their length.
+# 1 HELLO       shim->core  u16 version, 32 bytes secret (from fh2mp-chat.txt), u32 game pid, u64 game window, u64 xuid (0 unknown)
+# 2 WELCOME     core->shim  u16 version, u8 flags (bit 0: the Guide can be shown)
+# 3 PAD         shim->core  u16 XInput buttons (0x0400 = Guide), u8 left trigger, u8 right trigger, i16 lx, ly, rx, ry (only while the Guide is open)
+# 4 GUIDE       shim->core  u8 cause (1 Guide button held 1 s, 2 keyboard key, 3 the game asked to invite friends): open or close the Guide
+# 5 GUIDE_STATE core->shim  u8 open (1: the shim keeps the pad from the game and sends PAD)
+# 6 WINDOW      shim->core  i32 x, y, width, height of the game's client area in screen pixels, u8 flags (bit 0 fullscreen, bit 1 minimized)
+# 7 GAME_STATE  shim->core  u8 online, u8 mode (0 menus, 1 Free Roam, 2 event, 3 Road Trip, 4 Car Meet), u16 players in the world
+# 8 OPEN_PAGE   shim->core  u8 page (1 invite to game), u16 length, UTF-8 argument (at most 512 bytes)
+# 9 BYE         either      u8 reason (1 game closing, 2 core closing, 3 protocol error)
+# The C side is shim/src/chat_link_wire.h (tests/test_chat_link.sh), the Rust side client/crates/fh2mp-chat/src/link_wire.rs; both check
+# their encoder and decoder against these lines.
+hello 3800000001000100000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f921000002c0b1a00000000006b23d52700000900
+welcome 050000000200010001
+pad 0e0000000300011400ff0080ff7f64009cff
+guide 03000000040001
+guide_state 03000000050001
+window 13000000060080f8ffff00000000800700003804000001
+game_state 06000000070001010b00
+open_page 16000000080001110066726565726f616d3a3737343164633164
+bye 03000000090002

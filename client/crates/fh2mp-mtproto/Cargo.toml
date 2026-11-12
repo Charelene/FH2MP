@@ -1,0 +1,25 @@
+[package]
+name = "fh2mp-mtproto"
+version = "0.1.0"
+description = "The FH2MP chat's MTProto 2.0 client: temporary auth keys against a pinned server key, sign-in with the account key, RPCs and the update stream"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+fh2mp-tl = { path = "../fh2mp-tl" }
+grammers-crypto = { workspace = true }
+grammers-mtproto = { workspace = true }
+grammers-tl-types = { workspace = true }
+base64 = "0.22"
+ed25519-dalek = "2"
+getrandom = "0.4.3"
+num-bigint = "0.5"
+sha1 = "0.11"
+tokio = { version = "1", features = ["net", "time", "sync", "rt", "macros", "io-util"] }
+tracing = "0.1"
+
+[dev-dependencies]
+grammers-crypto = { workspace = true }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }

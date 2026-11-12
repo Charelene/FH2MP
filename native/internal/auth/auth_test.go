@@ -189,3 +189,56 @@ func TestGoRoundTrip(t *testing.T) {
 		t.Fatalf("rename cooldown: %v", err)
 	}
 }
+
+// SignInKey (the chat's sign-in): bound to its purpose and its extra fields, single-use challenges, bans apply, no session token.
+func TestSignInKey(t *testing.T) {
+	now := 1_800_000_000.0
+	s := service(t, &now)
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	chal, bits, _, _ := s.Challenge("203.0.113.9")
+	raw, _ := unb64u(chal)
+	var c uint64
+	for !PowOK(raw, pub, c, bits) {
+		c++
+	}
+	acct, err := s.Register("203.0.113.9", chal, B64u(pub), "Chat Key", int64(c), B64u(ed25519.Sign(priv, SignMessage("dev", "register", raw, pub, []byte("Chat Key")))), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyID := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	sign := func(purpose string, fields ...[]byte) ([]byte, []byte) {
+		r, _, err := s.ChallengeRaw("203.0.113.9")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r, ed25519.Sign(priv, SignMessage("dev", purpose, r, append([][]byte{pub}, fields...)...))
+	}
+	r, sig := sign("mtproto", keyID)
+	got, err := s.SignInKey("203.0.113.9", "mtproto", r, pub, sig, keyID)
+	if err != nil || got.Xuid != acct.Xuid || got.Gamertag != "Chat Key" {
+		t.Fatalf("sign-in: %+v %v", got, err)
+	}
+	if _, err := s.SignInKey("203.0.113.9", "mtproto", r, pub, sig, keyID); err == nil || err.(*Error).Code != "challenge_used" {
+		t.Fatalf("challenge reused: %v", err)
+	}
+	// A launcher-login signature, or one made for another auth key, does not sign the chat in.
+	r, sig = sign("login")
+	if _, err := s.SignInKey("203.0.113.9", "mtproto", r, pub, sig, keyID); err == nil || err.(*Error).Code != "bad_signature" {
+		t.Fatalf("login signature as chat sign-in: %v", err)
+	}
+	r, sig = sign("mtproto", []byte{9, 9, 9, 9, 9, 9, 9, 9})
+	if _, err := s.SignInKey("203.0.113.9", "mtproto", r, pub, sig, keyID); err == nil || err.(*Error).Code != "bad_signature" {
+		t.Fatalf("signature for another key id: %v", err)
+	}
+	reason := "test"
+	if _, err := s.SetBanned(acct.Xuid, &reason, nil); err != nil {
+		t.Fatal(err)
+	}
+	r, sig = sign("mtproto", keyID)
+	if _, err := s.SignInKey("203.0.113.9", "mtproto", r, pub, sig, keyID); err == nil || err.(*Error).Code != "banned" {
+		t.Fatalf("banned account: %v", err)
+	}
+	if st, _ := s.Stats(); st["sessions"] != 0 {
+		t.Fatalf("chat sign-ins made HTTP sessions: %v", st)
+	}
+}

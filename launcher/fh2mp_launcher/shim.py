@@ -17,7 +17,7 @@ from . import logs, paths, upstream
 from .constants import AZIMUTH_TLS_HELPERS, AZIMUTH_VERSION, BUILTIN_AZIMUTH_BUILDS, UPSTREAM
 from .constants import (EXTRA_MODS_DIR, EXTRA_MODS_RESERVED, EXTRA_OPTIONS_DIR, EXTRA_OPTIONS_DLL, EXTRA_OPTIONS_DLL_SHA256, EXTRA_OPTIONS_VERSION,
                         LEGACY_SHIM_DLL, LSP_FILE, MODS_DIR, PLATFORM_DLL, PLATFORM_DLL_SHA256, PLATFORM_FILES, PLATFORM_LOADERS, PLATFORM_VERSION,
-                        RETIRED_EXTRA_OPTIONS, SESSION_FILE, SHIM_DLL)
+                        RETIRED_EXTRA_OPTIONS, SESSION_FILE, SHIM_DLL, GUIDE_DLL)
 
 MARKER = re.compile(rb"FH2MP-SHIM-VERSION:([0-9A-Za-z.+-]{1,32}):END")
 EXTRA_FILES_PREFIX = "FH2_ExtraOptions."
@@ -30,6 +30,10 @@ class ShimError(Exception):
 
 def _dll(folder):
     return os.path.join(folder, MODS_DIR, SHIM_DLL)
+
+
+def _guide(folder):
+    return os.path.join(folder, MODS_DIR, GUIDE_DLL)
 
 
 def _vkey(v):
@@ -195,18 +199,20 @@ def _install_platform(folder, files):
 
 
 def enable(folder):
-    """Takes FH2MP off the platform's list of mods turned off on the in-game MODS tab. -> True when it was on it."""
+    """Takes FH2MP (and the Guide with it) off the platform's list of mods turned off on the in-game MODS tab. -> True when FH2MP was on it."""
     path = os.path.join(folder, MODS_DIR, DISABLED_LIST)
     try:
         with open(path, encoding="utf-8-sig") as f:
             lines = f.read().splitlines()
     except OSError:
         return False
-    keep = [ln for ln in lines if ln.strip().lower() != SHIM_DLL.lower()]
+    ours = {SHIM_DLL.lower(), GUIDE_DLL.lower()}
+    was = any(ln.strip().lower() == SHIM_DLL.lower() for ln in lines)
+    keep = [ln for ln in lines if ln.strip().lower() not in ours]
     if len(keep) == len(lines):
         return False
     paths.atomic_write(path, ("\n".join(keep) + "\n").encode("utf-8"), 0o644)
-    return True
+    return was
 
 
 def disable(folder):
@@ -218,19 +224,26 @@ def disable(folder):
             lines = f.read().splitlines()
     except OSError:
         lines = []
-    if any(ln.strip().lower() == SHIM_DLL.lower() for ln in lines):
+    have = {ln.strip().lower() for ln in lines}
+    if SHIM_DLL.lower() in have and (GUIDE_DLL.lower() in have or not os.path.isfile(_guide(folder))):
         return False
+    add = [n for n in (SHIM_DLL, GUIDE_DLL) if n.lower() not in have and (n == SHIM_DLL or os.path.isfile(_guide(folder)))]
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    paths.atomic_write(path, ("\n".join([ln for ln in lines if ln.strip()] + [SHIM_DLL]) + "\n").encode("utf-8"), 0o644)
-    return True
+    paths.atomic_write(path, ("\n".join([ln for ln in lines if ln.strip()] + add) + "\n").encode("utf-8"), 0o644)
+    return SHIM_DLL in add
 
 
-def install(folder, dll_bytes, expect_sha256=None, platform=None):
+def install(folder, dll_bytes, expect_sha256=None, platform=None, guide=None, guide_sha256=None):
     """Puts the shim in fh2-mods and, from `platform` ({file name: bytes} of PLATFORM_FILES, upstream.fetch("platform")), the FH2 Mod
-    Platform next to azimuth.exe when it is missing or older. Without `platform` a good one must be there already. Moves the old winmm.dll
-    layout over first. Returns a list of things done, for the log. Raises ShimError with a message fit for the user."""
+    Platform next to azimuth.exe when it is missing or older. Without `platform` a good one must be there already. `guide` (the bytes of
+    FH2MPGuide.dll from the same zip) goes next to the shim. Moves the old winmm.dll layout over first. Returns a list of things done, for the
+    log. Raises ShimError with a message fit for the user."""
     if expect_sha256 and hashlib.sha256(dll_bytes).hexdigest() != expect_sha256.lower():
         raise ShimError("the downloaded shim does not match its checksum")
+    if guide is not None and guide_sha256 and hashlib.sha256(guide).hexdigest() != guide_sha256.lower():
+        raise ShimError("the downloaded Guide does not match its checksum")
+    if guide is not None and not guide.startswith(b"MZ"):
+        raise ShimError("the Guide in the shim package is not a DLL")
     if not blob_version(dll_bytes):
         raise ShimError("that file is not an FH2MP shim")
     if platform is None and not platform_ok(folder):
@@ -244,6 +257,11 @@ def install(folder, dll_bytes, expect_sha256=None, platform=None):
         if inspect_dll(target)[0] == "ours":
             shutil.copy2(target, target + ".prev")
         paths.atomic_write(target, dll_bytes, 0o755, busy_ok=True)
+        if guide is not None:
+            g = _guide(folder)
+            if os.path.isfile(g):
+                shutil.copy2(g, g + ".prev")
+            paths.atomic_write(g, guide, 0o755, busy_ok=True)
     except OSError as e:
         where = getattr(e, "filename2", None) or getattr(e, "filename", None) or ""
         if getattr(e, "winerror", None) in (32, 33):
@@ -256,12 +274,14 @@ def install(folder, dll_bytes, expect_sha256=None, platform=None):
     if enable(folder):
         did.append("turned FH2MP back on (it was off on the in-game MODS tab)")
     did.append(f"installed shim {blob_version(dll_bytes)}")
+    if guide is not None:
+        did.append(f"installed the Guide ({len(guide)} bytes)")
     return did
 
 
 def uninstall(folder):
-    """Removes the shim (and an old winmm.dll one). The platform stays: other mods may use it."""
-    for path in (_dll(folder), _dll(folder) + ".prev"):
+    """Removes the shim and the Guide (and an old winmm.dll shim). The platform stays: other mods may use it."""
+    for path in (_dll(folder), _dll(folder) + ".prev", _guide(folder), _guide(folder) + ".prev"):
         try:
             os.unlink(path)
         except OSError:
@@ -842,6 +862,57 @@ def install_anna(folder, files):
     except OSError as e:
         raise ShimError(f"could not install FH2 ANNA: {e.strerror or e}. Is the game still running?") from None
     return [f"installed FH2 ANNA {anna_version()} (qiangqiang101, MIT) from its GitHub release"]
+
+# ---- Achievements (Trinculo54): fh2-mods\Achievements.dll, loaded by the platform next to the shim. It works out the game's 88 achievements
+# from the save and the game's events and keeps them in fh2-mods\Achievements\; the Guide reads that for its list and tells the server.
+# Optional: a game runs without it, and a player's own build of it is left alone.
+
+ACHIEVEMENTS_DLL = "fh2-mods/Achievements.dll"
+ACHIEVEMENTS_INI = "fh2-mods/Achievements.ini"
+# The mod's own settings file as it writes it, with its GitHub update check off: the launcher installs a pinned build, so the title screen's
+# "a newer version is out" would send players to install what the launcher does not know. Written only when the player has no file.
+ACHIEVEMENTS_INI_TEXT = (b"; Achievements (fh2-mods\\Achievements.ini). Delete this file to get the defaults back.\r\n"
+                         b"[Achievements]\r\n"
+                         b"; 0 = no pop-up when you unlock an achievement (also under Pause > Settings > MODS)\r\n"
+                         b"Popups=1\r\n"
+                         b"; 0 = don't check GitHub for a newer version\r\n"
+                         b"CheckUpdates=0\r\n")
+
+
+def achievements_version():
+    return UPSTREAM["achievements"]["version"]
+
+
+def achievements_installed(folder):
+    """-> (installed, version): the pinned version when the DLL is the pinned build, "unknown" for another Achievements.dll (a newer one the
+    player put there, say), (False, "") when missing."""
+    try:
+        with open(os.path.join(folder, *ACHIEVEMENTS_DLL.split("/")), "rb") as f:
+            same = hashlib.sha256(f.read()).hexdigest() == UPSTREAM["achievements"]["dllSha256"]
+    except OSError:
+        return False, ""
+    return True, achievements_version() if same else "unknown"
+
+
+def install_achievements(folder, files):
+    """Installs the Achievements mod from its release (`files` = upstream.fetch("achievements"): the DLL only) where there is none; an
+    Achievements.dll already there, whatever build, is the player's and stays. Its settings file is written with the update check off when
+    the player has none. -> list of things done."""
+    data = files.get(ACHIEVEMENTS_DLL)
+    if data is None:
+        raise ShimError("the Achievements release has no Achievements.dll")
+    target = os.path.join(folder, *ACHIEVEMENTS_DLL.split("/"))
+    if os.path.exists(target):
+        return []
+    ini = os.path.join(folder, *ACHIEVEMENTS_INI.split("/"))
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        if not os.path.exists(ini):
+            paths.atomic_write(ini, ACHIEVEMENTS_INI_TEXT, 0o644, busy_ok=True)
+        paths.atomic_write(target, data, 0o755, busy_ok=True)
+    except OSError as e:
+        raise ShimError(f"could not install Achievements: {e.strerror or e}. Is the game still running?") from None
+    return [f"installed Achievements {achievements_version()} (Trinculo54, GPL-3.0) from its GitHub release"]
 
 
 # ---- Extra Options' aero unlock ([Experiments] UnlockAeroTuning). With it on, Extra Options gives every stock aero part its car's race aero physics at game

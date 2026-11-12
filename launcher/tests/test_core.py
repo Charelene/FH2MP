@@ -897,6 +897,36 @@ class ShimTests(unittest.TestCase):
             with self.assertRaises(updater.UpdateError):
                 core.read_shim_zip(zp)
 
+    def test_the_guide_in_the_shim_zip(self):
+        from fh2mp_launcher import core
+        with tempfile.TemporaryDirectory() as d:
+            zp = os.path.join(d, "fh2mp-shim-0.1.0.zip")
+            with zipfile.ZipFile(zp, "w") as z:
+                z.writestr("fh2-mods/FH2MP.dll", self.DLL)
+            self.assertIsNone(core.read_shim_guide(zp))                                       # a shim from before the Guide shipped
+            with zipfile.ZipFile(zp, "w") as z:
+                z.writestr("fh2-mods\\FH2MP.dll", self.DLL)
+                z.writestr("fh2-mods\\FH2MPGuide.dll", b"MZ guide")                          # Compress-Archive on Windows
+            self.assertEqual(core.read_shim_guide(zp), b"MZ guide")
+
+    def test_install_puts_the_guide_next_to_the_shim(self):
+        guide = b"MZ the guide"
+        with tempfile.TemporaryDirectory() as d:
+            did = shim.install(d, self.DLL, platform=platform_files(), guide=guide, guide_sha256=hashlib.sha256(guide).hexdigest())
+            self.assertEqual(self.read(d, "fh2-mods", "FH2MPGuide.dll"), guide)
+            self.assertTrue(any("Guide" in x for x in did))
+            shim.install(d, self.DLL, platform=platform_files(), guide=b"MZ a newer guide")
+            self.assertEqual(self.read(d, "fh2-mods", "FH2MPGuide.dll"), b"MZ a newer guide")
+            self.assertEqual(self.read(d, "fh2-mods", "FH2MPGuide.dll.prev"), guide)
+            with self.assertRaises(shim.ShimError):
+                shim.install(d, self.DLL, platform=platform_files(), guide=b"MZ tampered", guide_sha256=hashlib.sha256(guide).hexdigest())
+            self.assertEqual(self.read(d, "fh2-mods", "FH2MPGuide.dll"), b"MZ a newer guide")
+            shim.install(d, self.DLL, platform=platform_files())                               # no Guide given: the installed one stays
+            self.assertEqual(self.read(d, "fh2-mods", "FH2MPGuide.dll"), b"MZ a newer guide")
+            shim.uninstall(d)
+            self.assertFalse(os.path.exists(os.path.join(d, "fh2-mods", "FH2MPGuide.dll")))
+            self.assertFalse(os.path.exists(os.path.join(d, "fh2-mods", "FH2MPGuide.dll.prev")))
+
     def test_session_file(self):
         with tempfile.TemporaryDirectory() as d:
             os.makedirs(os.path.join(d, "data", "bin"))
@@ -1072,6 +1102,27 @@ class OfflineTests(unittest.TestCase):
                 self.assertEqual(f.read().split(), ["other.dll", shim.SHIM_DLL])
 
 
+    def test_the_guide_goes_off_and_on_with_fh2mp(self):
+        """Offline play turns the Guide off with FH2MP (it is part of FH2MP online) and on again with it."""
+        with tempfile.TemporaryDirectory() as az:
+            os.makedirs(os.path.join(az, "fh2-mods"))
+            with open(os.path.join(az, "fh2-mods", shim.GUIDE_DLL), "wb") as f:
+                f.write(b"MZ guide")
+            lst = os.path.join(az, "fh2-mods", shim.DISABLED_LIST)
+            self.assertTrue(shim.disable(az))
+            with open(lst) as f:
+                self.assertEqual(f.read().split(), [shim.SHIM_DLL, shim.GUIDE_DLL])
+            self.assertFalse(shim.disable(az))
+            self.assertTrue(shim.enable(az))
+            with open(lst) as f:
+                self.assertEqual(f.read().split(), [])
+            with open(lst, "w") as f:                                                         # an older launcher turned only FH2MP off
+                f.write(shim.SHIM_DLL + "\n")
+            self.assertFalse(shim.disable(az))                                                # FH2MP was off already; the Guide joins it
+            with open(lst) as f:
+                self.assertEqual(f.read().split(), [shim.SHIM_DLL, shim.GUIDE_DLL])
+
+
 class ExtraOptionsTests(unittest.TestCase):
     INI = b"; Forza Horizon 2 Extra Options\n; Release v0.2.88\n; Compatible with Azimuth 0.9.10\n[Global]\nEnabled=1\n"
 
@@ -1088,7 +1139,7 @@ class ExtraOptionsTests(unittest.TestCase):
 
     def test_only_one_extra_options_pin_is_supplied(self):
         from fh2mp_launcher.constants import UPSTREAM
-        self.assertEqual(set(UPSTREAM), {'platform', 'extraOptions', 'honkHonk', 'anna'})
+        self.assertEqual(set(UPSTREAM), {'platform', 'extraOptions', 'honkHonk', 'anna', 'achievements'})
         self.assertEqual(UPSTREAM['extraOptions']['version'], '0.6.0')
         self.assertEqual(UPSTREAM['extraOptions']['dll'], 'winmm.dll')
         with tempfile.TemporaryDirectory() as az:
@@ -1620,7 +1671,8 @@ class DevModeTests(unittest.TestCase):
             lc.shim_state = lambda: ("ours", "1.0.0-rc3")
             rows = {r[0]: r for r in lc.status_lines()}
             self.assertEqual(list(rows), ["FH2MP launcher", "Azimuth", "FH2MP shim", "FH2 Mod Platform", "FH2 Extra Options",
-                                          "HonkHonk", "FH2 ANNA", "Session for the game", "Car database", "Connection", "Mode"])
+                                          "HonkHonk", "FH2 ANNA", "Achievements", "Session for the game", "Car database", "Connection", "Mode"])
+            self.assertEqual(rows["Achievements"][1:], ("not installed", "1.0.2", None))   # optional: missing is not a fault
             self.assertEqual(rows["FH2MP shim"][1:], ("1.0.0-rc3", version.__version__ + " (server needs 1.1.2)", False))   # outdated: marked
             self.assertEqual(rows["Azimuth"][3], False)                          # no azimuth.exe in the folder
             self.assertEqual(rows["FH2 Mod Platform"][1], "not installed")
@@ -2009,6 +2061,111 @@ class HonkHonkTests(unittest.TestCase):
             with mock.patch.object(core.upstream, "fetch", return_value=self.files):
                 self.assertTrue(lc.ensure_honk())
             self.assertEqual(lc.honk_state(), (True, shim.honk_version()))
+
+
+class AchievementsModTests(unittest.TestCase):
+    """The Achievements mod (shim.install_achievements, Launcher.ensure_achievements): optional. Only its DLL comes from the release; it is
+    installed where there is none, with its update check off; a player's own Achievements.dll or settings file is never replaced."""
+
+    def setUp(self):
+        self.az = tempfile.mkdtemp()
+        self.dll = b"MZ-achievements"
+
+    def path(self, name):
+        return os.path.join(self.az, "fh2-mods", name)
+
+    def test_the_pin_takes_the_dll_only(self):
+        from fh2mp_launcher import upstream
+        from fh2mp_launcher.constants import UPSTREAM
+        pin = UPSTREAM["achievements"]
+        self.assertTrue(pin["url"].startswith("https://github.com/Trinculo54/fh2-achievements/releases/download/v1.0.2/"))
+        self.assertEqual(pin["files"], {"fh2-mods/Achievements.dll": "fh2-mods/Achievements.dll"})
+        data, pin = fake_release("achievements", {"fh2-mods/Achievements.dll": self.dll, "DWrite.dll": b"MZ-platform", "d3dcompiler_47.dll": b"MZ-platform",
+                                                  "README.txt": b"r"}, "fh2-mods/Achievements.dll")
+        self.assertEqual(upstream.extract("achievements", data, pin), {"fh2-mods/Achievements.dll": self.dll})
+
+    def test_install_where_there_is_none_turns_the_update_check_off(self):
+        from fh2mp_launcher.constants import UPSTREAM
+        with mock.patch.dict(UPSTREAM["achievements"], dllSha256=hashlib.sha256(self.dll).hexdigest()):
+            self.assertEqual(shim.achievements_installed(self.az), (False, ""))
+            self.assertTrue(shim.install_achievements(self.az, {"fh2-mods/Achievements.dll": self.dll}))
+            self.assertEqual(shim.achievements_installed(self.az), (True, "1.0.2"))
+            with open(self.path("Achievements.ini"), "rb") as f:
+                ini = f.read()
+            self.assertIn(b"\r\nCheckUpdates=0\r\n", ini)
+            self.assertIn(b"\r\nPopups=1\r\n", ini)
+            self.assertEqual(shim.install_achievements(self.az, {"fh2-mods/Achievements.dll": self.dll}), [])
+            self.assertFalse(os.path.exists(os.path.join(self.az, "DWrite.dll")))
+
+    def test_the_players_own_build_and_settings_stay(self):
+        os.makedirs(os.path.join(self.az, "fh2-mods"))
+        with open(self.path("Achievements.dll"), "wb") as f:
+            f.write(b"MZ-newer")
+        self.assertEqual(shim.achievements_installed(self.az), (True, "unknown"))
+        self.assertEqual(shim.install_achievements(self.az, {"fh2-mods/Achievements.dll": self.dll}), [])
+        with open(self.path("Achievements.dll"), "rb") as f:
+            self.assertEqual(f.read(), b"MZ-newer")
+        self.assertFalse(os.path.exists(self.path("Achievements.ini")))
+        # a missing DLL beside the player's settings file: the DLL comes, the file stays theirs
+        os.remove(self.path("Achievements.dll"))
+        with open(self.path("Achievements.ini"), "wb") as f:
+            f.write(b"[Achievements]\r\nPopups=0\r\n")
+        self.assertTrue(shim.install_achievements(self.az, {"fh2-mods/Achievements.dll": self.dll}))
+        with open(self.path("Achievements.ini"), "rb") as f:
+            self.assertEqual(f.read(), b"[Achievements]\r\nPopups=0\r\n")
+
+    def test_the_launcher_installs_it_only_when_wanted_and_missing(self):
+        from fh2mp_launcher import core, upstream
+        from fh2mp_launcher.settings import Settings
+        lc = core.Launcher(Settings(os.path.join(self.az, "settings.json")), load_identity=False)   # never the player's own settings file
+        lc.settings["azimuth_dir"] = self.az
+        with mock.patch.object(upstream, "fetch", return_value={"fh2-mods/Achievements.dll": self.dll}) as fetch:
+            lc.settings["achievements"] = False
+            self.assertEqual(lc.ensure_achievements(), [])
+            fetch.assert_not_called()
+            lc.settings["achievements"] = True
+            self.assertTrue(lc.ensure_achievements())
+            self.assertEqual(fetch.call_args[0][0], "achievements")
+            self.assertEqual(lc.ensure_achievements(), [])       # there now: nothing is downloaded again
+            self.assertEqual(fetch.call_count, 1)
+
+
+class AchToastTests(unittest.TestCase):
+    """The achievement toast's files (Launcher.ensure_ach_toast): only from the FH2MP mirror, checked by the pinned hash, downloaded once."""
+
+    def test_the_pins_are_mirror_files_with_hashes(self):
+        from fh2mp_launcher.constants import ACH_TOAST, MIRROR_BASE
+        self.assertTrue(ACH_TOAST["base"].startswith(MIRROR_BASE))
+        self.assertIn("ach-sound-rare.wav", ACH_TOAST["files"])
+        self.assertIn("TrophyIntro.png", ACH_TOAST["files"])
+        for name, (sha, size) in ACH_TOAST["files"].items():
+            self.assertRegex(sha, r"^[0-9a-f]{64}$", name)
+            self.assertGreater(size, 0, name)
+
+    def test_files_in_place_are_not_downloaded_again(self):
+        from fh2mp_launcher import core, updater
+        from fh2mp_launcher.constants import ACH_TOAST
+        from fh2mp_launcher.settings import Settings
+        az = tempfile.mkdtemp()
+        lc = core.Launcher(Settings(os.path.join(az, "settings.json")), load_identity=False)
+        lc.settings["azimuth_dir"] = az
+        data = b"RIFF-sound"
+        files = {"ach-sound-rare.wav": (hashlib.sha256(data).hexdigest(), len(data))}
+        def fake(self, url, entry, progress=None, cancelled=lambda: False, dest_dir=None):
+            self_calls.append(url)
+            path = os.path.join(dest_dir, entry["name"])
+            with open(path, "wb") as f:
+                f.write(data)
+            return path
+        self_calls = []
+        with mock.patch.dict(ACH_TOAST, files=files), mock.patch.object(updater.Updater, "download_url", fake):
+            lc.settings["achievements"] = False
+            self.assertEqual(lc.ensure_ach_toast(), [])
+            lc.settings["achievements"] = True
+            self.assertTrue(lc.ensure_ach_toast())
+            self.assertEqual(self_calls, [ACH_TOAST["base"] + "ach-sound-rare.wav"])
+            self.assertEqual(lc.ensure_ach_toast(), [])
+            self.assertEqual(len(self_calls), 1)
 
 
 class AnnaTests(unittest.TestCase):

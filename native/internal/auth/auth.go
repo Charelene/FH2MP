@@ -518,6 +518,11 @@ func (s *Service) openChallenge(chal string) ([]byte, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+	return s.openChallengeRaw(raw)
+}
+
+// openChallengeRaw checks the MAC and age of a challenge and burns its nonce; returns the challenge and its proof-of-work bits.
+func (s *Service) openChallengeRaw(raw []byte) ([]byte, int, error) {
 	if len(raw) != 8+1+16+16 {
 		return nil, 0, aerr(400, "bad_challenge", "").withDetail(fmt.Sprintf("challenge is %d bytes, expected 41", len(raw)))
 	}
@@ -533,7 +538,7 @@ func (s *Service) openChallenge(chal string) ([]byte, int, error) {
 			fmt.Sprintf("challenge is %.0f s old, allowed 0 to %.0f s (negative = the client's clock is ahead)", now-ts, ChallengeTTL))
 	}
 	var used bool
-	err = s.DB.Do(func(t *db.Tx) error {
+	err := s.DB.Do(func(t *db.Tx) error {
 		if _, err := t.Exec("DELETE FROM auth_nonces WHERE expires < ?", now); err != nil {
 			return err
 		}
@@ -832,6 +837,56 @@ func (s *Service) Login(ip, challenge, pubkeyB64, sigB64, client string) (string
 	}
 	s.event("login", ip, i64p(xuid), cl)
 	return token, &Account{Xuid: xuid, Gamertag: row.Str("gamertag"), Pubkey: pubkey}, SessionIdle, nil
+}
+
+// ChallengeRaw is Challenge for binary protocols (the chat's auth.getChallenge): the challenge bytes and their lifetime in seconds.
+func (s *Service) ChallengeRaw(ip string) ([]byte, float64, error) {
+	chal, _, ttl, err := s.Challenge(ip)
+	if err != nil {
+		return nil, 0, err
+	}
+	raw, err := unb64u(chal)
+	return raw, ttl, err
+}
+
+// SignInKey checks a challenge signed with an account key for another channel than the launcher's HTTP sign-in (purpose "mtproto" for the
+// chat): signature over SignMessage(realm, purpose, challenge, pubkey, fields...), burnt challenge, known account, no active ban. It hands
+// out no session token; the caller binds the account to its own channel (the chat binds it to the MTProto auth key, which is one field).
+func (s *Service) SignInKey(ip, purpose string, challengeRaw, pubkey, sig []byte, fields ...[]byte) (*Account, error) {
+	ip = NormIP(ip)
+	if len(pubkey) != ed25519.PublicKeySize || len(sig) != ed25519.SignatureSize {
+		return nil, aerr(400, "bad_request", "malformed field").withDetail(fmt.Sprintf("pubkey %d bytes (want 32), signature %d bytes (want 64)", len(pubkey), len(sig)))
+	}
+	byIP := s.hit([2]any{purpose + "-login", ip}, 30, 60)
+	if !byIP || !s.hit([2]any{purpose + "-login-key", string(pubkey)}, 12, 60) {
+		d := purpose + " sign-ins: over 12 per minute for this key"
+		if !byIP {
+			d = purpose + " sign-ins: over 30 per minute from this address"
+		}
+		return nil, aerr(429, "rate_limited", "too many sign-in attempts").withDetail(d)
+	}
+	raw, _, err := s.openChallengeRaw(challengeRaw)
+	if err != nil {
+		return nil, err
+	}
+	if !verify(pubkey, sig, SignMessage(s.Env, purpose, raw, append([][]byte{pubkey}, fields...)...)) {
+		s.event(purpose+"_badsig", ip, nil, "")
+		return nil, aerr(401, "bad_signature", "").withDetail(fmt.Sprintf("%s sign-in signature does not verify for realm %s (another realm, another key, or signed for another channel binding)", purpose, pyfmt.ReprStr(s.Env)))
+	}
+	row, err := s.DB.One("SELECT xuid, gamertag, banned_at, ban_until, ban_reason FROM accounts WHERE pubkey=?", pubkey)
+	if err != nil {
+		return nil, err
+	}
+	if row == nil {
+		return nil, aerr(404, "unknown_account", "no account for this key: sign up first").withDetail(fmt.Sprintf("no account has this public key in realm %s", pyfmt.ReprStr(s.Env)))
+	}
+	xuid := row.Int("xuid")
+	if BanActive(fptr(row, "banned_at"), fptr(row, "ban_until"), s.Clock()) {
+		s.event(purpose+"_banned", ip, i64p(xuid), "")
+		return nil, aerr(403, "banned", BanMessage(row.Str("ban_reason"), fptr(row, "ban_until"))).withXuid(xuid)
+	}
+	s.event(purpose+"_login", ip, i64p(xuid), "")
+	return &Account{Xuid: xuid, Gamertag: row.Str("gamertag"), Pubkey: pubkey}, nil
 }
 
 // Authenticate returns the Account for a live token used from the address that logged in.

@@ -4,7 +4,8 @@
 #   release/ci.sh [--container] <lane>...
 #
 # Lanes: go (the game server and LSP in native/: fmt, vet, tests on a disposable PostgreSQL), unit (release flow, pure shim checks),
-# shim (Wine checks), launcher, mutations (deliberate launcher regressions must be caught), quick (go + unit + launcher, before a push), all.
+# shim (Wine checks), launcher, mutations (deliberate launcher regressions must be caught), quick (go + unit + launcher, before a push), all,
+# rust (the chat client in client/: fmt, clippy, tests incl. the interop test against the Go chat server; not in all until the image has Rust).
 # The Python servers in server/ were removed on 2026-11-07; the Go tests replay their frozen fixtures (native/testdata).
 # --container runs the lanes in the image built from release/ci.Containerfile (podman or docker): the same Go, Python, Wine, mingw and
 # PostgreSQL as GitHub. Without it the host's tools are used, which can differ (host Wine 10/11 vs Debian's, Python 3.14 vs 3.12).
@@ -17,12 +18,12 @@ lanes=()
 for a in "$@"; do
     case "$a" in
         --container) container=1 ;;
-        unit|shim|launcher|mutations|go|quick|all) lanes+=("$a") ;;
-        -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+        unit|shim|launcher|mutations|go|rust|quick|all) lanes+=("$a") ;;
+        -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
         *) echo "unknown lane or option: $a" >&2; exit 2 ;;
     esac
 done
-[ ${#lanes[@]} -gt 0 ] || { sed -n '2,10p' "$0" >&2; exit 2; }
+[ ${#lanes[@]} -gt 0 ] || { sed -n '2,11p' "$0" >&2; exit 2; }
 
 if [ "$container" = 1 ]; then
     # The GitHub image action builds/loads Docker's image; use the same engine
@@ -77,6 +78,7 @@ lane_unit() {
     run "shim model unload guard" shim/tests/test_model_unload.sh
     run "shim dtconv guard" shim/tests/test_dtconv.sh
     run "shim garage rating guard" shim/tests/test_garage_rating.sh
+    run "shim chat link wire" shim/tests/test_chat_link.sh
     run "shim online setup" shim/tests/test_online_setup.sh
 }
 
@@ -145,6 +147,13 @@ lane_go() {   # the servers (native/): format, vet, tests. The tests that need t
         echo "go lane: no PostgreSQL here, the database tests are skipped" >&2
         run "go test" sh -c 'cd native && go test ./...'
     fi
+}
+
+lane_rust() {   # the chat client (client/): format, clippy, tests; the interop test builds and runs native/cmd/fh2mp-mt-testserver with go
+    command -v cargo >/dev/null 2>&1 || { echo "rust lane: cargo is not installed" >&2; failed=1; return; }
+    run "cargo fmt" sh -c 'cd client && cargo fmt --check'
+    run "cargo clippy" sh -c 'cd client && cargo clippy --locked --all-targets -- -D warnings'
+    run "cargo test" sh -c 'cd client && cargo test --locked'
 }
 
 lane_mutations() {

@@ -27,6 +27,8 @@
 /scratch/
 /build/
 /target/
+/client/target/
+!/client/Cargo.lock
 __pycache__/
 *.pyc
 .venv/
@@ -48,6 +50,7 @@ ops/fh2mp-lsp.service
 /dist/
 /launcher/dist/
 /launcher/build/
+/guide/build/
 /launcher/.venv/
 /launcher/*.spec.bak
 *.AppImage

@@ -1046,7 +1046,8 @@ func (c *Core) OnLogout(xuid int64, token string) {
 	c.Xbl.DropPlayer(fmt.Sprint(xuid))
 }
 
-// OnRevoke is a ban or kick: sessions and tickets go, and the game server ends the player's live UDP connections.
+// OnRevoke is a ban or kick: sessions and tickets go, the game server ends the player's live UDP connections and the chat session ends. The
+// launcher's own sign-out (OnLogout, after every game exit) leaves the chat alone: the chat core signs in by itself and stays in the tray.
 func (c *Core) OnRevoke(xuid int64) {
 	f := &c.front
 	f.mu.Lock()
@@ -1058,4 +1059,7 @@ func (c *Core) OnRevoke(xuid int64) {
 	f.mu.Unlock()
 	c.Xbl.DropPlayer(fmt.Sprint(xuid))
 	c.Xbl.AnnounceRevoke(xuid)
+	if c.Chat != nil {
+		c.Chat.EndAccount(xuid, "signed out by the server")
+	}
 }

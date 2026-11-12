@@ -1,0 +1,16 @@
+# The FH2MP chat client (Rust): the MTProto 2.0 client of our own schema (proto/fh2mp.tl) and the chat core with its own window.
+[workspace]
+resolver = "3"
+members = ["crates/fh2mp-tl", "crates/fh2mp-mtproto", "crates/fh2mp-chat"]
+
+[workspace.package]
+edition = "2024"
+license = "GPL-3.0-only"
+publish = false
+
+[workspace.dependencies]
+grammers-crypto = "0.12"
+grammers-mtproto = "0.12"
+grammers-tl-types = "0.12"
+grammers-tl-gen = "0.12"
+grammers-tl-parser = "2"

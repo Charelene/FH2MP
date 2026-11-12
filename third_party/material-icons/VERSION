@@ -1,0 +1,3 @@
+Material Icons (filled), Apache-2.0 (LICENSE), google/material-design-icons commit 10ecc14790612ca8fd164e3f4ffe9c16fc50d5b7, font/
+sha256 MaterialIcons-Regular.ttf ef149f08bdd2ff09a4e2c8573476b7b0f3fbb15b623954ade59899e7175bedda
+The in-game Guide (guide/) embeds the font for its icons (codepoints: MaterialIcons-Regular.codepoints).

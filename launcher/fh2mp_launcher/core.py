@@ -8,7 +8,7 @@ import threading
 
 from . import azimuth, gamedb, hotfix, keystore, launch, logs, memguard, paths, shim, tunnel, updater, upstream
 from .api import Api, ApiError
-from .constants import AZIMUTH_VERSION, BUILTIN_AZIMUTH_BUILDS, DEFAULT_WEBSITE, MODS_DIR, PLATFORM_VERSION, SHIM_DLL
+from .constants import AZIMUTH_VERSION, BUILTIN_AZIMUTH_BUILDS, DEFAULT_WEBSITE, GUIDE_DLL, MODS_DIR, PLATFORM_VERSION, SHIM_DLL
 from .identity import Identity
 from .settings import Settings
 from .version import __version__
@@ -103,6 +103,20 @@ def read_shim_zip(path):
             return z.read(names[f"{MODS_DIR}/{SHIM_DLL}"])
     except (zipfile.BadZipFile, KeyError):
         raise updater.UpdateError("the shim package is not what was expected") from None
+
+
+def read_shim_guide(path):
+    """A shim zip -> the bytes of its fh2-mods/FH2MPGuide.dll, or None for a zip without one (shims before the Guide shipped)."""
+    import zipfile
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = {n.replace("\\", "/"): n for n in z.namelist()}
+            name = names.get(f"{MODS_DIR}/{GUIDE_DLL}")
+            return z.read(name) if name else None
+    except zipfile.BadZipFile:
+        raise updater.UpdateError("the shim package is not what was expected") from None
+    except OSError:
+        return None     # read_shim_zip took the DLL from it a moment ago; without the file there is no Guide to add
 
 
 def release_summary(body, limit=110):
@@ -513,12 +527,13 @@ class Launcher:
         signed, not checked against a manifest: the dev launcher only."""
         if not paths.is_dev():
             raise PlayBlocked("installing a local shim is a dev launcher feature")
+        guide = None
         if path.lower().endswith(".zip"):
-            data = read_shim_zip(path)
+            data, guide = read_shim_zip(path), read_shim_guide(path)
         else:
             with open(path, "rb") as f:
                 data = f.read()
-        did = shim.install(self.settings["azimuth_dir"], data, platform=self.platform_files())
+        did = shim.install(self.settings["azimuth_dir"], data, platform=self.platform_files(), guide=guide)
         self.settings["dev_shim_path"] = path
         self.settings.save()
         return did
@@ -529,11 +544,14 @@ class Launcher:
         if manifest is not self.manifest:
             self.own_manifest = manifest
         zip_path = up.download(e["tag"], e, progress, cancelled)
-        dll = read_shim_zip(zip_path)
+        dll, guide = read_shim_zip(zip_path), read_shim_guide(zip_path)
         if shim.blob_version(dll) != e["version"]:
             raise updater.UpdateError('The FH2MP DLL does not match its signed release.')
+        if e.get("guideSha256") and guide is None:
+            raise updater.UpdateError('The FH2MP package has no Guide although its signed release names one.')
         before = self.shim_state()
-        did = shim.install(self.settings["azimuth_dir"], dll, e.get("dllSha256"), self.platform_files(progress, cancelled))
+        did = shim.install(self.settings["azimuth_dir"], dll, e.get("dllSha256"), self.platform_files(progress, cancelled), guide,
+                           e.get("guideSha256"))
         self.remember_shim(e, manifest, before)
         did += self.repair_tls_helper()
         did += self.ensure_extra_options(progress, cancelled)
@@ -667,6 +685,16 @@ class Launcher:
         except shim.ShimError as e:                  # not worth stopping a game over: ANNA and Extra Options then share the D-pad
             from .api import log_failure
             log_failure("PLAY", "anna_bindings", e, str(e))
+        try:
+            self.ensure_achievements()
+        except Exception as e:  # noqa: BLE001       # not worth stopping a game over: this game then has no achievements
+            from .api import log_failure
+            log_failure("PLAY", "achievements", e, str(e))
+        try:
+            self.ensure_ach_toast()
+        except Exception as e:  # noqa: BLE001       # not worth stopping a game over: the Guide's toast is then drawn without them
+            from .api import log_failure
+            log_failure("PLAY", "ach_toast", e, str(e))
         try:
             self.ensure_controls()
         except shim.ShimError as e:                  # not worth stopping a game over: the toggles just stay where they are
@@ -1129,6 +1157,38 @@ class Launcher:
             raise updater.UpdateError(str(e)) from None
         return shim.install_anna(d, files)
 
+    # ---- Achievements (optional: the game's 88 achievements; the Guide lists them, the server shows them on gamercards)
+    def ensure_achievements(self, progress=None, cancelled=lambda: False):
+        """Install the pinned Achievements release when the player wants it (Settings) and has no Achievements.dll; one they have, whatever
+        build, stays. -> list of things done."""
+        d = self.settings["azimuth_dir"]
+        if not self.settings["achievements"] or not d or not os.path.isdir(d) or shim.achievements_installed(d)[0]:
+            return []
+        try:
+            files = upstream.fetch("achievements", updater.Updater(channel=self.settings["channel"]), progress, cancelled)
+        except upstream.UpstreamError as e:
+            raise updater.UpdateError(str(e)) from None
+        return shim.install_achievements(d, files)
+
+    def ensure_ach_toast(self, progress=None, cancelled=lambda: False):
+        """The achievement toast's sounds and pictures (constants.ACH_TOAST) from the FH2MP mirror, each checked by size and SHA-256, where
+        the player wants achievements and a file is missing or not the pinned one. -> list of things done."""
+        from .constants import ACH_TOAST
+        d = self.settings["azimuth_dir"]
+        if not self.settings["achievements"] or not d or not os.path.isdir(d):
+            return []
+        dest = os.path.join(d, *ACH_TOAST["dir"].split("/"))
+        os.makedirs(dest, exist_ok=True)
+        up = updater.Updater(channel=self.settings["channel"])
+        got = 0
+        for name, (sha, size) in ACH_TOAST["files"].items():
+            target = os.path.join(dest, name)
+            if os.path.isfile(target) and updater.sha256_file(target) == sha:
+                continue
+            up.download_url(ACH_TOAST["base"] + name, {"name": name, "sha256": sha, "size": size}, progress, cancelled, dest_dir=dest)
+            got += 1
+        return [f"downloaded {got} sound and picture file(s) for the Guide's achievement toast"] if got else []
+
     def ensure_anna_bindings(self):
         """Extra Options' D-pad autodrive and hazard buttons (ANNA's buttons) go to None once; a binding the player chose is never touched, and a
         player who sets them again afterwards keeps them. -> list of things done."""
@@ -1246,6 +1306,8 @@ class Launcher:
         uk, uv = shim.underglow_installed(d)
         if uk:
             out.append(("Underglow", uv or "installed", "-", None))
+        ac_ok, ac_ver = shim.achievements_installed(d)   # optional: neither missing nor another build is a fault
+        out.append(("Achievements", ac_ver if ac_ok else "not installed", shim.achievements_version(), True if ac_ok else None))
         session = os.path.exists(os.path.join(shim.bin_dir(d), shim.SESSION_FILE))
         out.append(("Session for the game", "present (written by Play)" if session else "none yet: Play makes it", "Play writes it", None))
         out.append(("Car database", "your own car packs kept: custom cars stay out of online events" if s["keep_car_packs"] else "the server's, put in place at Play", "-", None))

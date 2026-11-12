@@ -1,0 +1,36 @@
+[package]
+name = "fh2mp-chat"
+version = "0.1.0"
+description = "The FH2MP chat core: its own window, the account's chat session over MTProto, friends with presence and club chat"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "fh2mp-chat"
+path = "src/main.rs"
+
+[[bin]]
+name = "fh2mp-guide"
+path = "src/guide_main.rs"
+
+[dependencies]
+fh2mp-mtproto = { path = "../fh2mp-mtproto" }
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+eframe = "0.37"
+ed25519-dalek = "2"
+getrandom = "0.4.3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zeroize = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Graphics_Gdi"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+secret-service = { version = "5.2", features = ["rt-tokio-crypto-rust"] }

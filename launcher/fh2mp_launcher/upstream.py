@@ -38,7 +38,7 @@ def extract(kind, data, pin=None):
 
 
 def fetch(kind, updater, progress=None, cancelled=lambda: False):
-    """Downloads the pinned release of `kind` ("platform" | "extraOptions" | "honkHonk" | "anna") with `updater` (updater.Updater: certificates, size and hash
+    """Downloads the pinned release of `kind` ("platform" | "extraOptions" | "honkHonk" | "anna" | "achievements") with `updater` (updater.Updater: certificates, size and hash
     checks, cache) and returns extract()'s files. The FH2MP mirror is tried first, the author's GitHub release second; both must be exactly the
     pinned bytes."""
     pin = UPSTREAM[kind]

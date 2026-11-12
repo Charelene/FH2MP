@@ -226,6 +226,10 @@ class CommunityController(QObject):
         return self.show_dialog("add", lambda: AddFriendDialog(self, self.window))
 
     def chats(self, ref=None):
+        from .. import chatcore
+        target = "club" if ref is None else (f"friend:{int(ref):x}" if str(ref).isdigit() else None)
+        if chatcore.open_chat(target):          # the chat core's window (FH2MP_CHAT_CORE=1 and installed); else the launcher's own dialog
+            return None
         dlg = self.show_dialog("chats", lambda: ChatsDialog(self, self.window))
         if ref is not None:
             dlg.select(str(ref))

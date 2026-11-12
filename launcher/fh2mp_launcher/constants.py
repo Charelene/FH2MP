@@ -41,6 +41,9 @@ AZIMUTH_TLS_HELPERS = {
 # chain-loaded FH2 Extra Options from fh2extra\; installing a new shim moves that layout over.
 MODS_DIR = "fh2-mods"
 SHIM_DLL = "FH2MP.dll"
+# The Guide (the in-game Xbox Guide: friends, invites, messages, achievements, voice chat), a second FH2 Mod Platform mod. It ships in the
+# shim zip next to FH2MP.dll (release.yml builds it on the Windows runner) and is installed, turned off and on together with the shim.
+GUIDE_DLL = "FH2MPGuide.dll"
 LEGACY_SHIM_DLL = "winmm.dll"
 DATA_DIR = "fh2mp"                     # FH2MP's own files next to azimuth.exe (the car database copy)
 PLATFORM_DLL = "d3dcompiler_47.dll"
@@ -140,7 +143,54 @@ UPSTREAM = {
             "fh2-mods/FH2ANNA.dll": "da7032e35f3444fc77dc80b744f22418cb6fcffafd02617f7f597ce241cab02d",
         },
     },
+    # Not required to play: the game's 88 achievements, which the Guide lists and the server shows on gamercards. Only the mod's DLL is taken:
+    # the zip also carries a build of the FH2 Mod Platform (d3dcompiler_47.dll / DWrite.dll), which stays the pinned one above.
+    "achievements": {
+        "name": "Achievements", "author": "Trinculo54", "license": "GPL-3.0", "version": "1.0.2",
+        "url": "https://github.com/Trinculo54/fh2-achievements/releases/download/v1.0.2/Achievements-v1.0.2.zip",
+        "mirror": MIRROR_BASE + "Achievements-v1.0.2.zip",
+        "sha256": "7655cdb7a4ceb65d4703f83fbf2afaa0e199545d089e8f1a56abd2ed0a1bc188", "size": 2780646,
+        "dll": "fh2-mods/Achievements.dll", "dllSha256": "4b487ee0fc825bfd22ad13e638b051a1b16fa822815f92554dd8274e6bedb316",
+        "files": {
+            "fh2-mods/Achievements.dll": "fh2-mods/Achievements.dll",
+        },
+        "fileSha256": {
+            "fh2-mods/Achievements.dll": "4b487ee0fc825bfd22ad13e638b051a1b16fa822815f92554dd8274e6bedb316",
+        },
+    },
 }
+# The Guide's achievement toast: the Xbox app's and Game Bar's sounds and pictures for it (Microsoft's files, mirrored on the FH2MP website
+# at the user's decision 2026-11-11), put into the Azimuth folder's data/bin/achievement-toast by name -> (SHA-256, size). The sounds are
+# wav (Windows plays those from memory); the pictures keep the app's names, which the Guide looks for.
+ACH_TOAST = {
+    "base": MIRROR_BASE + "achievement-toast/",
+    "dir": "data/bin/achievement-toast",
+    "files": {
+    "Aurora.png": ("7ac037f055f7c6affe74cf7bb8032250aff7ccaad5a4e41a71c236b4b8a699bc", 409851),
+    "DiamondIdleV2.png": ("97a7e0c150aac11d2e3af05e818b805340e015233b4196bb7798b7cad7771b6e", 69407),
+    "DiamondIntroV2.png": ("0a1c322012bda71ffad03f83ab34b4043eb0f080fc932b0bc0d7a01e4c4ab70e", 120134),
+    "DiamondOutroV2.png": ("7bdb515a3eb6558222a9e7c6ee5dc0bd4e86afe397879a7e59d480e3fd39bc00", 88112),
+    "MythicGlowA.png": ("0bec700bef99ee0cfa3dc30544452ea00f94e2ba9d73ecb8d3684f2c9a922407", 14159),
+    "MythicGlowB.png": ("85ee8e421d8ddf1df30a06e6506f768e77d29726d40d1d14ee1eba231635d875", 14309),
+    "MythicPulse.png": ("cb5c91ce069248370b756ad4324758ea7b05c092995235e496caea9636f14249", 5855),
+    "MythicV2Idle.png": ("38b23dd5af3c3f50c75d16005f02a1b733f8e498f714b58c0615938185175fee", 579146),
+    "MythicV2IdleHighlights.png": ("232fa37d0d54108c253644cac4384f637f96bd5e483122ae04cb0cfcad723906", 331917),
+    "MythicV2Intro.png": ("074b97841f349419df49ef159decb0a8e1a0c739e29a86f3f4b39de6da6ed0e5", 1196225),
+    "MythicV2IntroHighlights.png": ("fb0133ad8bca1ac88a478a7ff0644b9818067e337add2355cc6068ac5f9d1df9", 714283),
+    "MythicV2Outro.png": ("434cb9724a026cf4e413f566391b9ca9c44219b06c77d7c54fc6dc2e57f0c587", 358654),
+    "MythicV2OutroHighlights.png": ("5b97b8082782b800dab1bf1436cb8e30cce1ce97c9cea06c8f4b10bfd1a0cc79", 206534),
+    "Ripple.png": ("25770cb8fa9e46d7d503013feaf05e8f4b5639396df4a9cdf0da0f94b928df66", 19755),
+    "ShimmerSparkle.png": ("022643e679f3b8be28802ff529fc888ff29e74dfd0461e32d9f3ad46aba700ab", 2100),
+    "TrophyIdle.png": ("c2b66fbfb18e5191862046de7f36c3aba0fed714909bdc154619f8f637abb54a", 1315),
+    "TrophyIntro.png": ("6097723f8f05fb687e931438cf44319941cd97a060803a4551d5935ec67bc67a", 35745),
+    "TrophyOutro.png": ("d16f0ae4012514184e4f4db2d3bd944a5e608924b2f497da7a048f3f64fb71b5", 27084),
+    "gleam.png": ("d89a2daacde9f789f9f939bb4af01446ec6e20c0d917c23ee055d037e7aba12f", 3811),
+    "ach-sound-mythic.wav": ("a38be51bfd0ded8b5c6fc45ee852fca796f9735e4ac8b559df2e586edfb4e395", 2647360),
+    "ach-sound-normal.wav": ("4995fa48d56e62773d2b465f630f8754714e4382863d37c43228d3eb5ab93a97", 96388),
+    "ach-sound-rare.wav": ("a751d4c56801951fb47b98a4d0c6ccc2b9ec9b8adbe1bbe54acd4a56c259ee7e", 2294656),
+    },
+}
+
 # The Extra Options build launchers up to 1.3.2 installed (0.4.4, zip FH2_Extra_Options_0.4.4-azimuth.zip): only to recognise FH2MP's own earlier
 # install when 0.6.0 replaces it. Its bundled packages were at the mods root; 0.6.0 brings its own copies in mods/Forza Horizon 2, so the old
 # ones are moved aside when they are exactly these files (shim.retire_old_extra_packages).
