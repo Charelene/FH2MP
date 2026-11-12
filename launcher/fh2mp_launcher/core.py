@@ -1302,7 +1302,22 @@ class Launcher:
         return launch.start(self.settings, self.settings["azimuth_dir"], skip_launcher=False)
 
     def game_running(self):
-        return self.process is not None and self.process.poll() is None
+        """The game of the current Play runs: the process Play started, or, once that one ended, any azimuth.exe of this Azimuth folder (the Mod
+        Platform's Restart now and Azimuth's own window carry on in a new process). The Play's session lives exactly as long as this."""
+        if self.process is None:
+            return False
+        return self.process.poll() is None or bool(launch.game_processes(self.settings["azimuth_dir"]))
+
+    def touch_session(self):
+        """Keeps the session file fresh while the game runs: the shim takes one older than 30 minutes for a leftover of an earlier Play, and a
+        game that restarts itself reads it again."""
+        d = self.settings["azimuth_dir"]
+        path = os.path.join(shim.bin_dir(d), shim.SESSION_FILE) if d else ""
+        try:
+            if path and os.path.isfile(path):
+                os.utime(path, None)
+        except OSError as e:
+            logs.swallowed("game", "game.session_touch_failed", e)
 
     def status_lines(self):
         """The player's setup as (component, what is installed, what this launcher needs, ok: True / False / None for "nothing to judge").
@@ -1360,34 +1375,6 @@ class Launcher:
         before = os.path.exists(os.path.join(shim.bin_dir(d), shim.SESSION_FILE))
         launch.cleanup(d)
         return before
-
-    def follow_restarted_game(self, old_pid):
-        """The game's process ended. When another azimuth.exe of this Azimuth folder runs now, it replaced the one Play started (the Mod Platform's
-        Restart now starts a new process, so does Azimuth's own window when it starts the game): the launcher follows that one as its game,
-        and the session file and the sign-in stay, so it plays online like the game Play started. -> the new pid, or None."""
-        d = self.settings["azimuth_dir"]
-        pids = [p for p in launch.game_processes(d) if p != old_pid] if d else []
-        if not pids:
-            return None
-        self.process = launch.FollowedProcess(pids[0])
-        self.game_started_at = time.monotonic()
-        self.touch_session()
-        logs.info("game", "game.followed", old_pid=old_pid, pid=pids[0], others=len(pids) - 1 or None,
-                  why="another game process of this Azimuth folder runs (the Mod Platform's Restart now, or the game started from Azimuth's window)")
-        return pids[0]
-
-    def touch_session(self):
-        """Keeps the session file of a running game fresh: the shim takes one older than 30 minutes for a leftover of an earlier Play, and a game
-        that restarts itself reads it again. Called while a game of ours runs."""
-        d = self.settings["azimuth_dir"]
-        if not d:
-            return
-        path = os.path.join(shim.bin_dir(d), shim.SESSION_FILE)
-        try:
-            if os.path.isfile(path):
-                os.utime(path, None)
-        except OSError as e:
-            logs.swallowed("game", "game.session_touch_failed", e)
 
     def after_game(self):
         launch.cleanup(self.settings["azimuth_dir"])

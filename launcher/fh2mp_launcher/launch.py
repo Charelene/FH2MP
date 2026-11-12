@@ -265,17 +265,13 @@ def cleanup(folder):
     shim.clear_session(folder)
 
 
-def _norm(path):
-    return os.path.normcase(os.path.abspath(path))
-
-
 def game_processes(folder):
-    """The process ids of azimuth.exe processes started from this Azimuth folder: on Windows by their image path, under Wine by the Windows-style
-    path in their command line (as end_leftover_game). [] when there are none or the system cannot be asked."""
+    """The process ids of the azimuth.exe processes started from this Azimuth folder: on Windows by their image path, under Wine by the
+    Windows-style path in their command line (as end_leftover_game). [] when there are none or the system cannot be asked."""
     if not folder or not os.path.isdir(folder):
         return []
     if WIN:
-        return _game_processes_win(_norm(os.path.join(folder, "azimuth.exe")))
+        return _game_processes_win(os.path.normcase(os.path.abspath(os.path.join(folder, "azimuth.exe"))))
     if not os.path.isdir("/proc"):
         return []
     want = ("z:" + os.path.abspath(os.path.expanduser(folder)).replace("/", "\\") + "\\azimuth.exe").lower()
@@ -320,13 +316,13 @@ def _game_processes_win(want):
         e.dwSize = ctypes.sizeof(Entry)
         ok = k32.Process32FirstW(snap, ctypes.byref(e))
         while ok:
-            if e.szExeFile.lower() == "azimuth.exe" and e.th32ProcessID != os.getpid():
+            if e.szExeFile.lower() == "azimuth.exe":
                 h = k32.OpenProcess(0x1000, False, e.th32ProcessID)      # PROCESS_QUERY_LIMITED_INFORMATION
                 if h:
                     try:
                         buf = ctypes.create_unicode_buffer(1024)
                         n = wintypes.DWORD(len(buf))
-                        if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)) and _norm(buf.value) == want:
+                        if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)) and os.path.normcase(os.path.abspath(buf.value)) == want:
                             out.append(int(e.th32ProcessID))
                     finally:
                         k32.CloseHandle(h)
@@ -334,49 +330,3 @@ def _game_processes_win(want):
     finally:
         k32.CloseHandle(snap)
     return out
-
-
-class FollowedProcess:
-    """A game process the launcher did not start but follows as its game: the one that replaced the process Play started (the Mod Platform's
-    Restart now starts a new process; Azimuth's own window starts the game as one). poll() and returncode as subprocess.Popen's; no memory watch."""
-
-    def __init__(self, pid):
-        self.pid = pid
-        self.returncode = None
-        self.memguard = None
-        self._handle = None
-        if WIN:
-            import ctypes
-            from ctypes import wintypes
-            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            k32.OpenProcess.restype = wintypes.HANDLE
-            k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-            self._handle = k32.OpenProcess(0x00100000 | 0x1000, False, pid) or None      # SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION
-
-    def poll(self):
-        if self.returncode is not None:
-            return self.returncode
-        if WIN:
-            import ctypes
-            from ctypes import wintypes
-            if not self._handle:
-                self.returncode = 0             # it could not be opened: gone already
-                return 0
-            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
-            k32.CloseHandle.argtypes = [wintypes.HANDLE]
-            code = wintypes.DWORD()
-            if k32.GetExitCodeProcess(self._handle, ctypes.byref(code)) and code.value == 259:      # STILL_ACTIVE
-                return None
-            self.returncode = int(code.value)
-            k32.CloseHandle(self._handle)
-            self._handle = None
-            return self.returncode
-        try:
-            with open(f"/proc/{self.pid}/stat", "rb") as f:
-                if f.read().split(b") ", 1)[-1][:1] not in (b"Z", b"X"):
-                    return None
-        except OSError:
-            pass
-        self.returncode = 0
-        return 0
