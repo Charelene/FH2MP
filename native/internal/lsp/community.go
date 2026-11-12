@@ -315,7 +315,11 @@ func (l *Launcher) seatFor(me int64, h *xbl.Hold, host int64) any {
 		communityLog.Info(fmt.Sprintf("seat to join a player: joiner=%#x host=%#x lobby=%.8s, the host is in no session of the directory: the lobby's own session is named (the joiner is a reserved member there: %s)",
 			me, host, h.ID, pyBool(reserved)))
 	}
-	l.C.Xbl.AnnouncePlayer(fmt.Sprint(me), h.ID)
+	if scid, tmpl, name, ok := l.C.Xbl.SessionOf(fmt.Sprint(host)); ok && l.C.Xbl.PrivateWorld(scid, tmpl, name) != "" {
+		l.C.Xbl.AnnounceFollower(fmt.Sprint(me), l.C.Xbl.PrivateWorld(scid, tmpl, name))
+	} else {
+		l.C.Xbl.AnnouncePlayer(fmt.Sprint(me), h.ID)
+	}
 	return out
 }
 

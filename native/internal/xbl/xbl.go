@@ -592,7 +592,7 @@ func (s *Server) AllocateServer(sessionPath string) bool {
 	world := rec.World
 	s.mu.Unlock()
 	for _, x := range announce {
-		s.AnnouncePlayer(x, world)
+		s.AnnounceFollower(x, world)
 	}
 	return true
 }
@@ -625,13 +625,17 @@ func (s *Server) PutSession(path string, body []byte, xuid string) (int, pyjson.
 	status, doc, announce := s.putSession(path, body, xuid)
 	s.mu.Unlock()
 	for _, a := range announce {
-		s.AnnouncePlayer(a[0], a[1])
+		if a[2] == "follow" {
+			s.AnnounceFollower(a[0], a[1])
+		} else {
+			s.AnnouncePlayer(a[0], a[1])
+		}
 	}
 	return status, doc
 }
 
 // putSession does PutSession's work; the caller holds the lock.
-func (s *Server) putSession(path string, body []byte, xuid string) (int, pyjson.Obj, [][2]string) {
+func (s *Server) putSession(path string, body []byte, xuid string) (int, pyjson.Obj, [][3]string) {
 	key, ok := ParsePath(path)
 	if !ok {
 		p, _, _ := strings.Cut(path, "?")
@@ -827,15 +831,15 @@ func (s *Server) putSession(path string, body []byte, xuid string) (int, pyjson.
 	if wroteSelf {
 		s.playing[xuid] = lk
 	}
-	var announce [][2]string
-	world := key[2]
+	var announce [][3]string
+	world, how := key[2], ""
 	if qos {
-		world = rec.World // a private game's world; "" for any other QoS session
+		world, how = rec.World, "follow" // a private game's world; "" for any other QoS session
 	}
 	if world != "" {
 		for _, mk := range rec.Members.Keys() {
 			if isDigits(mk) && mk == xuid {
-				announce = append(announce, [2]string{mk, world})
+				announce = append(announce, [3]string{mk, world, how})
 			}
 		}
 	}
@@ -994,6 +998,29 @@ func (s *Server) AnnouncePlayer(xuid, lobby string) {
 	s.assigned[xuid] = lobby
 	s.assignMu.Unlock()
 	s.Hub.Control(fmt.Sprintf("assign %x %s", n, lobby))
+}
+
+// AnnounceFollower tells the game server that this player belongs in a private game's world: the one of that name with players in it,
+// whatever lobby type the player's game asks for (an invite taken in a Car Meet).
+func (s *Server) AnnounceFollower(xuid, lobby string) {
+	n, err := strconv.ParseInt(xuid, 10, 64)
+	if xuid == "" || err != nil {
+		return
+	}
+	s.assignMu.Lock()
+	s.assigned[xuid] = lobby
+	s.assignMu.Unlock()
+	s.Hub.Control(fmt.Sprintf("assign %x %s follow", n, lobby))
+}
+
+// PrivateWorld is the world of a private game's session ("" when the session is not one).
+func (s *Server) PrivateWorld(scid, template, name string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if rec := s.sessions[lowerKey([3]string{scid, template, name})]; rec != nil {
+		return rec.World
+	}
+	return ""
 }
 
 // SessionOf is the session a player is in, as the game would name it to join them: the one the player last wrote itself into as a member and

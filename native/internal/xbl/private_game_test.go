@@ -32,7 +32,7 @@ func (r *heldSeatRig) assignedTo(xuid string) string {
 	got := ""
 	for _, c := range r.hub.control {
 		if len(c) > len(want) && c[:len(want)] == want {
-			got = c[len(want):]
+			got = strings.TrimSuffix(c[len(want):], " follow")
 		}
 	}
 	return got
@@ -94,7 +94,7 @@ func TestPrivateGameFromACarMeetKeepsTheMeetsWorld(t *testing.T) {
 	if got := r.assignedTo("2002"); got != meet {
 		t.Fatalf("a meet member following the host went to %q, want %s", got, meet)
 	}
-	if !slices.Contains(r.hub.control, fmt.Sprintf("assign %s %s", hexOf("2002"), meet)) {
+	if !slices.Contains(r.hub.control, fmt.Sprintf("assign %s %s follow", hexOf("2002"), meet)) {
 		t.Fatalf("control datagrams %v", r.hub.control)
 	}
 }

@@ -73,24 +73,27 @@ type HubConfig struct {
 
 // Hub is one UDP port, many worlds (= fh2mp_server.Hub). It is driven from one goroutine: Handle, ControlText, Step.
 type Hub struct {
-	cfg            HubConfig
-	Clk            Clock
-	Rng            Rand
-	Sock           PacketConn
-	Out            *LogOut
-	Events         *eventlog.Log
-	Sinks          *Sinks
-	catalogPtr     atomic.Pointer[catalog.Catalog]
-	catalogMu      sync.Mutex
-	authMu         sync.Mutex
-	deferMu        sync.Mutex
-	deferred       []func()
-	workers        []*Worker
-	manual         bool
-	syncer         *catalog.Syncer
-	CtlSend        func(data []byte, to Addr)
-	DefaultType    int
-	Assign         map[uint64]string
+	cfg         HubConfig
+	Clk         Clock
+	Rng         Rand
+	Sock        PacketConn
+	Out         *LogOut
+	Events      *eventlog.Log
+	Sinks       *Sinks
+	catalogPtr  atomic.Pointer[catalog.Catalog]
+	catalogMu   sync.Mutex
+	authMu      sync.Mutex
+	deferMu     sync.Mutex
+	deferred    []func()
+	workers     []*Worker
+	manual      bool
+	syncer      *catalog.Syncer
+	CtlSend     func(data []byte, to Addr)
+	DefaultType int
+	Assign      map[uint64]string
+	// Follow: players assigned to a private game ("assign <xuid> <name> follow"): they go to the world of that name that has players, whatever
+	// lobby type their game asks for (an invite accepted in a Car Meet joins the host's private Free Roam as a Car Meet, dev 2026-11-12)
+	Follow         map[uint64]bool
 	Standins       map[uint64]map[int64]int64 // a car-pack player's custom car -> the stock car the others see (control "standins")
 	CustomCars     map[uint64]map[int64]bool  // every custom car a player's launcher listed (control "standins"), with or without a stand-in
 	Runs           map[uint64]string
@@ -136,7 +139,7 @@ func NewHub(cfg HubConfig) (*Hub, error) {
 		return nil, err
 	}
 	h := &Hub{cfg: cfg, Clk: cfg.Clock, Rng: cfg.Rng, Sock: cfg.Sock, Out: cfg.Out, Sinks: cfg.Sinks, CtlSend: cfg.CtlSend,
-		Assign: map[uint64]string{}, Standins: map[uint64]map[int64]int64{}, CustomCars: map[uint64]map[int64]bool{}, Runs: map[uint64]string{}, Authed: map[uint64]authEnt{}, Flagged: omap.New[uint64, flagEnt](), Revoked: map[uint64]float64{},
+		Assign: map[uint64]string{}, Follow: map[uint64]bool{}, Standins: map[uint64]map[int64]int64{}, CustomCars: map[uint64]map[int64]bool{}, Runs: map[uint64]string{}, Authed: map[uint64]authEnt{}, Flagged: omap.New[uint64, flagEnt](), Revoked: map[uint64]float64{},
 		Keys: map[uint64]map[string]float64{}, TicketEpochs: map[Addr][]byte{}, Bound: map[Addr]boundEnt{}, Nonces: omap.New[nonceKey, float64](), NonceCount: map[uint64]int{},
 		AuthLog: map[any]float64{}, Worlds: omap.New[WorldKey, *World](), Route: omap.New[Addr, *World](), EmptySince: map[WorldKey]float64{},
 		LightingRoutes: map[uint64]Addr{}, HonkRoutes: map[uint64]Addr{}, CarselRoutes: map[uint64]Addr{}, probeSeen: map[Addr]probeEnt{}, nxt: math.Inf(1)}
@@ -461,14 +464,20 @@ func (h *Hub) ControlText(text string, replyTo *Addr) {
 		}
 		h.CustomCars[xuid] = owned
 		h.Log(fmt.Sprintf("control: stand-ins for %s: %s", parts[1], strings.Join(notes, "; ")))
-	case n == 3 && parts[0] == "assign":
+	case (n == 3 || n == 4 && parts[3] == "follow") && parts[0] == "assign":
 		xuid, err := parseHex(parts[1])
 		if err != nil {
 			h.ctlIgnored(parts, fmt.Sprintf("assign message unreadable (%v)", err))
 			return
 		}
 		h.Assign[xuid] = parts[2]
-		h.Log(fmt.Sprintf("control: player %s assigned to lobby %s", parts[1], parts[2]))
+		if n == 4 {
+			h.Follow[xuid] = true
+			h.Log(fmt.Sprintf("control: player %s assigned to lobby %s, a private game: it joins that lobby's world with players in it, whatever lobby type its game asks for", parts[1], parts[2]))
+		} else {
+			delete(h.Follow, xuid)
+			h.Log(fmt.Sprintf("control: player %s assigned to lobby %s", parts[1], parts[2]))
+		}
 	default:
 		h.ctlIgnored(parts, fmt.Sprintf("unknown or malformed control message (%d field(s))", n))
 	}
@@ -826,6 +835,7 @@ func (h *Hub) revokeTables(xuid uint64) {
 		}
 	}
 	delete(h.Assign, xuid)
+	delete(h.Follow, xuid)
 	h.Revoked[xuid] = h.Clk.Mono() + 86400.0
 }
 
@@ -997,7 +1007,7 @@ func (h *Hub) Handle(data []byte, addr Addr) {
 		name, assigned := h.Assign[player]
 		var target *World
 		if assigned && name != "" {
-			target = h.WorldFor(ltype, name)
+			target = h.WorldFor(h.followType(player, ltype, name, addr), name)
 		} else {
 			target = h.openWorldFor(ltype, player, &addr)
 		}
@@ -1168,6 +1178,27 @@ func (h *Hub) ownerRoom(w *World, addr *Addr) bool {
 		}
 	}
 	return RelayOwnerLast-len(w.OwnerIDsTaken())-waiting >= 1
+}
+
+// followType is the lobby type of the world a player assigned to `name` goes to: the one its game asks for, except for a private game's
+// member (Follow) when that world has nobody else and another world of that name has players: then that one's (the host's private Free Roam
+// or Road Trip). The world tells the game its lobby type at the handshake.
+func (h *Hub) followType(player uint64, ltype int, name string, addr Addr) int {
+	if !h.Follow[player] {
+		return ltype
+	}
+	if w, ok := h.Worlds.Get(WorldKey{ltype, name}); ok && h.worldLoad(w, &addr) > 0 {
+		return ltype
+	}
+	for _, k := range h.Worlds.Keys() {
+		if k.Name == name && k.Type != ltype {
+			if w, _ := h.Worlds.Get(k); w != nil && h.worldLoad(w, &addr) > 0 {
+				h.Log(fmt.Sprintf("%#x asks for lobby type %d in %.8s, where only the lobby type %d world has players (a private game): it goes there", player, ltype, name, k.Type))
+				return k.Type
+			}
+		}
+	}
+	return ltype
 }
 
 // openWorldFor: a player with no lobby assignment goes to the busiest world of that type that has room.
