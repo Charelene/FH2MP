@@ -2321,6 +2321,7 @@ static int patch_online_meet(void)
 #include "remote_prediction_guard.inc"
 #include "model_unload_guard.inc"
 #include "dtconv_guard.inc"
+#include "component_lookup_guard.inc"
 #include "picker_pi.inc"
 #include "autodrive_rule.inc"
 #include "tune_gate.inc"
@@ -5615,6 +5616,7 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_PREDGUARD", env, 8) == 0) patch_remote_prediction_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_MODELGUARD", env, 8) == 0) patch_model_unload_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_DTCONVGUARD", env, 8) == 0) patch_dtconv_guard();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_COMPGUARD", env, 8) == 0) patch_component_lookup_guard();
         }
         patch_car_pool();
         {
