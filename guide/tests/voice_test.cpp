@@ -59,8 +59,22 @@ static ULONG STDMETHODCALLTYPE box_ref(Box*) { return 1; }
 static HRESULT STDMETHODCALLTYPE box_value(Box* b, UINT64* v) { return *v = b->v, S_OK; }
 static void* g_box_vt[7] = {(void*)box_qi, (void*)box_ref, (void*)box_ref, nullptr, nullptr, nullptr, (void*)box_value};
 
+// A Windows.Xbox.System.IUser as Azimuth hands one to AddLocalUserToChatChannelAsync: get_XboxUserId at +0x78 (slot 15).
+static HRESULT STDMETHODCALLTYPE fu_xuid(void*, HSTRING* out) { return g_create(L"2533277673447315", 16, out); }
+static HRESULT STDMETHODCALLTYPE fu_ok() { return S_OK; }
+static void* g_fu_vt[40];
+static struct {
+    void** vt;
+} g_fake_user = {g_fu_vt};
+
 int main() {
     init_settings();
+    HMODULE combase = LoadLibraryW(L"combase.dll");
+    g_raw = (RawBufferFn)(void*)GetProcAddress(combase, "WindowsGetStringRawBuffer");
+    g_create = (CreateStringFn)(void*)GetProcAddress(combase, "WindowsCreateString");
+    g_delete = (DeleteStringFn)(void*)GetProcAddress(combase, "WindowsDeleteString");
+    for (auto& f : g_fu_vt) f = (void*)fu_ok;
+    g_fu_vt[15] = (void*)fu_xuid;
     IChatManagerAbi* cm = (IChatManagerAbi*)hk_activate();
     // the slots the game calls
     CHECK(slot(cm, 0x88) == (*(void***)cm)[17]);
@@ -69,9 +83,12 @@ int main() {
     CHECK(settings != nullptr);
     typedef HRESULT(STDMETHODCALLTYPE * SetFn)(void*, int);
     for (int off : {0x38, 0x48, 0x68, 0x88, 0xb8, 0xc8}) CHECK(((SetFn)slot(settings, off))(settings, 1) == S_OK);
-    void* users = (void*)1;
+    void* users = nullptr;
     ((Slot1)slot(cm, 0xb8))(cm, &users);
-    CHECK(users == nullptr);
+    UINT32 nusers = 9;
+    if (users) ((Slot1)slot(users, 0x38))(users, &nusers);
+    CHECK(users && nusers == 0);  // nobody yet: an empty list, as the real engine gives
+    if (users) ((IUnknown*)users)->Release();
     void* op = nullptr;
     typedef HRESULT(STDMETHODCALLTYPE * ChanFn)(void*, UINT8, void*, void**);
     CHECK(((ChanFn)slot(cm, 0x98))(cm, 0, nullptr, &op) == S_OK && op);
@@ -139,6 +156,85 @@ int main() {
     take_packet(7, junk, sizeof junk);
     CHECK(g_engine.talkers.count(7) == 0);
     opus_encoder_destroy(enc);
+    // the local player: its ChatUser is there when AddLocalUserToChatChannelAsync returns, found by xuid as game+0x370bc0 does
+    {
+        void* op2 = nullptr;
+        CHECK(((ChanFn)slot(cm, 0x98))(cm, 0, &g_fake_user, &op2) == S_OK && op2);
+        ((IUnknown*)op2)->Release();
+        void* users2 = nullptr;
+        ((Slot1)slot(cm, 0xb8))(cm, &users2);
+        UINT32 count = 0;
+        ((Slot1)slot(users2, 0x38))(users2, &count);
+        CHECK(count == 2);  // the local player and the console heard above
+        void* local = nullptr;
+        typedef HRESULT(STDMETHODCALLTYPE * GetAtFn)(void*, UINT32, void**);
+        for (UINT32 i = 0; i < count; i++) {
+            void* u = nullptr;
+            ((GetAtFn)slot(users2, 0x30))(users2, i, &u);
+            HSTRING h = nullptr;
+            ((Slot1)slot(u, 0x30))(u, &h);
+            if (wcscmp(g_raw(h, nullptr), L"2533277673447315") == 0)
+                local = u;
+            else
+                ((IUnknown*)u)->Release();
+            g_delete(h);
+        }
+        CHECK(local != nullptr);
+        if (local) {
+            INT32 mode = -1;
+            g_engine.mic_loud = GetTickCount() - 1000;
+            ((Slot1)slot(local, 0x40))(local, &mode);
+            CHECK(mode == 0);
+            g_engine.mic_loud = GetTickCount();
+            ((Slot1)slot(local, 0x40))(local, &mode);
+            CHECK(mode == 1);
+            // get_User -> AudioDevices (+0x38): our capture device when there is a microphone; other slots reach the real user
+            void* user = nullptr;
+            ((Slot1)slot(local, 0x60))(local, &user);
+            CHECK(user != nullptr);
+            void* devices = nullptr;
+            ((Slot1)slot(user, 0x38))(user, &devices);
+            UINT32 nd = 9;
+            ((Slot1)slot(devices, 0x38))(devices, &nd);
+            CHECK(nd == (have_microphone() ? 1u : 0u));
+            if (nd == 1) {
+                void* d = nullptr;
+                ((GetAtFn)slot(devices, 0x30))(devices, 0, &d);
+                INT32 type = -1;
+                ((Slot1)slot(d, 0x38))(d, &type);
+                HSTRING hid = nullptr;
+                ((Slot1)slot(d, 0x30))(d, &hid);
+                CHECK(type == 0 && wcsstr(g_raw(hid, nullptr), L"xboxcontrollercapture"));
+                g_delete(hid);
+                ((IUnknown*)d)->Release();
+            }
+            HSTRING hx = nullptr;
+            ((Slot1)slot(user, 0x78))(user, &hx);  // forwarded to the real user
+            CHECK(hx && wcscmp(g_raw(hx, nullptr), L"2533277673447315") == 0);
+            g_delete(hx);
+            ((IUnknown*)devices)->Release();
+            ((IUnknown*)user)->Release();
+            ((IUnknown*)local)->Release();
+        }
+        ((IUnknown*)users2)->Release();
+        printf("local ChatUser: talking mode, %s capture device, forwarded user calls\n", have_microphone() ? "a" : "no");
+    }
+    // the game's Mute with the remote player's ChatUser: their packets are not played any more; Unmute brings them back
+    {
+        ChatUser* remote = chat_user(id.v, nullptr);
+        CHECK(((Slot1)slot(cm, 0xc0))(cm, static_cast<IChatUserAbi*>(remote)) == S_OK);
+        CHECK(g_engine.talkers.count(id.v) == 0);
+        void* b = hk_make_buffer(g_sent[0].data(), g_sent[0].size());
+        ((Slot2)slot(cm, 0x88))(cm, b, &id);
+        ((IUnknown*)b)->Release();
+        CHECK(g_engine.talkers.count(id.v) == 0);
+        CHECK(((Slot1)slot(cm, 0xc8))(cm, static_cast<IChatUserAbi*>(remote)) == S_OK);
+        b = hk_make_buffer(g_sent[1].data(), g_sent[1].size());
+        ((Slot2)slot(cm, 0x88))(cm, b, &id);
+        ((IUnknown*)b)->Release();
+        CHECK(g_engine.talkers.count(id.v) == 1);
+        printf("mute and unmute through the game's ChatManager calls\n");
+    }
     printf(g_fail ? "%d FAILED\n" : "all passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

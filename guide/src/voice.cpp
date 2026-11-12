@@ -32,7 +32,9 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <cwchar>
 #include <map>
+#include <set>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -397,9 +399,12 @@ struct Engine {
     std::atomic<DWORD> mic_loud{0};  // GetTickCount when the gate was last open
     int out_rate = 8000;
     bool mic = true;
+    std::set<uint64_t> muted;  // the players this one muted (the game's Mute: MuteUserFromAllChannels with their ChatUser)
 } g_engine;
 
 IInspectable* chat_manager_self();
+class ChatUser;
+ChatUser* chat_user(uint64_t xuid, IInspectable* local_user);
 
 // Hands one packet to the game (any thread: the game's handler queues it under a lock).
 void raise_packet(const std::vector<unsigned char>& payload) {
@@ -640,6 +645,14 @@ void start_engine() {
 
 // A relayed packet from the game's voice loop (the game's thread): its frames go to that console's queue.
 void take_packet(uint64_t from, const BYTE* p, UINT32 n) {
+    bool heard_new = false;
+    struct AfterLock {
+        bool& now;
+        uint64_t x;
+        ~AfterLock() {
+            if (now && x) chat_user(x, nullptr);  // a ChatUser for the game to find (its Mute); taken outside the engine lock
+        }
+    } after{heard_new, from};
     if (n < 5 || p[0] != 'V' || p[1] != 1) return;
     int seq = p[2] | (p[3] << 8), count = p[4];
     std::vector<std::vector<unsigned char>> frames;
@@ -650,10 +663,12 @@ void take_packet(uint64_t from, const BYTE* p, UINT32 n) {
         at += 1 + p[at];
     }
     std::lock_guard<std::mutex> l(g_engine.mu);
+    if (g_engine.muted.count(from)) return;  // the server leaves them out too; this covers a server that does not
     auto found = g_engine.talkers.find(from);
     if (found == g_engine.talkers.end()) {
         found = g_engine.talkers.emplace(from, Talker()).first;
         logf("voice: hearing console %#llx (its first packet: %u bytes, %d frames)", (unsigned long long)from, n, count);
+        heard_new = true;
     }
     Talker& t = found->second;
     t.heard = GetTickCount(), t.packets++;
@@ -668,6 +683,307 @@ void take_packet(uint64_t from, const BYTE* p, UINT32 n) {
     t.expect = (seq + 1) & 0xffff;
     for (auto& f : frames) t.frames.push_back(std::move(f));
     while (int(t.frames.size()) > kJitterMax) t.frames.pop_front();
+}
+
+// ---- ChatUser ------------------------------------------------------------------------------------------------------------------------
+//
+// The game reads chat users in three places (all [C]):
+//   game+0x370bc0 finds a user's ChatUser by xuid among GetChatUsers (ChatManager +0xb8: IVectorView, GetAt +0x30, get_Size +0x38),
+//     comparing get_XboxUserId (+0x30) with the user's own (IUser +0x78) without case;
+//   game+0x367520 (after AddLocalUserToChatChannelAsync, through its continuation game+0x3883f0) hands the local player's ChatUser to its
+//     CLocalTalker (player+0x980), which reads get_User (+0x60) -> IUser get_AudioDevices (+0x38) for a capture device (+0x38 = 0) whose
+//     id (+0x30) contains "xboxcontrollercapture": that is LobbyPlayer.HeadsetConnected, which the player list shows as HasVoiceAbility
+//     (mic_off without it) and which the player popup needs before it offers Mute (game+0xe13be0);
+//   CLocalTalker's update (game+0x383530) reads get_TalkingMode (+0x40) each frame: non-zero = talking (the talker's +0x78, held for
+//     GameChat/MinIsTalkingSeconds into +0x79 = IsTalking). Remote players' talkers are keyed by their xuid (the lobby player's +0x40,
+//     game+0xa2f930) and marked talking by the game's own voice loop when a relayed packet carries that id, so they need nothing here.
+// The DLL's ChatUser ABI (vtable rva 0x136530 of the real Microsoft.Xbox.GameChat.dll) has 15 slots from +0x30; the ones the game does
+// not read are answered with zeros.
+
+typedef PCWSTR(WINAPI* RawBufferFn)(HSTRING, UINT32*);
+typedef HRESULT(WINAPI* CreateStringFn)(PCWSTR, UINT32, HSTRING*);
+typedef HRESULT(WINAPI* DeleteStringFn)(HSTRING);
+RawBufferFn g_raw;
+CreateStringFn g_create;
+DeleteStringFn g_delete;
+
+HRESULT make_hstring(const std::wstring& w, HSTRING* out) {
+    *out = nullptr;
+    return g_create ? g_create(w.c_str(), UINT32(w.size()), out) : E_FAIL;
+}
+
+// A Windows.Xbox.System.IUser's xuid (get_XboxUserId, +0x78), 0 when it has none.
+uint64_t user_xuid(IInspectable* user) {
+    if (!user || !g_raw || !g_delete) return 0;
+    HSTRING h = nullptr;
+    typedef HRESULT(STDMETHODCALLTYPE * Fn)(IInspectable*, HSTRING*);
+    if (FAILED(((Fn)(*(void***)user)[15])(user, &h)) || !h) return 0;
+    UINT32 n = 0;
+    PCWSTR w = g_raw(h, &n);
+    uint64_t x = w ? wcstoull(w, nullptr, 10) : 0;
+    g_delete(h);
+    return x;
+}
+
+// Whether this PC has a microphone the capture thread can open.
+bool have_microphone() {
+    static std::atomic<int> known{-1};
+    if (known < 0) {
+        wchar_t sys[MAX_PATH];
+        UINT n = GetSystemDirectoryW(sys, MAX_PATH);
+        HMODULE m = n ? LoadLibraryW((std::wstring(sys, n) + L"\\winmm.dll").c_str()) : nullptr;
+        typedef UINT(WINAPI * NumFn)();
+        NumFn num = m ? (NumFn)(void*)GetProcAddress(m, "waveInGetNumDevs") : nullptr;
+        known = num && num() > 0 ? 1 : 0;
+    }
+    return known == 1;
+}
+
+// IAudioDeviceInfo of the one capture device we report: id +0x30, type +0x38 (0 = capture).
+class CaptureDevice final : public IInspectable {
+public:
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+        if (!out) return E_POINTER;
+        if (IsEqualGUID(iid, IID_IUnknown) || IsEqualGUID(iid, IID_Inspectable) || IsEqualGUID(iid, IID_Agile)) {
+            *out = static_cast<IInspectable*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return *out = nullptr, E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ULONG(++refs_); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        long n = --refs_;
+        if (n == 0) delete this;
+        return ULONG(n);
+    }
+    INSPECTABLE_BODY
+    virtual HRESULT STDMETHODCALLTYPE get_Id(HSTRING* id) { return id ? make_hstring(L"fh2mp-voice-xboxcontrollercapture", id) : E_POINTER; }
+    virtual HRESULT STDMETHODCALLTYPE get_DeviceType(INT32* t) { return t ? (*t = 0, S_OK) : E_POINTER; }
+    virtual HRESULT STDMETHODCALLTYPE get_DeviceCategory(INT32* c) { return c ? (*c = 0, S_OK) : E_POINTER; }
+    virtual HRESULT STDMETHODCALLTYPE get_IsMicrophoneMuted(boolean* m) { return m ? (*m = 0, S_OK) : E_POINTER; }
+    virtual HRESULT STDMETHODCALLTYPE get_Sharing(INT32* s) { return s ? (*s = 0, S_OK) : E_POINTER; }
+
+private:
+    std::atomic<long> refs_{1};
+};
+
+// IVectorView<T*> of our objects (GetAt +0x30, get_Size +0x38, IndexOf, GetMany).
+class ObjView final : public IInspectable {
+public:
+    explicit ObjView(std::vector<IInspectable*> items) : items_(std::move(items)) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+        if (!out) return E_POINTER;
+        if (IsEqualGUID(iid, IID_IUnknown) || IsEqualGUID(iid, IID_Inspectable) || IsEqualGUID(iid, IID_Agile)) {
+            *out = static_cast<IInspectable*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return *out = nullptr, E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ULONG(++refs_); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        long n = --refs_;
+        if (n == 0) delete this;
+        return ULONG(n);
+    }
+    INSPECTABLE_BODY
+    virtual HRESULT STDMETHODCALLTYPE GetAt(UINT32 i, IInspectable** item) {
+        if (!item) return E_POINTER;
+        *item = nullptr;
+        if (i >= items_.size()) return HRESULT(0x8000000BL);  // E_BOUNDS
+        *item = items_[i];
+        items_[i]->AddRef();
+        return S_OK;
+    }
+    virtual HRESULT STDMETHODCALLTYPE get_Size(UINT32* n) { return n ? (*n = UINT32(items_.size()), S_OK) : E_POINTER; }
+    virtual HRESULT STDMETHODCALLTYPE IndexOf(IInspectable* item, UINT32* index, boolean* found) {
+        if (!index || !found) return E_POINTER;
+        *index = 0, *found = 0;
+        for (size_t i = 0; i < items_.size(); i++)
+            if (items_[i] == item) return *index = UINT32(i), *found = 1, S_OK;
+        return S_OK;
+    }
+    virtual HRESULT STDMETHODCALLTYPE GetMany(UINT32 start, UINT32 capacity, IInspectable** items, UINT32* actual) {
+        if (!actual) return E_POINTER;
+        *actual = 0;
+        for (UINT32 i = start; i < items_.size() && *actual < capacity; i++) {
+            items[(*actual)++] = items_[i];
+            items_[i]->AddRef();
+        }
+        return S_OK;
+    }
+
+private:
+    ~ObjView() {
+        for (IInspectable* x : items_) x->Release();
+    }
+    std::atomic<long> refs_{1};
+    std::vector<IInspectable*> items_;  // one count each
+};
+
+// The local player's user as its ChatUser hands it out: the real IUser (Azimuth's), except that get_AudioDevices (+0x38) lists our
+// capture device while this PC has a microphone and FH2MP_VOICE_MIC is not 0. Every other slot goes to the real user unchanged
+// (IUser's methods take at most three arguments after this, none of them floating point).
+struct UserView {
+    void** vt;
+    std::atomic<long> refs;
+    IInspectable* real;
+};
+typedef HRESULT(STDMETHODCALLTYPE* Fwd3)(void*, void*, void*, void*);
+template <int N>
+HRESULT STDMETHODCALLTYPE uv_forward(UserView* self, void* a, void* b, void* c) {
+    return ((Fwd3)(*(void***)self->real)[N])(self->real, a, b, c);
+}
+HRESULT STDMETHODCALLTYPE uv_qi(UserView* self, REFIID iid, void** out) {
+    if (!out) return E_POINTER;
+    if (IsEqualGUID(iid, IID_IUnknown) || IsEqualGUID(iid, IID_Inspectable) || IsEqualGUID(iid, IID_Agile)) {
+        *out = self;
+        ++self->refs;
+        return S_OK;
+    }
+    return self->real->QueryInterface(iid, out);  // the real user's other interfaces (calls on them reach Azimuth's object)
+}
+ULONG STDMETHODCALLTYPE uv_addref(UserView* self) { return ULONG(++self->refs); }
+ULONG STDMETHODCALLTYPE uv_release(UserView* self) {
+    long n = --self->refs;
+    if (n == 0) {
+        self->real->Release();
+        delete self;
+    }
+    return ULONG(n);
+}
+HRESULT STDMETHODCALLTYPE uv_audio_devices(UserView*, IInspectable** out) {
+    if (!out) return E_POINTER;
+    std::vector<IInspectable*> devices;
+    if (g_engine.mic && have_microphone()) devices.push_back(new CaptureDevice());
+    *out = new ObjView(std::move(devices));
+    return S_OK;
+}
+const int kUserSlots = 40;
+void* g_user_vt[kUserSlots];
+template <int N>
+void fill_user_vt() {
+    if constexpr (N < kUserSlots) {
+        g_user_vt[N] = (void*)uv_forward<N>;
+        fill_user_vt<N + 1>();
+    }
+}
+IInspectable* user_view(IInspectable* real) {
+    static bool init = [] {
+        fill_user_vt<0>();
+        g_user_vt[0] = (void*)uv_qi, g_user_vt[1] = (void*)uv_addref, g_user_vt[2] = (void*)uv_release;
+        g_user_vt[7] = (void*)uv_audio_devices;  // +0x38
+        return true;
+    }();
+    (void)init;
+    real->AddRef();
+    return (IInspectable*)new UserView{g_user_vt, {1}, real};
+}
+
+struct IChatUserAbi : IInspectable {
+    virtual HRESULT STDMETHODCALLTYPE get_XboxUserId(HSTRING* id) = 0;                    // +0x30
+    virtual HRESULT STDMETHODCALLTYPE get_UniqueConsoleIdentifier(IInspectable** v) = 0;  // +0x38
+    virtual HRESULT STDMETHODCALLTYPE get_TalkingMode(INT32* v) = 0;                      // +0x40
+    virtual HRESULT STDMETHODCALLTYPE get_Int48(INT32* v) = 0;                            // +0x48
+    virtual HRESULT STDMETHODCALLTYPE get_Int50(INT32* v) = 0;                            // +0x50
+    virtual HRESULT STDMETHODCALLTYPE get_Int58(INT32* v) = 0;                            // +0x58
+    virtual HRESULT STDMETHODCALLTYPE get_User(IInspectable** v) = 0;                     // +0x60
+    virtual HRESULT STDMETHODCALLTYPE get_IsLocal(boolean* v) = 0;                        // +0x68
+    virtual HRESULT STDMETHODCALLTYPE get_IsMuted(boolean* v) = 0;                        // +0x70
+    virtual HRESULT STDMETHODCALLTYPE get_Bool78(boolean* v) = 0;                         // +0x78
+    virtual HRESULT STDMETHODCALLTYPE get_Obj80(IInspectable** v) = 0;                    // +0x80
+    virtual HRESULT STDMETHODCALLTYPE get_Int88(INT32* v) = 0;                            // +0x88
+    virtual HRESULT STDMETHODCALLTYPE Call90() = 0;                                       // +0x90
+    virtual HRESULT STDMETHODCALLTYPE get_Value98(INT32* v) = 0;                          // +0x98
+    virtual HRESULT STDMETHODCALLTYPE CallA0() = 0;                                       // +0xa0
+};
+
+class ChatUser final : public IChatUserAbi {
+public:
+    ChatUser(uint64_t xuid, IInspectable* user) : xuid_(xuid), user_(user) {
+        if (user_) user_->AddRef();
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+        if (!out) return E_POINTER;
+        if (IsEqualGUID(iid, IID_IUnknown) || IsEqualGUID(iid, IID_Inspectable) || IsEqualGUID(iid, IID_Agile)) {
+            *out = static_cast<IChatUserAbi*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return *out = nullptr, E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ULONG(++refs_); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        long n = --refs_;
+        if (n == 0) delete this;
+        return ULONG(n);
+    }
+    INSPECTABLE_BODY
+    HRESULT STDMETHODCALLTYPE get_XboxUserId(HSTRING* id) override { return id ? make_hstring(std::to_wstring(xuid_), id) : E_POINTER; }
+    HRESULT STDMETHODCALLTYPE get_UniqueConsoleIdentifier(IInspectable** v) override { return v ? (*v = nullptr, S_OK) : E_POINTER; }
+    // 0 not talking, 1 talking over a headset
+    HRESULT STDMETHODCALLTYPE get_TalkingMode(INT32* v) override { return v ? (*v = talking() ? 1 : 0, S_OK) : E_POINTER; }
+    HRESULT STDMETHODCALLTYPE get_Int48(INT32* v) override { return v ? (*v = 0, S_OK) : E_POINTER; }
+    HRESULT STDMETHODCALLTYPE get_Int50(INT32* v) override { return v ? (*v = 0, S_OK) : E_POINTER; }
+    HRESULT STDMETHODCALLTYPE get_Int58(INT32* v) override { return v ? (*v = 0, S_OK) : E_POINTER; }
+    HRESULT STDMETHODCALLTYPE get_User(IInspectable** v) override {
+        if (!v) return E_POINTER;
+        *v = user_ ? user_view(user_) : nullptr;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE get_IsLocal(boolean* v) override { return v ? (*v = user_ != nullptr, S_OK) : E_POINTER; }
+    HRESULT STDMETHODCALLTYPE get_IsMuted(boolean* v) override {
+        if (!v) return E_POINTER;
+        std::lock_guard<std::mutex> l(g_engine.mu);
+        *v = g_engine.muted.count(xuid_) != 0;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE get_Bool78(boolean* v) override { return v ? (*v = 0, S_OK) : E_POINTER; }
+    HRESULT STDMETHODCALLTYPE get_Obj80(IInspectable** v) override { return v ? (*v = nullptr, S_OK) : E_POINTER; }
+    HRESULT STDMETHODCALLTYPE get_Int88(INT32* v) override { return v ? (*v = 0, S_OK) : E_POINTER; }
+    HRESULT STDMETHODCALLTYPE Call90() override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE get_Value98(INT32* v) override { return v ? (*v = 0, S_OK) : E_POINTER; }
+    HRESULT STDMETHODCALLTYPE CallA0() override { return S_OK; }
+
+    bool local() const { return user_ != nullptr; }
+
+private:
+    ~ChatUser() {
+        if (user_) user_->Release();
+    }
+    bool talking() const {
+        DWORD now = GetTickCount();
+        if (user_) return g_engine.mic && now - g_engine.mic_loud < 300;
+        std::lock_guard<std::mutex> l(g_engine.mu);
+        auto t = g_engine.talkers.find(xuid_);
+        return t != g_engine.talkers.end() && now - t->second.heard < 300;
+    }
+    std::atomic<long> refs_{1};
+    const uint64_t xuid_;
+    IInspectable* user_;  // the local player's IUser, null for a remote one
+};
+
+// The chat users the game can find: the local player (from AddLocalUserToChatChannelAsync) and everyone heard (from their packets).
+std::mutex g_users_mu;
+std::map<uint64_t, ChatUser*> g_users;  // one count each
+
+ChatUser* chat_user(uint64_t xuid, IInspectable* local_user) {
+    std::lock_guard<std::mutex> l(g_users_mu);
+    auto it = g_users.find(xuid);
+    if (it != g_users.end() && (!local_user || it->second->local())) return it->second;
+    if (it != g_users.end()) it->second->Release();  // a remote entry for what turns out to be the local player
+    ChatUser* u = new ChatUser(xuid, local_user);
+    g_users[xuid] = u;
+    return u;
+}
+
+// The xuid of one of our ChatUsers (ChatManager +0xc0 / +0xc8 get one); 0 for anything else.
+uint64_t chat_user_xuid(IInspectable* user) {
+    std::lock_guard<std::mutex> l(g_users_mu);
+    for (auto& kv : g_users)
+        if (static_cast<IInspectable*>(static_cast<IChatUserAbi*>(kv.second)) == user) return kv.first;
+    return 0;
 }
 
 // ---- IChatManager ---------------------------------------------------------------------------------------------------------------------
@@ -770,19 +1086,55 @@ public:
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE HandleNewRemoteConsole(IInspectable*) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE AddLocalUserToChatChannelAsync(UINT8, IInspectable*, IUnknown** op) override { return done(op); }
+    HRESULT STDMETHODCALLTYPE AddLocalUserToChatChannelAsync(UINT8 ch, IInspectable* user, IUnknown** op) override {
+        // the local player's ChatUser must be there before the task completes: its continuation looks it up (game+0x3883f0)
+        if (uint64_t x = user_xuid(user)) {
+            chat_user(x, user);
+            logf("voice: the local player %#llx joins chat channel %d (a capture device is reported: %s)", (unsigned long long)x, int(ch),
+                 g_engine.mic && have_microphone() ? "yes" : "no, so the game shows no microphone");
+        }
+        return done(op);
+    }
     HRESULT STDMETHODCALLTYPE RemoveLocalUserFromChatChannelAsync(UINT8, IInspectable*, IUnknown** op) override { return done(op); }
     HRESULT STDMETHODCALLTYPE ChannelCall3Async(UINT8, IInspectable*, IUnknown** op) override { return done(op); }
     HRESULT STDMETHODCALLTYPE RemoveRemoteConsoleAsync(IInspectable*, IUnknown** op) override { return done(op); }
-    HRESULT STDMETHODCALLTYPE GetChatUsers(IInspectable** out) override { return out ? (*out = nullptr, S_OK) : E_POINTER; }
-    HRESULT STDMETHODCALLTYPE MuteUserFromAllChannels(IInspectable*) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE UnmuteUserFromAllChannels(IInspectable*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetChatUsers(IInspectable** out) override {
+        if (!out) return E_POINTER;
+        std::vector<IInspectable*> users;
+        {
+            std::lock_guard<std::mutex> l(g_users_mu);
+            for (auto& kv : g_users) {
+                kv.second->AddRef();
+                users.push_back(static_cast<IChatUserAbi*>(kv.second));
+            }
+        }
+        *out = new ObjView(std::move(users));
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE MuteUserFromAllChannels(IInspectable* user) override { return mute(user, true); }
+    HRESULT STDMETHODCALLTYPE UnmuteUserFromAllChannels(IInspectable* user) override { return mute(user, false); }
     HRESULT STDMETHODCALLTYPE MuteAll() override { return S_OK; }
     HRESULT STDMETHODCALLTYPE UnmuteAll() override { return S_OK; }
     HRESULT STDMETHODCALLTYPE get_Flag(boolean* out) override { return out ? (*out = 0, S_OK) : E_POINTER; }
     HRESULT STDMETHODCALLTYPE get_Object(IInspectable** out) override { return out ? (*out = nullptr, S_OK) : E_POINTER; }
 
 private:
+    HRESULT mute(IInspectable* user, bool on) {
+        uint64_t x = chat_user_xuid(user);
+        if (!x) return S_OK;
+        bool changed;
+        {
+            std::lock_guard<std::mutex> l(g_engine.mu);
+            changed = on ? g_engine.muted.insert(x).second : g_engine.muted.erase(x) != 0;
+            auto t = g_engine.talkers.find(x);
+            if (on && t != g_engine.talkers.end()) {
+                if (t->second.dec) opus_decoder_destroy(t->second.dec);
+                g_engine.talkers.erase(t);
+            }
+        }
+        if (changed) logf(on ? "voice: %#llx muted: their voice is not played" : "voice: %#llx unmuted", (unsigned long long)x);
+        return S_OK;
+    }
     HRESULT give_token(int64_t* token) {
         if (!token) return E_POINTER;
         std::lock_guard<std::mutex> l(g_engine.mu);
@@ -820,6 +1172,11 @@ void* hk_make_buffer(const void* data, unsigned long long n) {
 
 bool voice_install(const FH2ModApi* api, FH2Mod* mod, unsigned char* base, void (*log)(const char*)) {
     g_log = log;
+    if (HMODULE combase = LoadLibraryW(L"combase.dll")) {
+        g_raw = (RawBufferFn)(void*)GetProcAddress(combase, "WindowsGetStringRawBuffer");
+        g_create = (CreateStringFn)(void*)GetProcAddress(combase, "WindowsCreateString");
+        g_delete = (DeleteStringFn)(void*)GetProcAddress(combase, "WindowsDeleteString");
+    }
     const char* off = getenv("FH2MP_NO_VOICE");
     if (off && off[0] && off[0] != '0') {
         logf("voice: FH2MP_NO_VOICE is set: the game's ChatManager is left to Azimuth (no voice)");
