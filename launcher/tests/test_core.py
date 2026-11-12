@@ -2079,6 +2079,44 @@ class AchievementsModTests(unittest.TestCase):
             self.assertEqual(fetch.call_count, 1)
 
 
+class AchToastTests(unittest.TestCase):
+    """The achievement toast's files (Launcher.ensure_ach_toast): only from the FH2MP mirror, checked by the pinned hash, downloaded once."""
+
+    def test_the_pins_are_mirror_files_with_hashes(self):
+        from fh2mp_launcher.constants import ACH_TOAST, MIRROR_BASE
+        self.assertTrue(ACH_TOAST["base"].startswith(MIRROR_BASE))
+        self.assertIn("ach-sound-rare.wav", ACH_TOAST["files"])
+        self.assertIn("TrophyIntro.png", ACH_TOAST["files"])
+        for name, (sha, size) in ACH_TOAST["files"].items():
+            self.assertRegex(sha, r"^[0-9a-f]{64}$", name)
+            self.assertGreater(size, 0, name)
+
+    def test_files_in_place_are_not_downloaded_again(self):
+        from fh2mp_launcher import core, updater
+        from fh2mp_launcher.constants import ACH_TOAST
+        from fh2mp_launcher.settings import Settings
+        az = tempfile.mkdtemp()
+        lc = core.Launcher(Settings(os.path.join(az, "settings.json")), load_identity=False)
+        lc.settings["azimuth_dir"] = az
+        data = b"RIFF-sound"
+        files = {"ach-sound-rare.wav": (hashlib.sha256(data).hexdigest(), len(data))}
+        def fake(self, url, entry, progress=None, cancelled=lambda: False, dest_dir=None):
+            self_calls.append(url)
+            path = os.path.join(dest_dir, entry["name"])
+            with open(path, "wb") as f:
+                f.write(data)
+            return path
+        self_calls = []
+        with mock.patch.dict(ACH_TOAST, files=files), mock.patch.object(updater.Updater, "download_url", fake):
+            lc.settings["achievements"] = False
+            self.assertEqual(lc.ensure_ach_toast(), [])
+            lc.settings["achievements"] = True
+            self.assertTrue(lc.ensure_ach_toast())
+            self.assertEqual(self_calls, [ACH_TOAST["base"] + "ach-sound-rare.wav"])
+            self.assertEqual(lc.ensure_ach_toast(), [])
+            self.assertEqual(len(self_calls), 1)
+
+
 class AnnaTests(unittest.TestCase):
     """FH2 ANNA (shim.install_anna, anna_bindings): only its DLL comes from the release, the platform build in its zip stays out; Extra Options'
     D-pad autodrive and hazard buttons go to None only where they are still the defaults."""

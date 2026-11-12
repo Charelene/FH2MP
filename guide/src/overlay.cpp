@@ -383,6 +383,66 @@ bool make_buffers() {
     return true;
 }
 
+// The achievement toast's pictures and sounds, which the launcher puts into data/bin/achievement-toast (constants.ACH_TOAST): the
+// pictures become textures by their names (ach_art_set), the sounds stay in memory for PlaySound. What is missing is drawn without.
+std::vector<unsigned char> g_ach_wav[3];
+
+std::vector<unsigned char> read_file(const std::wstring& path) {
+    std::vector<unsigned char> out;
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return out;
+    DWORD size = GetFileSize(f, nullptr), got = 0;
+    if (size != INVALID_FILE_SIZE && size < (16u << 20)) {
+        out.resize(size);
+        if (!ReadFile(f, out.data(), size, &got, nullptr)) got = 0;
+        out.resize(got);
+    }
+    CloseHandle(f);
+    return out;
+}
+
+void load_ach_art() {
+    std::wstring dir = std::wstring(g_api->azimuth_dir) + L"\\data\\bin\\achievement-toast\\";
+    int pictures = 0, missing = 0;
+    for (int where = 0; where < 2; where++)
+        for (const char* const* f = ach_art_files(where); *f; f++) {
+            std::wstring name(*f, *f + strlen(*f));
+            std::vector<unsigned char> png = read_file(dir + name), rgba;
+            int w = 0, h = 0;
+            if (png.empty() || !decode_png(png.data(), png.size(), &rgba, &w, &h)) {
+                missing++;
+                continue;
+            }
+            D3D12_CPU_DESCRIPTOR_HANDLE cpu;
+            D3D12_GPU_DESCRIPTOR_HANDLE gpu;
+            srv_alloc(nullptr, &cpu, &gpu);
+            if (!upload_texture(g_device, g_queue, rgba.data(), w, h, cpu)) {
+                srv_free(nullptr, cpu, gpu);
+                missing++;
+                continue;
+            }
+            ach_art_set(&g_assets.ach, *f, (ImTextureID)gpu.ptr);
+            pictures++;
+        }
+    static const wchar_t* sounds[3] = {L"ach-sound-normal.wav", L"ach-sound-rare.wav", L"ach-sound-mythic.wav"};
+    int wavs = 0;
+    for (int i = 0; i < 3; i++) wavs += !(g_ach_wav[i] = read_file(dir + sounds[i])).empty();
+    logf("guide: achievement toast: %d pictures and %d sounds loaded from data\\bin\\achievement-toast (%d pictures missing: drawn without)", pictures, wavs, missing);
+}
+
+// The toast's sound, from the real winmm.dll in the system folder (the one next to azimuth.exe is Extra Options').
+void play_ach_sound(AchTier tier) {
+    typedef BOOL(WINAPI * PlaySoundWFn)(LPCWSTR, HMODULE, DWORD);
+    static PlaySoundWFn play = [] {
+        wchar_t sys[MAX_PATH];
+        UINT n = GetSystemDirectoryW(sys, MAX_PATH);
+        HMODULE m = n ? LoadLibraryW((std::wstring(sys, n) + L"\\winmm.dll").c_str()) : nullptr;
+        return m ? (PlaySoundWFn)(void*)GetProcAddress(m, "PlaySoundW") : nullptr;
+    }();
+    const std::vector<unsigned char>& wav = g_ach_wav[int(tier)];
+    if (play && !wav.empty()) play((LPCWSTR)wav.data(), nullptr, 0x0004 /* SND_MEMORY */ | 0x0001 /* SND_ASYNC */ | 0x0002 /* SND_NODEFAULT */);
+}
+
 // The player's picture: Azimuth's data/player.png (256x256 RGBA, written by the launcher), uploaded once into a shader-visible texture.
 ImTextureID load_gamerpic() {
     std::wstring path = std::wstring(g_api->azimuth_dir) + L"\\data\\player.png";
@@ -468,6 +528,7 @@ bool setup(IDXGISwapChain3* sc) {
     if (!ImGui_ImplDX12_Init(&info)) return false;
 
     g_assets.gamerpic = load_gamerpic();
+    load_ach_art();
     g_guide.gamertag = read_gamertag();
     g_hwnd = desc.OutputWindow;
     if (g_hwnd && !g_old_proc) g_old_proc = (WNDPROC)SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC, (LONG_PTR)guide_wndproc);
@@ -494,6 +555,30 @@ void social_and_toasts(double now) {
         if (ach_refresh(g_api->azimuth_dir, &ach_stamp, &u)) {
             if (u.known) logf("guide: achievements read from the Achievements mod's unlock file (%d of %d unlocked, %dG)", u.count(), int(ach_defs().size()), u.gamerscore());
             else logf("guide: the Achievements mod has no unlock file (fh2-mods\\Achievements\\User_*.ini): the Guide's Achievements stay off");
+            // what is new since the last read: a toast each, in the list's order (none at the first read: that is what was already
+            // unlocked); the Mythic Achievement when the last of the game's own 50 comes
+            static AchUnlocks before;
+            static bool read_once;
+            if (read_once && before.known && u.known) {
+                const std::vector<AchDef>& defs = ach_defs();
+                int base_before = 0, base_after = 0, base_all = 0;
+                for (int i = 0; i < int(defs.size()); i++) {
+                    const AchDef& d = defs[i];
+                    if (d.group == 0) base_all++, base_before += before.has(d.id), base_after += u.has(d.id);
+                    if (u.has(d.id) && !before.has(d.id)) {
+                        logf("guide: achievement unlocked: %s (%dG): its toast", d.name, d.g);
+                        g_guide.ach_toast(AchTier::Normal, d.g, d.name, d.desc, -1, i, now);
+                    }
+                }
+                if (base_after == base_all && base_before < base_all) {
+                    char words[48];
+                    snprintf(words, sizeof words, "%d of %d Achievements", base_all, base_all);
+                    logf("guide: all %d of the game's own achievements unlocked: the Mythic Achievement's toast", base_all);
+                    g_guide.ach_toast(AchTier::Mythic, -1, "Forza Horizon 2", words, -1, -1, now);
+                }
+            }
+            if (u.known) before = u;
+            read_once = true;
             g_guide.set_achievements(u);
             net_report_achievements(u);
         }
@@ -631,6 +716,8 @@ void render(IDXGISwapChain3* sc) {
     ImGui_ImplDX12_NewFrame();
     ImGui::NewFrame();
     g_guide.draw(ImGui::GetForegroundDrawList(), g_assets, io.DisplaySize.x, io.DisplaySize.y, now);
+    AchTier sound_tier;
+    if (g_guide.take_ach_sound(&sound_tier)) play_ach_sound(sound_tier);
     ImGui::Render();
 
     f.alloc->Reset();

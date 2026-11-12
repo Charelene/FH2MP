@@ -641,6 +641,11 @@ class Launcher:
             from .api import log_failure
             log_failure("PLAY", "achievements", e, str(e))
         try:
+            self.ensure_ach_toast()
+        except Exception as e:  # noqa: BLE001       # not worth stopping a game over: the Guide's toast is then drawn without them
+            from .api import log_failure
+            log_failure("PLAY", "ach_toast", e, str(e))
+        try:
             self.ensure_controls()
         except shim.ShimError as e:                  # not worth stopping a game over: the toggles just stay where they are
             from .api import log_failure
@@ -1076,6 +1081,25 @@ class Launcher:
         except upstream.UpstreamError as e:
             raise updater.UpdateError(str(e)) from None
         return shim.install_achievements(d, files)
+
+    def ensure_ach_toast(self, progress=None, cancelled=lambda: False):
+        """The achievement toast's sounds and pictures (constants.ACH_TOAST) from the FH2MP mirror, each checked by size and SHA-256, where
+        the player wants achievements and a file is missing or not the pinned one. -> list of things done."""
+        from .constants import ACH_TOAST
+        d = self.settings["azimuth_dir"]
+        if not self.settings["achievements"] or not d or not os.path.isdir(d):
+            return []
+        dest = os.path.join(d, *ACH_TOAST["dir"].split("/"))
+        os.makedirs(dest, exist_ok=True)
+        up = updater.Updater(channel=self.settings["channel"])
+        got = 0
+        for name, (sha, size) in ACH_TOAST["files"].items():
+            target = os.path.join(dest, name)
+            if os.path.isfile(target) and updater.sha256_file(target) == sha:
+                continue
+            up.download_url(ACH_TOAST["base"] + name, {"name": name, "sha256": sha, "size": size}, progress, cancelled, dest_dir=dest)
+            got += 1
+        return [f"downloaded {got} sound and picture file(s) for the Guide's achievement toast"] if got else []
 
     def ensure_anna_bindings(self):
         """Extra Options' D-pad autodrive and hazard buttons (ANNA's buttons) go to None once; a binding the player chose is never touched, and a
