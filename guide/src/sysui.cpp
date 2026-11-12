@@ -422,11 +422,13 @@ bool wrapper_at(const unsigned char* at, const GUID& iid, unsigned char slot) {
 
 bool sysui_install(const FH2ModApi* api, FH2Mod* mod, unsigned char* base, void (*log)(const char*), void (*on_invite)()) {
     g_log = log, g_on_invite = on_invite;
-    if (HMODULE combase = LoadLibraryW(L"combase.dll")) {
-        g_raw = (RawBufferFn)(void*)GetProcAddress(combase, "WindowsGetStringRawBuffer");
-        g_create = (CreateStringFn)(void*)GetProcAddress(combase, "WindowsCreateString");
-        g_delete = (DeleteStringFn)(void*)GetProcAddress(combase, "WindowsDeleteString");
-    }
+    // The game's own HSTRING functions: its import address table slots for COMBASE (build 1.0.0.64: WindowsCreateString +0x1dd0eb8,
+    // WindowsDeleteString +0x1dd0ec0, WindowsGetStringRawBuffer +0x1dd0ed8), which Azimuth fills with its own. Azimuth keeps a table of the
+    // strings it made and stops the game on any other ("invalid local string handle", win1 2026-11-12 at game+0x370d57, a ChatUser's xuid
+    // made with Windows' combase), so every string handed to the game is made here.
+    g_create = *(CreateStringFn*)(base + 0x1dd0eb8);
+    g_delete = *(DeleteStringFn*)(base + 0x1dd0ec0);
+    g_raw = *(RawBufferFn*)(base + 0x1dd0ed8);
     int on = 0;
     auto hook = [&](const char* name, unsigned rva, void* detour, void** orig, bool known) {
         if (!known) {
@@ -441,7 +443,7 @@ bool sysui_install(const FH2ModApi* api, FH2Mod* mod, unsigned char* base, void 
         on++;
     };
     bool strings = g_raw && g_create && g_delete;
-    if (!strings) logf("guide: combase has no HSTRING functions: the game's gamercard, keyboard and people picker calls are left to Azimuth");
+    if (!strings) logf("guide: the game's HSTRING imports are empty: the game's gamercard, keyboard and people picker calls are left to Azimuth");
     hook("guide: the game's gamercard popup (ShowProfileCardAsync)", 0xe41d30, (void*)hk_profile_card, (void**)&o_card_popup,
          strings && wrapper_at(base + 0xe41d30, IID_SystemUIStatics, 0x40));
     hook("guide: the game's system keyboard (ShowVirtualKeyboardAsync)", 0xed23a0, (void*)hk_virtual_keyboard, (void**)&o_keyboard,

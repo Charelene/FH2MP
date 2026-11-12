@@ -1101,7 +1101,7 @@ public:
     HRESULT STDMETHODCALLTYPE GetChatUsers(IInspectable** out) override {
         if (!out) return E_POINTER;
         std::vector<IInspectable*> users;
-        {
+        if (g_create) {
             std::lock_guard<std::mutex> l(g_users_mu);
             for (auto& kv : g_users) {
                 kv.second->AddRef();
@@ -1172,11 +1172,13 @@ void* hk_make_buffer(const void* data, unsigned long long n) {
 
 bool voice_install(const FH2ModApi* api, FH2Mod* mod, unsigned char* base, void (*log)(const char*)) {
     g_log = log;
-    if (HMODULE combase = LoadLibraryW(L"combase.dll")) {
-        g_raw = (RawBufferFn)(void*)GetProcAddress(combase, "WindowsGetStringRawBuffer");
-        g_create = (CreateStringFn)(void*)GetProcAddress(combase, "WindowsCreateString");
-        g_delete = (DeleteStringFn)(void*)GetProcAddress(combase, "WindowsDeleteString");
-    }
+    // The game's own HSTRING functions: its import address table slots for COMBASE (build 1.0.0.64: WindowsCreateString +0x1dd0eb8,
+    // WindowsDeleteString +0x1dd0ec0, WindowsGetStringRawBuffer +0x1dd0ed8), which Azimuth fills with its own. Azimuth keeps a table of the
+    // strings it made and stops the game on any other ("invalid local string handle", win1 2026-11-12 at game+0x370d57, a ChatUser's xuid
+    // made with Windows' combase), so every string handed to the game is made here.
+    g_create = *(CreateStringFn*)(base + 0x1dd0eb8);
+    g_delete = *(DeleteStringFn*)(base + 0x1dd0ec0);
+    g_raw = *(RawBufferFn*)(base + 0x1dd0ed8);
     const char* off = getenv("FH2MP_NO_VOICE");
     if (off && off[0] && off[0] != '0') {
         logf("voice: FH2MP_NO_VOICE is set: the game's ChatManager is left to Azimuth (no voice)");
