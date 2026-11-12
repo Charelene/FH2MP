@@ -138,6 +138,9 @@ type Hold struct {
 	Kind      string
 	ExpiresAt int64
 	Key       *LobbyKey
+	// Private: a seat in a private game for an invited player. It only counts against the game's room: no matchmaking ticket uses it
+	// (that would make a public lobby of the private game's name) and the lobby list does not show it.
+	Private bool
 }
 
 type left struct {
@@ -558,8 +561,8 @@ func ServersBlock() pyjson.Obj { return ToJSON(serversBlock()).(pyjson.Obj) }
 //
 // A QoS session that gets a server is a private game (dev 2026-11-12: Private Free Roam chosen in a public Free Roam put both players back
 // into the public world, because the game server still had them assigned to the public lobby). Its members go into a world of its own,
-// named after the session, and so does everyone who later writes itself into it (an invited friend). A private Free Roam started from a Car
-// Meet keeps the Car Meet's world (the game takes the whole meet there; the lobby list and the matchmaker already treat it as private).
+// named after the session, and so does everyone who later writes itself into it (an invited friend). That holds wherever it was started
+// from: two players of one Car Meet who each chose Private Free Roam got the meet's world, together and uninvited (dev 2026-11-12 14:50).
 func (s *Server) AllocateServer(sessionPath string) bool {
 	key, ok := ParsePath(sessionPath)
 	if !ok {
@@ -575,19 +578,13 @@ func (s *Server) AllocateServer(sessionPath string) bool {
 	rec.Change++
 	var announce []string
 	if strings.Contains(strings.ToLower(key[1]), "qos") && rec.World == "" {
-		world, from := key[2], "a world of its own"
-		if owner := rec.Owner; owner != "" {
-			if lobby := s.assignedLobby(owner); lobby != "" && s.carMeetLobbyLocked(lobby) {
-				world, from = lobby, "the world of the Car Meet it started from"
-			}
-		}
-		rec.World = world
+		rec.World = key[2]
 		for _, mk := range rec.Members.Keys() {
 			if isDigits(mk) {
 				announce = append(announce, mk)
 			}
 		}
-		mpsdLog.Info(fmt.Sprintf("private game: session %s/%.8s got a server: it is %s (%.8s), its %d member(s) are put there", key[1], key[2], from, world, len(announce)))
+		mpsdLog.Info(fmt.Sprintf("private game: session %s/%.8s got a server: it is a world of its own, its %d member(s) are put there (owner %s)", key[1], key[2], len(announce), rec.Owner))
 	}
 	world := rec.World
 	s.mu.Unlock()
@@ -595,13 +592,6 @@ func (s *Server) AllocateServer(sessionPath string) bool {
 		s.AnnounceFollower(x, world)
 	}
 	return true
-}
-
-// assignedLobby is the lobby the game server was last told the player belongs in ("" = none).
-func (s *Server) assignedLobby(xuid string) string {
-	s.assignMu.Lock()
-	defer s.assignMu.Unlock()
-	return s.assigned[xuid]
 }
 
 // privateGameLocked is the private game whose world has this name, or nil.
@@ -830,6 +820,10 @@ func (s *Server) putSession(path string, body []byte, xuid string) (int, pyjson.
 	s.sessions[lk] = rec
 	if wroteSelf {
 		s.playing[xuid] = lk
+		if h := s.holds[xuid]; h != nil && h.Private && rec.World != "" && strings.EqualFold(h.ID, rec.World) {
+			delete(s.holds, xuid) // the invited player is in the private game now: its seat lease is used up
+			lobbyLog.Info("reservation used: the player joined the private game " + kv(f("xuid", xuid), f("lobby", trunc(h.ID, 8))))
+		}
 	}
 	var announce [][3]string
 	world, how := key[2], ""

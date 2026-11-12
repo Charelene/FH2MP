@@ -80,22 +80,59 @@ func TestPrivateGameFromPublicFreeRoamIsAWorldOfItsOwn(t *testing.T) {
 	}
 }
 
-func TestPrivateGameFromACarMeetKeepsTheMeetsWorld(t *testing.T) {
+// Dev 2026-11-12 14:50 (win1, win2): both were matched into one Car Meet and each chose Private Free Roam; both private games were given
+// the meet's world, so the second player joined the first uninvited. Each private game is a world of its own.
+func TestTwoPrivateGamesFromOneCarMeetAreSeparateWorlds(t *testing.T) {
 	r := newHeldSeatRig(t)
 	meet := r.carMeet("2001", "5", true)
 	r.s.AnnouncePlayer("2001", meet)
-	priv := "71b8e600-026b-41d5-a235-ed41e2f5d064"
+	if got := r.carMeet("2002", "5", true); got != meet {
+		t.Fatalf("the second player's Car Meet is %s, want the first one's %s", got, meet)
+	}
+	r.s.AnnouncePlayer("2002", meet)
+	a, b := "ffbb4ebb-0726-4ebc-9780-ceaf136507f9", "c9aab327-5db8-475e-a67a-94c857682e98"
+	r.putQos(a, joinBody, "2001")
+	r.s.AllocateServer(r.qosPath(a))
+	r.putQos(b, joinBody, "2002")
+	r.s.AllocateServer(r.qosPath(b))
+	if got := r.assignedTo("2001"); got != a {
+		t.Fatalf("the first player's private game is world %q, want its own %s", got, a)
+	}
+	if got := r.assignedTo("2002"); got != b {
+		t.Fatalf("the second player's private game is world %q, want its own %s", got, b)
+	}
+	if !slices.Contains(r.hub.control, fmt.Sprintf("assign %s %s follow", hexOf("2002"), b)) {
+		t.Fatalf("control datagrams %v", r.hub.control)
+	}
+}
+
+// The seat an accepted invite leases in a private game is no matchmaking hold: a Free Roam ticket made while it lasts gets a public lobby
+// (using it would make a public lobby of the private game's name), the lobby list does not show it, and joining the game uses it up.
+func TestAPrivateGamesSeatIsNotAMatchmakingHold(t *testing.T) {
+	r := newHeldSeatRig(t)
+	priv := "ffbb4ebb-0726-4ebc-9780-ceaf136507f9"
 	r.putQos(priv, joinBody, "2001")
 	r.s.AllocateServer(r.qosPath(priv))
-	if got := r.assignedTo("2001"); got != meet {
-		t.Fatalf("the Car Meet's private Free Roam put its host in %q, want the meet's world %s", got, meet)
+	r.hub.pops[priv] = []string{hexOf("2001")}
+	h, err := r.s.ReserveInvited("2002", priv)
+	if err != nil || !h.Private {
+		t.Fatalf("lease %+v, error %v", h, err)
 	}
+	if got := r.match("2002", false); got == priv {
+		t.Fatal("a Free Roam ticket was matched into the private game through the invite's lease")
+	}
+	for _, row := range r.s.LauncherRows(2002, nil, r.hub.pops, nil) {
+		if id, _ := row.Row.Get("id"); id == priv {
+			t.Fatalf("the lobby list shows the private game's lease: %v", row.Row)
+		}
+	}
+	if r.s.CurrentHold("2002") == nil {
+		t.Fatal("the lease was dropped before the player joined")
+	}
+	r.s.ReserveMember("s", qosTemplate, priv, "2002")
 	r.putQos(priv, joinBody, "2002")
-	if got := r.assignedTo("2002"); got != meet {
-		t.Fatalf("a meet member following the host went to %q, want %s", got, meet)
-	}
-	if !slices.Contains(r.hub.control, fmt.Sprintf("assign %s %s follow", hexOf("2002"), meet)) {
-		t.Fatalf("control datagrams %v", r.hub.control)
+	if r.s.CurrentHold("2002") != nil {
+		t.Fatal("the lease outlived the join")
 	}
 }
 

@@ -209,7 +209,7 @@ func (s *Server) reserve(xuid, lobby, kind string, invited bool) (*Hold, error) 
 					return
 				}
 				previous = s.holds[xuid]
-				hold = &Hold{ID: lobby, Kind: kind, ExpiresAt: int64(s.Now()) + HoldSeconds}
+				hold = &Hold{ID: lobby, Kind: kind, ExpiresAt: int64(s.Now()) + HoldSeconds, Private: true}
 				s.holds[xuid] = hold
 				return
 			}
@@ -277,7 +277,7 @@ func pyBool(b bool) string {
 func (s *Server) pick(xuid string, key LobbyKey, attrs *Dict, ref *Dict, pops map[string][]string, havePops bool) (string, error) {
 	s.pruneHolds(s.Now())
 	h := s.holds[xuid]
-	if h == nil {
+	if h == nil || h.Private {
 		return "", nil
 	}
 	if holdKind(key) != h.Kind {
@@ -404,7 +404,7 @@ func (s *Server) LauncherRows(me int64, lobbies []any, pops map[string][]string,
 		clean.Set("occupied", int64(occupied))
 		out = append(out, LauncherRow{Row: clean, IDs: ids})
 	}
-	if h, ok := s.holds[strconv.FormatInt(me, 10)]; ok && h.Key == nil {
+	if h, ok := s.holds[strconv.FormatInt(me, 10)]; ok && h.Key == nil && !h.Private {
 		out = append(out, LauncherRow{Row: pyjson.Obj{{K: "id", V: h.ID}, {K: "kind", V: h.Kind}, {K: "players", V: int64(0)}, {K: "held", V: int64(1)}, {K: "occupied", V: int64(1)},
 			{K: "capacity", V: int64(capacity.FreeRoam())}, {K: "status", V: "Waiting for your matchmaking request"}, {K: "members", V: []any{}}}})
 	}
