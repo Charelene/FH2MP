@@ -121,39 +121,43 @@ type Peer struct {
 	Pos                                   *[3]float64
 	PosFlagged                            bool
 	UnknownLogged                         map[int]struct{}
-	MalformedLogged                       bool
-	MalformedCount                        int
-	OpenedAt                              float64
-	OpenResult                            *int
-	LostSeen                              int
-	UnmappedLogged                        map[[2]int]struct{}
-	ModelID                               *int64
-	ModelLogged                           *int64
-	MaxY                                  float64
-	ClimbS                                float64
-	TopClimb                              float64
-	CarPayloadLogs                        int
-	KickReason                            *string
-	PartNotes                             int
-	PartLogged                            string
-	SpeedRef                              *SpeedRef
-	Push                                  PushState
-	InvisibleLogged                       bool
-	RepairNotified                        map[int64]float64
-	NoticedAt                             map[string]float64 // Message Center notices sent to this player by key (NotifyPlayer)
-	TopKmh                                float64
-	HardS, SoftS                          float64
-	SpeedFlagged                          map[string]struct{}
-	MaxAbs                                float64
-	Outbox                                []netv2.Baked
-	Window                                reliable.Window
-	RxSeq                                 map[ObjKey]int
-	DupObjects, DupRequests               int
-	Due                                   float64
-	Hold                                  float64
-	AckCache                              *[2]int
-	State                                 PeerState   // half-open / connected / entered / leaving / removed (peerstate.go)
-	Refused                               map[int]int // messages not acted on because of the state, per type
+	// voice relay (voice.go): the send budget, counts, and whether its first packet and a refused one were logged
+	VoiceTokens, VoiceAt        float64
+	VoicePackets, VoiceDropped  int
+	VoiceLogged, VoiceBadLogged bool
+	MalformedLogged             bool
+	MalformedCount              int
+	OpenedAt                    float64
+	OpenResult                  *int
+	LostSeen                    int
+	UnmappedLogged              map[[2]int]struct{}
+	ModelID                     *int64
+	ModelLogged                 *int64
+	MaxY                        float64
+	ClimbS                      float64
+	TopClimb                    float64
+	CarPayloadLogs              int
+	KickReason                  *string
+	PartNotes                   int
+	PartLogged                  string
+	SpeedRef                    *SpeedRef
+	Push                        PushState
+	InvisibleLogged             bool
+	RepairNotified              map[int64]float64
+	NoticedAt                   map[string]float64 // Message Center notices sent to this player by key (NotifyPlayer)
+	TopKmh                      float64
+	HardS, SoftS                float64
+	SpeedFlagged                map[string]struct{}
+	MaxAbs                      float64
+	Outbox                      []netv2.Baked
+	Window                      reliable.Window
+	RxSeq                       map[ObjKey]int
+	DupObjects, DupRequests     int
+	Due                         float64
+	Hold                        float64
+	AckCache                    *[2]int
+	State                       PeerState   // half-open / connected / entered / leaving / removed (peerstate.go)
+	Refused                     map[int]int // messages not acted on because of the state, per type
 
 	// attributes Python sets dynamically (getattr / setattr in lighting.py, honk.py and the world)
 	Lighting         *LightState

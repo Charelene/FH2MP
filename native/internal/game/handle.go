@@ -759,6 +759,9 @@ loop:
 			break loop
 		}
 	}
+	if !broke && peer.State != PeerRemoved {
+		w.relayVoice(peer, br)
+	}
 	if !broke {
 		left := br.Size - br.Pos
 		if left >= 16 && w.LeftoverLogged < 8 {
