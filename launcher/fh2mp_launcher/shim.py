@@ -939,3 +939,109 @@ def anna_bindings(folder):
     except OSError as e:
         raise ShimError(f"could not update the FH2 Extra Options settings: {e.strerror or e}. Is the game still running?") from None
     return True, [f"turned off Extra Options' D-pad autodrive/hazard buttons ({n} setting(s)); the D-pad opens FH2 ANNA"]
+
+
+# ---- NitroSystem (qiangqiang101, MIT): fh2-mods\FnFNitro.dll. It tells FH2 Mod Platform 2.8.0 it is offline_only, so the platform does not load it
+# for online play unless fh2-mods\platform-online.txt has "FnFNitro.dll<TAB>1" (the MODS tab's "Load when playing online"; the platform reads lines
+# of "<dll><TAB><value>", "#" comments, the dll in any case, "0" off and anything else on [C: DWrite.dll 2.8.0 FUN_1800025e0 / FUN_1800072c0]).
+# NitroSystem 2.0.0 and newer have an off switch other mods can pull (NitroSystem.Control, FnFNitro_SetBlocked); the shim keeps its NOS off
+# online except in Free Roam lobbies (src/mods_sync.inc). So the launcher turns "Load when playing online" on for a NitroSystem with the switch and
+# off for one without it. A value the player set on the MODS tab is theirs: only the one the launcher wrote last is changed again, except that a
+# NitroSystem without the switch is always kept off online (it would burn NOS in events).
+ONLINE_LIST = "platform-online.txt"
+ONLINE_HEADER = "# The mods' \"Load when playing online\" on MODS > Installed mods: 1 loads it when the game is started from the FH2MP launcher, 0 doesn't."
+NITRO_DLL = "FnFNitro.dll"
+NITRO_SWITCH_EXPORT = b"FnFNitro_SetBlocked\x00"
+UNDERGLOW_DLL = "Underglow.dll"
+
+
+def _mods_txt_version(folder, dll):
+    """The version the platform's MODS tab last saw for `dll` (fh2-mods\\platform-mods.txt: dll, name, version, ...), "" when not listed."""
+    try:
+        with open(os.path.join(folder, MODS_DIR, "platform-mods.txt"), encoding="utf-8-sig") as f:
+            for line in f:
+                cols = line.rstrip("\r\n").split("\t")
+                if len(cols) >= 3 and cols[0].strip().lower() == dll.lower():
+                    return cols[2].strip()
+    except OSError:
+        pass
+    return ""
+
+
+def nitro_installed(folder):
+    """-> ("none" | "switch" | "no_switch", version as the MODS tab last saw it)."""
+    path = os.path.join(folder, MODS_DIR, NITRO_DLL)
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except FileNotFoundError:
+        return "none", ""
+    except OSError as e:
+        logs.swallowed("shim", "nitro.unreadable", e, effect="treated as a NitroSystem without its off switch")
+        return "no_switch", ""
+    return ("switch" if NITRO_SWITCH_EXPORT in data else "no_switch"), _mods_txt_version(folder, NITRO_DLL)
+
+
+def underglow_installed(folder):
+    """-> (fh2-mods\\Underglow.dll is there, version as the MODS tab last saw it)."""
+    return os.path.isfile(os.path.join(folder, MODS_DIR, UNDERGLOW_DLL)), _mods_txt_version(folder, UNDERGLOW_DLL)
+
+
+def online_value(folder, dll):
+    """`dll`'s value in platform-online.txt ("0", "1", ...), None when it has no line."""
+    try:
+        with open(os.path.join(folder, MODS_DIR, ONLINE_LIST), encoding="utf-8-sig") as f:
+            for line in f:
+                cols = line.rstrip("\r\n").split("\t")
+                if not line.startswith("#") and len(cols) >= 2 and cols[0].lower() == dll.lower():
+                    return cols[1]
+    except OSError:
+        pass
+    return None
+
+
+def set_online_value(folder, dll, value):
+    """Writes `dll`'s line in platform-online.txt (the others stay as they are)."""
+    path = os.path.join(folder, MODS_DIR, ONLINE_LIST)
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        lines = [ONLINE_HEADER]
+    except OSError as e:
+        raise ShimError(f"could not read {ONLINE_LIST}: {e.strerror or e}") from None
+    out, done = [], False
+    for line in lines:
+        cols = line.split("\t")
+        if not line.startswith("#") and len(cols) >= 2 and cols[0].lower() == dll.lower():
+            if not done:
+                out.append(f"{cols[0]}\t{value}")
+                done = True
+            continue
+        out.append(line)
+    if not done:
+        out.append(f"{dll}\t{value}")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        paths.atomic_write(path, ("\n".join(out) + "\n").encode("utf-8-sig"), 0o644)
+    except OSError as e:
+        raise ShimError(f"could not write {ONLINE_LIST}: {e.strerror or e}. Is the game still running?") from None
+
+
+def nitro_online(folder, written):
+    """Every online Play: NitroSystem's "Load when playing online" as the rule above wants it. `written` is the value the launcher wrote last
+    ("" none). -> (the value the launcher has written now, or `written` when it left the line alone; a note for the log, "" when nothing changed)."""
+    kind, version = nitro_installed(folder)
+    if kind == "none":
+        return written, ""
+    want = "1" if kind == "switch" else "0"
+    have = online_value(folder, NITRO_DLL)
+    name = f"NitroSystem {version}".strip()
+    if have == want:
+        return (want if have == written else written), ""
+    if have is None or have == written or want == "0":
+        set_online_value(folder, NITRO_DLL, want)
+        why = ("it has the off switch: FH2MP keeps its NOS off online except in Free Roam lobbies" if want == "1" else
+               "it has no off switch (2.0.0 and newer have one), so its NOS would also burn in events")
+        return want, f"{name} {'loads' if want == '1' else 'stays off'} for online play ({why})"
+    return written, ""          # the player turned it off for online play on the MODS tab: theirs to change

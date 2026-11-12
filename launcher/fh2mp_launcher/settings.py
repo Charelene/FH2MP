@@ -31,6 +31,7 @@ DEFAULTS = {
     "anna_bindings_moved": False,   # Extra Options' D-pad autodrive/hazard buttons (FH2 ANNA's) were set to None, once
     "eo_aero_restore": "",          # the player's Extra Options UnlockAeroTuning value while an online game runs with it at 0 (put back for offline play)
     "controls_swapped": False,      # Extra Options' headlight and roof toggles were moved from the right stick (honk) to the left stick, once; reset when a game's shim could not move the horn (fh2mp-controls.txt)
+    "nitro_online_written": "",     # the value this launcher last wrote for NitroSystem in fh2-mods\platform-online.txt ("" none; shim.nitro_online)
     "extra_options": True,          # put FH2 Extra Options (GPL-3.0, RokkuDayo) next to the shim when the player has no copy
     # developer options (the dev launcher's panel; harmless elsewhere)
     "pin_shim": False,              # never replace the installed shim automatically (local / debug builds)
