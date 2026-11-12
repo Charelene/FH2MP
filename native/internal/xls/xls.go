@@ -128,8 +128,17 @@ func (s *Struct) Int(k string) int64 { return AsInt(s.Vals[k]) }
 // Str returns a string field.
 func (s *Struct) Str(k string) string { v, _ := s.Vals[k].(string); return v }
 
-// Bytes returns a blob field.
-func (s *Struct) Bytes(k string) []byte { v, _ := s.Vals[k].([]byte); return v }
+// Bytes returns a blob field, or the 16 bytes of a GUID field (type 0x12 decodes to [16]byte). The Python codec gave bytes for both; reading
+// only []byte made every Scoreboard.UploadFile scoreId and NotifyRival myScoreId empty, so no ghost was stored after the Go LSP went live.
+func (s *Struct) Bytes(k string) []byte {
+	switch v := s.Vals[k].(type) {
+	case []byte:
+		return v
+	case [16]byte:
+		return v[:]
+	}
+	return nil
+}
 
 // Float returns a float field.
 func (s *Struct) Float(k string) float64 {

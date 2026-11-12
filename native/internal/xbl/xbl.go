@@ -1789,6 +1789,12 @@ func (s *Server) CreateGameSession(mode int, xuids []string) (string, string) {
 // HubLobbies is the live public summaries from the UDP hub, or nil when it cannot be reached.
 func (s *Server) HubLobbies() pyjson.Obj { return s.Hub.Query("lobbies") }
 
+// HubFlags is the cheater pool ("flagged" list of xuid, reason, until), or nil when the hub cannot be reached.
+func (s *Server) HubFlags() pyjson.Obj { return s.Hub.Query("flags") }
+
+// HubUnflag takes a player out of the cheater pool.
+func (s *Server) HubUnflag(xuid int64) { s.Hub.Control(fmt.Sprintf("unflag %x", uint64(xuid))) }
+
 // HubPositions is HubLobbies plus where each car is in those lobbies, or nil when the hub cannot be reached.
 func (s *Server) HubPositions() pyjson.Obj { return s.Hub.Query("positions") }
 

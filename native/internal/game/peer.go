@@ -1,6 +1,7 @@
 package game
 
 import (
+	"fmt"
 	"math"
 
 	"fh2mp/internal/bits"
@@ -100,6 +101,8 @@ type Peer struct {
 	VipHidden                             *VipHidden
 	PlayerStatus                          int // latest LobbyPlayer.PlayerStatus this client wrote (PlayerVarStatus); valid when HasPlayerStatus
 	HasPlayerStatus                       bool
+	PlayerStatusAt                        float64 // when PlayerStatus last changed (monotonic)
+	Look                                  CarLook
 	GoptsReleased                         bool
 	GoptsOwnSeq                           *int
 	ConsoleOid                            *int
@@ -179,6 +182,37 @@ func NewPeer(addr Addr, now float64) *Peer {
 		RepairNotified: map[int64]float64{}, NoticedAt: map[string]float64{}, SpeedFlagged: map[string]struct{}{}, RxSeq: map[ObjKey]int{}, Due: math.Inf(1),
 		Extra: map[string]any{}, Refused: map[int]int{},
 	}
+}
+
+// CarLook is what a player's car wears as its game last wrote it in the player object: HasLivery (var 1), IsNewLivery (var 2), LiveryId (93) and
+// TuneId (94). Seen has bit k set once the k-th of those four was written.
+type CarLook struct {
+	HasLivery, NewLivery bool
+	LiveryID, TuneID     int64
+	Seen                 uint8
+}
+
+// String is "livery 48873 (HasLivery=1 IsNewLivery=0), tune -1"; a field the game has not written yet is "?".
+func (l CarLook) String() string {
+	if l.Seen == 0 {
+		return "livery and tune not written yet"
+	}
+	flag := func(bit uint8, v bool) string {
+		if l.Seen&bit == 0 {
+			return "?"
+		}
+		if v {
+			return "1"
+		}
+		return "0"
+	}
+	num := func(bit uint8, v int64) string {
+		if l.Seen&bit == 0 {
+			return "?"
+		}
+		return fmt.Sprint(v)
+	}
+	return fmt.Sprintf("livery %s (HasLivery=%s IsNewLivery=%s), tune %s", num(4, l.LiveryID), flag(1, l.HasLivery), flag(2, l.NewLivery), num(8, l.TuneID))
 }
 
 // Flagged reports whether a speed/policy report was already made.

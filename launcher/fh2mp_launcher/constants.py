@@ -24,6 +24,12 @@ AZIMUTH_VERSION = "1.0.4"
 BUILTIN_AZIMUTH_BUILDS = [
     {"version": AZIMUTH_VERSION, "sha256": "56d2c9cb6ccf3ae1836dee9676b64285f3a247efa2d12cf02c6c742696b3b092"},
 ]
+# Azimuth 1.0.4's FFmpeg DLLs. Azimuth checks avcodec by hash at start and stops ("STOPPED SHAPE graph: Azimuth's FFmpeg DLL avcodec-62.dll is
+# not the one this Azimuth ships", issue #450: a 1.0.4 azimuth.exe over an older install's datain); avutil is the same FFmpeg build.
+AZIMUTH_RUNTIME_FILES = {
+    "data/bin/avcodec-62.dll": "c439b47af4780a800ff20379bb313d0fd2902e8cadacaafacdb81813311394c7",
+    "data/bin/avutil-60.dll": "22a5a7c70ec3541ad5e50aa973c438b66de4516002c90e1caa396ef29e4153af",
+}
 # Per-title helpers from the same supplied Azimuth 1.0.4 installation.
 AZIMUTH_TLS_HELPERS = {
     "azimuth-tls-1.dll": "c672413a9b068bbe789ecd6a5bd86c0548719e7e4bec72948fad9021f205107c",
@@ -122,16 +128,16 @@ UPSTREAM = {
     },
     # Only the mod's DLL is taken: the zip also carries a build of the FH2 Mod Platform (DWrite.dll), which stays the pinned one above.
     "anna": {
-        "name": "FH2 ANNA", "author": "qiangqiang101", "license": "MIT", "version": "1.1.1",
-        "url": "https://github.com/qiangqiang101/FH2_ANNA/releases/download/1.1.1/FH2ANNA-1.1.1.zip",
-        "mirror": MIRROR_BASE + "FH2ANNA-1.1.1.zip",
-        "sha256": "423faa3c505d4271a68d4dcc0e91a914226c744d2edf0aa793bee636e88820fc", "size": 1333643,
-        "dll": "fh2-mods/FH2ANNA.dll", "dllSha256": "6955cbd35d35408a8e9ed8de132e75b877d52c681c645dcec6d24c50d8d974b6",
+        "name": "FH2 ANNA", "author": "qiangqiang101", "license": "MIT", "version": "1.2.0",
+        "url": "https://github.com/qiangqiang101/FH2_ANNA/releases/download/1.2.0/FH2ANNA-1.2.0.zip",
+        "mirror": MIRROR_BASE + "FH2ANNA-1.2.0.zip",
+        "sha256": "b339186683f1b4f7949ec0ffce88e4ed00729c885085419105fa608c979554e8", "size": 1341846,
+        "dll": "fh2-mods/FH2ANNA.dll", "dllSha256": "da7032e35f3444fc77dc80b744f22418cb6fcffafd02617f7f597ce241cab02d",
         "files": {
             "fh2-mods/FH2ANNA.dll": "fh2-mods/FH2ANNA.dll",
         },
         "fileSha256": {
-            "fh2-mods/FH2ANNA.dll": "6955cbd35d35408a8e9ed8de132e75b877d52c681c645dcec6d24c50d8d974b6",
+            "fh2-mods/FH2ANNA.dll": "da7032e35f3444fc77dc80b744f22418cb6fcffafd02617f7f597ce241cab02d",
         },
     },
 }

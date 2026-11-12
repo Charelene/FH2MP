@@ -206,6 +206,9 @@ type Event struct {
 	LeftBehind           map[*Peer]bool
 	ClearAt              *float64
 	RacingSince          float64
+	GoMs                 uint64         // the start time MsgStartRace carried; a resend carries the same one
+	RaceHeard            map[*Peer]bool // participants that sent a score message since the start (they have the start message)
+	StartResends         int            // resend rounds done (StartResendSeconds)
 }
 
 // Gm is the Car Meet game-mode invite state.

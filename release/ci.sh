@@ -73,6 +73,8 @@ lane_unit() {
     run "shim eo timelock" shim/tests/test_eo_timelock.sh
     run "shim eo routes" shim/tests/test_eo_routes.sh
     run "shim identity scope" shim/tests/test_identity_scope.sh
+    run "shim tune gate" shim/tests/test_tune_gate.sh
+    run "shim model unload guard" shim/tests/test_model_unload.sh
     run "shim online setup" shim/tests/test_online_setup.sh
 }
 
@@ -107,7 +109,7 @@ lane_shim() {
     logs=$(dirname "$tpl")
     declare -A pids
     t0=$(date +%s)
-    for t in gamedb_files game_image game_memory title_scope xhr_config health_thread session_log torque_scale net_strings torque_load speed_pb restricted_tools lighting honk diag party_hud car_pool crash_guards picker_pi event_stock; do
+    for t in gamedb_files game_image game_memory title_scope xhr_config health_thread session_log torque_scale net_strings torque_load speed_pb restricted_tools lighting honk diag party_hud car_pool crash_guards picker_pi event_stock race_wait; do
         "shim/tests/test_$t.sh" > "$logs/$t.log" 2>&1 &
         pids[$t]=$!
     done

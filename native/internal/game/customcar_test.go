@@ -213,6 +213,70 @@ func TestStandinSetup(t *testing.T) {
 	}
 }
 
+// The default stand-in (the placeholder car, no stand-in from the launcher) gets its stock setup too: the custom car's tune on the placeholder
+// made its physics NaN on every other client (#454-#456). With StandinStock off the old path is kept: placeholder parts, the custom tune.
+func TestPlaceholderStandinDropsTheCustomTune(t *testing.T) {
+	r := newLoadRig(t, 1)
+	p := r.peers[0]
+	cat := r.w.cat()
+	stand, ok := parts.StockList(cat.Parts, StandinCar)
+	if !ok {
+		t.Skip("the placeholder car has no stock part list in this catalog")
+	}
+	var custom []uint32
+	for id := range cat.KnownCars {
+		if s, ok := parts.StockList(cat.Parts, int64(id)); ok {
+			custom = append([]uint32(nil), s...)
+			break
+		}
+	}
+	if custom == nil {
+		t.Skip("no car with a stock part list")
+	}
+	custom[2] = 9024000 // a car pack's own body
+	pv, err := playersetup.PartsValue(custom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const tune = 0x3f000000 // 0.5, a tune slider the custom car's owner set
+	send := func() map[int]playersetup.Field {
+		t.Helper()
+		size, payload, err := playersetup.Encode(map[int]bits.Int{playersetup.Model: bits.FromUint64(9024), playersetup.Parts: pv, 108: bits.FromUint64(tune)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.w.Hub = nil // without a hub the stand-in is StandinCar
+		_, hide, n, out := r.w.CheckParts(p, size, payload, 1)
+		if hide {
+			t.Fatal("the custom car's setup was withheld")
+		}
+		f, err := playersetup.Fields(n, out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	prev := StandinStock
+	t.Cleanup(func() { StandinStock = prev })
+
+	StandinStock = true
+	f := send()
+	words := playersetup.PartWords(f[playersetup.Parts].Value)
+	if f[playersetup.Model].Value.Uint64() != uint64(StandinCar) || words[2] != stand[2] || f[playersetup.UseStock].Value.Uint64() != 1 ||
+		f[108].Value.Uint64() != 0xBF800000 {
+		t.Fatalf("placeholder setup: Model %d body %d UseStock %d tune %#x, want %d %d 1 0xbf800000", f[playersetup.Model].Value.Uint64(), words[2],
+			f[playersetup.UseStock].Value.Uint64(), f[108].Value.Uint64(), StandinCar, stand[2])
+	}
+
+	StandinStock = false
+	f = send()
+	words = playersetup.PartWords(f[playersetup.Parts].Value)
+	if f[playersetup.Model].Value.Uint64() != uint64(StandinCar) || words[2] != stand[2] || f[108].Value.Uint64() != tune {
+		t.Fatalf("old placeholder path: Model %d body %d tune %#x, want %d %d %#x", f[playersetup.Model].Value.Uint64(), words[2], f[108].Value.Uint64(),
+			StandinCar, stand[2], tune)
+	}
+}
+
 // Part (a): a player whose game has every custom car the sender's launcher listed (the same car pack) gets the sender's object as it was sent;
 // everyone else gets the stand-in version; both histories are kept, numbered alike, for players who join later.
 func TestSamePackPlayersSeeTheRealCar(t *testing.T) {

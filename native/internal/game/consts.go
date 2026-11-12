@@ -127,8 +127,15 @@ const (
 	SHNumLapsCompleted         = 10
 	SHFurthestProgress         = 11
 
-	PlayerVarTeamID          = 90
-	PlayerVarIsLeader        = 5
+	PlayerVarTeamID   = 90
+	PlayerVarIsLeader = 5
+	// What the car wears, in the player object [I: registration order of Nerd::PlayerData (BufChoices 0, HasLivery 1, IsNewLivery 2, docs/protocol.md)
+	// and of PlayerChoices from CarClass 81 (TeamId 90 is confirmed): PlayerBucketId 91, PittingProfile 92, LiveryId 93, TuneId 94, both 64 bits in
+	// playersetup's widths; StockCorrection writes -1 to 94 as the stock tune].
+	PlayerVarHasLivery       = 1
+	PlayerVarIsNewLivery     = 2
+	PlayerVarLiveryID        = 93
+	PlayerVarTuneID          = 94
 	PlayerVarFlags           = 31
 	PlayerFlagVIP            = 1
 	PlayerVarPrivateUniverse = 40
@@ -148,11 +155,19 @@ var ConsoleBoolVarNames = map[int]string{0: "RenderReady", 1: "SessionEntryFinal
 
 // Environment-derived settings, read once at start.
 var (
-	Verbosity        = diag.NewVerbosity(nil, nil)
-	RelayFlushSecs   = envFloat("FH2MP_RELAY_FLUSH_MS", 10) / 1000.0
-	MaxPacketBytes   = envInt("FH2MP_MAX_PACKET_BYTES", 1000)
-	Reliable         = envStr("FH2MP_RELIABLE", "0") == "1"
-	OwnerQuarantineS = envFloat("FH2MP_OWNER_QUARANTINE", 30)
+	Verbosity      = diag.NewVerbosity(nil, nil)
+	RelayFlushSecs = envFloat("FH2MP_RELAY_FLUSH_MS", 10) / 1000.0
+	MaxPacketBytes = envInt("FH2MP_MAX_PACKET_BYTES", 1000)
+	Reliable       = envStr("FH2MP_RELIABLE", "0") == "1"
+	// StartResend: MsgStartRace goes out once as a plain datagram; a participant that has sent no score message StartResendSeconds after it gets it
+	// again with the same start time (prod 2026-11-11: one lost start left the event leader on the grid while seven others raced). "0" = off.
+	StartResend = envStr("FH2MP_START_RESEND", "1") == "1"
+	// RtClassMode: a Road Trip car above the trip's class after car select (a tune loaded mid-trip, as FH2 ANNA's Tune Car allowed): "log" (default,
+	// one line per owner and class every 5 min), "enforce" (Ready refused, out of the event at its start) or "off".
+	RtClassMode = strings.ToLower(strings.TrimSpace(envStr("FH2MP_RT_CLASS", "log")))
+	// StartResendSeconds: when the resend rounds run, in seconds after the start message (the countdown is RaceCountdownMs, so 5 and 12 s of racing).
+	StartResendSeconds = []float64{10, 17}
+	OwnerQuarantineS   = envFloat("FH2MP_OWNER_QUARANTINE", 30)
 	// CarPolicy for a car players cannot get (traffic-only cars, catalog.Blocked): "events" (default, user decision 2026-11-08: it drives in Free
 	// Roam, events and Road Trip refuse it, like a car pack's own car), "kick" (ends the connection and puts the account in the cheater pool),
 	// "log" or "off".
@@ -160,12 +175,30 @@ var (
 	PartPolicy       = strings.ToLower(strings.TrimSpace(envStr("FH2MP_PART_POLICY", "fix")))
 	UnknownCarPolicy = envStr("FH2MP_UNKNOWN_CAR_POLICY", "standin")
 	StandinCar       = int64(envInt("FH2MP_STANDIN_CAR", 1215))
+	// StandinStock: the default stand-in (StandinCar, the game's placeholder car) gets its complete stock setup like a stand-in the launcher
+	// named, so the custom car's tune never reaches it. Off ("0"), the placeholder keeps the custom car's tune: a car pack car's tune on
+	// NUL_Car_00 can make its physics NaN, and every other client then throws while building its AI driver (game+0xf48fe0, #454-#456).
+	StandinStock     = envStr("FH2MP_STANDIN_STOCK", "1") != "0"
 	SpeedPolicy      = envStr("FH2MP_SPEED_POLICY", "kick")
 	CarCapture       = os.Getenv("FH2MP_CAR_CAPTURE") != ""
 	CheaterPoolHours = envFloat("FH2MP_CHEATER_POOL_HOURS", 24)
 	EventLoadTimeout = envFloat("FH2MP_EVENT_LOAD_TIMEOUT", 30)
-	LspURL           = envStr("FH2MP_LSP", "http://127.0.0.1:5080")
-	TracePackets     = Verbosity.Enabled(diag.Trace, "packet")
+	// EventCarLook: the event start and the load timeout lines name each participant's livery and tune as its game last wrote them, and a participant
+	// that changes them while the event loads gets a line (prod 2026-11-11: a client waited for another participant's car and the log could not say
+	// which car or what it wore). FH2MP_EVENT_CAR_LOOK=0 turns the lines off.
+	EventCarLook = envStr("FH2MP_EVENT_CAR_LOOK", "1") != "0"
+	// CarselPickedBeforeStart: a participant whose game wrote PlayerStatus PreRace after the race request and before the event start has left its car
+	// select; it no longer counts as choosing, so it does not hold the others until the group's deadline (prod 2026-11-11: such players were listed as
+	// "still in the car select" with status 3 and every race waited the full 26 s). FH2MP_CARSEL_PICKED_EARLY=0 turns it off.
+	CarselPickedBeforeStart = envStr("FH2MP_CARSEL_PICKED_EARLY", "1") != "0"
+	// CarselLateRelease: a connected participant still in its car select (PlayerStatus CarSelect) after the hold's end keeps everybody's load clock
+	// from starting until it leaves, for at most CarselLateReleaseSeconds; a participant that picked after the hold's end starts the clock when it did
+	// (prod 2026-11-11 20:37: owner 3 left the car select 43.8 s after the start, seven players reported their cars loaded in the same second, and a
+	// slow loader had already used 18 of its 30 s). FH2MP_CARSEL_LATE_RELEASE=0 turns it off.
+	CarselLateRelease        = envStr("FH2MP_CARSEL_LATE_RELEASE", "1") != "0"
+	CarselLateReleaseSeconds = 30.0
+	LspURL                   = envStr("FH2MP_LSP", "http://127.0.0.1:5080")
+	TracePackets             = Verbosity.Enabled(diag.Trace, "packet")
 )
 
 // ValidatePolicies is the start-up check Python does at import time.

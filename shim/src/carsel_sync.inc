@@ -67,6 +67,8 @@ static unsigned char *g_cs_mgr_slot, *g_cs_clock_slot;
 static unsigned char *g_cs_fn_lo, *g_cs_fn_hi;      /* the clock's function must lie in the game image */
 static void *volatile g_cs_comp;                    /* the loading message component FUN_1405e68c0 was last called with (game thread only) */
 static ULONGLONG g_cs_comp_at;
+/* race_wait.inc: called on every frame of a cars-loaded wait; 1 = it ran the node's Loaded transition itself, so the update is skipped. NULL = not installed. */
+static int (*g_race_wait_step)(void *self, ULONGLONG now, ULONGLONG wait_first, int holding);
 
 enum { CS_NONE = 0, CS_STARTED, CS_RELEASED, CS_NO_ANSWER, CS_LIMIT };
 /* What one wait has seen; only the game thread touches it. */
@@ -170,7 +172,7 @@ static unsigned char carsel_state_bits(ULONGLONG now, ULONGLONG armed_a, ULONGLO
 #define CS_REPORT_MAX_TOTAL 60u
 #define CS_REPORT_EXPIRE_MS 60000u
 #define CS_REPORT_WAIT_MS 20000u      /* a cars-loaded wait this long is reported once */
-enum { CS_RPT_CARS_LOADED = 1, CS_RPT_CAR_CACHE = 2, CS_RPT_STALL = 3, CS_RPT_STALL_END = 4, CS_RPT_OTHER = 5 };
+enum { CS_RPT_CARS_LOADED = 1, CS_RPT_CAR_CACHE = 2, CS_RPT_STALL = 3, CS_RPT_STALL_END = 4, CS_RPT_OTHER = 5, CS_RPT_RACE_WAIT = 6 /* race_wait.inc */ };
 typedef struct { int used; unsigned char code; unsigned detail, sends; ULONGLONG seq, posted_at, next_at; char text[CARSEL_REPORT_TEXT + 1]; } carsel_report_slot;
 static carsel_report_slot g_cs_reports[CS_REPORT_SLOTS];
 static SRWLOCK g_cs_report_lock = SRWLOCK_INIT;
@@ -343,6 +345,7 @@ static void carsel_update(void *self, ULONGLONG a, ULONGLONG b, ULONGLONG c)
         } else cs_t(&t, "; the server never answered");
         carsel_report_post(CS_RPT_CARS_LOADED, (unsigned)((now - g_cs_wait.wait_first) / 1000), t.s);
     }
+    if (g_race_wait_step && g_race_wait_step(self, now, g_cs_wait.wait_first, g_cs_wait.holding)) return;
     if (skip) return;
     if (g_cs_original) g_cs_original(self, a, b, c);
 }

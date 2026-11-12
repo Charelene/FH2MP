@@ -519,6 +519,16 @@ func cvGetLivery(c *Core, r *Req, req *xls.Struct) (*xls.Struct, error) {
 	res := c.defCall("ForzaContentVersioningRetrieveVersionedLiveryById_Results")
 	d := res.Sub("versionedLiveryData")
 	data := ugc.StripLiveryPrefix(append([]byte{}, v.Data...)) // the client's own compression-stream blob, served as uploaded
+	if stamp, ok := ugc.LiveryCreator(data); ok && stamp == xuid && v.Creator != 0 && v.Creator != xuid && os.Getenv("FH2MP_LIVERY_RESTAMP_OFF") == "" {
+		// A design that names the downloader as its creator although someone else shared it (the FH4 conversions carried the converter's xuid): that
+		// player's game takes it as its own, keeps no versioned id when applying it, and other players see the plain base livery (#255).
+		if fixed, err := ugc.RestampLiveryCreator(data, v.Creator); err == nil {
+			data = fixed
+			c.Log(r, fmt.Sprintf("  RetrieveVersionedLivery %d: the design names the downloader %#x as its creator but %#x shared it; served with %#x as the creator", v.ID, xuid, v.Creator, v.Creator))
+		} else {
+			c.Warn(r, fmt.Sprintf("  RetrieveVersionedLivery %d: the design names the downloader %#x as its creator but %#x shared it; served unchanged, the restamp failed: %v", v.ID, xuid, v.Creator, err))
+		}
+	}
 	var car int64
 	if v.CarID != nil {
 		car = *v.CarID

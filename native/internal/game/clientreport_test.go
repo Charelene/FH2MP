@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"fh2mp/internal/bits"
 	"fh2mp/internal/gameopts"
 )
 
@@ -116,6 +117,62 @@ func TestRefusalAndDropNotices(t *testing.T) {
 	}
 	if classLetter(4) != "S1" || classLetter(5) != "S2" || classLetter(6) != "X" || classLetter(7) != "7" {
 		t.Fatal("class letters")
+	}
+}
+
+// An invitee whose Ready was refused on its car gets no notice while its game's car select can still switch cars; only the one still in a car
+// that does not fit when the event starts gets it. The leader's car is checked again after loading, so the start sends the leader nothing.
+// (2026-11-10: a player refused in a B 618 A45 AMG switched to a class A car 10 s later and raced, yet read "you were not let into the event".)
+func TestRefusedReadyNoticeWaitsForTheStart(t *testing.T) {
+	r := newLoadRig(t, 3)
+	var mu sync.Mutex
+	got := map[uint64][]string{}
+	arrived := make(chan struct{}, 8)
+	r.w.Sinks.Notice = func(xuid uint64, text string, log func(string)) {
+		mu.Lock()
+		got[xuid] = append(got[xuid], text)
+		mu.Unlock()
+		arrived <- struct{}{}
+	}
+	size, payload, err := gameopts.EncodeFields(map[int]gameopts.Field{30: {Width: 8, Value: bits.FromUint64(3)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.w.GameOptions = &gameopts.Options{Size: size, Payload: payload}
+	r.w.Event = nil
+	leader, fixed, stuck := r.peers[0], r.peers[1], r.peers[2]
+	for _, p := range r.peers {
+		p.Choices = &Choices{true, 2, 0.6178034543991089}
+	}
+	r.w.RaceRequestedAt = r.clk.t
+	r.w.PendingRace = &PendingRace{Deadline: r.clk.t + RaceInviteSeconds, Leader: leader}
+	for _, p := range []*Peer{fixed, stuck} {
+		if fits, notice := r.w.carFitsEvent(p, nil); fits || !strings.Contains(notice, "your car is class B 618, the event needs class A") {
+			t.Fatalf("B 618 against a class A rule: fits=%v notice %q", fits, notice)
+		}
+		at := r.w.RaceRequestedAt
+		p.ReadyRetry = &at // a refused invite Ready (handle.go)
+	}
+	fixed.Choices = &Choices{true, 3, 0.8}
+	r.w.RetryRefusedReady(fixed)
+	if !fixed.ConsoleVars[4] || fixed.ReadyRetry != nil {
+		t.Fatalf("the car change did not count the refused Ready: %q", r.log)
+	}
+	r.w.PendingRace = nil
+	r.w.StartEvent(leader)
+	if !r.in(leader) || !r.in(fixed) || r.in(stuck) {
+		t.Fatalf("participants %s", owners(r.w.Event.People))
+	}
+	select {
+	case <-arrived:
+	case <-time.After(time.Second):
+		t.Fatal("the invitee left out for its car got no notice")
+	}
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1 || len(got[stuck.Xuid]) != 1 || !strings.Contains(got[stuck.Xuid][0], "your car is class B 618, the event needs class A") {
+		t.Fatalf("notices %v, want one for owner %d only", got, stuck.Owner)
 	}
 }
 

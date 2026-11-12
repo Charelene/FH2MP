@@ -157,6 +157,13 @@ class CrashReportDialog(QDialog):
         m.setObjectName("muted")
         m.setWordWrap(True)
         lay.addWidget(m)
+        if getattr(report, "hint", ""):
+            bg, edge, ink, _btn = theme.PILL["warn"]
+            hint = QLabel(report.hint)
+            hint.setObjectName("crashhint")
+            hint.setWordWrap(True)
+            hint.setStyleSheet(f"QLabel#crashhint {{ background: {bg}; border: 1px solid {edge}; color: {ink}; border-radius: 10px; padding: 10px 14px; }}")
+            lay.addWidget(hint)
 
         self.fold = QToolButton()
         self.fold.setText("Here's the data that will be sent")

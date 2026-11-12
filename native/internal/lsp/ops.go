@@ -271,6 +271,52 @@ func (o *Ops) nickname(hexXuid string) string {
 	return name
 }
 
+// flagsList is the game server's cheater pool with gamertags: {"flagged": [{xuid, gamertag, reason, until}]}.
+func (o *Ops) flagsList() pyjson.Obj {
+	result := o.C.Xbl.HubFlags()
+	if result == nil {
+		panic(opsErr(503, "unavailable", "the game server did not answer").with("flags query got no answer"))
+	}
+	fv, _ := result.Get("flagged")
+	out := []any{}
+	for _, f := range anyList(fv) {
+		fo, _ := f.(pyjson.Obj)
+		xv, _ := fo.Get("xuid")
+		rv, _ := fo.Get("reason")
+		uv, _ := fo.Get("until")
+		xs := pyjson.PyStr(xv)
+		x, _ := strconv.ParseInt(xs, 16, 64)
+		out = append(out, pyjson.Obj{{K: "xuid", V: x}, {K: "gamertag", V: o.nickname(xs)}, {K: "reason", V: rv}, {K: "until", V: uv}})
+	}
+	return pyjson.Obj{{K: "flagged", V: out}}
+}
+
+// unflag releases a player from the cheater pool and answers with whether the game server still lists them afterwards.
+func (o *Ops) unflag(decimalXuid string) pyjson.Obj {
+	x, err := strconv.ParseInt(decimalXuid, 10, 64)
+	if err != nil || x <= 0 {
+		panic(opsErr(400, "bad_xuid", "that is not a player id"))
+	}
+	if o.C.Xbl.HubFlags() == nil {
+		panic(opsErr(503, "unavailable", "the game server did not answer").with("flags query got no answer"))
+	}
+	o.C.Xbl.HubUnflag(x)
+	time.Sleep(150 * time.Millisecond) // the control datagram and the query travel on separate sockets
+	still := false
+	if result := o.C.Xbl.HubFlags(); result != nil {
+		fv, _ := result.Get("flagged")
+		for _, f := range anyList(fv) {
+			fo, _ := f.(pyjson.Obj)
+			xv, _ := fo.Get("xuid")
+			if v, err := strconv.ParseInt(pyjson.PyStr(xv), 16, 64); err == nil && v == x {
+				still = true
+			}
+		}
+	}
+	opsLog.Info(fmt.Sprintf("operator released %#x from the cheater pool (still flagged afterwards: %v)", x, still))
+	return pyjson.Obj{{K: "ok", V: !still}, {K: "xuid", V: x}}
+}
+
 func must[T any](v T, err error) T {
 	if err != nil {
 		panic(err)
@@ -346,6 +392,14 @@ func (o *Ops) route(r *Req, method, path string, body []byte) (int, any, *Downlo
 			list[i] = lo
 		}
 		return 200, result, nil
+	}
+	if what == "flags" {
+		if len(rest) == 0 && method == "GET" {
+			return 200, o.flagsList(), nil
+		}
+		if len(rest) == 2 && rest[1] == "unflag" && method == "POST" && isDigits(rest[0]) {
+			return 200, o.unflag(rest[0]), nil
+		}
 	}
 	if what == "positions" && len(rest) == 0 && method == "GET" {
 		result := c.Xbl.HubPositions()

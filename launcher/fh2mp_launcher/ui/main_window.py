@@ -290,6 +290,8 @@ class MainWindow(QMainWindow):
         info = lc.azimuth_info()
         if not info.found:
             return "bad", "azimuth.exe not found.", "Change...", self.open_settings
+        if not info.supported and info.runtime_bad:
+            return "warn", "Azimuth's own files here are from a different Azimuth version. Setup repairs them (settings, saves and mods stay).", "Run setup", self.run_wizard
         if not info.supported:
             return "warn", f"This launcher requires Azimuth {AZIMUTH_VERSION} and its supplied mod versions.", "Run setup", self.run_wizard
         if not info.game_folder:
@@ -727,7 +729,7 @@ class MainWindow(QMainWindow):
         def ok(_r):
             import time
             self._launched_at = time.time()
-            self.set_busy(False, "Game started offline. Nothing is sent to the server.")
+            self.set_busy(False, " ".join(filter(None, ("Game started offline. Nothing is sent to the server.", getattr(lc, "disk_warning", "")))))
             self.render()
 
         def fail(e):
@@ -765,7 +767,7 @@ class MainWindow(QMainWindow):
             import time
             _acct, notes = res
             self._launched_at = time.time()
-            self.set_busy(False, "Game started. Have fun!")
+            self.set_busy(False, f"Game started. {lc.disk_warning}" if getattr(lc, "disk_warning", "") else "Game started. Have fun!")
             self.render()
 
         def fail(e):

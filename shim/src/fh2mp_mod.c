@@ -2319,8 +2319,10 @@ static int patch_online_meet(void)
 #include "hook_guard.inc"
 #include "gameplaylog_guard.inc"
 #include "remote_prediction_guard.inc"
+#include "model_unload_guard.inc"
 #include "picker_pi.inc"
 #include "autodrive_rule.inc"
+#include "tune_gate.inc"
 
 static int patch_torque_load(void)
 {
@@ -3204,6 +3206,7 @@ static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *
 #include "lighting_sync.inc"
 #include "honk_sync.inc"
 #include "carsel_sync.inc"
+#include "race_wait.inc"
 #include "event_stock.inc"
 #include "stall_trace.inc"
 
@@ -5576,6 +5579,7 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_HONK", env, 8) == 0) patch_honk(g_exe_dir, g_dir);
             else honk_switched_off(g_exe_dir, g_dir);
             if (GetEnvironmentVariableW(L"FH2MP_NO_CARSELECT_HOLD", env, 8) == 0) patch_carsel();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_RACEWAIT", env, 8) == 0) patch_race_wait();
         }
         {
             wchar_t env[8];
@@ -5599,6 +5603,7 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_HOOKGUARD", env, 8) == 0) patch_hook_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_LOGGUARD", env, 8) == 0) patch_gameplaylog_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_PREDGUARD", env, 8) == 0) patch_remote_prediction_guard();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_MODELGUARD", env, 8) == 0) patch_model_unload_guard();
         }
         patch_car_pool();
         {
@@ -5655,6 +5660,9 @@ static DWORD WINAPI late_init(LPVOID unused)
             }
             if (GetEnvironmentVariableW(L"FH2MP_NO_EOROUTES", env, 8) == 0) {
                 patch_eo_routes();
+            }
+            if (GetEnvironmentVariableW(L"FH2MP_NO_TUNEGATE", env, 8) == 0) {
+                patch_tune_gate();
             }
         }
         {

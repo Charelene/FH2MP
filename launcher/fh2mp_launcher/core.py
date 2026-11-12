@@ -2,6 +2,7 @@
 import os
 import platform
 import re
+import shutil
 import time
 import threading
 
@@ -11,6 +12,13 @@ from .constants import AZIMUTH_VERSION, BUILTIN_AZIMUTH_BUILDS, DEFAULT_WEBSITE,
 from .identity import Identity
 from .settings import Settings
 from .version import __version__
+
+
+def azimuth_files_text(info):
+    """What to tell a player whose Azimuth folder mixes versions (azimuth.inspect runtime_bad)."""
+    names = ", ".join(os.path.basename(p) for p in info.runtime_bad)
+    return (f"Azimuth's own files in {info.folder} come from a different Azimuth version ({names}), so Azimuth would stop at start. "
+            f"Run setup and install Azimuth {AZIMUTH_VERSION} into this folder: your settings, saves and mods stay.")
 
 
 class PlayBlocked(Exception):
@@ -60,6 +68,29 @@ def game_port_env(game):
     if traffic == 1 and not isinstance(traffic, bool):
         env["FH2MP_NET_TRAFFIC"] = "1"
     return env
+
+
+DISK_LOW_BYTES = 2 << 30      # under this much free space Azimuth's saves and caches fail with error 112 (#463, #464)
+
+
+def low_disk(folders, floor=DISK_LOW_BYTES):
+    """[(drive, free bytes)] for each drive holding one of `folders` that has less than `floor` free, one entry per drive. Folders that do
+    not exist here (a Windows path read on Linux) or cannot be measured are left out."""
+    seen, low = set(), []
+    for folder in folders:
+        if not folder or not os.path.isdir(folder):
+            continue
+        try:
+            dev = os.stat(folder).st_dev
+            free = shutil.disk_usage(folder).free
+        except OSError:
+            continue
+        if dev in seen:
+            continue
+        seen.add(dev)
+        if free < floor:
+            low.append((os.path.splitdrive(os.path.abspath(folder))[0] or folder, free))
+    return low
 
 
 def read_shim_zip(path):
@@ -582,7 +613,8 @@ class Launcher:
         if not info.found:
             raise PlayBlocked("azimuth.exe not found.", "no_azimuth")
         if not info.supported:
-            raise PlayBlocked(f"This launcher requires Azimuth {AZIMUTH_VERSION}. Run setup to install the supported combination.", "azimuth_unsupported")
+            raise PlayBlocked(azimuth_files_text(info) if info.runtime_bad else
+                              f"This launcher requires Azimuth {AZIMUTH_VERSION}. Run setup to install the supported combination.", "azimuth_unsupported")
         kind, _v = self.shim_state()
         self.apply_hotfix(_v if kind == "ours" else "")
         if kind == "old":
@@ -892,6 +924,8 @@ class Launcher:
                 self.game_started_at = time.monotonic()
                 return None, ["offline mode: online features and progress sync are off"]
             acct, notes = self.prepare_play(require_game=not azimuth_window)
+            if self.check_disk():
+                notes.append(self.disk_warning)
             try:
                 self.process = launch.start(self.settings, self.settings["azimuth_dir"], skip_launcher=not azimuth_window,
                                             extra_env=getattr(self, "game_env", None))
@@ -931,7 +965,8 @@ class Launcher:
         if not info.found:
             raise PlayBlocked("azimuth.exe not found.", "no_azimuth")
         if not info.supported:
-            raise PlayBlocked(f"This launcher requires Azimuth {AZIMUTH_VERSION}. Run setup to install the supported combination.", "azimuth_unsupported")
+            raise PlayBlocked(azimuth_files_text(info) if info.runtime_bad else
+                              f"This launcher requires Azimuth {AZIMUTH_VERSION}. Run setup to install the supported combination.", "azimuth_unsupported")
         try:
             self.repair_tls_helper()
         except shim.ShimError as e:
@@ -958,6 +993,7 @@ class Launcher:
         self._offline_enabled = shim.enable(d) if use_identity else False
         self._offline_disabled = shim.disable(d) if not use_identity else False
         self.offline_run = True
+        self.check_disk()
         try:
             self.process = launch.start(s, d, skip_launcher=not azimuth_window, extra_env=self.game_env)
         except Exception:
@@ -968,6 +1004,17 @@ class Launcher:
             if self._offline_enabled:
                 shim.disable(d)
             raise
+
+    def check_disk(self):
+        """Looks at the free space of the drives with Azimuth (its saves and caches) and the game. -> what to show the player when one is
+        nearly full, else ''. Never blocks playing."""
+        d = self.settings["azimuth_dir"]
+        game = azimuth.fh2_title(azimuth.read_ini(d)).get("folder", "") if d and os.path.isdir(d) else ""
+        low = low_disk([d, game])
+        for drive, free in low:
+            logs.warn("play", "game.disk_low", drive=drive, free_mb=free >> 20, floor_mb=DISK_LOW_BYTES >> 20)
+        self.disk_warning = (f"Drive {low[0][0]} has only {low[0][1] / (1 << 30):.1f} GB free, so the game may fail to save." if low else "")
+        return self.disk_warning
 
     def ensure_game(self):
         """If Azimuth does not know the game folder yet, find the install and write it into Azimuth's settings. -> path set, or ''. """
