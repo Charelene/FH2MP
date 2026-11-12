@@ -897,6 +897,36 @@ class ShimTests(unittest.TestCase):
             with self.assertRaises(updater.UpdateError):
                 core.read_shim_zip(zp)
 
+    def test_the_guide_in_the_shim_zip(self):
+        from fh2mp_launcher import core
+        with tempfile.TemporaryDirectory() as d:
+            zp = os.path.join(d, "fh2mp-shim-0.1.0.zip")
+            with zipfile.ZipFile(zp, "w") as z:
+                z.writestr("fh2-mods/FH2MP.dll", self.DLL)
+            self.assertIsNone(core.read_shim_guide(zp))                                       # a shim from before the Guide shipped
+            with zipfile.ZipFile(zp, "w") as z:
+                z.writestr("fh2-mods\\FH2MP.dll", self.DLL)
+                z.writestr("fh2-mods\\FH2MPGuide.dll", b"MZ guide")                          # Compress-Archive on Windows
+            self.assertEqual(core.read_shim_guide(zp), b"MZ guide")
+
+    def test_install_puts_the_guide_next_to_the_shim(self):
+        guide = b"MZ the guide"
+        with tempfile.TemporaryDirectory() as d:
+            did = shim.install(d, self.DLL, platform=platform_files(), guide=guide, guide_sha256=hashlib.sha256(guide).hexdigest())
+            self.assertEqual(self.read(d, "fh2-mods", "FH2MPGuide.dll"), guide)
+            self.assertTrue(any("Guide" in x for x in did))
+            shim.install(d, self.DLL, platform=platform_files(), guide=b"MZ a newer guide")
+            self.assertEqual(self.read(d, "fh2-mods", "FH2MPGuide.dll"), b"MZ a newer guide")
+            self.assertEqual(self.read(d, "fh2-mods", "FH2MPGuide.dll.prev"), guide)
+            with self.assertRaises(shim.ShimError):
+                shim.install(d, self.DLL, platform=platform_files(), guide=b"MZ tampered", guide_sha256=hashlib.sha256(guide).hexdigest())
+            self.assertEqual(self.read(d, "fh2-mods", "FH2MPGuide.dll"), b"MZ a newer guide")
+            shim.install(d, self.DLL, platform=platform_files())                               # no Guide given: the installed one stays
+            self.assertEqual(self.read(d, "fh2-mods", "FH2MPGuide.dll"), b"MZ a newer guide")
+            shim.uninstall(d)
+            self.assertFalse(os.path.exists(os.path.join(d, "fh2-mods", "FH2MPGuide.dll")))
+            self.assertFalse(os.path.exists(os.path.join(d, "fh2-mods", "FH2MPGuide.dll.prev")))
+
     def test_session_file(self):
         with tempfile.TemporaryDirectory() as d:
             os.makedirs(os.path.join(d, "data", "bin"))
@@ -1070,6 +1100,27 @@ class OfflineTests(unittest.TestCase):
             self.assertTrue(shim.disable(az))
             with open(lst) as f:
                 self.assertEqual(f.read().split(), ["other.dll", shim.SHIM_DLL])
+
+
+    def test_the_guide_goes_off_and_on_with_fh2mp(self):
+        """Offline play turns the Guide off with FH2MP (it is part of FH2MP online) and on again with it."""
+        with tempfile.TemporaryDirectory() as az:
+            os.makedirs(os.path.join(az, "fh2-mods"))
+            with open(os.path.join(az, "fh2-mods", shim.GUIDE_DLL), "wb") as f:
+                f.write(b"MZ guide")
+            lst = os.path.join(az, "fh2-mods", shim.DISABLED_LIST)
+            self.assertTrue(shim.disable(az))
+            with open(lst) as f:
+                self.assertEqual(f.read().split(), [shim.SHIM_DLL, shim.GUIDE_DLL])
+            self.assertFalse(shim.disable(az))
+            self.assertTrue(shim.enable(az))
+            with open(lst) as f:
+                self.assertEqual(f.read().split(), [])
+            with open(lst, "w") as f:                                                         # an older launcher turned only FH2MP off
+                f.write(shim.SHIM_DLL + "\n")
+            self.assertFalse(shim.disable(az))                                                # FH2MP was off already; the Guide joins it
+            with open(lst) as f:
+                self.assertEqual(f.read().split(), [shim.SHIM_DLL, shim.GUIDE_DLL])
 
 
 class ExtraOptionsTests(unittest.TestCase):

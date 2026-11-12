@@ -35,6 +35,9 @@ AZIMUTH_TLS_HELPERS = {
 # chain-loaded FH2 Extra Options from fh2extra\; installing a new shim moves that layout over.
 MODS_DIR = "fh2-mods"
 SHIM_DLL = "FH2MP.dll"
+# The Guide (the in-game Xbox Guide: friends, invites, messages, achievements, voice chat), a second FH2 Mod Platform mod. It ships in the
+# shim zip next to FH2MP.dll (release.yml builds it on the Windows runner) and is installed, turned off and on together with the shim.
+GUIDE_DLL = "FH2MPGuide.dll"
 LEGACY_SHIM_DLL = "winmm.dll"
 DATA_DIR = "fh2mp"                     # FH2MP's own files next to azimuth.exe (the car database copy)
 PLATFORM_DLL = "d3dcompiler_47.dll"

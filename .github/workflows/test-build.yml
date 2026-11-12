@@ -36,7 +36,18 @@ jobs:
       - name: unpack the shim
         shell: pwsh
         run: Expand-Archive -Path (Get-Item in\*.zip).FullName -DestinationPath pkg
-      - name: sign FH2MP.dll
+      # The Guide (fh2-mods/FH2MPGuide.dll): C++ with Dear ImGui and libopus, built with the runner's MSYS2 mingw64 toolchain, the one it is
+      # developed with; pacman checks the packages' signatures. It joins the shim's files before they are signed and packed.
+      - name: build the Guide
+        shell: pwsh
+        run: |
+          C:\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-opus"
+          if ($LASTEXITCODE) { throw "pacman failed" }
+          $env:MSYSTEM = "MINGW64"; $env:CHERE_INVOKING = "1"
+          C:\msys64\usr\bin\bash.exe -lc "bash guide/build.sh"
+          if ($LASTEXITCODE) { throw "guide/build.sh failed" }
+          Copy-Item guide\build\FH2MPGuide.dll pkg\fh2-mods\
+      - name: sign FH2MP.dll and FH2MPGuide.dll
         if: env.AZURE_CLIENT_ID != ''
         uses: azure/artifact-signing-action@v2
         with:
@@ -46,7 +57,7 @@ jobs:
           endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
           signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
-          files: ${{ github.workspace }}\pkg\fh2-mods\FH2MP.dll
+          files: ${{ github.workspace }}\pkg\fh2-mods\FH2MP.dll,${{ github.workspace }}\pkg\fh2-mods\FH2MPGuide.dll
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256

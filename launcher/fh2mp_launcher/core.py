@@ -7,7 +7,7 @@ import threading
 
 from . import azimuth, gamedb, hotfix, keystore, launch, logs, memguard, paths, shim, tunnel, updater, upstream
 from .api import Api, ApiError
-from .constants import AZIMUTH_VERSION, BUILTIN_AZIMUTH_BUILDS, DEFAULT_WEBSITE, MODS_DIR, PLATFORM_VERSION, SHIM_DLL
+from .constants import AZIMUTH_VERSION, BUILTIN_AZIMUTH_BUILDS, DEFAULT_WEBSITE, GUIDE_DLL, MODS_DIR, PLATFORM_VERSION, SHIM_DLL
 from .identity import Identity
 from .settings import Settings
 from .version import __version__
@@ -72,6 +72,20 @@ def read_shim_zip(path):
             return z.read(names[f"{MODS_DIR}/{SHIM_DLL}"])
     except (zipfile.BadZipFile, KeyError):
         raise updater.UpdateError("the shim package is not what was expected") from None
+
+
+def read_shim_guide(path):
+    """A shim zip -> the bytes of its fh2-mods/FH2MPGuide.dll, or None for a zip without one (shims before the Guide shipped)."""
+    import zipfile
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = {n.replace("\\", "/"): n for n in z.namelist()}
+            name = names.get(f"{MODS_DIR}/{GUIDE_DLL}")
+            return z.read(name) if name else None
+    except zipfile.BadZipFile:
+        raise updater.UpdateError("the shim package is not what was expected") from None
+    except OSError:
+        return None     # read_shim_zip took the DLL from it a moment ago; without the file there is no Guide to add
 
 
 def release_summary(body, limit=110):
@@ -482,12 +496,13 @@ class Launcher:
         signed, not checked against a manifest: the dev launcher only."""
         if not paths.is_dev():
             raise PlayBlocked("installing a local shim is a dev launcher feature")
+        guide = None
         if path.lower().endswith(".zip"):
-            data = read_shim_zip(path)
+            data, guide = read_shim_zip(path), read_shim_guide(path)
         else:
             with open(path, "rb") as f:
                 data = f.read()
-        did = shim.install(self.settings["azimuth_dir"], data, platform=self.platform_files())
+        did = shim.install(self.settings["azimuth_dir"], data, platform=self.platform_files(), guide=guide)
         self.settings["dev_shim_path"] = path
         self.settings.save()
         return did
@@ -498,11 +513,14 @@ class Launcher:
         if manifest is not self.manifest:
             self.own_manifest = manifest
         zip_path = up.download(e["tag"], e, progress, cancelled)
-        dll = read_shim_zip(zip_path)
+        dll, guide = read_shim_zip(zip_path), read_shim_guide(zip_path)
         if shim.blob_version(dll) != e["version"]:
             raise updater.UpdateError('The FH2MP DLL does not match its signed release.')
+        if e.get("guideSha256") and guide is None:
+            raise updater.UpdateError('The FH2MP package has no Guide although its signed release names one.')
         before = self.shim_state()
-        did = shim.install(self.settings["azimuth_dir"], dll, e.get("dllSha256"), self.platform_files(progress, cancelled))
+        did = shim.install(self.settings["azimuth_dir"], dll, e.get("dllSha256"), self.platform_files(progress, cancelled), guide,
+                           e.get("guideSha256"))
         self.remember_shim(e, manifest, before)
         did += self.repair_tls_helper()
         did += self.ensure_extra_options(progress, cancelled)

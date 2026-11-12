@@ -92,12 +92,16 @@ def build_shim(dist, ver):
         if "fh2-mods/FH2MP.dll" not in names:
             sys.exit(f"{shim_zip} has no fh2-mods/FH2MP.dll: build it with release/build_shim_zip.sh")
         dll = z.read(names["fh2-mods/FH2MP.dll"])
+        guide = z.read(names["fh2-mods/FH2MPGuide.dll"]) if "fh2-mods/FH2MPGuide.dll" in names else None
     if f"FH2MP-SHIM-VERSION:{ver}:END".encode() not in dll:
         sys.exit("the shim in the zip does not carry this version's marker: rebuild it with shim/VERSION = " + ver)
     for marker in (b"-debug:END", "fh2mp-dbg".encode("utf-16-le"), b"fh2mp-dbg"):      # a research build must never be published
         if marker in dll:
             sys.exit("the shim in the zip is a debug build (live debugger / tracer): rebuild with shim/build.sh (no argument)")
-    return {"version": ver, **entry(shim_zip), "dllSha256": hashlib.sha256(dll).hexdigest()}
+    out = {"version": ver, **entry(shim_zip), "dllSha256": hashlib.sha256(dll).hexdigest()}
+    if guide is not None:
+        out["guideSha256"] = hashlib.sha256(guide).hexdigest()      # the Guide, built and signed with the shim (release.yml shim-sign)
+    return out
 
 
 def main():

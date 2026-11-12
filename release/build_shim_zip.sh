@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds the shim and packs it as dist/fh2mp-shim-<version>.zip (version = shim/VERSION). Needs x86_64-w64-mingw32-gcc.
-# The zip is laid out like the Azimuth folder (fh2-mods/FH2MP.dll, fh2mp/LICENSE.txt, fh2mp/README.txt). The FH2 Mod Platform and FH2 Extra
+# The zip is laid out like the Azimuth folder (fh2-mods/FH2MP.dll, fh2mp/LICENSE.txt, fh2mp/README.txt); the release's Windows job adds
+# fh2-mods/FH2MPGuide.dll (guide/build.sh, MSYS2) before it signs and packs the zip again (.github/workflows/release.yml shim-sign). The FH2 Mod Platform and FH2 Extra
 # Options are not in it: the launcher downloads their authors' pinned releases (launcher/fh2mp_launcher/upstream.py).
 set -euo pipefail
 cd "$(dirname "$0")/.."
