@@ -178,10 +178,17 @@ func (l *Launcher) profiles(xuids []int64, lobbies []any) (map[int64]card, error
 	for i := range crows {
 		clubOf[crows[i].Int("xuid")] = &crows[i]
 	}
+	scores, err := l.gamerscores(xuids)
+	if err != nil {
+		return nil, err
+	}
 	for _, x := range xuids {
 		c, err := l.card(x, byXuid[x], clubOf[x], lobbies)
 		if err != nil {
 			return nil, err
+		}
+		if g, reported := scores[x]; reported {
+			c = append(c, pyjson.Pair{K: "gamerscore", V: g}) // from the achievements their Guide reported
 		}
 		out[x] = c
 	}
@@ -890,6 +897,16 @@ func (l *Launcher) handleCommunity(r *Req, method, p string, u *url.URL, body py
 			return nil, auth.NewError(400, "bad_request", "")
 		}
 		return l.player(me, target)
+	}
+	if len(parts) == 6 && strings.Join(parts[:4], "/") == "/v1/community/player" && isDigits(parts[4]) && parts[5] == "achievements" && method == "GET" {
+		target, err := strconv.ParseInt(parts[4], 10, 64)
+		if err != nil || target <= 0 {
+			return nil, auth.NewError(400, "bad_request", "")
+		}
+		return l.playerAchievements(me, target)
+	}
+	if p == "/v1/community/achievements" && method == "POST" {
+		return l.reportAchievements(me, body)
 	}
 	if p == "/v1/community/profile" {
 		switch method {
