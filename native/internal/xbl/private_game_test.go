@@ -3,6 +3,7 @@ package xbl
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"fh2mp/internal/pyjson"
@@ -95,5 +96,32 @@ func TestPrivateGameFromACarMeetKeepsTheMeetsWorld(t *testing.T) {
 	}
 	if !slices.Contains(r.hub.control, fmt.Sprintf("assign %s %s", hexOf("2002"), meet)) {
 		t.Fatalf("control datagrams %v", r.hub.control)
+	}
+}
+
+// Dev 2026-11-12 (win2 into win1's private Free Roam): the invitee's game read the host's session, did not find itself among the members
+// and sent a leave at once ("The session you were trying to join no longer exists"). The seat reserves it there first.
+func TestAnInvitedFriendIsAReservedMemberOfTheHostsSession(t *testing.T) {
+	r := newHeldSeatRig(t)
+	public := r.match("2001", true)
+	r.s.AnnouncePlayer("2001", public)
+	priv := "2d45247e-58be-4269-a57a-338ee0f8c956"
+	r.putQos(priv, joinBody, "2001")
+	r.s.AllocateServer(r.qosPath(priv))
+	if !r.s.ReserveMember("s", qosTemplate, priv, "2002") {
+		t.Fatal("no session to reserve the friend in")
+	}
+	_, doc := r.s.GetSession(r.qosPath(priv), "2002")
+	members, _ := doc.Get("members")
+	text, _ := pyjson.Dumps(members, pyjson.Opts{})
+	if !strings.Contains(text, `"xuid": "2002"`) || !strings.Contains(text, `"active": false`) {
+		t.Fatalf("the friend is not a reserved member: %s", text)
+	}
+	r.putQos(priv, joinBody, "2002") // the game's own join: properties.system.active = true for itself
+	if got := r.assignedTo("2002"); got != priv {
+		t.Fatalf("the friend is assigned to %q, want the private game %s", got, priv)
+	}
+	if !r.s.ReserveMember("s", qosTemplate, priv, "2002") {
+		t.Fatal("a member already there is reported as no session")
 	}
 }

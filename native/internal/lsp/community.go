@@ -307,9 +307,13 @@ func (l *Launcher) seatFor(me int64, h *xbl.Hold, host int64) any {
 		if !replaced {
 			out = append(out, pyjson.Pair{K: "session", V: ses})
 		}
-		communityLog.Info(fmt.Sprintf("seat to join a player: joiner=%#x host=%#x lobby=%.8s session=%s/%.8s, the game server is told the joiner's world", me, host, h.ID, tmpl, name))
+		reserved := l.C.Xbl.ReserveMember(scid, tmpl, name, fmt.Sprint(me))
+		communityLog.Info(fmt.Sprintf("seat to join a player: joiner=%#x host=%#x lobby=%.8s session=%s/%.8s (the joiner is a reserved member there: %s), the game server is told the joiner's world",
+			me, host, h.ID, tmpl, name, pyBool(reserved)))
 	} else {
-		communityLog.Info(fmt.Sprintf("seat to join a player: joiner=%#x host=%#x lobby=%.8s, the host is in no session of the directory: the lobby's own session is named", me, host, h.ID))
+		reserved := h.Key != nil && l.C.Xbl.ReserveMember(h.Key.Scid, xbl.TargetTemplate, h.ID, fmt.Sprint(me))
+		communityLog.Info(fmt.Sprintf("seat to join a player: joiner=%#x host=%#x lobby=%.8s, the host is in no session of the directory: the lobby's own session is named (the joiner is a reserved member there: %s)",
+			me, host, h.ID, pyBool(reserved)))
 	}
 	l.C.Xbl.AnnouncePlayer(fmt.Sprint(me), h.ID)
 	return out

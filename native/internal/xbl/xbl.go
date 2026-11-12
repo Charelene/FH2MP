@@ -1014,6 +1014,32 @@ func (s *Server) SessionOf(xuid string) (scid, template, name string, ok bool) {
 	return rec.Scid, rec.Template, rec.Name, true
 }
 
+// ReserveMember puts xuid into a session as an inactive member, as the matchmaker does for a match and the held seat for its players: the
+// game's session-ready join (an accepted invite, Join) reads the session, looks for itself among the members and then PUTs
+// properties.system.active = true; when it is not there it sends a leave at once and says "The session you were trying to join no longer
+// exists" (dev 2026-11-12, win2 into win1's private Free Roam). A member already there is left as it is. False when there is no such session.
+func (s *Server) ReserveMember(scid, template, name, xuid string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec := s.sessions[lowerKey([3]string{scid, template, name})]
+	if rec == nil {
+		return false
+	}
+	if rec.Members.Has(xuid) {
+		return true
+	}
+	m, c, cs, p, ps := NewDict(), NewDict(), NewDict(), NewDict(), NewDict()
+	cs.Set("xuid", xuid)
+	c.Set("system", cs)
+	ps.Set("active", false)
+	p.Set("system", ps)
+	m.Set("constants", c)
+	m.Set("properties", p)
+	rec.Members.Set(xuid, m)
+	rec.Change++
+	return true
+}
+
 // AnnounceRun tells the game server the run id of the game this player started: it writes it on its lines about them.
 func (s *Server) AnnounceRun(xuid int64, run string) {
 	s.Hub.Control(fmt.Sprintf("run %x %s", xuid, run))
