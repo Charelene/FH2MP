@@ -11,8 +11,8 @@
 //                    (it has the one signed-in user; the launcher signs players in)
 //     game+0xed23a0  +0x58 ShowVirtualKeyboardAsync(default, title, description, scope)  the VirtualKeyboardPopup scene
 //                                                                                                     -> the Guide's keyboard (hooked)
-//     game+0xe36a80  +0x68 LaunchAchievementsAsync(user, titleId)  the PopupShowAchievements scene: left to Azimuth (the server keeps no
-//                    achievements to list)
+//     game+0xe36a80  +0x68 LaunchAchievementsAsync(user, titleId)  the PopupShowAchievements scene: left to Azimuth. With the Achievements
+//                    mod the pause menu's tile opens that mod's own list and this is not reached; without it the Guide has none to list
 //   ISystemUIStatics5 {1fac25f1-2fa6-4a68-88d6-89d5454a6c0f}
 //     game+0xb64690  +0x30 ShowPeoplePickerAsync(user, prompt, from, chosen, min, max)  the Car Club popup's Invite (PopupClubAction,
 //                    game+0xde0b50)                                                                   -> the Guide's player list (hooked)
