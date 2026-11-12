@@ -539,6 +539,7 @@ void render(IDXGISwapChain3* sc) {
             logf("guide: could not set up on the game's swap chain: the Guide stays off for this run");
             return;
         }
+        sysui_showing(true);
     }
     if (sc != g_swapchain) return;  // a second swap chain (a video, say): the Guide only draws on the game's
     double now = now_s();
@@ -663,6 +664,7 @@ HRESULT STDMETHODCALLTYPE hk_resize(IDXGISwapChain3* sc, UINT n, UINT w, UINT h,
         if (d.BufferCount != g_frames.size() || d.BufferDesc.Format != g_format) {
             logf("guide: the game changed its swap chain's buffers (%u, format %d): the Guide stays off for this run", d.BufferCount, int(d.BufferDesc.Format));
             g_failed = true;
+            sysui_showing(false);
         }
     }
     return hr;

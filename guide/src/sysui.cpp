@@ -46,6 +46,7 @@ namespace {
 
 void (*g_log)(const char*);
 void (*g_on_invite)();
+std::atomic<bool> g_can_show{false};
 
 void logf(const char* fmt, ...) {
     char buf[512];
@@ -332,15 +333,18 @@ IAsyncWork* ask(SysAsk a, Gives gives) {
     return static_cast<IAsyncWork*>(op);
 }
 
-void* o_card_popup;
-void* o_keyboard;
-void* o_people;
+typedef void* (*CardFn)(void* user, HSTRING xuid);
+typedef void* (*KeyboardFn)(HSTRING def, HSTRING title, HSTRING description, int scope);
+typedef void* (*PeopleFn)(void* user, HSTRING prompt, void* from, void* chosen, UINT32 min, UINT32 max);
 typedef void (*InviteUiFn)(void* party_manager, void* callback);
+CardFn o_card_popup;
+KeyboardFn o_keyboard;
+PeopleFn o_people;
 InviteUiFn o_invite_ui;
 
 // ShowProfileCardAsync(user, xuid): the xuid comes as decimal text.
 void* hk_profile_card(void* user, HSTRING xuid) {
-    (void)user;
+    if (!g_can_show) return o_card_popup(user, xuid);
     SysAsk a;
     a.kind = SysAsk::ProfileCard;
     a.xuid = strtoull(utf8_of(xuid).c_str(), nullptr, 10);
@@ -350,6 +354,7 @@ void* hk_profile_card(void* user, HSTRING xuid) {
 
 // ShowVirtualKeyboardAsync(defaultText, titleText, descriptionText, inputScope).
 void* hk_virtual_keyboard(HSTRING def, HSTRING title, HSTRING description, int scope) {
+    if (!g_can_show) return o_keyboard(def, title, description, scope);
     SysAsk a;
     a.kind = SysAsk::Keyboard;
     a.text = utf8_of(def), a.title = utf8_of(title), a.description = utf8_of(description);
@@ -378,7 +383,7 @@ std::vector<uint64_t> xuids_of(void* list) {
 
 // ShowPeoplePickerAsync(user, promptText, selectFrom, preselected, minimum, maximum).
 void* hk_people_picker(void* user, HSTRING prompt, void* from, void* chosen, UINT32 min, UINT32 max) {
-    (void)user;
+    if (!g_can_show) return o_people(user, prompt, from, chosen, min, max);
     SysAsk a;
     a.kind = SysAsk::People;
     a.title = utf8_of(prompt), a.people = xuids_of(from), a.chosen = xuids_of(chosen), a.min = min, a.max = max;
@@ -390,8 +395,10 @@ void* hk_people_picker(void* user, HSTRING prompt, void* from, void* chosen, UIN
 // The party manager's "show the system invite UI": the Guide opens its game invite, and the game's own call goes on as before (its
 // task ends without a user under Azimuth and tells the caller so).
 void hk_invite_ui(void* party_manager, void* callback) {
-    logf("guide: the game asked for the invite UI: the Guide opens a game invite");
-    if (g_on_invite) g_on_invite();
+    if (g_can_show) {
+        logf("guide: the game asked for the invite UI: the Guide opens a game invite");
+        if (g_on_invite) g_on_invite();
+    }
     o_invite_ui(party_manager, callback);
 }
 
@@ -435,17 +442,23 @@ bool sysui_install(const FH2ModApi* api, FH2Mod* mod, unsigned char* base, void 
     };
     bool strings = g_raw && g_create && g_delete;
     if (!strings) logf("guide: combase has no HSTRING functions: the game's gamercard, keyboard and people picker calls are left to Azimuth");
-    hook("guide: the game's gamercard popup (ShowProfileCardAsync)", 0xe41d30, (void*)hk_profile_card, &o_card_popup,
+    hook("guide: the game's gamercard popup (ShowProfileCardAsync)", 0xe41d30, (void*)hk_profile_card, (void**)&o_card_popup,
          strings && wrapper_at(base + 0xe41d30, IID_SystemUIStatics, 0x40));
-    hook("guide: the game's system keyboard (ShowVirtualKeyboardAsync)", 0xed23a0, (void*)hk_virtual_keyboard, &o_keyboard,
+    hook("guide: the game's system keyboard (ShowVirtualKeyboardAsync)", 0xed23a0, (void*)hk_virtual_keyboard, (void**)&o_keyboard,
          strings && wrapper_at(base + 0xed23a0, IID_SystemUIStatics, 0x58));
-    hook("guide: the game's people picker (ShowPeoplePickerAsync)", 0xb64690, (void*)hk_people_picker, &o_people,
+    hook("guide: the game's people picker (ShowPeoplePickerAsync)", 0xb64690, (void*)hk_people_picker, (void**)&o_people,
          strings && wrapper_at(base + 0xb64690, IID_SystemUIStatics5, 0x30));
     static const unsigned char invite_head[] = {0x48, 0x8b, 0xc4, 0x57, 0x48, 0x81, 0xec, 0xa0, 0x00, 0x00, 0x00, 0x48, 0xc7, 0x40, 0xe0, 0xfe};
     hook("guide: the game's invite UI (the party manager, game+0x17b9700)", 0x17b9700, (void*)hk_invite_ui, (void**)&o_invite_ui,
          memcmp(base + 0x17b9700, invite_head, sizeof invite_head) == 0);
     logf("guide: %d of 4 system UI calls of the game are answered by the Guide (gamercard, keyboard, people picker, invite UI)", on);
     return on > 0;
+}
+
+void sysui_showing(bool can) {
+    if (g_can_show.exchange(can) == can) return;
+    logf(can ? "guide: the game's system UI calls are answered by the Guide from now on (it can draw)"
+             : "guide: the Guide cannot draw any more: the game's system UI calls go on to Azimuth");
 }
 
 bool sysui_take(SysAsk* out) {

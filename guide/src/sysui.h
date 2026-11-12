@@ -21,6 +21,9 @@ struct SysAsk {
 // Hooks the game's own wrappers of the system UI calls the Guide has a screen for. on_invite runs when the game asks for the invite UI
 // (any thread). False when none could be hooked.
 bool sysui_install(const FH2ModApi* api, FH2Mod* mod, unsigned char* base, void (*log)(const char*), void (*on_invite)());
+// Whether the Guide can show a screen (it drew on the game's swap chain and has not given up). While it cannot, the hooked calls go on
+// to the game's own wrappers, as without the Guide: a call the Guide took and never showed would leave the game's popup waiting.
+void sysui_showing(bool can);
 // The next thing the game asked for, if any (the render thread).
 bool sysui_take(SysAsk* out);
 // Ends what the game is waiting on and releases the overlay's hold on op. done = it has a result (the keyboard's text, the chosen
