@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -323,6 +324,30 @@ func (l *Launcher) seatFor(me int64, h *xbl.Hold, host int64) any {
 	return out
 }
 
+// playersHere are the players in the caller's game right now, the caller left out (the Guide's Players tab): the other members of the
+// game server world the caller is in, from the hub's lobby list (memberXuids, hex).
+func playersHere(me int64, lobbies []any) []int64 {
+	var here []int64
+	meHex := fmt.Sprintf("%x", me)
+	for _, lv := range lobbies {
+		lo, _ := lv.(pyjson.Obj)
+		mv, _ := lo.Get("memberXuids")
+		members := anyList(mv)
+		if !slices.Contains(members, any(meHex)) {
+			continue
+		}
+		for _, m := range members {
+			if s, _ := m.(string); s != meHex {
+				if x, err := strconv.ParseInt(s, 16, 64); err == nil && x != 0 {
+					here = append(here, x)
+				}
+			}
+		}
+		break
+	}
+	return here
+}
+
 func (l *Launcher) snapshot(me int64) (any, error) {
 	result := l.hubLobbies()
 	var lobbies []any
@@ -345,9 +370,15 @@ func (l *Launcher) snapshot(me int64) (any, error) {
 	for _, r := range reqs {
 		all = append(all, r.IntAt(1))
 	}
+	here := playersHere(me, lobbies)
+	all = append(all, here...)
 	cards, err := l.profiles(all, lobbies)
 	if err != nil {
 		return nil, err
+	}
+	players := []any{}
+	for _, x := range here {
+		players = append(players, cards[x])
 	}
 	friends, incoming, outgoing := []any{}, []any{}, []any{}
 	for _, f := range people {
@@ -383,7 +414,7 @@ func (l *Launcher) snapshot(me int64) (any, error) {
 		counts = cnt
 	}
 	return pyjson.Obj{{K: "friends", V: friends}, {K: "incoming", V: incoming}, {K: "outgoing", V: outgoing}, {K: "me", V: cards[me]},
-		{K: "reservation", V: publicHold(l.C.Xbl.CurrentHold(fmt.Sprint(me)))}, {K: "chats", V: chats}, {K: "lobbyCounts", V: counts}}, nil
+		{K: "reservation", V: publicHold(l.C.Xbl.CurrentHold(fmt.Sprint(me)))}, {K: "chats", V: chats}, {K: "lobbyCounts", V: counts}, {K: "players", V: players}}, nil
 }
 
 func ok1() pyjson.Obj { return pyjson.Obj{{K: "ok", V: true}} }
