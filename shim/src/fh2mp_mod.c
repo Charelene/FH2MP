@@ -2325,7 +2325,9 @@ static int patch_online_meet(void)
 #include "autodrive_rule.inc"
 #include "tune_gate.inc"
 
-static int patch_torque_load(void)
+/* Checks the native car part resolvers torque_parts_valid() calls and binds them. -> 1 when they are this build's. Used by the torque load
+ * guard and the garage rating guard (garage_rating_guard.inc); either may run first, or alone. */
+static int torque_bind(void)
 {
     static const struct { unsigned rva; unsigned char bytes[16]; } signatures[] = {
         {0xfcfe70, {0x40,0x55,0x53,0x56,0x57,0x41,0x54,0x41,0x56,0x41,0x57,0x48,0x8d,0x6c,0x24,0x80}},
@@ -2336,20 +2338,29 @@ static int patch_torque_load(void)
     };
     unsigned char *img = find_fh2_image();
     unsigned i;
+    if (g_torque_load_img) return 1;
     if (!img) return 0;
     for (i = 0; i < sizeof signatures / sizeof signatures[0]; ++i) {
         if (!code_is("torqueload", "the native car preloader/part resolver", img, signatures[i].rva, signatures[i].bytes, 16)) {
             return 0;
         }
     }
-    g_torque_load_img = img;
     g_torque_parts_ctor = (torque_parts_ctor_fn)(img + 0x1042d10);
     g_torque_stock = (torque_stock_fn)(img + 0x104d5f0);
     g_torque_car_part = (torque_part_fn)(img + 0x10482f0);
     g_torque_engine_part = (torque_part_fn)(img + 0x1048990);
-    return plat_hook("torqueload: native fallback for invalid engine curves", img + 0xfcfe70,
+    g_torque_load_img = img;
+    return 1;
+}
+
+static int patch_torque_load(void)
+{
+    if (!torque_bind()) return 0;
+    return plat_hook("torqueload: native fallback for invalid engine curves", g_torque_load_img + 0xfcfe70,
                      (void *)torque_preload_guard, (void **)&g_torque_preload_orig);
 }
+
+#include "garage_rating_guard.inc"
 
 static int patch_net_string_receivers(void)
 {
@@ -5645,6 +5656,9 @@ static DWORD WINAPI late_init(LPVOID unused)
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_TORQUELOAD", env, 8) == 0) {
                 patch_torque_load();
+            }
+            if (GetEnvironmentVariableW(L"FH2MP_NO_GARAGERATING", env, 8) == 0) {
+                patch_garage_rating_guard();
             }
         }
         {
