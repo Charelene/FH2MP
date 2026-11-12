@@ -834,24 +834,45 @@ class MainWindow(QMainWindow):
             if note:
                 self.say("Online didn't start in this game run (\"Unable to connect to the Live configuration servers\"). "
                          "The game keeps running offline; to play online, close the game and press Play. Logs has the details.", theme.BAD)
+        if lc.process is not None and lc.game_running():
+            self._session_ticks = getattr(self, "_session_ticks", 0) + 1
+            if self._session_ticks % 60 == 0:
+                lc.touch_session()                      # fresh for a game that restarts itself after 30 minutes
         if lc.process is not None and not lc.game_running():
-            import time
             code = lc.process.returncode
+            old_pid = getattr(lc.process, "pid", None)
             stopped = lc.note_game_exit(code)
             lc.process = None
-            quick = time.time() - self._launched_at < 25
-            run_async(lambda j: lc.after_game(), lambda _r: None, lambda e: None)
-            if stopped:
-                self.say(f"FH2MP stopped the game: its memory grew by {stopped['grew_mb'] / 1024:.1f} GB in {stopped['seconds']:.0f} s and your PC "
-                         f"had only {stopped['free_mb'] / 1024:.1f} GB of RAM left. Please send the crash report or your logs.", theme.BAD)
-            elif quick and launch.gpu_check_failure(lc.settings["azimuth_dir"], self._launched_at - 5):
-                self.say(launch.gpu_check_advice(lc.settings), theme.BAD)
-            elif quick and code not in (0, None):
-                self.say(f"The game closed right away (exit code {code}). See Logs.", theme.BAD)
-            else:
-                self.say("")
-            self.render()
-            QTimer.singleShot(0, self._check_crash)
+            if stopped or code not in (0, None):
+                self._game_ended(code, stopped)
+            elif not lc.follow_restarted_game(old_pid):
+                # the new process of a restart may start a moment after the old one ended: look once more before the session goes
+                QTimer.singleShot(3000, lambda: self._exit_settled(code, old_pid))
+
+    def _exit_settled(self, code, old_pid):
+        lc = self.lc
+        if lc.process is not None:
+            return                                      # Play started a new game meanwhile: its session stays
+        if not lc.follow_restarted_game(old_pid):
+            self._game_ended(code, None)
+
+    def _game_ended(self, code, stopped):
+        """The game ended for good (no process replaced it): the session goes, and the player is told what happened."""
+        import time
+        lc = self.lc
+        quick = time.time() - self._launched_at < 25
+        run_async(lambda j: lc.after_game(), lambda _r: None, lambda e: None)
+        if stopped:
+            self.say(f"FH2MP stopped the game: its memory grew by {stopped['grew_mb'] / 1024:.1f} GB in {stopped['seconds']:.0f} s and your PC "
+                     f"had only {stopped['free_mb'] / 1024:.1f} GB of RAM left. Please send the crash report or your logs.", theme.BAD)
+        elif quick and launch.gpu_check_failure(lc.settings["azimuth_dir"], self._launched_at - 5):
+            self.say(launch.gpu_check_advice(lc.settings), theme.BAD)
+        elif quick and code not in (0, None):
+            self.say(f"The game closed right away (exit code {code}). See Logs.", theme.BAD)
+        else:
+            self.say("")
+        self.render()
+        QTimer.singleShot(0, self._check_crash)
 
     def closeEvent(self, e):
         lc = self.lc

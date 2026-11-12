@@ -2063,6 +2063,66 @@ class HonkHonkTests(unittest.TestCase):
             self.assertEqual(lc.honk_state(), (True, shim.honk_version()))
 
 
+class GameRestartTests(unittest.TestCase):
+    """A game process that replaces the one Play started (the Mod Platform's Restart now, the game started from Azimuth's own window) is
+    followed: the launcher keeps its session and sign-in instead of ending them under it (a 1.4.0 player's restarted game went online unsigned)."""
+
+    def setUp(self):
+        from fh2mp_launcher import core
+        from fh2mp_launcher.settings import Settings
+        self.az = tempfile.mkdtemp()
+        os.makedirs(shim.bin_dir(self.az), exist_ok=True)
+        self.lc = core.Launcher(Settings(os.path.join(self.az, "settings.json")), load_identity=False)   # never the player's own settings file
+        self.lc.settings["azimuth_dir"] = self.az
+        self.session = os.path.join(shim.bin_dir(self.az), shim.SESSION_FILE)
+        with open(self.session, "w") as f:
+            f.write("token=t" + chr(10))
+        os.utime(self.session, (1_000_000, 1_000_000))
+
+    def test_the_other_process_of_the_folder_is_followed_and_the_session_kept_fresh(self):
+        from fh2mp_launcher import launch
+        with mock.patch.object(launch, "game_processes", return_value=[111, 222]):
+            self.assertEqual(self.lc.follow_restarted_game(111), 222)
+        self.assertIsInstance(self.lc.process, launch.FollowedProcess)
+        self.assertEqual(self.lc.process.pid, 222)
+        self.assertTrue(os.path.isfile(self.session))
+        self.assertGreater(os.path.getmtime(self.session), 1_000_000 + 3600)
+
+    def test_no_other_process_means_the_game_ended(self):
+        from fh2mp_launcher import launch
+        with mock.patch.object(launch, "game_processes", return_value=[111]):
+            self.assertIsNone(self.lc.follow_restarted_game(111))
+        self.assertIsNone(getattr(self.lc, "process", None))
+        self.assertEqual(os.path.getmtime(self.session), 1_000_000)
+
+    def test_touch_session_without_a_file_does_nothing(self):
+        os.remove(self.session)
+        self.lc.touch_session()
+        self.assertFalse(os.path.exists(self.session))
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows process list")
+    def test_a_real_azimuth_exe_of_the_folder_is_found_and_followed_to_its_end(self):
+        import shutil
+        import subprocess
+        from fh2mp_launcher import launch
+        ping = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "PING.EXE")
+        if not os.path.isfile(ping):
+            self.skipTest("no ping.exe")
+        exe = os.path.join(self.az, "azimuth.exe")
+        shutil.copyfile(ping, exe)
+        self.assertEqual(launch.game_processes(self.az), [])
+        p = subprocess.Popen([exe, "-n", "3", "127.0.0.1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=0x08000000)
+        try:
+            self.assertIn(p.pid, launch.game_processes(self.az))
+            self.assertEqual(launch.game_processes(tempfile.mkdtemp()), [])        # another folder's azimuth.exe is not this one's
+            followed = launch.FollowedProcess(p.pid)
+            self.assertIsNone(followed.poll())
+        finally:
+            p.wait(timeout=20)
+        self.assertEqual(followed.poll(), 0)
+        self.assertEqual(launch.game_processes(self.az), [])
+
+
 class OptionalModTests(unittest.TestCase):
     """NitroSystem and Underglow (shim.install_nitro / install_underglow, Launcher.ensure_nitro_system / ensure_underglow): optional, off until the
     player ticks them. Only each mod's DLL comes from its release; a NitroSystem with the off switch and any Underglow the player has stay, a

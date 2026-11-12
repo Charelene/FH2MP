@@ -263,3 +263,120 @@ def end_leftover_game(folder):
 
 def cleanup(folder):
     shim.clear_session(folder)
+
+
+def _norm(path):
+    return os.path.normcase(os.path.abspath(path))
+
+
+def game_processes(folder):
+    """The process ids of azimuth.exe processes started from this Azimuth folder: on Windows by their image path, under Wine by the Windows-style
+    path in their command line (as end_leftover_game). [] when there are none or the system cannot be asked."""
+    if not folder or not os.path.isdir(folder):
+        return []
+    if WIN:
+        return _game_processes_win(_norm(os.path.join(folder, "azimuth.exe")))
+    if not os.path.isdir("/proc"):
+        return []
+    want = ("z:" + os.path.abspath(os.path.expanduser(folder)).replace("/", "\\") + "\\azimuth.exe").lower()
+    out = []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit() or int(pid) == os.getpid():
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                args = f.read().decode("utf-8", "replace").split("\0")
+            if args and args[0].lower() == want:
+                out.append(int(pid))
+        except OSError:
+            pass                        # the process ended while the list was walked, or is not ours to read
+    return out
+
+
+def _game_processes_win(want):
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    class Entry(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", ctypes.c_wchar * 260)]
+
+    k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    k32.Process32FirstW.argtypes = k32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(Entry)]
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    snap = k32.CreateToolhelp32Snapshot(0x2, 0)          # TH32CS_SNAPPROCESS
+    if not snap or snap == wintypes.HANDLE(-1).value:
+        return []
+    out = []
+    try:
+        e = Entry()
+        e.dwSize = ctypes.sizeof(Entry)
+        ok = k32.Process32FirstW(snap, ctypes.byref(e))
+        while ok:
+            if e.szExeFile.lower() == "azimuth.exe" and e.th32ProcessID != os.getpid():
+                h = k32.OpenProcess(0x1000, False, e.th32ProcessID)      # PROCESS_QUERY_LIMITED_INFORMATION
+                if h:
+                    try:
+                        buf = ctypes.create_unicode_buffer(1024)
+                        n = wintypes.DWORD(len(buf))
+                        if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)) and _norm(buf.value) == want:
+                            out.append(int(e.th32ProcessID))
+                    finally:
+                        k32.CloseHandle(h)
+            ok = k32.Process32NextW(snap, ctypes.byref(e))
+    finally:
+        k32.CloseHandle(snap)
+    return out
+
+
+class FollowedProcess:
+    """A game process the launcher did not start but follows as its game: the one that replaced the process Play started (the Mod Platform's
+    Restart now starts a new process; Azimuth's own window starts the game as one). poll() and returncode as subprocess.Popen's; no memory watch."""
+
+    def __init__(self, pid):
+        self.pid = pid
+        self.returncode = None
+        self.memguard = None
+        self._handle = None
+        if WIN:
+            import ctypes
+            from ctypes import wintypes
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            k32.OpenProcess.restype = wintypes.HANDLE
+            k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            self._handle = k32.OpenProcess(0x00100000 | 0x1000, False, pid) or None      # SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION
+
+    def poll(self):
+        if self.returncode is not None:
+            return self.returncode
+        if WIN:
+            import ctypes
+            from ctypes import wintypes
+            if not self._handle:
+                self.returncode = 0             # it could not be opened: gone already
+                return 0
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+            k32.CloseHandle.argtypes = [wintypes.HANDLE]
+            code = wintypes.DWORD()
+            if k32.GetExitCodeProcess(self._handle, ctypes.byref(code)) and code.value == 259:      # STILL_ACTIVE
+                return None
+            self.returncode = int(code.value)
+            k32.CloseHandle(self._handle)
+            self._handle = None
+            return self.returncode
+        try:
+            with open(f"/proc/{self.pid}/stat", "rb") as f:
+                if f.read().split(b") ", 1)[-1][:1] not in (b"Z", b"X"):
+                    return None
+        except OSError:
+            pass
+        self.returncode = 0
+        return 0
