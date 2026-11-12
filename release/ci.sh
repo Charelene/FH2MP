@@ -75,6 +75,7 @@ lane_unit() {
     run "shim identity scope" shim/tests/test_identity_scope.sh
     run "shim tune gate" shim/tests/test_tune_gate.sh
     run "shim model unload guard" shim/tests/test_model_unload.sh
+    run "shim dtconv guard" shim/tests/test_dtconv.sh
     run "shim online setup" shim/tests/test_online_setup.sh
 }
 
