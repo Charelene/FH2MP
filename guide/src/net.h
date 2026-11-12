@@ -61,6 +61,7 @@ struct Social {
     std::vector<ChatThread> chats;
     std::vector<TextMessage> texts;  // friends' messages, newest first, without the ones deleted here
     std::vector<Friend> others;      // players looked up by xuid (the game asked for their gamercard)
+    std::vector<Friend> players;     // the players in this player's game right now, without this player (the Players tab)
     std::map<uint64_t, AchUnlocks> ach_of;  // other players' achievements as the server gave them (Compare Games)
     uint64_t version = 0;  // goes up with every change
 };

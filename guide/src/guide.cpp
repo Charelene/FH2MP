@@ -227,6 +227,7 @@ void Guide::entered(Page p, double now) {
     if (p == Page::Community) {
         friends_.clamp(1 + int(friend_rows().size()), 6);
         messages_.clamp(1 + int(messages().size()), 8);
+        players_.clamp(int(social_.players.size()), 6);
     } else if (p == Page::Profile) {
         for (int t = 0; t < 2; t++) {
             std::vector<Opt> o = profile_options(t);
@@ -358,6 +359,7 @@ void Guide::set_social(const Social& s) {
     if (p == Page::Community || p == Page::Recipients || p == Page::Profile || p == Page::Compose) {
         friends_.clamp(1 + int(friend_rows().size()), 6);
         messages_.clamp(1 + int(messages().size()), 8);
+        players_.clamp(int(social_.players.size()), 6);
         pick_.clamp(int(pick_rows().size()), 6);
         // an option list can lose or grey the focused entry when the server's state changes
         if (p == Page::Profile) {
@@ -381,6 +383,8 @@ const Friend* Guide::find(uint64_t xuid) const {
     for (const Friend& f : social_.requests)
         if (f.xuid == xuid) return &f;
     for (const Friend& f : social_.outgoing)
+        if (f.xuid == xuid) return &f;
+    for (const Friend& f : social_.players)
         if (f.xuid == xuid) return &f;
     for (const Friend& f : social_.others)
         if (f.xuid == xuid) return &f;

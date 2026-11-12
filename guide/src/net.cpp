@@ -416,8 +416,9 @@ DWORD WINAPI worker(LPVOID) {
             JVal v;
             if (status == 200 && json_parse(out, &v)) {
                 Friend me = card(v["me"]);
-                std::vector<Friend> friends, requests, outgoing;
+                std::vector<Friend> friends, requests, outgoing, players;
                 std::vector<ChatThread> chats;
+                for (auto& f : v["players"].a) players.push_back(card(f));  // absent from a server before 2026-11-12: no players
                 for (auto& f : v["friends"].a) friends.push_back(card(f));
                 for (auto& f : v["incoming"].a) requests.push_back(card(f));
                 for (auto& f : v["outgoing"].a) outgoing.push_back(card(f));
@@ -484,6 +485,7 @@ DWORD WINAPI worker(LPVOID) {
                 first_comm = false;
                 std::lock_guard<std::mutex> l(g_mu);
                 g_social.me = me, g_social.friends = friends, g_social.requests = requests, g_social.outgoing = outgoing, g_social.chats = chats;
+                g_social.players = players;
                 g_social.texts.clear();
                 for (const ChatThread& t : chats) {
                     auto it = threads.find(t.id);
@@ -552,6 +554,7 @@ DWORD WINAPI worker(LPVOID) {
             for (auto& iv : g_social.invites) want.emplace_back(iv.from.xuid, iv.from.pic_version);
             for (auto& f : g_social.requests) want.emplace_back(f.xuid, f.pic_version);
             for (auto& f : g_social.outgoing) want.emplace_back(f.xuid, f.pic_version);
+            for (auto& f : g_social.players) want.emplace_back(f.xuid, f.pic_version);
             for (auto& kv : g_others) want.emplace_back(kv.first, kv.second.pic_version);
         }
         for (auto& w : want) {

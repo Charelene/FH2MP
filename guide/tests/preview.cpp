@@ -187,6 +187,14 @@ int main(int argc, char** argv) {
     so.requests.push_back(card(9, "PaperLantern", Friend::Online, "", "", "", 22));
     so.outgoing.push_back(card(10, "Ugandan Hobo", Friend::Offline, "", "", "", 31));
     if (scene.find("nogame") != std::string::npos) so.me.lobby_id = "", so.me.state = Friend::Online;
+    if (scene == "players") {
+        // who is in DebugFox's game: a friend, a stranger and someone who asked to be a friend; the stranger is talking
+        so.players.push_back(so.friends[0]);
+        so.players.push_back(card(11, "apex hunter 7", Friend::Playing, "L1", "Free Roam", "APEX", 44));
+        so.players.push_back(card(9, "PaperLantern", Friend::Playing, "L1", "Free Roam", "", 22));
+        const uint64_t talking[] = {11};
+        g.set_talking(talking, 1);
+    }
     ReceivedInvite iv;
     iv.id = 9, iv.from = so.friends[1], iv.kind = "freeroam", iv.age = 75, iv.expires_in = 525, iv.text = "meet at the docks";
     so.invites.push_back(iv);

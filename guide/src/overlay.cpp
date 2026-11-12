@@ -547,6 +547,8 @@ void social_and_toasts(double now) {
         Social so = net_social();
         if (so.version != version) version = so.version, g_guide.set_social(so);
     }
+    uint64_t talkers[16];
+    g_guide.set_talking(talkers, voice_talking(talkers, 16));  // every frame: a talker's mark follows the voice
     // this player's achievements: the Achievements mod's unlock file, looked at every 3 s and read when it changed
     static double last_ach = -10;
     static uint64_t ach_stamp;

@@ -169,6 +169,8 @@ public:
     std::vector<GuideRequest> type_char(uint32_t cp, double now);
     // The friend list, invites and messages as the server last gave them.
     void set_social(const Social& s);
+    // Who is talking right now (the voice engine's list: xuids, 0 for this player): the Players tab marks them.
+    void set_talking(const uint64_t* ids, int n) { talking_.assign(ids, ids + n); }
     // This player's unlocked achievements as the Achievements mod's file has them (not known: the Achievements row is greyed).
     void set_achievements(const AchUnlocks& u);
     // An achievement was unlocked: its toast (they queue). gamerscore -1: none to show (the Mythic Achievement, whose name is the game's);
@@ -266,7 +268,8 @@ private:
     // community
     int comm_tab_ = TabFriends, comm_dir_ = 1;
     double comm_at_ = -10;
-    ListFocus friends_, messages_;
+    ListFocus friends_, messages_, players_;
+    std::vector<uint64_t> talking_;  // who is heard right now (voice), by xuid; 0 = this player
     // profile
     Friend prof_;
     int prof_tab_ = 0, prof_dir_ = 1;
@@ -365,6 +368,7 @@ private:
         Relation rel;
     };
     std::vector<FriendRow> friend_rows() const;        // the Friends tab under its Add Friend row
+    std::vector<const Friend*> player_rows() const;    // the Players tab: who is in this player's game, by gamertag
     std::vector<const Friend*> pick_rows() const;      // the recipients list
     void handle_game_pick(PadEvent e, double now);
     std::vector<MessageItem> messages() const;

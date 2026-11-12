@@ -65,6 +65,15 @@ std::vector<Guide::FriendRow> Guide::friend_rows() const {
     return out;
 }
 
+// The Players tab: who is in this player's game right now, by gamertag (the 360 listed the players of the current game first; players
+// met earlier come when the server keeps them).
+std::vector<const Friend*> Guide::player_rows() const {
+    std::vector<const Friend*> out;
+    for (const Friend& f : social_.players) out.push_back(&f);
+    std::stable_sort(out.begin(), out.end(), [](const Friend* x, const Friend* y) { return _stricmp(x->tag.c_str(), y->tag.c_str()) < 0; });
+    return out;
+}
+
 // The Messages tab: friend requests, then game invites and friends' messages, newest first.
 std::vector<MessageItem> Guide::messages() const {
     std::vector<MessageItem> out, dated;
@@ -139,6 +148,16 @@ void Guide::handle_community(PadEvent e, std::vector<GuideRequest>& out, double 
             prof_tab_ = 0, prof_at_ = -10, prof_row_[0] = prof_row_[1] = -1;
             push(Page::Profile, now);
         }
+    } else if (comm_tab_ == TabPlayers) {
+        std::vector<const Friend*> rows = player_rows();
+        int n = int(rows.size());
+        if (dy && n) {
+            players_.move(dy, n, FRIEND_ROWS, now);
+        } else if (e == PadEvent::A && players_.row < n) {
+            prof_ = *rows[players_.row];
+            prof_tab_ = 0, prof_at_ = -10, prof_row_[0] = prof_row_[1] = -1;
+            push(Page::Profile, now);
+        }
     } else if (comm_tab_ == TabMessages) {
         std::vector<MessageItem> list = messages();
         int n = 1 + int(list.size());
@@ -210,7 +229,8 @@ void Guide::draw_community(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, 
     int online = 0, unread = 0;
     for (const Friend& f : social_.friends) online += f.state != Friend::Offline;
     for (const MessageItem& m : msgs) unread += m.unread;
-    int counts[4] = {0, online, int(msgs.size()), 0};
+    std::vector<const Friend*> players = player_rows();
+    int counts[4] = {0, online, int(msgs.size()), int(players.size())};
     float tx = x;
     for (int t = 0; t < 4; t++) {
         bool on = t == comm_tab_;
@@ -307,13 +327,29 @@ void Guide::draw_community(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, 
         option_list(dl, a, v, cxs, 138, W, 46, 22, 27, opts, -1, 0, cop);
         break;
     }
-    default: empty("No recent players"); break;
+    default: {
+        int n = int(players.size());
+        if (!n) { empty("No recent players"); break; }
+        bar(players_.bar.value(now), 69);
+        for (int i = players_.top; i < std::min(n, players_.top + FRIEND_ROWS); i++) {
+            float y = 138 + (i - players_.top) * 69;
+            const Friend& f = *players[i];
+            player_row(dl, a, origin, s, zoom, cxs, y, f, relation(f.xuid), i == players_.row, false, -1, cop);
+            if (std::find(talking_.begin(), talking_.end(), f.xuid) != talking_.end()) {
+                // heard right now: a microphone at the row's end
+                ImVec2 mp = v.pt(cxs + W - 20 - 16, y + 34.5f);
+                icon_mid(dl, a, v.sz(30), mp.x, mp.y, alpha(i == players_.row ? WHITE : BRIGHT, cop), I_MIC);
+            }
+        }
+        scroll_marks(dl, a, v, cxs + W - 30, 579.5f, players_.top > 0, players_.top + FRIEND_ROWS < n, cop);
+        break;
+    }
     }
     dl->PopClipRect();
     if (comm_tab_ == TabMessages) {
         const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}, {"X", "Delete", RING_X}, {"Y", "Create New", RING_Y}};
         hint_bar(dl, a, v, L + 27, 617, hints, 4, op);
-    } else if (comm_tab_ == TabFriends) {
+    } else if (comm_tab_ == TabFriends || (comm_tab_ == TabPlayers && !social_.players.empty())) {
         const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}};
         hint_bar(dl, a, v, L + 27, 617, hints, 2, op);
     } else {
