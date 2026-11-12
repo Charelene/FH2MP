@@ -71,6 +71,66 @@ func readVoiceTails(br *bits.Reader) (payloads [][]byte, bad string) {
 	return payloads, ""
 }
 
+// LobbyPlayer.PlayerChatStates: 12 entries of three variables from var 41 (u64 id, Muted, Friend). The game's Mute in the player popup
+// writes Muted for that player's xuid (the player list's IsMuted reads it back, game+0xa2c930; its talkers keep no mute list of their
+// own, game+0xa41740 answers false), so the relay leaves a muted sender out for that listener.
+const (
+	ChatStates        = 12
+	chatStateFirstVar = 41
+)
+
+// NoteChatStates keeps the chat states a client wrote for its player and logs whom it muted or unmuted.
+func (w *World) NoteChatStates(peer *Peer, size int, payload bits.Int) {
+	fields, err := playersetupFields(size, payload)
+	if err != nil {
+		return
+	}
+	before := peer.mutedSet()
+	seen := false
+	for i := 0; i < ChatStates; i++ {
+		if f, ok := fields[chatStateFirstVar+3*i]; ok {
+			peer.ChatIDs[i], seen = f.Value.Uint64(), true
+		}
+		if f, ok := fields[chatStateFirstVar+3*i+1]; ok {
+			peer.ChatMuted[i], seen = f.Value.Uint64() != 0, true
+		}
+	}
+	if !seen {
+		return
+	}
+	after := peer.mutedSet()
+	for x := range after {
+		if !before[x] {
+			w.Logf("%d voice: owner %d xuid %#x muted %#x: that player's voice is no longer relayed to it", peer.Addr.Port, peer.Owner, peer.Xuid, x)
+		}
+	}
+	for x := range before {
+		if !after[x] {
+			w.Logf("%d voice: owner %d xuid %#x unmuted %#x", peer.Addr.Port, peer.Owner, peer.Xuid, x)
+		}
+	}
+}
+
+func (p *Peer) mutedSet() map[uint64]bool {
+	out := map[uint64]bool{}
+	for i := 0; i < ChatStates; i++ {
+		if p.ChatMuted[i] && p.ChatIDs[i] != 0 {
+			out[p.ChatIDs[i]] = true
+		}
+	}
+	return out
+}
+
+// mutes says whether this client's player muted xuid.
+func (p *Peer) mutes(xuid uint64) bool {
+	for i := 0; i < ChatStates; i++ {
+		if p.ChatMuted[i] && p.ChatIDs[i] == xuid {
+			return true
+		}
+	}
+	return false
+}
+
 // voiceAllowed takes one packet from the sender's budget (VoicePerSecond, bursts up to voiceBurstTokens).
 func (p *Peer) voiceAllowed(now float64) bool {
 	if p.VoiceAt == 0 {
@@ -119,6 +179,9 @@ func (w *World) relayVoice(peer *Peer, br *bits.Reader) {
 			continue
 		}
 		for _, q := range others {
+			if q.mutes(peer.Xuid) {
+				continue
+			}
 			ack, ackBits := q.AckFields()
 			if err := w.Sock.SendTo(VoiceDatagram(uint16(ack), ackBits, peer.Xuid, p), q.Addr); err != nil {
 				w.Noise(fmt.Sprintf("%d voice send failed: %v", q.Addr.Port, err), diag.Info)

@@ -7,6 +7,7 @@ import (
 
 	"fh2mp/internal/bits"
 	"fh2mp/internal/netv2"
+	"fh2mp/internal/playersetup"
 )
 
 // A client's voice datagram as the game writes it (game+0x37f860): a header with no messages, then HeaderToServer and the payload for each.
@@ -142,5 +143,35 @@ func TestVoiceRelayNeedsAnEnteredSender(t *testing.T) {
 	r.w.Handle(clientVoice(bytes.Repeat([]byte{1}, 30)), a.Addr)
 	if n := len(sentTo(r, b.Addr)); n != 0 {
 		t.Errorf("relayed %d from a peer that has not entered", n)
+	}
+}
+
+// The game's Mute writes PlayerChatStates (var 41 id, 42 Muted) on the listener's LobbyPlayer: from then on the muted sender's voice is
+// not relayed to that listener; unmuting brings it back.
+func TestVoiceRelayHonoursTheListenersMute(t *testing.T) {
+	r, a, b, _ := voiceRig(t)
+	mute := func(on bool) {
+		v := uint64(0)
+		if on {
+			v = 1
+		}
+		size, payload, err := playersetup.Encode(map[int]bits.Int{41: bits.FromUint64(a.Xuid), 42: bits.FromUint64(v)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.w.NoteChatStates(b, size, payload)
+	}
+	mute(true)
+	r.w.Handle(clientVoice(bytes.Repeat([]byte{1}, 30)), a.Addr)
+	if n := len(sentTo(r, b.Addr)); n != 0 {
+		t.Fatalf("relayed %d to a listener who muted the sender", n)
+	}
+	if !r.logHas("muted 0x9000000000009c41") {
+		t.Errorf("no mute line in %q", r.log)
+	}
+	mute(false)
+	r.w.Handle(clientVoice(bytes.Repeat([]byte{1}, 30)), a.Addr)
+	if n := len(sentTo(r, b.Addr)); n != 1 {
+		t.Fatalf("after unmuting %d relayed, want 1", n)
 	}
 }
