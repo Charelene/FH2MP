@@ -127,8 +127,15 @@ const (
 	SHNumLapsCompleted         = 10
 	SHFurthestProgress         = 11
 
-	PlayerVarTeamID          = 90
-	PlayerVarIsLeader        = 5
+	PlayerVarTeamID   = 90
+	PlayerVarIsLeader = 5
+	// What the car wears, in the player object [I: registration order of Nerd::PlayerData (BufChoices 0, HasLivery 1, IsNewLivery 2, docs/protocol.md)
+	// and of PlayerChoices from CarClass 81 (TeamId 90 is confirmed): PlayerBucketId 91, PittingProfile 92, LiveryId 93, TuneId 94, both 64 bits in
+	// playersetup's widths; StockCorrection writes -1 to 94 as the stock tune].
+	PlayerVarHasLivery       = 1
+	PlayerVarIsNewLivery     = 2
+	PlayerVarLiveryID        = 93
+	PlayerVarTuneID          = 94
 	PlayerVarFlags           = 31
 	PlayerFlagVIP            = 1
 	PlayerVarPrivateUniverse = 40
@@ -176,8 +183,22 @@ var (
 	CarCapture       = os.Getenv("FH2MP_CAR_CAPTURE") != ""
 	CheaterPoolHours = envFloat("FH2MP_CHEATER_POOL_HOURS", 24)
 	EventLoadTimeout = envFloat("FH2MP_EVENT_LOAD_TIMEOUT", 30)
-	LspURL           = envStr("FH2MP_LSP", "http://127.0.0.1:5080")
-	TracePackets     = Verbosity.Enabled(diag.Trace, "packet")
+	// EventCarLook: the event start and the load timeout lines name each participant's livery and tune as its game last wrote them, and a participant
+	// that changes them while the event loads gets a line (prod 2026-11-11: a client waited for another participant's car and the log could not say
+	// which car or what it wore). FH2MP_EVENT_CAR_LOOK=0 turns the lines off.
+	EventCarLook = envStr("FH2MP_EVENT_CAR_LOOK", "1") != "0"
+	// CarselPickedBeforeStart: a participant whose game wrote PlayerStatus PreRace after the race request and before the event start has left its car
+	// select; it no longer counts as choosing, so it does not hold the others until the group's deadline (prod 2026-11-11: such players were listed as
+	// "still in the car select" with status 3 and every race waited the full 26 s). FH2MP_CARSEL_PICKED_EARLY=0 turns it off.
+	CarselPickedBeforeStart = envStr("FH2MP_CARSEL_PICKED_EARLY", "1") != "0"
+	// CarselLateRelease: a connected participant still in its car select (PlayerStatus CarSelect) after the hold's end keeps everybody's load clock
+	// from starting until it leaves, for at most CarselLateReleaseSeconds; a participant that picked after the hold's end starts the clock when it did
+	// (prod 2026-11-11 20:37: owner 3 left the car select 43.8 s after the start, seven players reported their cars loaded in the same second, and a
+	// slow loader had already used 18 of its 30 s). FH2MP_CARSEL_LATE_RELEASE=0 turns it off.
+	CarselLateRelease        = envStr("FH2MP_CARSEL_LATE_RELEASE", "1") != "0"
+	CarselLateReleaseSeconds = 30.0
+	LspURL                   = envStr("FH2MP_LSP", "http://127.0.0.1:5080")
+	TracePackets             = Verbosity.Enabled(diag.Trace, "packet")
 )
 
 // ValidatePolicies is the start-up check Python does at import time.

@@ -598,6 +598,9 @@ func (w *World) loadState(q *Peer, now float64) string {
 		loaded = fmt.Sprint(boolInt(v))
 	}
 	s += fmt.Sprintf("HasLoadedCars=%s, car %s", loaded, modelStr(q))
+	if EventCarLook {
+		s += ", " + q.Look.String()
+	}
 	if q.CarDoubtAt != 0 {
 		s += fmt.Sprintf(" (failed a check %.0f s ago)", now-q.CarDoubtAt)
 	}
@@ -613,32 +616,42 @@ func boolInt(b bool) int {
 }
 
 // loadRelease is when the group's car select is over for the shim's cars-loaded wait: every connected participant has left it, or the group's
-// deadline plus the hold's grace has passed, whichever is first (the same two conditions as CarselAnswer).
-func (ev *Event) loadRelease() float64 {
+// deadline plus the hold's grace has passed, whichever is first (the same two conditions as CarselAnswer). With CarselLateRelease a participant that
+// is still choosing, or chose, after the hold's end moves it to when it leaves, CarselLateReleaseSeconds at most: no game reports its cars loaded
+// before every participant has picked one.
+func (ev *Event) loadRelease(now float64) float64 {
 	limit := ev.carselDeadline() + CarselHoldGraceSeconds
+	if CarselLateRelease {
+		limit += CarselLateReleaseSeconds
+	}
 	latest := ev.Started
 	for _, q := range ev.People {
 		if q.Connected {
-			latest = math.Max(latest, ev.carDoneAt(q))
+			latest = math.Max(latest, ev.carDoneAt(q, now))
 		}
 	}
 	return math.Min(latest, limit)
 }
 
-// carDoneAt is when this participant left the car select (PreRace); one that has not is counted at the end of the hold.
-func (ev *Event) carDoneAt(q *Peer) float64 {
+// carDoneAt is when this participant left the car select (PreRace); one that has not is counted at the end of the hold, or, with CarselLateRelease,
+// at `now` while its game still says CarSelect after the hold's end.
+func (ev *Event) carDoneAt(q *Peer, now float64) float64 {
 	if ev.PickedAfter != nil {
 		if t, ok := ev.PickedAfter.Get(q); ok {
 			return ev.Started + t
 		}
 	}
-	return ev.carselDeadline() + CarselHoldGraceSeconds
+	end := ev.carselDeadline() + CarselHoldGraceSeconds
+	if CarselLateRelease && q.Connected && q.HasPlayerStatus && q.PlayerStatus == PlayerStatusCarSelect && now > end {
+		return math.Min(now, end+CarselLateReleaseSeconds)
+	}
+	return end
 }
 
 // loadStart is when this participant's car load could begin (monotonic): after the group's car select, after its own, after it (re)connected to
 // the event, and after the last restart of the clocks (a suspect was dropped). The car select time never counts against EventLoadTimeout.
-func (ev *Event) loadStart(q *Peer, release float64) float64 {
-	return math.Max(math.Max(release, ev.carDoneAt(q)), math.Max(q.ConnectedAt, ev.LoadRestart))
+func (ev *Event) loadStart(q *Peer, release, now float64) float64 {
+	return math.Max(math.Max(release, ev.carDoneAt(q, now)), math.Max(q.ConnectedAt, ev.LoadRestart))
 }
 
 // DropUnloaded runs on every tick while an event loads, after EventLoadTimeout has passed since it started. Each participant that has not reported
@@ -647,14 +660,14 @@ func (ev *Event) loadStart(q *Peer, release float64) float64 {
 // group that still has not loaded 2 x EventLoadTimeout after its clocks started ends the event in one step instead).
 func (w *World) DropUnloaded(now float64) {
 	ev := w.Event
-	release := ev.loadRelease()
+	release := ev.loadRelease(now)
 	var overdue, waiting []*Peer
 	loaded := 0
 	for _, q := range ev.People {
 		switch {
 		case q.Connected && q.ConsoleVars[ConsoleVarHasLoadedCars]:
 			loaded++
-		case now-ev.loadStart(q, release) > EventLoadTimeout:
+		case now-ev.loadStart(q, release, now) > EventLoadTimeout:
 			overdue = append(overdue, q)
 		default:
 			waiting = append(waiting, q)
@@ -679,7 +692,7 @@ func (w *World) DropUnloaded(now float64) {
 	states := func(l []*Peer) string {
 		parts := make([]string, len(l))
 		for i, q := range l {
-			parts[i] = fmt.Sprintf("%s, load could begin %.0f s ago", w.loadState(q, now), now-ev.loadStart(q, release))
+			parts[i] = fmt.Sprintf("%s, load could begin %.0f s ago", w.loadState(q, now), now-ev.loadStart(q, release, now))
 		}
 		return strings.Join(parts, "; ")
 	}
@@ -719,7 +732,7 @@ func (w *World) DropUnloaded(now float64) {
 			EventLoadTimeout, suspect.Owner, now-suspect.CarSeenAt, failed, len(ev.People)-1, EventLoadTimeout, 2*EventLoadTimeout, now-ev.Started, states(overdue))
 	} else {
 		for _, q := range ev.People {
-			if now-ev.loadStart(q, release) <= 2*EventLoadTimeout {
+			if now-ev.loadStart(q, release, now) <= 2*EventLoadTimeout {
 				return // the last players are not removed one by one: the whole event is ended once the long limit is reached
 			}
 		}
@@ -1046,6 +1059,71 @@ func (w *World) StartEvent(leader *Peer) {
 	}
 	w.SetSessionHostBool(SHRaceParticipantsSelected, 1, "participants selected")
 	w.RefreshCarPhasing()
+	if !w.Roadtrip {
+		w.notePickedBeforeStart(ev)
+	}
+	if EventCarLook {
+		parts := make([]string, len(people))
+		for i, q := range people {
+			parts[i] = fmt.Sprintf("owner%d car %s %s", q.Owner, modelStr(q), q.Look)
+		}
+		w.Logf("event cars at the start: %s", strings.Join(parts, "; "))
+	}
+}
+
+// notePickedBeforeStart counts the participants whose game wrote PlayerStatus PreRace between the race request and the event start as done with their
+// car select (CarselPickedBeforeStart): NotePlayerStatus only sees the CarSelect -> PreRace changes after the start.
+func (w *World) notePickedBeforeStart(ev *Event) {
+	if !CarselPickedBeforeStart || w.RaceRequestedAt == 0 {
+		return
+	}
+	var early []*Peer
+	for _, q := range ev.People {
+		if q.HasPlayerStatus && q.PlayerStatus == PlayerStatusPreRace && q.PlayerStatusAt >= w.RaceRequestedAt {
+			if ev.PickedAfter == nil {
+				ev.PickedAfter = omap.New[*Peer, float64]()
+			}
+			ev.PickedAfter.Set(q, 0)
+			early = append(early, q)
+		}
+	}
+	if len(early) > 0 {
+		w.Logf("event car select: %s left it before the start (PlayerStatus PreRace since the race request), %d/%d participant(s) done", owners(early), len(early), len(ev.People))
+	}
+}
+
+// NoteCarLook keeps the livery and tune fields of a player object (vars 1, 2, 93, 94; EventCarLook) and logs a change made while an event this player
+// is in still loads.
+func (w *World) NoteCarLook(peer *Peer, size int, payload bits.Int) {
+	if !EventCarLook {
+		return
+	}
+	fields, err := playersetupFields(size, payload)
+	if err != nil {
+		return
+	}
+	old := peer.Look
+	for k, vid := range [...]int{PlayerVarHasLivery, PlayerVarIsNewLivery, PlayerVarLiveryID, PlayerVarTuneID} {
+		f, ok := fields[vid]
+		if !ok {
+			continue
+		}
+		v := f.Value.Uint64()
+		switch k {
+		case 0:
+			peer.Look.HasLivery = v != 0
+		case 1:
+			peer.Look.NewLivery = v != 0
+		case 2:
+			peer.Look.LiveryID = int64(v)
+		case 3:
+			peer.Look.TuneID = int64(v)
+		}
+		peer.Look.Seen |= 1 << k
+	}
+	if ev := w.Event; old != peer.Look && ev != nil && !ev.Begun && ev.has(peer) {
+		w.Logf("%d owner %d changed its car's livery or tune while the event loads: %s (was %s)", peer.Addr.Port, peer.Owner, peer.Look, old)
+	}
 }
 
 func consoleVarsRepr(m map[int]bool) string {
@@ -1100,6 +1178,9 @@ func (w *World) NotePlayerStatus(peer *Peer, size int, payload bits.Int) {
 	}
 	before, had := peer.PlayerStatus, peer.HasPlayerStatus
 	peer.PlayerStatus, peer.HasPlayerStatus = int(f.Value.Uint64()), true
+	if !had || before != peer.PlayerStatus {
+		peer.PlayerStatusAt = w.Mono()
+	}
 	ev := w.Event
 	if had && before == peer.PlayerStatus || w.Roadtrip || ev == nil || ev.Begun || !ev.has(peer) {
 		return

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"fh2mp/internal/diag"
@@ -210,6 +212,8 @@ func reportCodeName(code uint8) string {
 		return "stall trace end"
 	case 5:
 		return "other"
+	case 6:
+		return "race wait detail"
 	}
 	return "unknown"
 }
@@ -312,9 +316,63 @@ func (w *World) ClientReport(peer *Peer, code uint8, detail uint32, text string,
 	if dropped > 0 {
 		extra = fmt.Sprintf(" (%d report(s) over the budget were not logged)", dropped)
 	}
+	if code == 6 {
+		extra += w.raceWaitNames(peer, text)
+	}
 	w.Warnf("client report: owner %d xuid %#x, %s [code %d, detail %d]: %s (server: %s, last packet %.1f s ago, car %s)%s",
 		peer.Owner, peer.Xuid, reportCodeName(code), code, detail, text, state, now-peer.LastRx, modelStr(peer), extra)
 	w.ev("client_report", kv("xuid", fmt.Sprintf("%#x", peer.Xuid)), kv("code", int64(code)), kv("name", reportCodeName(code)), kv("detail", int64(detail)), kv("text", text))
+}
+
+var (
+	raceWaitStuckRe  = regexp.MustCompile(`still loading \d+ of \d+ racers \[([0-9a-z: ]+)\]`)
+	raceWaitRacersRe = regexp.MustCompile(`; racers ([0-9,]+);`)
+)
+
+// raceWaitNames names the participants a race wait detail report (code 6, shim race_wait.inc) says its game still waits for. The report carries the
+// game's console ids; when they are the other participants' owner ids the stuck ones are named with their car, livery and tune, otherwise the tail
+// says the ids do not match (console id = relay owner id is not confirmed).
+func (w *World) raceWaitNames(peer *Peer, text string) string {
+	ev := w.Event
+	m := raceWaitRacersRe.FindStringSubmatch(text)
+	if ev == nil || m == nil {
+		return ""
+	}
+	others := map[int]*Peer{}
+	for _, q := range ev.People {
+		if q != peer {
+			others[q.Owner] = q
+		}
+	}
+	ids := strings.Split(m[1], ",")
+	same := len(ids) == len(others)
+	for _, s := range ids {
+		n, err := strconv.Atoi(s)
+		if _, ok := others[n]; err != nil || !ok {
+			same = false
+		}
+	}
+	if !same {
+		keys := make([]*Peer, 0, len(others))
+		for _, q := range ev.People {
+			if q != peer {
+				keys = append(keys, q)
+			}
+		}
+		return fmt.Sprintf("; the report's console ids %s are not the other participants' owner ids %s", m[1], owners(keys))
+	}
+	stuck := raceWaitStuckRe.FindStringSubmatch(text)
+	if stuck == nil {
+		return "; the report's console ids are the other participants' owner ids"
+	}
+	var parts []string
+	for _, item := range strings.Fields(stuck[1]) {
+		n, _ := strconv.Atoi(strings.SplitN(item, ":", 2)[0])
+		if q := others[n]; q != nil {
+			parts = append(parts, fmt.Sprintf("owner%d xuid %#x car %s, %s", q.Owner, q.Xuid, modelStr(q), q.Look))
+		}
+	}
+	return "; its game waits for " + strings.Join(parts, "; ")
 }
 
 // lastReport is the player's latest report when it is not older than window seconds, as a tail for a log line ("" = none).
