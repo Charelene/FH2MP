@@ -85,12 +85,18 @@ bool save_png(const char* path, const unsigned char* bgra, UINT stride) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        fprintf(stderr, "usage: guide-preview <out.png> <scene> [seconds] [gamerpic.png] [background.png]\n");
+        fprintf(stderr, "usage: guide-preview <out.png> <scene> [seconds | from:to:fps] [gamerpic.png] [background.png]\n"
+                        "  from:to:fps writes one picture per frame, <out>-000.png and so on\n"
+                        "  achtoast-normal | achtoast-rare | achtoast-mythic (add -noart to draw without the Xbox app's art): the app's folders are\n"
+                        "  given in GUIDE_XBOX_NOTIFICATIONS and GUIDE_GAMEBAR_ASSETS\n");
         return 2;
     }
     std::string scene = argv[2];
     bool is_toast = scene.rfind("toast", 0) == 0;
     double secs = argc > 3 ? atof(argv[3]) : (is_toast ? 3.0 : 1.5);
+    double seq_from = 0, seq_to = 0, seq_fps = 0;  // a frame sequence instead of one picture
+    if (argc > 3 && sscanf(argv[3], "%lf:%lf:%lf", &seq_from, &seq_to, &seq_fps) == 3 && seq_fps > 0) secs = seq_from;
+    else seq_fps = 0;
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
     ID3D12CommandQueue* q = nullptr;
@@ -143,6 +149,16 @@ int main(int argc, char** argv) {
     info.SrvDescriptorAllocFn = srv_alloc, info.SrvDescriptorFreeFn = srv_free;
     if (!ImGui_ImplDX12_Init(&info)) return 1;
     if (argc > 4) assets.gamerpic = picture(q, argv[4]);
+    if (scene.rfind("achtoast", 0) == 0 && scene.find("noart") == std::string::npos) {
+        // the achievement toast's art, from the Xbox app's own folders on this PC
+        const char* dirs[2] = {getenv("GUIDE_XBOX_NOTIFICATIONS"), getenv("GUIDE_GAMEBAR_ASSETS")};
+        for (int where = 0; where < 2; where++)
+            for (const char* const* f = ach_art_files(where); dirs[where] && *f; f++) {
+                ImTextureID tex = picture(q, (std::string(dirs[where]) + "\\" + *f).c_str());
+                if (!tex) fprintf(stderr, "no %s in %s\n", *f, dirs[where]);
+                ach_art_set(&assets.ach, *f, tex);
+            }
+    }
     ImTextureID bg = argc > 5 ? picture(q, argv[5]) : 0;
 
     Guide g;
@@ -286,6 +302,11 @@ int main(int argc, char** argv) {
         g.toggle(t0 - 10), g.handle(PadEvent::Lb, t0 - 9), g.handle(D, t0 - 8), g.handle(A, t0);  // Games > Achievements
         if (scene == "achievements-locked") press({PadEvent::Right, PadEvent::Right, PadEvent::Right, D});
         if (scene == "achievements-end") press({D, D, D, D, D, D, D, D});
+    } else if (scene.rfind("achtoast", 0) == 0) {
+        if (scene.find("mythic") != std::string::npos) g.ach_toast(AchTier::Mythic, -1, "Forza Horizon 2", "50 of 50 Achievements", -1, -1, t0);
+        else if (scene.find("rare") != std::string::npos)
+            g.ach_toast(AchTier::Rare, 50, "All Your Race Are Belong To Us 2.0", "Complete all 168 Championships.", 3.12f, 18, t0);
+        else g.ach_toast(AchTier::Normal, 10, "Rain Master", "Complete your first race in the rain.", -1, 34, t0);
     } else if (scene == "open-on-toast") {
         nr.op = NetOp::Received, nr.ok = true, nr.xuid = 3, nr.name = "NightRunR", nr.id = 9;
         g.on_result(nr, assets, t0 - 2);
@@ -303,7 +324,10 @@ int main(int argc, char** argv) {
         g.toggle(t0 - 1), g.toggle(t0);  // closed and opened again: the open animation starts at t0
     }
 
-    for (int frame = 0; frame < 2; frame++) {
+    int shots = seq_fps > 0 ? int((seq_to - seq_from) * seq_fps) + 1 : 1;
+    for (int shot = 0; shot < shots; shot++) {
+    if (seq_fps > 0) secs = seq_from + shot / seq_fps;
+    for (int frame = shot ? 1 : 0; frame < 2; frame++) {
         io.DisplaySize = ImVec2(float(W), float(H));
         io.DeltaTime = 1.0f / 60;
         ImGui_ImplDX12_NewFrame();
@@ -339,11 +363,32 @@ int main(int argc, char** argv) {
     memcpy(px.data(), map, px.size());
     readback->Unmap(0, nullptr);
     for (size_t i = 3; i < px.size(); i += 4) px[i] = 255;
-    if (!save_png(argv[1], px.data(), pitch)) {
-        fprintf(stderr, "could not write %s\n", argv[1]);
+    std::string out_path = argv[1];
+    if (seq_fps > 0) {
+        char n[16];
+        snprintf(n, sizeof n, "-%03d.png", shot);
+        size_t dot = out_path.rfind(".png");
+        out_path = (dot == std::string::npos ? out_path : out_path.substr(0, dot)) + n;
+    }
+    if (!save_png(out_path.c_str(), px.data(), pitch)) {
+        fprintf(stderr, "could not write %s\n", out_path.c_str());
         return 1;
     }
-    printf("wrote %s (%s at %.2f s)\n", argv[1], scene.c_str(), secs);
+    if (!seq_fps || shot == shots - 1) printf("wrote %s (%s at %.2f s%s)\n", out_path.c_str(), scene.c_str(), secs, seq_fps > 0 ? ", the last of the sequence" : "");
+    // back to a render target for the next picture
+    if (shot + 1 < shots) {
+        alloc->Reset();
+        list->Reset(alloc, nullptr);
+        D3D12_RESOURCE_BARRIER back{};
+        back.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION, back.Transition.pResource = rt, back.Transition.Subresource = 0;
+        back.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE, back.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        list->ResourceBarrier(1, &back);
+        list->Close();
+        ID3D12CommandList* ls[] = {list};
+        q->ExecuteCommandLists(1, ls);
+        wait();
+    }
+    }
     ImGui_ImplDX12_Shutdown();
     ImGui::DestroyContext();
     return 0;

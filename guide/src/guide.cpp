@@ -154,6 +154,14 @@ void Guide::toggle(double now) {
 
 // The Guide was opened while a toast about something plays: it opens on that thing (the 360's Guide button on a notification).
 void Guide::open_on_toast(double now) {
+    if (ach_toast_showing(now) && ach_now_.index >= 0 && ach_.known) {
+        // "Hold (the Guide button) to open": the achievements, on the one the toast is about
+        ach_focus_ = std::min(ach_now_.index, int(ach_defs().size()) - 1), ach_top_ = std::max(0, ach_focus_ / 11 - 1);
+        ach_now_.index = -1;
+        stack_ = {Page::Home, Page::Achievements};
+        entered(Page::Achievements, now);
+        return;
+    }
     if (now - toast_at_ > 6.3 || toast_.target == NoTarget) return;
     ToastItem t = toast_;
     toast_.target = NoTarget;
@@ -683,7 +691,7 @@ void Guide::toast_to(ToastTarget target, uint64_t xuid, int64_t id, ToastKind ki
     toast_ = t, toast_at_ = now;
 }
 
-bool Guide::busy(double now) const { return open || now - toast_at_ < 6.4 || !toasts_.empty(); }
+bool Guide::busy(double now) const { return open || now - toast_at_ < 6.4 || !toasts_.empty() || ach_toast_showing(now) || !ach_toasts_.empty(); }
 
 // ---- drawing
 
@@ -717,6 +725,7 @@ bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double 
         if (box_.on) draw_box(dl, a, origin, s, w, h, now);
     }
     draw_toast(dl, a, s, origin, now);
+    draw_ach_toast(dl, a, s, origin, now);
     return busy(now);
 }
 

@@ -10,6 +10,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -376,4 +377,308 @@ void Guide::draw_ach_detail(ImDrawList* dl, const GuideAssets& a, ImVec2 origin,
     }
     const Hint hints[] = {{"B", "Back", RING_B}};
     hint_bar(dl, a, v, L + 27, 617, hints, 1, op);
+}
+
+// ---- the achievement toast
+//
+// Xbox One's achievement toast, as the user's captures of a console show it (2026-11-11): a circle with the console's emblem pops in, the
+// emblem turns into the achievement's icon (a trophy; a diamond for a rare one; a star in a ring for the Mythic Achievement), the circle
+// opens into a pill with "Achievement unlocked" over "(G) 20 - Name", then the achievement's description, then "Hold (emblem) to open",
+// and it folds back into the circle and goes. A rare one has a gleam running over the pill; the mythic one has a haze around it and
+// sparkles on its edge. The pill takes the accent colour.
+//
+// The times are the cues of the sounds the Xbox app plays with them (measured from its own files: the rare sound hits at 0, swells to a
+// peak at 1.6 s and has its closing hit at 9.8 s; the mythic one swells from 0.85 s to a peak at 2.0 s and closes at 11.75 s; the plain
+// one is a half-second blip and is shown on the rare one's times). The icons are that app's sprite sheets, played 30 frames a second:
+// at that rate the diamond is whole at 1.6 s and the mythic star locks into its ring at 2.1 s, on the sounds' peaks.
+//
+// The art and the sounds are Microsoft's and are not part of FH2MP: they are read from the player's own Xbox app when it is installed
+// (ach_art_set says which files). Without them the icon is a glyph of the icon font and the effects are left out.
+
+namespace {
+
+struct AchTimes {
+    float icon;   // the icon's intro begins
+    float ring;   // the circle comes (the mythic star's pieces fly in before there is one)
+    float open;   // the pill opens
+    float close;  // the closing begins
+};
+const AchTimes TIMES[3] = {{0.2f, 0.0f, 1.6f, 9.8f}, {0.2f, 0.0f, 1.6f, 9.8f}, {0.0f, 1.8f, 2.1f, 11.75f}};
+const float FPS = 30;       // the sprite sheets' rate
+const float CLOSING = 1.45f;  // the icon's outro (about a second), the pill folding meanwhile, then the circle going
+const float PI = 3.14159265f;
+
+ImU32 mix(ImU32 a, ImU32 b, float k) {
+    ImVec4 x = ImGui::ColorConvertU32ToFloat4(a), y = ImGui::ColorConvertU32ToFloat4(b);
+    return ImGui::ColorConvertFloat4ToU32(ImVec4(x.x + (y.x - x.x) * k, x.y + (y.y - x.y) * k, x.z + (y.z - x.z) * k, x.w));
+}
+
+// One cell of a sheet, w by h, centred on c.
+void cell(ImDrawList* dl, const SpriteSheet& sh, int f, ImVec2 c, float w, float h, ImU32 col) {
+    if (!sh.tex || !sh.frames) return;
+    f = std::clamp(f, 0, sh.frames - 1);
+    float u = float(f % sh.cols) / sh.cols, v = float(f / sh.cols) / sh.rows;
+    dl->AddImage(sh.tex, ImVec2(c.x - w / 2, c.y - h / 2), ImVec2(c.x + w / 2, c.y + h / 2), ImVec2(u, v), ImVec2(u + 1.0f / sh.cols, v + 1.0f / sh.rows), col);
+}
+
+// A square picture centred on c, turned by angle.
+void turned(ImDrawList* dl, ImTextureID tex, ImVec2 c, float size, float angle, ImU32 col) {
+    if (!tex) return;
+    float h = size / 2, co = cosf(angle), si = sinf(angle);
+    auto p = [&](float x, float y) { return ImVec2(c.x + x * co - y * si, c.y + x * si + y * co); };
+    dl->AddImageQuad(tex, p(-h, -h), p(h, -h), p(h, h), p(-h, h), ImVec2(0, 0), ImVec2(1, 0), ImVec2(1, 1), ImVec2(0, 1), col);
+}
+
+// The Guide's emblem: a white disc with the Guide's glyph in the circle's colour. d is the disc's diameter.
+void emblem(ImDrawList* dl, const GuideAssets& a, ImVec2 c, float d, ImU32 ink, float op) {
+    if (d < 1) return;
+    dl->AddCircleFilled(c, d / 2, alpha(WHITE, op), 48);
+    icon_mid(dl, a, d * 0.66f, c.x, c.y, alpha(ink, op), I_GAMES);
+}
+
+float smooth(float x) {
+    x = std::clamp(x, 0.0f, 1.0f);
+    return x * x * (3 - 2 * x);
+}
+
+}  // namespace
+
+void ach_art_set(AchToastArt* art, const char* file, ImTextureID tex) {
+    struct Slot {
+        const char* name;
+        SpriteSheet AchToastArt::*sheet;
+        int tier, cols, rows, frames;  // tier -1: not one of the three per tier
+    };
+    // frames: the cells that are drawn (the sheets end in empty cells)
+    static const Slot sheets[] = {
+        {"TrophyIntro.png", nullptr, 0, 6, 8, 43},      {"TrophyIdle.png", nullptr, 0, 1, 1, 1},        {"TrophyOutro.png", nullptr, 0, 5, 7, 32},
+        {"DiamondIntroV2.png", nullptr, 1, 6, 8, 43},   {"DiamondIdleV2.png", nullptr, 1, 4, 5, 20},    {"DiamondOutroV2.png", nullptr, 1, 5, 7, 32},
+        {"MythicV2Intro.png", nullptr, 2, 10, 12, 120}, {"MythicV2Idle.png", nullptr, 2, 7, 9, 60},     {"MythicV2Outro.png", nullptr, 2, 6, 7, 41},
+        {"MythicV2IntroHighlights.png", &AchToastArt::intro_hi, -1, 10, 12, 120}, {"MythicV2IdleHighlights.png", &AchToastArt::idle_hi, -1, 7, 9, 60},
+        {"MythicV2OutroHighlights.png", &AchToastArt::outro_hi, -1, 6, 7, 41},    {"Aurora.png", &AchToastArt::aurora, -1, 7, 9, 60},
+    };
+    for (const Slot& sl : sheets) {
+        if (strcmp(sl.name, file)) continue;
+        SpriteSheet sh;
+        sh.tex = tex, sh.cols = sl.cols, sh.rows = sl.rows, sh.frames = sl.frames;
+        if (sl.sheet) art->*sl.sheet = sh;
+        else if (strstr(file, "Intro")) art->intro[sl.tier] = sh;
+        else if (strstr(file, "Idle")) art->idle[sl.tier] = sh;
+        else art->outro[sl.tier] = sh;
+        return;
+    }
+    if (!strcmp(file, "gleam.png")) art->gleam = tex;
+    else if (!strcmp(file, "ShimmerSparkle.png")) art->sparkle = tex;
+    else if (!strcmp(file, "Ripple.png")) art->ripple = tex;
+    else if (!strcmp(file, "MythicGlowA.png")) art->glow_a = tex;
+    else if (!strcmp(file, "MythicGlowB.png")) art->glow_b = tex;
+    else if (!strcmp(file, "MythicPulse.png")) art->pulse = tex;
+}
+
+const char* const* ach_art_files(int where) {
+    static const char* const notifications[] = {"TrophyIntro.png",   "TrophyIdle.png",   "TrophyOutro.png",   "DiamondIntroV2.png", "DiamondIdleV2.png",
+                                                "DiamondOutroV2.png", "MythicV2Intro.png", "MythicV2Idle.png", "MythicV2Outro.png",  "MythicV2IntroHighlights.png",
+                                                "MythicV2IdleHighlights.png", "MythicV2OutroHighlights.png", nullptr};
+    static const char* const game_bar[] = {"Aurora.png", "gleam.png", "ShimmerSparkle.png", "Ripple.png", "MythicGlowA.png", "MythicGlowB.png", "MythicPulse.png", nullptr};
+    return where == 0 ? notifications : game_bar;
+}
+
+float ach_toast_seconds(AchTier tier) { return TIMES[int(tier)].close + CLOSING; }
+
+void Guide::ach_toast(AchTier tier, int gamerscore, const std::string& name, const std::string& desc, float percent, int index, double now) {
+    AchToast n;
+    n.tier = tier, n.g = gamerscore, n.name = name, n.desc = desc, n.percent = percent, n.index = index;
+    if (!ach_toast_showing(now) && ach_toasts_.empty()) ach_now_ = n, ach_at_ = now, ach_sound_ = int(tier) + 1;  // at once
+    else if (ach_toasts_.size() < 8) ach_toasts_.push_back(n);                                                  // after the ones before it
+}
+
+bool Guide::take_ach_sound(AchTier* tier) {
+    if (!ach_sound_) return false;
+    *tier = AchTier(ach_sound_ - 1), ach_sound_ = 0;
+    return true;
+}
+
+bool Guide::ach_toast_showing(double now) const { return now - ach_at_ >= 0 && now - ach_at_ < ach_toast_seconds(ach_now_.tier); }
+
+void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 origin, double now) {
+    float t = float(now - ach_at_);
+    if ((t < 0 || t > ach_toast_seconds(ach_now_.tier)) && !ach_toasts_.empty()) {
+        ach_now_ = ach_toasts_.front(), ach_toasts_.pop_front(), ach_at_ = now, t = 0;
+        ach_sound_ = int(ach_now_.tier) + 1;
+    }
+    if (t < 0 || t > ach_toast_seconds(ach_now_.tier)) return;
+    const AchToast& n = ach_now_;
+    const int k = int(n.tier);
+    const AchTimes& T = TIMES[k];
+    const AchToastArt& art = a.ach;
+    const float end = T.close + CLOSING;
+    auto seg = [&](float t0, float t1, float x1, float y1, float x2, float y2) {
+        return css_bezier(x1, y1, x2, y2, std::clamp((t - t0) / (t1 - t0), 0.0f, 1.0f));
+    };
+    auto at = [&](float x, float y) { return ImVec2(origin.x + x * s, origin.y + y * s); };
+
+    // the words, and how wide the pill has to be for them
+    std::string title = k == 2 ? "Mythic Achievement unlocked" : k == 1 ? "Rare Achievement unlocked" : "Achievement unlocked";
+    if (k == 1 && n.percent >= 0) {
+        char p[24];
+        snprintf(p, sizeof p, " - %.2f%%", n.percent);
+        title += p;
+    }
+    std::string second = n.g >= 0 ? std::to_string(n.g) + " - " + n.name : n.name;
+    const float TS = 21, D = 72, PADL = 14, PADR = 36;  // canvas units: the text size, the circle's diameter (the pill's height), the body's padding
+    float w1 = a.text->CalcTextSizeA(TS, FLT_MAX, 0, title.c_str()).x;
+    float w2 = a.text->CalcTextSizeA(TS, FLT_MAX, 0, second.c_str()).x + (n.g >= 0 ? TS + 8 : 0);
+    float body = std::clamp(std::max(w1, w2) + PADL + PADR, 320.0f, 620.0f), area = body - PADL - PADR;
+
+    float open = t < T.close ? seg(T.open, T.open + 0.5f, 0.7f, 0.0f, 0.25f, 1.0f) : 1 - seg(T.close + 0.2f, T.close + 0.7f, 0.7f, 0.0f, 0.25f, 1.0f);
+    float zoom;  // the circle: pops in, stays, shrinks away
+    if (t < T.ring + 0.3f) zoom = 1.08f * seg(T.ring, T.ring + 0.3f, 0.2f, 0.8f, 0.3f, 1.2f);
+    else if (t < T.ring + 0.45f) zoom = 1.08f - 0.08f * seg(T.ring + 0.3f, T.ring + 0.45f, 0.0f, 0.0f, 0.58f, 1.0f);
+    else if (t < end - 0.3f) zoom = 1;
+    else zoom = 1 - seg(end - 0.3f, end, 0.6f, 0.0f, 0.9f, 0.4f);
+    float zop = std::min(1.0f, zoom);
+
+    // an ordinary toast showing at the same time keeps its place: this one stands above it
+    float lift = now - toast_at_ >= 0 && now - toast_at_ < 6.3 ? 84.0f : 0.0f;
+    ach_lift_ += (lift - ach_lift_) * 0.2f;
+    float wp = D + body * open, x0 = 640 - wp / 2, y0 = 596 - ach_lift_;
+    ImVec2 c = at(x0 + D / 2, y0 + D / 2);
+    float d = D * s;
+    ImU32 disc = k == 2 ? mix(ACCENT, BLACK, 0.4f) : mix(ACCENT, WHITE, 0.3f);
+    ImU32 haze = mix(ACCENT, WHITE, 0.62f);  // the mythic haze and glows take the accent's light
+    ImVec2 p0 = at(x0, y0), p1 = at(x0 + wp, y0 + D);
+
+    // behind the pill: the mythic haze (the sheet's 260x120 cell has the toast's place cut out of it at 57..203 by 45..75), the ring
+    // that runs out from the circle as the pill opens, the mythic glows turning behind the circle
+    if (k == 2 && art.aurora.tex && open > 0.02f) {
+        float sx = wp / 146.0f, sy = D / 30.0f;
+        ImVec2 h0 = at(x0 - 57 * sx, y0 - 45 * sy), h1 = at(x0 + 203 * sx, y0 + 75 * sy);
+        int f = int(std::max(0.0f, t - T.open) * FPS) % art.aurora.frames;
+        float u = float(f % art.aurora.cols) / art.aurora.cols, v = float(f / art.aurora.cols) / art.aurora.rows;
+        for (int pass = 0; pass < 2; pass++)  // the sheet is faint: twice
+            dl->AddImage(art.aurora.tex, h0, h1, ImVec2(u, v), ImVec2(u + 1.0f / art.aurora.cols, v + 1.0f / art.aurora.rows), alpha(haze, open));
+    }
+    if (k >= 1 && art.ripple) {
+        float r = (t - (T.open - 0.15f)) / 0.75f;
+        if (r > 0 && r < 1) turned(dl, art.ripple, c, d * (1.1f + 1.7f * smooth(r)), 0, alpha(WHITE, (1 - r) * 0.9f));
+    }
+    if (k == 2 && zoom > 0.01f) {
+        turned(dl, art.glow_a, c, d * 2.5f * zoom, t * 0.5f, alpha(haze, zop));
+        turned(dl, art.glow_b, c, d * 2.5f * zoom, -t * 0.35f, alpha(haze, zop));
+    }
+
+    // the pill, and what runs over it
+    if (open > 0.001f) {
+        dl->AddRectFilled(p0, p1, ACCENT, d / 2);
+        float since = t - T.open - 0.15f, period = k == 2 ? 3.3f : 2.8f;
+        if (k >= 1 && art.gleam && since > 0 && t < T.close) {
+            // the gleam: a bright band from the left end to the right, again every few seconds; the texture is as high as the pill
+            float ph = fmodf(since, period) / 1.3f;
+            if (ph < 1) {
+                float gw = D * 3.4f, gx = x0 - gw + (wp + gw) * smooth(ph);
+                dl->AddImageRounded(art.gleam, p0, p1, ImVec2((x0 - gx) / gw, 0), ImVec2((x0 + wp - gx) / gw, 1), alpha(WHITE, std::min(1.0f, open * (k == 2 ? 0.8f : 1.0f))), d / 2);
+            }
+        }
+    }
+
+    // the circle
+    if (zoom > 0.005f) dl->AddCircleFilled(c, d / 2 * zoom, alpha(disc, zop), 64);
+    if (k == 2 && art.pulse) {
+        float p = (t - (T.open - 0.05f)) / 0.85f;
+        if (p > 0 && p < 1) turned(dl, art.pulse, c, d * (0.9f + 1.6f * smooth(p)), 0, alpha(WHITE, 1 - p));
+    }
+
+    // the icon: the emblem first, then the sheet's intro, its idle loop, and from the closing its outro back to the emblem
+    const SpriteSheet &in = art.intro[k], &idle = art.idle[k], &out = art.outro[k];
+    float it = t - T.icon, ot = t - T.close;
+    bool have = in.tex && idle.tex && out.tex;
+    float intro_len = have ? in.frames / FPS : 0.4f, outro_len = have ? out.frames / FPS : 0.4f;
+    if ((it < 0.05f && k != 2) || ot >= outro_len - 0.03f) {
+        emblem(dl, a, c, d * 0.55f * zoom, disc, zop);
+    }
+    if (have) {
+        // the sheets' own first frame is a disc the emblem's size (60 of the cell's 68 or 84 pixels); the mythic ring (105 of 160) is the circle
+        float side = (k == 2 ? 160.0f / 105 : (k == 1 ? 84.0f : 68.0f) * 0.55f / 60) * d * (t > end - 0.3f ? zoom : 1.0f);
+        const SpriteSheet* sh = nullptr;
+        const SpriteSheet* hi = nullptr;
+        int f = 0;
+        if (it >= 0 && it < intro_len) sh = &in, hi = &art.intro_hi, f = int(it * FPS);
+        else if (it >= intro_len && ot < 0) sh = &idle, hi = &art.idle_hi, f = int((it - intro_len) * FPS) % idle.frames;
+        else if (ot >= 0 && ot < outro_len) sh = &out, hi = &art.outro_hi, f = int(ot * FPS);
+        if (sh) {
+            cell(dl, *sh, f, c, side, side, WHITE);
+            if (k == 2) cell(dl, *hi, f, c, side, side, WHITE);
+        }
+    } else if (it >= 0 && ot < outro_len) {
+        // no art: the icon font's glyph grows out of the emblem and goes back into it
+        float g = ot < 0 ? css_bezier(0.2f, 0.8f, 0.3f, 1.2f, std::clamp(it / intro_len, 0.0f, 1.0f)) : 1 - smooth(ot / outro_len);
+        uint32_t glyph = k == 2 ? 0xe65fu : k == 1 ? 0xead5u : uint32_t(I_TROPHY);  // Material Icons "auto_awesome", "diamond"
+        if (k == 2 && zoom < 0.01f) g = 0;
+        icon_mid(dl, a, d * 0.62f * g, c.x, c.y, alpha(WHITE, std::min(1.0f, g)), glyph);
+    }
+
+    // the words, in three turns: what was unlocked, its description, how to open it
+    if (open > 0.3f) {
+        const float ta = T.open + 0.4f, tz = T.close - 0.25f, a_end = ta + (tz - ta) * 0.40f, b_end = ta + (tz - ta) * 0.74f;
+        auto turn = [&](float from, float to, float* op, float* dy) {
+            float in_ = smooth((t - from) / 0.3f), out_ = smooth((to - t) / 0.22f);
+            *op = std::min(in_, out_) * std::min(1.0f, (open - 0.3f) / 0.5f), *dy = (1 - in_) * 8;
+        };
+        float tx = x0 + D + PADL, cy = y0 + D / 2;
+        dl->PushClipRect(at(x0 + D * 0.5f, y0), at(x0 + wp - 4, y0 + D), true);
+        float op, dy;
+        turn(ta, a_end, &op, &dy);
+        if (op > 0.01f) {
+            ImVec2 l1 = at(tx, cy - 14 + dy), l2 = at(tx, cy + 14 + dy);
+            text_mid(dl, a.text, a.text_m, TS * s, l1.x, l1.y, alpha(WHITE, op), title.c_str());
+            float x2 = l2.x;
+            if (n.g >= 0) {
+                // the Gamerscore mark as the console draws it here: a white disc with the G cut out
+                float gd = TS * 0.95f * s;
+                dl->AddCircleFilled(ImVec2(x2 + gd / 2, l2.y), gd / 2, alpha(WHITE, op), 32);
+                ImFont* bf = a.text_bold ? a.text_bold : a.text;
+                float gs = gd * 0.66f, gw = bf->CalcTextSizeA(gs, FLT_MAX, 0, "G").x;
+                dl->AddText(bf, gs, ImVec2(x2 + gd / 2 - gw / 2, caps_top(a.bold_m, gs, l2.y)), alpha(ACCENT, op), "G");
+                x2 += gd + 8 * s;
+            }
+            text_fit(dl, a.text, a.text_m, TS * s, x2, l2.y, (area - (n.g >= 0 ? TS + 8 : 0)) * s, alpha(WHITE, op), second);
+        }
+        turn(a_end, b_end, &op, &dy);
+        if (op > 0.01f && !n.desc.empty()) {
+            // the description: two lines at most, the second cut with an ellipsis
+            const char* b = n.desc.c_str();
+            const char* e = b + n.desc.size();
+            const char* br = a.text->CalcWordWrapPosition(TS, b, e, area);
+            if (br == b) br = e;
+            std::string first(b, br), rest(br < e && *br == ' ' ? br + 1 : br, e);
+            ImVec2 l1 = at(tx, (rest.empty() ? cy : cy - 14) + dy), l2 = at(tx, cy + 14 + dy);
+            text_mid(dl, a.text, a.text_m, TS * s, l1.x, l1.y, alpha(WHITE, op), first.c_str());
+            if (!rest.empty()) text_fit(dl, a.text, a.text_m, TS * s, l2.x, l2.y, area * s, alpha(WHITE, op), rest);
+        }
+        turn(n.desc.empty() ? a_end : b_end, tz, &op, &dy);
+        if (op > 0.01f) {
+            // "Hold (the Guide's emblem) to open", in the middle of the body
+            float wa = a.text->CalcTextSizeA(TS, FLT_MAX, 0, "Hold").x, wb = a.text->CalcTextSizeA(TS, FLT_MAX, 0, "to open").x, ed = 30, gap = 10;
+            float w = wa + gap + ed + gap + wb, lx = x0 + D + (body - PADR * 0.5f - w) / 2;
+            ImVec2 h = at(lx, cy + dy);
+            text_mid(dl, a.text, a.text_m, TS * s, h.x, h.y, alpha(WHITE, op), "Hold");
+            emblem(dl, a, ImVec2(h.x + (wa + gap + ed / 2) * s, h.y), ed * s, ACCENT, op);
+            text_mid(dl, a.text, a.text_m, TS * s, h.x + (wa + gap + ed + gap) * s, h.y, alpha(WHITE, op), "to open");
+        }
+        dl->PopClipRect();
+    }
+
+    // on top: the mythic sparkles, each twinkling in its own time at a place on the pill's edge
+    if (k == 2 && art.sparkle && open > 0.6f && t < T.close + 0.2f) {
+        static const float at_edge[9][3] = {{0.14f, 0, 0.00f}, {0.33f, 0, 0.47f}, {0.52f, 0, 0.21f}, {0.74f, 0, 0.83f}, {0.93f, 0, 0.58f},
+                                            {0.22f, 1, 0.35f}, {0.45f, 1, 0.91f}, {0.66f, 1, 0.12f}, {0.86f, 1, 0.66f}};
+        for (const float* sp : at_edge) {
+            float ph = fmodf(t * 0.6f + sp[2], 1.0f), tw = sinf(PI * ph);
+            tw *= tw * std::min(1.0f, (open - 0.6f) / 0.3f);
+            if (tw < 0.03f) continue;
+            ImVec2 q = at(x0 + wp * sp[0], y0 + (sp[1] > 0.5f ? D : 0));
+            float w = 26 * s * (0.5f + 0.5f * tw), h = w * 100 / 64;
+            dl->AddImage(art.sparkle, ImVec2(q.x - w / 2, q.y - h / 2), ImVec2(q.x + w / 2, q.y + h / 2), ImVec2(0, 0), ImVec2(1, 1), alpha(WHITE, tw));
+        }
+    }
 }

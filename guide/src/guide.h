@@ -44,6 +44,29 @@ struct FontMetrics {
     float cap = 0.7f;  // capital letter height (OS/2 sCapHeight), for centring a word on an icon by its letters
 };
 
+// A picture that holds an animation's frames in a grid, row by row.
+struct SpriteSheet {
+    ImTextureID tex = 0;
+    int cols = 0, rows = 0, frames = 0;
+};
+
+enum class AchTier { Normal, Rare, Mythic };
+
+// The Xbox app's art for achievement toasts, read from the player's own install of that app when there is one (achievements.cpp,
+// ach_art_set; a texture of 0 is not there and the toast is drawn without it). By tier: the trophy, the rare diamond, the mythic star.
+struct AchToastArt {
+    SpriteSheet intro[3], idle[3], outro[3];
+    SpriteSheet intro_hi, idle_hi, outro_hi;  // the mythic star's highlight layer
+    SpriteSheet aurora;                       // the haze around the mythic toast
+    ImTextureID gleam = 0, sparkle = 0, ripple = 0, glow_a = 0, glow_b = 0, pulse = 0;
+};
+// Puts a loaded picture where it belongs, by its file name; and the file names: where 0 = the Xbox app's SocialPublicAssets\Notifications,
+// 1 = Game Bar's Assets (null ended).
+void ach_art_set(AchToastArt* art, const char* file, ImTextureID tex);
+const char* const* ach_art_files(int where);
+// How long an achievement toast of a tier is on screen.
+float ach_toast_seconds(AchTier tier);
+
 // Fonts and textures the Guide draws with (made by the overlay once Direct3D is ready).
 struct GuideAssets {
     ImFont* text = nullptr;       // Segoe UI, or ImGui's own font when Windows has none
@@ -52,6 +75,7 @@ struct GuideAssets {
     FontMetrics text_m, bold_m, icons_m;
     ImTextureID gamerpic = 0;     // the player's picture (Azimuth's data/player.png), 0 when there is none
     std::unordered_map<uint64_t, ImTextureID> pics;  // other players' pictures by xuid, as they arrive from the server
+    AchToastArt ach;              // the achievement toast's art, when the player has the Xbox app
 
     ImTextureID pic(uint64_t xuid) const {
         auto it = pics.find(xuid);
@@ -147,6 +171,12 @@ public:
     void set_social(const Social& s);
     // This player's unlocked achievements as the Achievements mod's file has them (not known: the Achievements row is greyed).
     void set_achievements(const AchUnlocks& u);
+    // An achievement was unlocked: its toast (they queue). gamerscore -1: none to show (the Mythic Achievement, whose name is the game's);
+    // percent -1: not known (a rare one's share of players); index: its place in the list, for opening the Guide on it (-1: none).
+    void ach_toast(AchTier tier, int gamerscore, const std::string& name, const std::string& desc, float percent, int index, double now);
+    // A toast started just now: the sound that goes with it, once.
+    bool take_ach_sound(AchTier* tier);
+    bool ach_toast_showing(double now) const;
     // What came of a request, or what arrived: the 360's toasts and message boxes.
     void on_result(const NetResult& r, const GuideAssets& a, double now);
     // What on_result wants done (JoinGame), for the overlay to take after it.
@@ -262,6 +292,18 @@ private:
     // achievements: this player's, the focused tile and the first row of tiles on screen
     AchUnlocks ach_;
     int ach_focus_ = 0, ach_top_ = 0;
+    // the achievement toast: the one showing, the ones waiting
+    struct AchToast {
+        AchTier tier = AchTier::Normal;
+        int g = -1, index = -1;
+        float percent = -1;
+        std::string name, desc;
+    };
+    AchToast ach_now_;
+    std::deque<AchToast> ach_toasts_;
+    double ach_at_ = -100;
+    float ach_lift_ = 0;
+    int ach_sound_ = 0;  // 1 + the tier whose sound is to be played
     // Compare Games: the other player, the list's focus, and the achievement whose details are open
     Friend cmp_;
     ListFocus cmp_list_;
@@ -381,6 +423,7 @@ private:
     void player_row(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float x, float y, const Friend& f, Relation rel,
                     bool focused, bool greyed, int check, float op) const;
     void draw_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 origin, double now);
+    void draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 origin, double now);
     // The slide and fade of the page that just came in: x offset (canvas units) and opacity; title_op for the header's title.
     void page_motion(double now, float op, float* slide, float* pop, float* title_op) const;
 };
