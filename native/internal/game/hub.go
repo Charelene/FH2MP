@@ -115,6 +115,7 @@ type Hub struct {
 	LightingRoutes map[uint64]Addr
 	HonkRoutes     map[uint64]Addr
 	CarselRoutes   map[uint64]Addr
+	ModsRoutes     map[uint64]Addr
 	probeSeen      map[Addr]probeEnt
 	autoWorlds     int
 	lastSweep      float64
@@ -139,7 +140,7 @@ func NewHub(cfg HubConfig) (*Hub, error) {
 		Assign: map[uint64]string{}, Standins: map[uint64]map[int64]int64{}, CustomCars: map[uint64]map[int64]bool{}, Runs: map[uint64]string{}, Authed: map[uint64]authEnt{}, Flagged: omap.New[uint64, flagEnt](), Revoked: map[uint64]float64{},
 		Keys: map[uint64]map[string]float64{}, TicketEpochs: map[Addr][]byte{}, Bound: map[Addr]boundEnt{}, Nonces: omap.New[nonceKey, float64](), NonceCount: map[uint64]int{},
 		AuthLog: map[any]float64{}, Worlds: omap.New[WorldKey, *World](), Route: omap.New[Addr, *World](), EmptySince: map[WorldKey]float64{},
-		LightingRoutes: map[uint64]Addr{}, HonkRoutes: map[uint64]Addr{}, CarselRoutes: map[uint64]Addr{}, probeSeen: map[Addr]probeEnt{}, nxt: math.Inf(1)}
+		LightingRoutes: map[uint64]Addr{}, HonkRoutes: map[uint64]Addr{}, CarselRoutes: map[uint64]Addr{}, ModsRoutes: map[uint64]Addr{}, probeSeen: map[Addr]probeEnt{}, nxt: math.Inf(1)}
 	h.catalogPtr.Store(cfg.Catalog)
 	h.DefaultType = 2
 	h.PickRng = func() Rand { return pyrand.New(entropySeed()) }
@@ -945,6 +946,10 @@ func (h *Hub) Handle(data []byte, addr Addr) {
 	}
 	if len(data) >= 19 && string(data[11:19]) == carselMagic {
 		h.carselHandle(data, addr, nil)
+		return
+	}
+	if len(data) >= 19 && string(data[11:19]) == modsMagic {
+		h.modsHandle(data, addr, nil)
 		return
 	}
 	if h.probeHandle(data, addr) {

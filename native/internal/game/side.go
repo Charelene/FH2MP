@@ -58,6 +58,7 @@ var (
 	lightLog  = diag.Get("lighting")
 	honkLog   = diag.Get("honk")
 	probeLog  = diag.Get("probe")
+	modsLog   = diag.Get("mods")
 	probeRate = diag.NewRateLimit(nil, 0)
 )
 
@@ -159,6 +160,8 @@ func (h *Hub) sideForged(kind jobKind, xuid uint64) {
 		lg, name = honkLog, "horn"
 	case jobCarsel:
 		lg, name = carselLog, "car select"
+	case jobMods:
+		lg, name = modsLog, "mod state"
 	}
 	if ok, skipped := sideRate.Allow([2]any{"side-forged", xuid}, rejectLogSeconds); ok {
 		extra := ""

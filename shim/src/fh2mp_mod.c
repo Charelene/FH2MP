@@ -3219,6 +3219,9 @@ static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *
 #include "lighting_sync.inc"
 #include "honk_sync.inc"
 #include "carsel_sync.inc"
+#include "mods_sync.inc"
+#include "nos_flames.inc"
+#include "ug_remote.inc"
 #include "event_stock.inc"
 #include "stall_trace.inc"
 
@@ -5591,6 +5594,7 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_HONK", env, 8) == 0) patch_honk(g_exe_dir, g_dir);
             else honk_switched_off(g_exe_dir, g_dir);
             if (GetEnvironmentVariableW(L"FH2MP_NO_CARSELECT_HOLD", env, 8) == 0) patch_carsel();
+            patch_mods(g_exe_dir);    /* NitroSystem's NOS rule (always online) and other players' NOS and underglow */
         }
         {
             wchar_t env[8];

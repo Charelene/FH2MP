@@ -111,7 +111,7 @@ lane_shim() {
     logs=$(dirname "$tpl")
     declare -A pids
     t0=$(date +%s)
-    for t in gamedb_files game_image game_memory title_scope xhr_config health_thread session_log torque_scale net_strings torque_load speed_pb restricted_tools lighting honk diag party_hud car_pool crash_guards picker_pi event_stock; do
+    for t in gamedb_files game_image game_memory title_scope xhr_config health_thread session_log torque_scale net_strings torque_load speed_pb restricted_tools lighting honk mods diag party_hud car_pool crash_guards picker_pi event_stock; do
         "shim/tests/test_$t.sh" > "$logs/$t.log" 2>&1 &
         pids[$t]=$!
     done

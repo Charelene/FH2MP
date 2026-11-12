@@ -678,6 +678,11 @@ class Launcher:
             from .api import log_failure
             log_failure("PLAY", "eo_aero", e, str(e))
             self._aero_note = ""
+        try:
+            self.ensure_nitro_online()
+        except shim.ShimError as e:                  # not worth stopping a game over: NitroSystem then loads or not as the MODS tab last had it
+            from .api import log_failure
+            log_failure("PLAY", "nitro_online", e, str(e))
         logs.step("mods")
         self.ensure_game()
         if require_game and not azimuth.has_game_configured(s["azimuth_dir"]):
@@ -1087,6 +1092,24 @@ class Launcher:
             raise updater.UpdateError(str(e)) from None
         return shim.install_honk(d, files)
 
+    # ---- NitroSystem (optional): loaded for online play only when it has its off switch (shim.nitro_online); the shim keeps its NOS to Free Roam
+    def ensure_nitro_online(self):
+        """Every online Play. -> the note logged ("" when nothing changed)."""
+        d = self.settings["azimuth_dir"]
+        if not d or not os.path.isdir(d):
+            return ""
+        written, note = shim.nitro_online(d, self.settings["nitro_online_written"])
+        if written != self.settings["nitro_online_written"]:
+            self.settings["nitro_online_written"] = written
+            self.settings.save()
+        hud = shim.nitro_hud_default(d)
+        if hud:
+            note = (note + "; " if note else "") + hud
+        if note:
+            from .api import log_note
+            log_note("PLAY " + note)
+        return note
+
     # ---- FH2 ANNA (required: the in-car menu whose lights and doors other players see)
     def anna_state(self):
         """-> (the pinned FH2 ANNA is in place, version)."""
@@ -1217,6 +1240,12 @@ class Launcher:
         out.append(("HonkHonk", hh_ver if hh_ok else "not installed", shim.honk_version(), shim.honk_complete(d)))
         an_ok, an_ver = shim.anna_installed(d)
         out.append(("FH2 ANNA", an_ver if an_ok else "not installed", shim.anna_version(), shim.anna_complete(d)))
+        nk, nv = shim.nitro_installed(d)
+        if nk != "none":
+            out.append(("NitroSystem", (nv or "installed") + ("" if nk == "switch" else " (off online)"), "2.0.0 or newer", nk == "switch"))
+        uk, uv = shim.underglow_installed(d)
+        if uk:
+            out.append(("Underglow", uv or "installed", "-", None))
         session = os.path.exists(os.path.join(shim.bin_dir(d), shim.SESSION_FILE))
         out.append(("Session for the game", "present (written by Play)" if session else "none yet: Play makes it", "Play writes it", None))
         out.append(("Car database", "your own car packs kept: custom cars stay out of online events" if s["keep_car_packs"] else "the server's, put in place at Play", "-", None))

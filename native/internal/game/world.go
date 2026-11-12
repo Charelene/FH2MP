@@ -339,6 +339,7 @@ type World struct {
 	lightRoutes      map[uint64]Addr
 	honkRoutes       map[uint64]Addr
 	carselRoutes     map[uint64]Addr
+	modsRoutes       map[uint64]Addr
 }
 
 // NewWorld is Server(...) for a hub-owned world.
