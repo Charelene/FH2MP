@@ -180,6 +180,20 @@ int main(int argc, char** argv) {
     tm.id = 9, tm.from = 8, tm.tag = "drift_mum", tm.body = "gg", tm.chat = "8", tm.created = double(time(nullptr)) - 30 * 3600, tm.unread = false;
     so.texts.push_back(tm);
     g.set_social(so);
+    if (scene.find("noach") == std::string::npos) {
+        // the Achievements mod's file, as it writes it
+        AchUnlocks au;
+        ach_parse("; Achievements unlocked offline (Achievements mod). Delete this file to start over.\n[unlocked]\n"
+                  "welcome_festival=2026-10-20 18:02:11 UTC\nwelcome_sisteron=2026-10-20 18:40:03 UTC\nwelcome_nice=2026-10-21 19:12:45 UTC\n"
+                  "wanderlust=2026-10-21 19:13:02 UTC\nwristband_yellow=2026-10-20 18:25:30 UTC\nwristband_green=2026-10-22 20:01:00 UTC\n"
+                  "first_of_many=2026-10-20 18:31:09 UTC\nnumber_one=2026-10-20 19:05:44 UTC\nnew_car_smell=2026-10-20 18:10:00 UTC\n"
+                  "license_to_skill=2026-10-21 20:20:20 UTC\nsummer_sale=2026-10-23 21:00:00 UTC\nrain_master=2026-10-22 20:30:00 UTC\n"
+                  "social_caterpillar=2026-11-08 22:15:00 UTC\non_the_road_again=2026-11-09 21:40:00 UTC\nwelcome_storm_island=2026-11-01 17:00:00 UTC\n"
+                  "porsche_owners_club=2026-11-02 17:30:00 UTC\n\n[counters]\nskill.Drift.2293=7\n",
+                  &au);
+        au.known = true;
+        g.set_achievements(au);
+    }
     if (assets.gamerpic) assets.pics[2] = assets.gamerpic;
     auto press = [&](std::initializer_list<PadEvent> evs, double at = 99.0) {
         for (PadEvent e : evs) g.handle(e, at);
@@ -252,6 +266,10 @@ int main(int argc, char** argv) {
         if (scene == "game-people-full") g.handle(PadEvent::Down, t0), g.handle(PadEvent::Down, t0);
     } else if (scene == "game-keyboard") {
         g.open_keyboard_for_game("APEX", "Club Tag", "Enter a tag for your club.", t0);
+    } else if (scene == "achievements" || scene == "achievements-locked" || scene == "achievements-end") {
+        g.toggle(t0 - 10), g.handle(PadEvent::Lb, t0 - 9), g.handle(D, t0 - 8), g.handle(A, t0);  // Games > Achievements
+        if (scene == "achievements-locked") press({PadEvent::Right, PadEvent::Right, PadEvent::Right, D});
+        if (scene == "achievements-end") press({D, D, D, D, D, D, D, D});
     } else if (scene == "open-on-toast") {
         nr.op = NetOp::Received, nr.ok = true, nr.xuid = 3, nr.name = "NightRunR", nr.id = 9;
         g.on_result(nr, assets, t0 - 2);

@@ -485,6 +485,18 @@ void social_and_toasts(double now) {
         Social so = net_social();
         if (so.version != version) version = so.version, g_guide.set_social(so);
     }
+    // this player's achievements: the Achievements mod's unlock file, looked at every 3 s and read when it changed
+    static double last_ach = -10;
+    static uint64_t ach_stamp;
+    if (now - last_ach > 3) {
+        last_ach = now;
+        AchUnlocks u;
+        if (ach_refresh(g_api->azimuth_dir, &ach_stamp, &u)) {
+            if (u.known) logf("guide: achievements read from the Achievements mod's unlock file (%d of %d unlocked, %dG)", u.count(), int(ach_defs().size()), u.gamerscore());
+            else logf("guide: the Achievements mod has no unlock file (fh2-mods\\Achievements\\User_*.ini): the Guide's Achievements stay off");
+            g_guide.set_achievements(u);
+        }
+    }
     PicReady pic;
     while (net_take_pic(&pic)) {
         D3D12_CPU_DESCRIPTOR_HANDLE cpu;

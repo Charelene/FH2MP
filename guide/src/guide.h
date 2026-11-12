@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "achievements.h"
 #include "imgui.h"
 #include "net.h"
 
@@ -102,7 +103,7 @@ struct Opt {
     uint32_t icon = 0;
 };
 
-enum class Page { Home, Community, Profile, EditProfile, Message, CreateNew, Recipients, Compose, Keyboard };
+enum class Page { Home, Community, Profile, EditProfile, Message, CreateNew, Recipients, Compose, Keyboard, Achievements };
 enum CommunityTab { TabParty = 0, TabFriends = 1, TabMessages = 2, TabPlayers = 3 };
 // What a message box was shown for: just to tell (OK), or the question before a written message is dropped.
 // BoxThenClose: told from a closed Guide (the game's own Invite Friends), so OK closes it again.
@@ -144,6 +145,8 @@ public:
     std::vector<GuideRequest> type_char(uint32_t cp, double now);
     // The friend list, invites and messages as the server last gave them.
     void set_social(const Social& s);
+    // This player's unlocked achievements as the Achievements mod's file has them (not known: the Achievements row is greyed).
+    void set_achievements(const AchUnlocks& u);
     // What came of a request, or what arrived: the 360's toasts and message boxes.
     void on_result(const NetResult& r, const GuideAssets& a, double now);
     // What on_result wants done (JoinGame), for the overlay to take after it.
@@ -256,6 +259,9 @@ private:
     int draft_row_ = 0;
     Tween draft_bar_;
     Keys keys_;
+    // achievements: this player's, the focused tile and the first row of tiles on screen
+    AchUnlocks ach_;
+    int ach_focus_ = 0, ach_top_ = 0;
     std::string game_title_, game_description_, game_text_;  // the game's keyboard request and its answer
     bool game_done_ = false;
     // the game's people picker request and its answer
@@ -348,6 +354,7 @@ private:
     void handle_pick(PadEvent e, std::vector<GuideRequest>& out, double now);
     void handle_compose(PadEvent e, std::vector<GuideRequest>& out, double now);
     void handle_keyboard(PadEvent e, std::vector<GuideRequest>& out, double now);
+    void handle_achievements(PadEvent e, double now);
 
     void draw_home(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
     void draw_community(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
@@ -357,6 +364,7 @@ private:
     void draw_pick(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
     void draw_compose(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
     void draw_keyboard(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
+    void draw_achievements(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
     void draw_box(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float w, float h, double now);
     void draw_header(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, float left, float width, const char* title,
                      float title_op);

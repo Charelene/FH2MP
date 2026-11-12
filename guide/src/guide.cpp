@@ -19,7 +19,7 @@ using namespace ui;
 
 namespace {
 
-enum HomeCmd { HomeNone, HomeResume, HomeFriends, HomeParty, HomeMessages, HomeProfile };
+enum HomeCmd { HomeNone, HomeResume, HomeFriends, HomeParty, HomeMessages, HomeProfile, HomeAchievements };
 const char* BLADE[3] = {"Games", nullptr, "Settings"};
 
 // Toasts take the theme's accent; only a warning is red.
@@ -483,6 +483,7 @@ std::vector<GuideRequest> Guide::handle(PadEvent e, double now) {
     case Page::Recipients: handle_pick(e, out, now); break;
     case Page::Compose: handle_compose(e, out, now); break;
     case Page::Keyboard: handle_keyboard(e, out, now); break;
+    case Page::Achievements: handle_achievements(e, now); break;
     }
     return out;
 }
@@ -490,7 +491,7 @@ std::vector<GuideRequest> Guide::handle(PadEvent e, double now) {
 // The blades' rows as the canvas has them (artboard 1). A row with no screen behind it yet is greyed.
 std::vector<Opt> Guide::home_rows(int blade) const {
     if (blade == 0)
-        return {{"Forza Horizon 2", HomeResume, true, I_GAMES}, {"Achievements", HomeNone, false, I_TROPHY}, {"Game Library", HomeNone, false, I_APPS}};
+        return {{"Forza Horizon 2", HomeResume, true, I_GAMES}, {"Achievements", HomeAchievements, ach_.known, I_TROPHY}, {"Game Library", HomeNone, false, I_APPS}};
     if (blade == 1)
         return {{"Leave Game", HomeNone, false, 0},          {"Friends", HomeFriends, true, I_PERSON},  {"Party", HomeParty, true, I_GROUPS},
                 {"Messages", HomeMessages, true, I_MAIL},    {"Beacons & Activity", HomeNone, false, I_SENSORS},
@@ -522,6 +523,9 @@ void Guide::handle_home(PadEvent e, std::vector<GuideRequest>& out, double now) 
             GuideRequest r;
             r.action = GuideAction::Resume;
             out.push_back(r);
+        } else if (cmd == HomeAchievements) {
+            ach_focus_ = ach_top_ = 0;
+            push(Page::Achievements, now);
         } else if (cmd == HomeProfile) {
             prof_ = social_.me;
             if (prof_.tag.empty()) prof_.tag = gamertag;
@@ -696,6 +700,7 @@ bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double 
         case Page::Recipients: draw_pick(dl, a, origin, s, zoom, op, now); break;
         case Page::Compose: draw_compose(dl, a, origin, s, zoom, op, now); break;
         case Page::Keyboard: draw_keyboard(dl, a, origin, s, zoom, op, now); break;
+        case Page::Achievements: draw_achievements(dl, a, origin, s, zoom, op, now); break;
         }
         if (box_.on) draw_box(dl, a, origin, s, w, h, now);
     }
@@ -735,6 +740,8 @@ void Guide::draw_home(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float
     char friends_meta[16] = "", messages_meta[16] = "";
     if (social_.loaded) snprintf(friends_meta, sizeof friends_meta, "%d", online);
     if (waiting) snprintf(messages_meta, sizeof messages_meta, "%d", waiting);
+    char ach_meta[32] = "";
+    if (ach_.known) snprintf(ach_meta, sizeof ach_meta, "%d of %d", ach_.count(), int(ach_defs().size()));
 
     float x = 160 + pslide;
     float since = float(now - switched_);
@@ -777,7 +784,8 @@ void Guide::draw_home(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float
                 float right = r1.x - v.sz(22);
                 if (r.icon) icon_mid(dl, a, v.sz(32), right - v.sz(16), cy, fg, r.icon);
                 right -= v.sz(32 + 16);
-                const char* meta = r.cmd == HomeFriends ? friends_meta : r.cmd == HomeMessages ? messages_meta : r.cmd == HomeResume ? "Now playing" : "";
+                const char* meta = r.cmd == HomeFriends ? friends_meta : r.cmd == HomeMessages ? messages_meta : r.cmd == HomeResume ? "Now playing"
+                                   : r.cmd == HomeAchievements ? ach_meta : "";
                 if (*meta) text_mid(dl, tf, a.text_m, v.sz(20), right, cy, alpha(hi ? WHITE : MUTED, pop * rop), meta, true);
             }
             dl->PopClipRect();

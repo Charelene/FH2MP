@@ -514,6 +514,9 @@ void Guide::profile_side(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
     text_fit(dl, bf, a.bold_m, v.sz(25), np.x, np.y, v.sz(name_w), alpha(WHITE, pop), p.tag);
     player_pic(dl, a, me ? a.gamerpic : a.pic(p.xuid), p.xuid, v.pt(cx, cy0 + 46), v.pt(cx + 112, cy0 + 46 + 112), pop);
     std::vector<std::pair<std::string, std::string>> facts = {{"Club", p.club.empty() ? "-" : p.club}};
+    // Gamerscore, as on the 360's gamercard: this player's from the Achievements mod's file, another player's from the server
+    int score = me && ach_.known ? ach_.gamerscore() : p.gamerscore;
+    if (score >= 0) facts.push_back({"Gamerscore", std::to_string(score)});
     if (!p.name.empty() && !personal) facts.push_back({"Name", p.name});
     float fh = 28.0f * facts.size() + 4.0f * (facts.size() - 1), fy = cy0 + 46 + (112 - fh) / 2 + 14;
     for (size_t i = 0; i < facts.size(); i++) {

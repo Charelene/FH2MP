@@ -20,6 +20,7 @@ struct Friend {
     std::string motto, name, location, bio;   // profile texts, empty when the server has none
     bool has_profile = false;                 // the server keeps profile texts (it sent them with this card)
     std::string relation;                     // a looked-up player: "friend", "incoming", "outgoing", "none" or "self"
+    int gamerscore = -1;                      // from their unlocked achievements, -1 when the server does not say
 };
 
 struct ReceivedInvite {

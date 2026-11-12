@@ -202,6 +202,7 @@ Friend card(const JVal& c) {
     if (seen.type == JVal::Num) f.last_seen = int(seen.i64());
     f.motto = c["motto"].str(), f.name = c["name"].str(), f.location = c["location"].str(), f.bio = c["bio"].str();
     f.has_profile = c["motto"].type == JVal::Str;
+    if (c["gamerscore"].type == JVal::Num) f.gamerscore = int(c["gamerscore"].i64());
     return f;
 }
 
