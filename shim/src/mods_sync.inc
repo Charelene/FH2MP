@@ -28,7 +28,12 @@
 #define MODS_POLL_BUSY_MS 50u       /* while any NOS burns (ours or another's) */
 #define MODS_POLL_IDLE_MS 200u
 #define MODS_CHANGE_MS 35u          /* a change goes out at once, but not faster than this */
-#define UG_READ_MS 1000u
+/* Each `status` command is a line in platform.log, so it is read when something can have changed: Underglow's ini or a garage file was written
+ * (its Mods page, ANNA, a kit fitted), the local car changed (again 5 s later: Underglow learns the new car's garage id a while after), and
+ * every 30 s for the rest (lit or dark in a menu). */
+#define UG_CHECK_MS 1000u           /* how often the files' write times and the car are looked at */
+#define UG_READ_MS 30000u
+#define UG_CAR_AGAIN_MS 5000u
 #define UG_RETRY_MS 10000u          /* after a failed read */
 #ifndef UG_LOADED
 #define UG_LOADED() (GetModuleHandleW(L"Underglow.dll") != NULL)
@@ -109,12 +114,23 @@ static void nos_rule_tick(void)
     server_at = (ULONGLONG)g_nos_server_at;
     server = g_nos_server_ok && server_at && now - server_at <= NOS_SERVER_FRESH_MS;
     allowed = in_session && context == AD_FREE_ROAM && road_trip == 0 && server;
-    if (allowed == g_nos_allowed) return;
-    g_nos_set(NOS_WHO, !allowed);
-    InterlockedExchange(&g_nos_allowed, allowed);
+    if (allowed != g_nos_allowed) {
+        g_nos_set(NOS_WHO, !allowed);
+        InterlockedExchange(&g_nos_allowed, allowed);
+    }
     {
-        LONG n = InterlockedIncrement(&transitions);
-        if (n > 20 && n % 50) return;
+        /* one line whenever what the rule reads changes (not only when NOS turns on or off), so a NOS that stays off says why */
+        static int seen;
+        static int last[4];
+        int now_state[4];
+        LONG n;
+        now_state[0] = in_session; now_state[1] = context; now_state[2] = road_trip;
+        now_state[3] = !server_at ? 0 : server ? 1 : now - server_at > NOS_SERVER_FRESH_MS ? 2 : 3;
+        if (seen && now_state[0] == last[0] && now_state[1] == last[1] && now_state[2] == last[2] && now_state[3] == last[3]) return;
+        seen = 1;
+        last[0] = now_state[0]; last[1] = now_state[1]; last[2] = now_state[2]; last[3] = now_state[3];
+        n = InterlockedIncrement(&transitions);
+        if (n > 40 && n % 100) return;
         log_begin();
         log_raw(allowed ? "nitro: NOS on (online Free Roam" : "nitro: NOS off (");
         if (!allowed) {
@@ -143,6 +159,33 @@ static unsigned char nos_flags(void)
 
 /* ---- Underglow: the platform's command pipe ---- */
 static wchar_t g_ug_ini[MAX_PATH + 40];
+static wchar_t g_ug_garage[MAX_PATH + 60];     /* <Azimuth>\data\titles\1A96545B\Underglow: player-N\UnderglowGarage.json (each car's kit and style) */
+
+/* The newest write time of Underglow.ini and its garage files (0 when none). */
+static ULONGLONG ug_files_stamp(void)
+{
+    WIN32_FILE_ATTRIBUTE_DATA a;
+    WIN32_FIND_DATAW fd;
+    wchar_t path[MAX_PATH + 120];
+    ULONGLONG newest = 0, t;
+    HANDLE h;
+    if (g_ug_ini[0] && GetFileAttributesExW(g_ug_ini, GetFileExInfoStandard, &a))
+        newest = (ULONGLONG)a.ftLastWriteTime.dwHighDateTime << 32 | a.ftLastWriteTime.dwLowDateTime;
+    if (!g_ug_garage[0]) return newest;
+    lstrcpyW(path, g_ug_garage); lstrcatW(path, L"\\player-*");
+    h = FindFirstFileW(path, &fd);
+    if (h == INVALID_HANDLE_VALUE) return newest;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || lstrlenW(fd.cFileName) > 40) continue;
+        lstrcpyW(path, g_ug_garage); lstrcatW(path, L"\\"); lstrcatW(path, fd.cFileName); lstrcatW(path, L"\\UnderglowGarage.json");
+        if (GetFileAttributesExW(path, GetFileExInfoStandard, &a)) {
+            t = (ULONGLONG)a.ftLastWriteTime.dwHighDateTime << 32 | a.ftLastWriteTime.dwLowDateTime;
+            if (t > newest) newest = t;
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return newest;
+}
 
 static void ug_load_customs(ug_customs *cc)
 {
@@ -260,7 +303,8 @@ static DWORD WINAPI mods_worker(void *unused)
 {
     HMODULE ws = LoadLibraryW(L"ws2_32.dll");
     SOCKET s = INVALID_SOCKET;
-    ULONGLONG seq = 0, received = 0, generation = 0, last_send = 0, polls = 0, ug_next = 0;
+    ULONGLONG seq = 0, received = 0, generation = 0, last_send = 0, polls = 0, ug_next = 0, ug_checked = 0, ug_stamp = 0, ug_again = 0;
+    void *ug_car = NULL;
     SOCKET (WSAAPI *make_socket)(int, int, int) = NULL;
     int (WSAAPI *nonblocking)(SOCKET, long, u_long *) = NULL;
     int (WSAAPI *receive)(SOCKET, char *, int, int, struct sockaddr *, int *) = NULL;
@@ -291,7 +335,19 @@ static DWORD WINAPI mods_worker(void *unused)
         int length, i, n, drained, changed, busy;
         unsigned count = 0;
         ULONGLONG predicted, current_generation, now = GetTickCount64(), gap;
-        if (g_mods_share && now >= ug_next) ug_next = now + (ug_read(ug) || !UG_LOADED() ? UG_READ_MS : UG_RETRY_MS);
+        if (g_mods_share && now - ug_checked >= UG_CHECK_MS) {
+            ULONGLONG stamp = ug_files_stamp();
+            void *local;
+            ug_checked = now;
+            AcquireSRWLockShared(&g_light_lock);
+            local = g_light.local_hint;
+            ReleaseSRWLockShared(&g_light_lock);
+            if (stamp != ug_stamp || local != ug_car) ug_next = now;
+            if (local != ug_car) ug_again = now + UG_CAR_AGAIN_MS;
+            if (ug_again && now >= ug_again) { ug_next = now; ug_again = 0; }
+            ug_stamp = stamp; ug_car = local;
+            if (now >= ug_next) ug_next = now + (ug_read(ug) || !UG_LOADED() ? UG_READ_MS : UG_RETRY_MS);
+        }
         nos = nos_flags();
         AcquireSRWLockShared(&g_light_lock);
         length = g_light.address_len; predicted = g_light.prediction_at; car = g_light.car; current_generation = g_light.generation;
@@ -392,8 +448,11 @@ static void patch_mods(const wchar_t *azimuth_dir)
     unsigned char *img = find_fh2_image();
     HANDLE thread;
     int share = GetEnvironmentVariableW(L"FH2MP_NO_MODSYNC", env, 8) == 0;
-    g_ug_ini[0] = 0;
-    if (azimuth_dir && lstrlenW(azimuth_dir) < MAX_PATH) { lstrcpyW(g_ug_ini, azimuth_dir); lstrcatW(g_ug_ini, L"\\fh2-mods\\Underglow.ini"); }
+    g_ug_ini[0] = g_ug_garage[0] = 0;
+    if (azimuth_dir && lstrlenW(azimuth_dir) < MAX_PATH) {
+        lstrcpyW(g_ug_ini, azimuth_dir); lstrcatW(g_ug_ini, L"\\fh2-mods\\Underglow.ini");
+        lstrcpyW(g_ug_garage, azimuth_dir); lstrcatW(g_ug_garage, L"\\data\\titles\\1A96545B\\Underglow");
+    }
     if (!img || !g_light_enabled) {
         log_begin();
         log_raw(!img ? "mods: the game is not FH2 1.0.0.64" : "mods: the lighting hooks are off");
