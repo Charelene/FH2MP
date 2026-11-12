@@ -32,6 +32,7 @@ DEFAULTS = {
     "eo_aero_restore": "",          # the player's Extra Options UnlockAeroTuning value while an online game runs with it at 0 (put back for offline play)
     "controls_swapped": False,      # Extra Options' headlight and roof toggles were moved from the right stick (honk) to the left stick, once; reset when a game's shim could not move the horn (fh2mp-controls.txt)
     "extra_options": True,          # put FH2 Extra Options (GPL-3.0, RokkuDayo) next to the shim when the player has no copy
+    "achievements": True,           # put the Achievements mod (GPL-3.0, Trinculo54) into fh2-mods when the player has no copy
     # developer options (the dev launcher's panel; harmless elsewhere)
     "pin_shim": False,              # never replace the installed shim automatically (local / debug builds)
     "extra_env": "",                # KEY=VALUE lines added to the game's environment (FH2MP_NET_TRAFFIC=1, FH2MP_XUID=..., ...)

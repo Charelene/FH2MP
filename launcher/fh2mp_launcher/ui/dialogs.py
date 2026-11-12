@@ -673,6 +673,9 @@ class SettingsDialog(QDialog):
                                    "The pinned build already there is left alone; another winmm.dll is kept in the fh2extra folder.")
         self.extra_opts.setChecked(s["extra_options"])
         lay.addWidget(self.extra_opts)
+        self.achievements = QCheckBox("Install Achievements if it is missing (by Trinculo54, GPL-3.0)")
+        self.achievements.setChecked(s["achievements"])
+        lay.addWidget(self.achievements)
         self.packs = QCheckBox("Keep my car packs (custom cars stay out of online events)")
         self.packs.setToolTip("You play online with your own car database and the car packs in it. In Free Roam the others see your custom "
                               "cars as a stand-in car. Online events and Road Trip take only cars from the game, and parts from outside the "
@@ -868,6 +871,7 @@ class SettingsDialog(QDialog):
         s["azimuth_dir"] = d
         s["offline_mode"] = self.offline.isChecked()
         s["extra_options"] = self.extra_opts.isChecked()
+        s["achievements"] = self.achievements.isChecked()
         s["keep_car_packs"] = self.packs.isChecked()
         s["tcp_fallback"] = self.tcp.isChecked()
         s["crash_report_ask"] = self.crash_ask.isChecked()

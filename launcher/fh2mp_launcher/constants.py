@@ -134,6 +134,21 @@ UPSTREAM = {
             "fh2-mods/FH2ANNA.dll": "6955cbd35d35408a8e9ed8de132e75b877d52c681c645dcec6d24c50d8d974b6",
         },
     },
+    # Not required to play: the game's 88 achievements, which the Guide lists and the server shows on gamercards. Only the mod's DLL is taken:
+    # the zip also carries a build of the FH2 Mod Platform (d3dcompiler_47.dll / DWrite.dll), which stays the pinned one above.
+    "achievements": {
+        "name": "Achievements", "author": "Trinculo54", "license": "GPL-3.0", "version": "1.0.2",
+        "url": "https://github.com/Trinculo54/fh2-achievements/releases/download/v1.0.2/Achievements-v1.0.2.zip",
+        "mirror": MIRROR_BASE + "Achievements-v1.0.2.zip",
+        "sha256": "7655cdb7a4ceb65d4703f83fbf2afaa0e199545d089e8f1a56abd2ed0a1bc188", "size": 2780646,
+        "dll": "fh2-mods/Achievements.dll", "dllSha256": "4b487ee0fc825bfd22ad13e638b051a1b16fa822815f92554dd8274e6bedb316",
+        "files": {
+            "fh2-mods/Achievements.dll": "fh2-mods/Achievements.dll",
+        },
+        "fileSha256": {
+            "fh2-mods/Achievements.dll": "4b487ee0fc825bfd22ad13e638b051a1b16fa822815f92554dd8274e6bedb316",
+        },
+    },
 }
 # The Extra Options build launchers up to 1.3.2 installed (0.4.4, zip FH2_Extra_Options_0.4.4-azimuth.zip): only to recognise FH2MP's own earlier
 # install when 0.6.0 replaces it. Its bundled packages were at the mods root; 0.6.0 brings its own copies in mods/Forza Horizon 2, so the old

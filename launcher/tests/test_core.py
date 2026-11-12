@@ -1088,7 +1088,7 @@ class ExtraOptionsTests(unittest.TestCase):
 
     def test_only_one_extra_options_pin_is_supplied(self):
         from fh2mp_launcher.constants import UPSTREAM
-        self.assertEqual(set(UPSTREAM), {'platform', 'extraOptions', 'honkHonk', 'anna'})
+        self.assertEqual(set(UPSTREAM), {'platform', 'extraOptions', 'honkHonk', 'anna', 'achievements'})
         self.assertEqual(UPSTREAM['extraOptions']['version'], '0.6.0')
         self.assertEqual(UPSTREAM['extraOptions']['dll'], 'winmm.dll')
         with tempfile.TemporaryDirectory() as az:
@@ -1620,7 +1620,8 @@ class DevModeTests(unittest.TestCase):
             lc.shim_state = lambda: ("ours", "1.0.0-rc3")
             rows = {r[0]: r for r in lc.status_lines()}
             self.assertEqual(list(rows), ["FH2MP launcher", "Azimuth", "FH2MP shim", "FH2 Mod Platform", "FH2 Extra Options",
-                                          "HonkHonk", "FH2 ANNA", "Session for the game", "Car database", "Connection", "Mode"])
+                                          "HonkHonk", "FH2 ANNA", "Achievements", "Session for the game", "Car database", "Connection", "Mode"])
+            self.assertEqual(rows["Achievements"][1:], ("not installed", "1.0.2", None))   # optional: missing is not a fault
             self.assertEqual(rows["FH2MP shim"][1:], ("1.0.0-rc3", version.__version__ + " (server needs 1.1.2)", False))   # outdated: marked
             self.assertEqual(rows["Azimuth"][3], False)                          # no azimuth.exe in the folder
             self.assertEqual(rows["FH2 Mod Platform"][1], "not installed")
@@ -2009,6 +2010,73 @@ class HonkHonkTests(unittest.TestCase):
             with mock.patch.object(core.upstream, "fetch", return_value=self.files):
                 self.assertTrue(lc.ensure_honk())
             self.assertEqual(lc.honk_state(), (True, shim.honk_version()))
+
+
+class AchievementsModTests(unittest.TestCase):
+    """The Achievements mod (shim.install_achievements, Launcher.ensure_achievements): optional. Only its DLL comes from the release; it is
+    installed where there is none, with its update check off; a player's own Achievements.dll or settings file is never replaced."""
+
+    def setUp(self):
+        self.az = tempfile.mkdtemp()
+        self.dll = b"MZ-achievements"
+
+    def path(self, name):
+        return os.path.join(self.az, "fh2-mods", name)
+
+    def test_the_pin_takes_the_dll_only(self):
+        from fh2mp_launcher import upstream
+        from fh2mp_launcher.constants import UPSTREAM
+        pin = UPSTREAM["achievements"]
+        self.assertTrue(pin["url"].startswith("https://github.com/Trinculo54/fh2-achievements/releases/download/v1.0.2/"))
+        self.assertEqual(pin["files"], {"fh2-mods/Achievements.dll": "fh2-mods/Achievements.dll"})
+        data, pin = fake_release("achievements", {"fh2-mods/Achievements.dll": self.dll, "DWrite.dll": b"MZ-platform", "d3dcompiler_47.dll": b"MZ-platform",
+                                                  "README.txt": b"r"}, "fh2-mods/Achievements.dll")
+        self.assertEqual(upstream.extract("achievements", data, pin), {"fh2-mods/Achievements.dll": self.dll})
+
+    def test_install_where_there_is_none_turns_the_update_check_off(self):
+        from fh2mp_launcher.constants import UPSTREAM
+        with mock.patch.dict(UPSTREAM["achievements"], dllSha256=hashlib.sha256(self.dll).hexdigest()):
+            self.assertEqual(shim.achievements_installed(self.az), (False, ""))
+            self.assertTrue(shim.install_achievements(self.az, {"fh2-mods/Achievements.dll": self.dll}))
+            self.assertEqual(shim.achievements_installed(self.az), (True, "1.0.2"))
+            with open(self.path("Achievements.ini"), "rb") as f:
+                ini = f.read()
+            self.assertIn(b"\r\nCheckUpdates=0\r\n", ini)
+            self.assertIn(b"\r\nPopups=1\r\n", ini)
+            self.assertEqual(shim.install_achievements(self.az, {"fh2-mods/Achievements.dll": self.dll}), [])
+            self.assertFalse(os.path.exists(os.path.join(self.az, "DWrite.dll")))
+
+    def test_the_players_own_build_and_settings_stay(self):
+        os.makedirs(os.path.join(self.az, "fh2-mods"))
+        with open(self.path("Achievements.dll"), "wb") as f:
+            f.write(b"MZ-newer")
+        self.assertEqual(shim.achievements_installed(self.az), (True, "unknown"))
+        self.assertEqual(shim.install_achievements(self.az, {"fh2-mods/Achievements.dll": self.dll}), [])
+        with open(self.path("Achievements.dll"), "rb") as f:
+            self.assertEqual(f.read(), b"MZ-newer")
+        self.assertFalse(os.path.exists(self.path("Achievements.ini")))
+        # a missing DLL beside the player's settings file: the DLL comes, the file stays theirs
+        os.remove(self.path("Achievements.dll"))
+        with open(self.path("Achievements.ini"), "wb") as f:
+            f.write(b"[Achievements]\r\nPopups=0\r\n")
+        self.assertTrue(shim.install_achievements(self.az, {"fh2-mods/Achievements.dll": self.dll}))
+        with open(self.path("Achievements.ini"), "rb") as f:
+            self.assertEqual(f.read(), b"[Achievements]\r\nPopups=0\r\n")
+
+    def test_the_launcher_installs_it_only_when_wanted_and_missing(self):
+        from fh2mp_launcher import core, upstream
+        from fh2mp_launcher.settings import Settings
+        lc = core.Launcher(Settings(os.path.join(self.az, "settings.json")), load_identity=False)   # never the player's own settings file
+        lc.settings["azimuth_dir"] = self.az
+        with mock.patch.object(upstream, "fetch", return_value={"fh2-mods/Achievements.dll": self.dll}) as fetch:
+            lc.settings["achievements"] = False
+            self.assertEqual(lc.ensure_achievements(), [])
+            fetch.assert_not_called()
+            lc.settings["achievements"] = True
+            self.assertTrue(lc.ensure_achievements())
+            self.assertEqual(fetch.call_args[0][0], "achievements")
+            self.assertEqual(lc.ensure_achievements(), [])       # there now: nothing is downloaded again
+            self.assertEqual(fetch.call_count, 1)
 
 
 class AnnaTests(unittest.TestCase):

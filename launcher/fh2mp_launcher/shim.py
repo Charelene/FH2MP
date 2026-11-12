@@ -843,6 +843,57 @@ def install_anna(folder, files):
         raise ShimError(f"could not install FH2 ANNA: {e.strerror or e}. Is the game still running?") from None
     return [f"installed FH2 ANNA {anna_version()} (qiangqiang101, MIT) from its GitHub release"]
 
+# ---- Achievements (Trinculo54): fh2-mods\Achievements.dll, loaded by the platform next to the shim. It works out the game's 88 achievements
+# from the save and the game's events and keeps them in fh2-mods\Achievements\; the Guide reads that for its list and tells the server.
+# Optional: a game runs without it, and a player's own build of it is left alone.
+
+ACHIEVEMENTS_DLL = "fh2-mods/Achievements.dll"
+ACHIEVEMENTS_INI = "fh2-mods/Achievements.ini"
+# The mod's own settings file as it writes it, with its GitHub update check off: the launcher installs a pinned build, so the title screen's
+# "a newer version is out" would send players to install what the launcher does not know. Written only when the player has no file.
+ACHIEVEMENTS_INI_TEXT = (b"; Achievements (fh2-mods\\Achievements.ini). Delete this file to get the defaults back.\r\n"
+                         b"[Achievements]\r\n"
+                         b"; 0 = no pop-up when you unlock an achievement (also under Pause > Settings > MODS)\r\n"
+                         b"Popups=1\r\n"
+                         b"; 0 = don't check GitHub for a newer version\r\n"
+                         b"CheckUpdates=0\r\n")
+
+
+def achievements_version():
+    return UPSTREAM["achievements"]["version"]
+
+
+def achievements_installed(folder):
+    """-> (installed, version): the pinned version when the DLL is the pinned build, "unknown" for another Achievements.dll (a newer one the
+    player put there, say), (False, "") when missing."""
+    try:
+        with open(os.path.join(folder, *ACHIEVEMENTS_DLL.split("/")), "rb") as f:
+            same = hashlib.sha256(f.read()).hexdigest() == UPSTREAM["achievements"]["dllSha256"]
+    except OSError:
+        return False, ""
+    return True, achievements_version() if same else "unknown"
+
+
+def install_achievements(folder, files):
+    """Installs the Achievements mod from its release (`files` = upstream.fetch("achievements"): the DLL only) where there is none; an
+    Achievements.dll already there, whatever build, is the player's and stays. Its settings file is written with the update check off when
+    the player has none. -> list of things done."""
+    data = files.get(ACHIEVEMENTS_DLL)
+    if data is None:
+        raise ShimError("the Achievements release has no Achievements.dll")
+    target = os.path.join(folder, *ACHIEVEMENTS_DLL.split("/"))
+    if os.path.exists(target):
+        return []
+    ini = os.path.join(folder, *ACHIEVEMENTS_INI.split("/"))
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        if not os.path.exists(ini):
+            paths.atomic_write(ini, ACHIEVEMENTS_INI_TEXT, 0o644, busy_ok=True)
+        paths.atomic_write(target, data, 0o755, busy_ok=True)
+    except OSError as e:
+        raise ShimError(f"could not install Achievements: {e.strerror or e}. Is the game still running?") from None
+    return [f"installed Achievements {achievements_version()} (Trinculo54, GPL-3.0) from its GitHub release"]
+
 
 # ---- Extra Options' aero unlock ([Experiments] UnlockAeroTuning). With it on, Extra Options gives every stock aero part its car's race aero physics at game
 # start (EO 0.4.4 winmm.dll, read statically 2026-11-09: one switch for all six aero patches, read once at start, nothing kept between runs; only SELECTs on the
