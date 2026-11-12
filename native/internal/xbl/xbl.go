@@ -87,6 +87,9 @@ type Session struct {
 	HasUsed              bool
 	Seen                 map[string]float64
 	HasSeen              bool
+	// World is set on a private game's session (a QoS session the game asked a server for, AllocateServer): the game server world its
+	// members are put into. "" = not a private game.
+	World string
 }
 
 func (s *Session) obj() pyjson.Obj {
@@ -153,6 +156,8 @@ type Server struct {
 	left      map[string]left
 	holds     map[string]*Hold
 	playing   map[string][3]string // xuid -> the session the player last wrote itself into and has not left (lower-case key)
+	assignMu  sync.Mutex
+	assigned  map[string]string // decimal xuid -> the lobby (world) the game server was last told the player belongs in
 	lastSweep float64
 
 	rate         *diag.RateLimit
@@ -175,7 +180,7 @@ func New(hub Hub) *Server {
 	start := time.Now()
 	return &Server{
 		sessions: map[[3]string]*Session{}, tickets: map[string]*Ticket{}, lobbies: map[LobbyKey][]string{}, reserved: map[string]map[string]float64{},
-		left: map[string]left{}, holds: map[string]*Hold{}, playing: map[string][3]string{}, rate: diag.NewRateLimit(nil, 0), Hub: hub,
+		left: map[string]left{}, holds: map[string]*Hold{}, playing: map[string][3]string{}, assigned: map[string]string{}, rate: diag.NewRateLimit(nil, 0), Hub: hub,
 		Now:       func() float64 { return float64(time.Now().UnixNano()) / 1e9 },
 		Monotonic: func() float64 { return time.Since(start).Seconds() },
 		NewUUID:   randomUUID, MaxSessions: 20000, LobbyCapacity: capacity.FreeRoam(),
@@ -550,20 +555,66 @@ func ServersBlock() pyjson.Obj { return ToJSON(serversBlock()).(pyjson.Obj) }
 // and ends the request with "Unable to allocate a game server" when the block never shows up (win1 -> dev 2026-11-08: the private Free Roam the game
 // creates itself allocates into its QoS session, template defaultTemplate_qos, not into a lobby session). The change number moves so a poller sees a
 // change. It reports false when the path is not a session path or the session is unknown.
+//
+// A QoS session that gets a server is a private game (dev 2026-11-12: Private Free Roam chosen in a public Free Roam put both players back
+// into the public world, because the game server still had them assigned to the public lobby). Its members go into a world of its own,
+// named after the session, and so does everyone who later writes itself into it (an invited friend). A private Free Roam started from a Car
+// Meet keeps the Car Meet's world (the game takes the whole meet there; the lobby list and the matchmaker already treat it as private).
 func (s *Server) AllocateServer(sessionPath string) bool {
 	key, ok := ParsePath(sessionPath)
 	if !ok {
 		return false
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	rec := s.sessions[lowerKey(key)]
 	if rec == nil {
+		s.mu.Unlock()
 		return false
 	}
 	rec.Servers = serversBlock()
 	rec.Change++
+	var announce []string
+	if strings.Contains(strings.ToLower(key[1]), "qos") && rec.World == "" {
+		world, from := key[2], "a world of its own"
+		if owner := rec.Owner; owner != "" {
+			if lobby := s.assignedLobby(owner); lobby != "" && s.carMeetLobbyLocked(lobby) {
+				world, from = lobby, "the world of the Car Meet it started from"
+			}
+		}
+		rec.World = world
+		for _, mk := range rec.Members.Keys() {
+			if isDigits(mk) {
+				announce = append(announce, mk)
+			}
+		}
+		mpsdLog.Info(fmt.Sprintf("private game: session %s/%.8s got a server: it is %s (%.8s), its %d member(s) are put there", key[1], key[2], from, world, len(announce)))
+	}
+	world := rec.World
+	s.mu.Unlock()
+	for _, x := range announce {
+		s.AnnouncePlayer(x, world)
+	}
 	return true
+}
+
+// assignedLobby is the lobby the game server was last told the player belongs in ("" = none).
+func (s *Server) assignedLobby(xuid string) string {
+	s.assignMu.Lock()
+	defer s.assignMu.Unlock()
+	return s.assigned[xuid]
+}
+
+// privateGameLocked is the private game whose world has this name, or nil.
+func (s *Server) privateGameLocked(world string) *Session {
+	if world == "" {
+		return nil
+	}
+	for _, rec := range s.sessions {
+		if rec.World != "" && strings.EqualFold(rec.World, world) {
+			return rec
+		}
+	}
+	return nil
 }
 
 // PutSession creates or updates a session and returns (http status, document or nil). xuid is the authenticated caller; the server's own calls
@@ -777,10 +828,14 @@ func (s *Server) putSession(path string, body []byte, xuid string) (int, pyjson.
 		s.playing[xuid] = lk
 	}
 	var announce [][2]string
-	if !qos {
+	world := key[2]
+	if qos {
+		world = rec.World // a private game's world; "" for any other QoS session
+	}
+	if world != "" {
 		for _, mk := range rec.Members.Keys() {
 			if isDigits(mk) && mk == xuid {
-				announce = append(announce, [2]string{mk, key[2]})
+				announce = append(announce, [2]string{mk, world})
 			}
 		}
 	}
@@ -935,6 +990,9 @@ func (s *Server) AnnouncePlayer(xuid, lobby string) {
 		s.every(hubLog, "warn", "send-assign", ControlLogSeconds, fmt.Sprintf("could not tell the game server that xuid=%s was matched into lobby %s, the player will not be placed there: ValueError: %v", xuid, trunc(lobby, 8), err))
 		return
 	}
+	s.assignMu.Lock()
+	s.assigned[xuid] = lobby
+	s.assignMu.Unlock()
 	s.Hub.Control(fmt.Sprintf("assign %x %s", n, lobby))
 }
 

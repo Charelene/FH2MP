@@ -148,11 +148,15 @@ func authErr(status int, code, message, xuid, detail string) *auth.Error {
 }
 
 // Reserve leases a seat in a lobby (by name) or in a new one of a kind ("freeroam", "roadtrip").
-func (s *Server) Reserve(xuid, lobby, kind string) (*Hold, error) { return s.reserve(xuid, lobby, kind, false) }
+func (s *Server) Reserve(xuid, lobby, kind string) (*Hold, error) {
+	return s.reserve(xuid, lobby, kind, false)
+}
 
 // ReserveInvited leases a seat for a player who accepted a game invite into the named lobby: like Reserve, and a Car Meet lobby (the
 // inviter's private Free Roam) is allowed.
-func (s *Server) ReserveInvited(xuid, lobby string) (*Hold, error) { return s.reserve(xuid, lobby, "", true) }
+func (s *Server) ReserveInvited(xuid, lobby string) (*Hold, error) {
+	return s.reserve(xuid, lobby, "", true)
+}
 
 func (s *Server) reserve(xuid, lobby, kind string, invited bool) (*Hold, error) {
 	if kind != "" && kind != "freeroam" && kind != "roadtrip" {
@@ -185,6 +189,29 @@ func (s *Server) reserve(xuid, lobby, kind string, invited bool) (*Hold, error) 
 				if key != nil {
 					break
 				}
+			}
+			if key == nil && invited && s.privateGameLocked(lobby) != nil {
+				// the inviter's private game (a world of its own, not in the lobby index): a seat while it has room
+				kind = "freeroam"
+				present := []string{}
+				already := s.seatsLocked(lobby, nil, s.Now())[xuid]
+				for _, x := range pops[lobby] {
+					if x == fmt.Sprintf("%x", n) {
+						already = true
+					}
+					if v, e := strconv.ParseInt(x, 16, 64); e == nil {
+						present = append(present, strconv.FormatInt(v, 10))
+					}
+				}
+				occupied := len(pops[lobby]) + len(s.seatsLocked(lobby, present, s.Now()))
+				if room := capacity.ForKind(kind); occupied >= room && !already {
+					err = authErr(409, "lobby_full", "This lobby is full.", xuid, fmt.Sprintf("private game %s holds %d of %d", trunc(lobby, 8), occupied, room))
+					return
+				}
+				previous = s.holds[xuid]
+				hold = &Hold{ID: lobby, Kind: kind, ExpiresAt: int64(s.Now()) + HoldSeconds}
+				s.holds[xuid] = hold
+				return
 			}
 			if key == nil || (LobbyKind(*key) == "" && !(invited && holdKind(*key) == "carmeet")) {
 				why := "is not in the lobby index"
@@ -349,7 +376,7 @@ func (s *Server) LauncherRows(me int64, lobbies []any, pops map[string][]string,
 		if !s.poolFits(id, pops, flags, flags[me]) {
 			continue
 		}
-		if kind, _ := row.Get("kind"); kind == "freeroam" && s.carMeetLobbyLocked(id) {
+		if kind, _ := row.Get("kind"); kind == "freeroam" && (s.carMeetLobbyLocked(id) || s.privateGameLocked(id) != nil) {
 			continue // a private Free Roam: invite only, not listed
 		}
 		var ids []any
