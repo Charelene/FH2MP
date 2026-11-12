@@ -395,8 +395,8 @@ void Guide::draw_ach_detail(ImDrawList* dl, const GuideAssets& a, ImVec2 origin,
 //   Hide, 1.633 s: the panel folds and the square slides back over 0.667 s, the icon plays its exit and shrinks 0.767-1.367 s, the
 //     squares go last (dark 0.866-1.366 s, medium 0.9-1.5 s, light 0.933-1.633 s).
 //   Rare: from 2.433 s a gleam crosses the panel, twice. Mythic: from 2.433 s two pulses and two turning glows behind and over the icon, a
-//     ripple at 4.433 s, the gleam with six sparkles on the panel's edges from 5.064 s. Game Bar's aurora haze is cut to its pill's shape
-//     and is left out.
+//     ripple at 4.433 s, the gleam with six sparkles on the panel's edges from 5.064 s, and the aurora haze around the toast from 2.433 s
+//     (its cut-out fitted to the square and the panel rather than placed as on Game Bar's pill).
 // The icon sheets are played at 30 frames a second, as Game Bar's flip books are. The plain and rare ones start and end with the
 // console's emblem turning; those frames are replaced by the Guide's emblem (a white disc with the trophy of the icon font) making the
 // same turn.
@@ -488,13 +488,13 @@ void squeeze(ImDrawList* dl, int from, float cx, float kx, float dx = 0) {
 
 // The Guide's emblem where the console's is on the icon sheets: a white disc with the trophy cut out of it in the circle's colour. turn 0
 // faces; towards 1 it has turned away to the right, towards -1 to the left, as the console's emblem turns on the sheets.
-void emblem(ImDrawList* dl, const GuideAssets& a, ImVec2 c, float d, ImU32 ink, float turn, float op) {
+void emblem(ImDrawList* dl, const GuideAssets& a, ImVec2 c, float d, ImU32 ink, float turn, float op, uint32_t glyph = I_TROPHY) {
     if (d < 1 || op <= 0.004f) return;
     dl->AddCircleFilled(c, d / 2, alpha(WHITE, op), 48);
     float face = cosf(std::min(1.0f, std::fabs(turn)) * PI / 2);
     if (face < 0.03f) return;
     int from = dl->VtxBuffer.Size;
-    icon_mid(dl, a, d * 0.64f, c.x, c.y, alpha(ink, op * std::min(1.0f, face * 1.6f)), I_TROPHY);
+    icon_mid(dl, a, d * 0.64f, c.x, c.y, alpha(ink, op * std::min(1.0f, face * 1.6f)), glyph);
     squeeze(dl, from, c.x, face, (turn > 0 ? 1 : -1) * (1 - face) * d * 0.22f);
 }
 
@@ -515,7 +515,7 @@ void ach_art_set(AchToastArt* art, const char* file, ImTextureID tex) {
         {"DiamondIntroV2.png", nullptr, 1, 6, 8, 42},   {"DiamondIdleV2.png", nullptr, 1, 4, 5, 20},    {"DiamondOutroV2.png", nullptr, 1, 5, 7, 32},
         {"MythicV2Intro.png", nullptr, 2, 10, 12, 120}, {"MythicV2Idle.png", nullptr, 2, 7, 9, 60},     {"MythicV2Outro.png", nullptr, 2, 6, 7, 41},
         {"MythicV2IntroHighlights.png", &AchToastArt::intro_hi, -1, 10, 12, 120}, {"MythicV2IdleHighlights.png", &AchToastArt::idle_hi, -1, 7, 9, 60},
-        {"MythicV2OutroHighlights.png", &AchToastArt::outro_hi, -1, 6, 7, 41},
+        {"MythicV2OutroHighlights.png", &AchToastArt::outro_hi, -1, 6, 7, 41},    {"Aurora.png", &AchToastArt::aurora, -1, 7, 9, 60},
     };
     for (const Slot& sl : sheets) {
         if (strcmp(sl.name, file)) continue;
@@ -539,7 +539,7 @@ const char* const* ach_art_files(int where) {
     static const char* const notifications[] = {"TrophyIntro.png",   "TrophyIdle.png",   "TrophyOutro.png",   "DiamondIntroV2.png", "DiamondIdleV2.png",
                                                 "DiamondOutroV2.png", "MythicV2Intro.png", "MythicV2Idle.png", "MythicV2Outro.png",  "MythicV2IntroHighlights.png",
                                                 "MythicV2IdleHighlights.png", "MythicV2OutroHighlights.png", nullptr};
-    static const char* const game_bar[] = {"gleam.png", "ShimmerSparkle.png", "Ripple.png", "MythicGlowA.png", "MythicGlowB.png", "MythicPulse.png", nullptr};
+    static const char* const game_bar[] = {"Aurora.png", "gleam.png", "ShimmerSparkle.png", "Ripple.png", "MythicGlowA.png", "MythicGlowB.png", "MythicPulse.png", nullptr};
     return where == 0 ? notifications : game_bar;
 }
 
@@ -607,6 +607,18 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
     auto square = [&](ImVec2 c, float side, ImU32 col) {
         if (side > 0.5f) dl->AddRectFilled(ImVec2(c.x - side / 2, c.y - side / 2), ImVec2(c.x + side / 2, c.y + side / 2), col);
     };
+
+    // the mythic's aurora haze, behind everything: Game Bar's 260 x 120 cells have a 146 x 30 cut-out with the haze brightest at its edge;
+    // here the cut-out is fitted just inside the square and the panel, so the haze rises from their edges (8 frames a second, there and
+    // back; it fades in 2.433-3.433 s and on Hide shrinks with the toast and fades)
+    if (mythic && art.aurora.tex) {
+        float op = !hiding ? track({kf(2.433f, 0), kfeio(3.433f, 1)}, t) : track({kf(0, 1), kfeio(0.75f, 0)}, h);
+        if (op > 0.004f) {
+            float w = Q + pw * std::max(unfold, 0.0f), fx = w * 0.97f / 146, fy = Q * 0.94f / 30;
+            int i = int(t * 8) % 118, f = i < 60 ? i : 118 - i;
+            cell(dl, art.aurora, f, at(640, by + Q / 2), 260 * fx * s, 120 * fy * s, alpha(WHITE, op));
+        }
+    }
 
     // the squares, at the toast's centre (behind the panel: on Hide they are under it while it folds)
     if (!hiding) {
@@ -687,11 +699,11 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
         if (!hiding && t >= TS) hint_op = track({kf(0.066f, 0), kf(0.267f, 1)}, t - TS);
         else if (hiding) hint_op = track({kf(0, 1), kfei(0.5f, 0)}, h), hint_dx = track({kf(0, 0), kfei(0.6f, -40)}, h);
         if (hint_op > 0.004f) {
-            // "Hold (the emblem) to open", in the middle of the panel
+            // "Hold (a gamepad on a white disc) to open", in the middle of the panel
             float w = wa + gap + ed + gap + wb, hx = bx + Q + half - w / 2 + hint_dx;
             float cy = at(0, by + Q / 2).y;
             text_mid(dl, a.text, a.text_m, TSZ * s, at(hx, 0).x, cy, alpha(WHITE, hint_op), "Hold");
-            emblem(dl, a, ImVec2(at(hx + wa + gap + ed / 2, 0).x, cy), ed * s, PANEL, 0, hint_op);
+            emblem(dl, a, ImVec2(at(hx + wa + gap + ed / 2, 0).x, cy), ed * s, PANEL, 0, hint_op, I_GAMES);  // the button: a gamepad (user 2026-11-11)
             text_mid(dl, a.text, a.text_m, TSZ * s, at(hx + wa + gap + ed + gap, 0).x, cy, alpha(WHITE, hint_op), "to open");
         }
         dl->PopClipRect();
