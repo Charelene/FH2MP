@@ -428,6 +428,14 @@ func (w *World) ReportEvent(why string) {
 	}
 }
 
+// refusedOnClass says whether an invitee answered the pending invite with a Ready that was refused only because its car is outside the event's
+// rule (not a custom or traffic car, which never race). Such an invitee is let into the event like an ineligible leader: its game opens the event
+// car select, ValidateEventCars drops it after that if its car still does not fit. Left out at the start it never got a car select at all (S2 race
+// with a class C car, dev 2026-11-12: "never ever did i get car to pick even").
+func (w *World) refusedOnClass(q *Peer) bool {
+	return !w.Roadtrip && q.ReadyRetry != nil && *q.ReadyRetry == w.RaceRequestedAt && !w.NotForEvents(q)
+}
+
 // RetryRefusedReady: an invitee whose Ready was refused on its old car and who has since changed to one that fits is ready after all.
 func (w *World) RetryRefusedReady(peer *Peer) {
 	if peer.ReadyRetry == nil {
@@ -488,7 +496,7 @@ func (w *World) RefuseEventReady(peer *Peer, why string) {
 func (w *World) CheckInviteesReady() {
 	waiting := 0
 	for _, q := range w.Others(w.PendingRace.Leader) {
-		if q.Connected && q.Entered && !q.ConsoleVars[4] {
+		if q.Connected && q.Entered && !q.ConsoleVars[4] && !w.refusedOnClass(q) {
 			waiting++
 		}
 	}
@@ -889,6 +897,9 @@ func (w *World) ValidateEventCars() bool {
 		if q.Connected {
 			w.SetConsoleBool(q, ConsoleVarParticipatingInRace, 0, "car does not meet the event restrictions")
 			q.ConsoleVars[ConsoleVarParticipatingInRace] = false
+			if !w.Roadtrip {
+				w.noticeRefused(q, w.refusalNotice(q)) // it had the car select and still has a car that does not fit
+			}
 		}
 	}
 	w.Warnf("event: %s out of the event (car does not meet the restrictions, see the 'not eligible' line above); %d participant(s) remain %s", owners(wrong), len(ev.People), owners(ev.People))
@@ -933,6 +944,14 @@ func (w *World) StartEvent(leader *Peer) {
 	people := []*Peer{leader}
 	excluded := map[*Peer]string{}
 	for _, q := range w.Peers.Values() {
+		if q != leader && q.Connected && !q.ConsoleVars[4] && w.refusedOnClass(q) && len(people) < capacity.ClientLimit {
+			w.Logf("event start: owner %d's Ready was refused on its car (it does not meet the restrictions yet); it is selected and gets the event car select, its car is checked again when every participant has loaded", q.Owner)
+			q.ReadyRetry = nil
+			w.SetConsoleBool(q, 4, 1, "selected: its Ready was refused on its car, the event car select follows")
+			q.ConsoleVars[4] = true
+			people = append(people, q)
+			continue
+		}
 		if q == leader || !q.Connected || !q.ConsoleVars[4] {
 			if q != leader {
 				if !q.Connected {

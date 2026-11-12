@@ -24,16 +24,16 @@ static const unsigned char *g_ad_img;
 static SIZE_T g_ad_img_size;
 static volatile LONG g_ad_refused, g_ad_allowed;
 
-/* The event context's type (+0x60), -1 when it cannot be read. The shared_ptr the game hands out is released as the game does (strong count +8,
+/* The event context's type (+0x60), -1 when it cannot be read (also NitroSystem's online rule, mods_sync.inc). The shared_ptr the game hands out is released as the game does (strong count +8,
  * weak +0xc of the control block, its vtable slots 0 and 1). */
-static int ad_context_type(void)
+static int ad_context_type(const unsigned char *img)
 {
     void *holder = NULL, *shared[2] = {NULL, NULL};
     int type = -1;
-    if (!read_game_memory(g_ad_img + AD_CONTEXT_HOLDER_RVA, &holder, sizeof holder) || !holder) {
+    if (!img || !read_game_memory(img + AD_CONTEXT_HOLDER_RVA, &holder, sizeof holder) || !holder) {
         return -1;
     }
-    ((ad_context_fn)(g_ad_img + AD_EVENT_CONTEXT_RVA))(holder, shared);
+    ((ad_context_fn)(img + AD_EVENT_CONTEXT_RVA))(holder, shared);
     if (shared[0] && !read_game_memory((unsigned char *)shared[0] + 0x60, &type, sizeof type)) {
         type = -1;
     }
@@ -51,11 +51,11 @@ static int ad_context_type(void)
 }
 
 /* 1 when a Road Trip is on, 0 when not, -1 when the manager cannot be read */
-static int ad_road_trip(void)
+static int ad_road_trip(const unsigned char *img)
 {
     const unsigned char *mgr = NULL;
     void *synced = NULL;
-    if (!read_game_memory(g_ad_img + AD_ROADTRIP_MGR_RVA, &mgr, sizeof mgr) || !mgr || !read_game_memory(mgr + 0x28, &synced, sizeof synced)) {
+    if (!img || !read_game_memory(img + AD_ROADTRIP_MGR_RVA, &mgr, sizeof mgr) || !mgr || !read_game_memory(mgr + 0x28, &synced, sizeof synced)) {
         return -1;
     }
     return synced != NULL;
@@ -84,7 +84,7 @@ static void ad_hook(void *car, char ai)
 {
     const unsigned char *from = (const unsigned char *)__builtin_return_address(0);
     if (ai && g_ad_img && !(from >= g_ad_img && from < g_ad_img + g_ad_img_size) && ppi_in_session(g_ad_img)) {
-        int context = ad_context_type(), road_trip = ad_road_trip();
+        int context = ad_context_type(g_ad_img), road_trip = ad_road_trip(g_ad_img);
         if (context != AD_FREE_ROAM || road_trip != 0) {
             ad_log("a mod's Auto Drive refused: online it only drives in Free Roam, not in an event or Road Trip", context, road_trip, &g_ad_refused);
             return;
