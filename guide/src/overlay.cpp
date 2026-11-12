@@ -29,6 +29,7 @@
 #include "join.h"
 #include "net.h"
 #include "sysui.h"
+#include "voice.h"
 
 // probe.cpp
 void party_probe_start(const FH2ModApi* api, FH2Mod* mod, unsigned char* game, void (*log)(const char*));
@@ -866,6 +867,7 @@ DWORD WINAPI hook_thread(LPVOID) {
     if (ok) CloseHandle(CreateThread(nullptr, 0, pad_thread, nullptr, 0, nullptr));
     if (unsigned char* base = (unsigned char*)g_api->wait_for_code(180000)) {
         sysui_install(g_api, g_mod, base, net_log, on_game_invite_ui);
+        voice_install(g_api, g_mod, base, net_log);
         g_join_ok.store(join_install(g_api, g_mod, base, net_log));
         wchar_t probe[8];
         if (GetEnvironmentVariableW(L"FH2MP_GUIDE_PROBE", probe, 8) && probe[0] == L'1') party_probe_start(g_api, g_mod, base, net_log);
