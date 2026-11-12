@@ -320,10 +320,14 @@ type World struct {
 	GameOptions               *gameopts.Options
 	GameOptionsOwner          *Peer
 	LeaderSince               float64
-	Leader                    *Peer
-	FreeRoamLaps              int64
-	FreeRoamEndCondition      int64
-	Event                     *Event
+	// Private: the world of a private game (the hub sets it when it routes one of the game's members here, hub.go Follow). The game is told
+	// PrivacyMode = InviteOnly, and the world always has a leader: its first player, then whoever the leader names (message 59) or, when the
+	// leader leaves, the player who has been here longest. Only the leader starts events.
+	Private              bool
+	Leader               *Peer
+	FreeRoamLaps         int64
+	FreeRoamEndCondition int64
+	Event                *Event
 
 	raceClock    [2]int64
 	raceProgress struct {

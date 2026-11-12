@@ -107,6 +107,7 @@ func (w *World) handleObject(peer *Peer, r rd, br *bits.Reader, mtype int, data 
 		w.RetryRefusedReady(peer)
 		w.NotePlayerStatus(peer, size, payload)
 		w.NoteCarLook(peer, rs, rp)
+		w.NoteChatStates(peer, size, payload)
 	}
 	if CarCapture && router == netv2.RouterCar && size != 0 {
 		w.Logf("%d CAPTURE car %s id=%d seq=%d bits=%d hex=%s", addr.Port, kindName(mtype), oid, seq, size, hexOf(payload, size))

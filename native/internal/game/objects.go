@@ -717,6 +717,102 @@ func pyBool(b bool) string {
 	return "False"
 }
 
+// sessionHostCreateVars is SessionHostSynced as this player's game gets it at the handshake (nil = every default): LobbyType where it is
+// not the default (Free Roam) or the game came in as another type (an accepted invite enters through a Car Meet), PrivacyMode for a private
+// game.
+func (w *World) sessionHostCreateVars(peer *Peer) netv2.VarsWriter {
+	lobby := -1
+	if w.Roadtrip {
+		lobby = LobbyTypeRoadTrip
+	} else if peer.LobbyType == LobbyTypeCarMeet {
+		lobby = LobbyTypeCarMeet
+	} else if peer.ClaimedLobbyType != 0 && peer.ClaimedLobbyType != peer.LobbyType {
+		lobby = peer.LobbyType
+	}
+	inviteOnly := w.Private && !w.Roadtrip && peer.LobbyType != LobbyTypeCarMeet
+	if lobby < 0 && !inviteOnly {
+		return nil
+	}
+	return func(b *bits.Writer) {
+		if lobby >= 0 {
+			b.Bits(SHLobbyType, netv2.SessionHostVarBits)
+			b.Bits(uint64(lobby), SHLobbyTypeBits)
+		}
+		if inviteOnly {
+			b.Bits(SHPrivacyMode, netv2.SessionHostVarBits)
+			b.Bits(SHPrivacyInviteOnly, SHPrivacyModeBits)
+		}
+	}
+}
+
+// KeepPrivateLeader gives a private game without a leader one: the player who has been in it longest (its host, while the host is there).
+func (w *World) KeepPrivateLeader(why string) {
+	if !w.Private || w.Roadtrip || w.Leader != nil {
+		return
+	}
+	var first *Peer
+	for _, q := range w.Peers.Values() {
+		if q.Connected && q.Entered && q.LobbyType != LobbyTypeCarMeet && (first == nil || q.ConnectedAt < first.ConnectedAt) {
+			first = q
+		}
+	}
+	if first != nil {
+		w.SetLeader(first, why)
+	}
+}
+
+// RequestLeaderChange handles message 59 in a private game: the leader names another player of the game as its leader (the player popup's
+// Make Session Leader). The key is the named player's object as the sender sees it: a relay key carries that player's relay owner id.
+func (w *World) RequestLeaderChange(peer *Peer, kind string, owner int) {
+	var target *Peer
+	if kind == "relay" {
+		for _, q := range w.Peers.Values() {
+			if q.Owner == owner && q.Connected && q.Entered {
+				target = q
+			}
+		}
+	}
+	switch {
+	case w.Leader != peer:
+		w.Logf("%d RequestLeaderChange (owner %d) ignored: it is not the leader", peer.Addr.Port, peer.Owner)
+	case w.Event != nil || w.PendingRace != nil:
+		w.Logf("%d RequestLeaderChange (owner %d) ignored: an event is being set up or running", peer.Addr.Port, peer.Owner)
+	case target == nil || target == peer:
+		w.Logf("%d RequestLeaderChange (owner %d) ignored: the key names no other player here (%s key, owner %d)", peer.Addr.Port, peer.Owner, kind, owner)
+	default:
+		w.ReleaseOptions(peer, fmt.Sprintf("leadership passed to owner %d", target.Owner))
+		w.SetLeader(target, fmt.Sprintf("named by the leader, owner %d", peer.Owner))
+	}
+}
+
+// KickFromPrivate handles message 46 in a private game: its leader removes a player (the popup's Kick From Session). The player's
+// connection is closed with the reason PlayerKick and the hub forgets that the player belongs here, so only a new invite brings them back.
+func (w *World) KickFromPrivate(peer *Peer, target uint64) {
+	var q *Peer
+	for _, c := range w.Peers.Values() {
+		if c.Xuid == target && c.Connected {
+			q = c
+		}
+	}
+	switch {
+	case w.Leader != peer:
+		w.Logf("%d kick of %#x (owner %d) ignored: only the private game's leader removes players", peer.Addr.Port, target, peer.Owner)
+	case q == nil || q == peer:
+		w.Logf("%d kick of %#x (owner %d) ignored: no other player here has that id", peer.Addr.Port, target, peer.Owner)
+	default:
+		w.Logf("kick: owner %d xuid %#x removed from the private game by its leader, owner %d; it comes back only by a new invite", q.Owner, q.Xuid, peer.Owner)
+		w.Send(q, false, netv2.CloseConnection(CloseReasonPlayerKick, q.ClientCounter, w.ServerCounter))
+		w.DropPeer(q, "kicked by the private game's leader")
+		if w.Hub != nil {
+			hub, xuid := w.Hub, target
+			hub.Defer(func() {
+				delete(hub.Assign, xuid)
+				delete(hub.Follow, xuid)
+			})
+		}
+	}
+}
+
 // SendLeaderFlag writes IsLeader of a player.
 func (w *World) SendLeaderFlag(peer *Peer, flag int) {
 	w.SendPlayerVar(peer, PlayerVarIsLeader, 1, uint64(flag), true)

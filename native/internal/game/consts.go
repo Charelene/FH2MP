@@ -120,12 +120,23 @@ const (
 	SHRaceReady                = 4
 	SHRaceParticipantsSelected = 5
 	SHInRace                   = 6
-	SHCountdownType            = 2
-	SHCountdownTypeBits        = 2
-	SHCountdownStartRace       = 2
-	SHRaceStartTime            = 9
-	SHNumLapsCompleted         = 10
-	SHFurthestProgress         = 11
+	// CloseConnection's reason for a player its leader removed: NetworkDisconnectType::PlayerKick (game+0x10fd80: 1 LiveFailure, 2 Network,
+	// 3 PlayerKick, 4 PlayerInactive, 5 PlayerChoice) [I: that the transport's 3-bit reason is that enum]
+	CloseReasonPlayerKick = 3
+	SHLobbyType           = 0
+	SHLobbyTypeBits       = 3
+	// SessionHostSynced.PrivacyMode (var 1, SyncedEnum<SessionPrivacy,0,2,0>: 2 bits): 0 Public, 1 InviteOnly. The game's session object reads
+	// it (States::NetworkGetSessionPrivacy, game+0x8c80c0); InviteOnly shows the leader's crown in the HUD list and lets only the leader
+	// start events (NotPrivateLeader for everybody else), docs/protocol.md "Event leader".
+	SHPrivacyMode        = 1
+	SHPrivacyModeBits    = 2
+	SHPrivacyInviteOnly  = 1
+	SHCountdownType      = 2
+	SHCountdownTypeBits  = 2
+	SHCountdownStartRace = 2
+	SHRaceStartTime      = 9
+	SHNumLapsCompleted   = 10
+	SHFurthestProgress   = 11
 
 	PlayerVarTeamID   = 90
 	PlayerVarIsLeader = 5
@@ -162,6 +173,9 @@ var (
 	// StartResend: MsgStartRace goes out once as a plain datagram; a participant that has sent no score message StartResendSeconds after it gets it
 	// again with the same start time (prod 2026-11-11: one lost start left the event leader on the grid while seven others raced). "0" = off.
 	StartResend = envStr("FH2MP_START_RESEND", "1") == "1"
+	// PopFreeRoam: the "pop" report also names the lobbies that have a Free Roam world with players (" !freeroam=a,b"), so the LSP can keep a
+	// Car Meet that went to Free Roam (the game's private Free Roam) out of matchmaking and the lobby list. FH2MP_POP_FREEROAM=0 leaves it out.
+	PopFreeRoam = envStr("FH2MP_POP_FREEROAM", "1") == "1"
 	// RtClassMode: a Road Trip car above the trip's class after car select (a tune loaded mid-trip, as FH2 ANNA's Tune Car allowed): "log" (default,
 	// one line per owner and class every 5 min), "enforce" (Ready refused, out of the event at its start) or "off".
 	RtClassMode = strings.ToLower(strings.TrimSpace(envStr("FH2MP_RT_CLASS", "log")))

@@ -87,6 +87,9 @@ type Session struct {
 	HasUsed              bool
 	Seen                 map[string]float64
 	HasSeen              bool
+	// World is set on a private game's session (a QoS session the game asked a server for, AllocateServer): the game server world its
+	// members are put into. "" = not a private game.
+	World string
 }
 
 func (s *Session) obj() pyjson.Obj {
@@ -135,6 +138,9 @@ type Hold struct {
 	Kind      string
 	ExpiresAt int64
 	Key       *LobbyKey
+	// Private: a seat in a private game for an invited player. It only counts against the game's room: no matchmaking ticket uses it
+	// (that would make a public lobby of the private game's name) and the lobby list does not show it.
+	Private bool
 }
 
 type left struct {
@@ -152,6 +158,9 @@ type Server struct {
 	reserved  map[string]map[string]float64
 	left      map[string]left
 	holds     map[string]*Hold
+	playing   map[string][3]string // xuid -> the session the player last wrote itself into and has not left (lower-case key)
+	assignMu  sync.Mutex
+	assigned  map[string]string // decimal xuid -> the lobby (world) the game server was last told the player belongs in
 	lastSweep float64
 
 	rate         *diag.RateLimit
@@ -174,7 +183,7 @@ func New(hub Hub) *Server {
 	start := time.Now()
 	return &Server{
 		sessions: map[[3]string]*Session{}, tickets: map[string]*Ticket{}, lobbies: map[LobbyKey][]string{}, reserved: map[string]map[string]float64{},
-		left: map[string]left{}, holds: map[string]*Hold{}, rate: diag.NewRateLimit(nil, 0), Hub: hub,
+		left: map[string]left{}, holds: map[string]*Hold{}, playing: map[string][3]string{}, assigned: map[string]string{}, rate: diag.NewRateLimit(nil, 0), Hub: hub,
 		Now:       func() float64 { return float64(time.Now().UnixNano()) / 1e9 },
 		Monotonic: func() float64 { return time.Since(start).Seconds() },
 		NewUUID:   randomUUID, MaxSessions: 20000, LobbyCapacity: capacity.FreeRoam(),
@@ -549,20 +558,53 @@ func ServersBlock() pyjson.Obj { return ToJSON(serversBlock()).(pyjson.Obj) }
 // and ends the request with "Unable to allocate a game server" when the block never shows up (win1 -> dev 2026-11-08: the private Free Roam the game
 // creates itself allocates into its QoS session, template defaultTemplate_qos, not into a lobby session). The change number moves so a poller sees a
 // change. It reports false when the path is not a session path or the session is unknown.
+//
+// A QoS session that gets a server is a private game (dev 2026-11-12: Private Free Roam chosen in a public Free Roam put both players back
+// into the public world, because the game server still had them assigned to the public lobby). Its members go into a world of its own,
+// named after the session, and so does everyone who later writes itself into it (an invited friend). That holds wherever it was started
+// from: two players of one Car Meet who each chose Private Free Roam got the meet's world, together and uninvited (dev 2026-11-12 14:50).
 func (s *Server) AllocateServer(sessionPath string) bool {
 	key, ok := ParsePath(sessionPath)
 	if !ok {
 		return false
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	rec := s.sessions[lowerKey(key)]
 	if rec == nil {
+		s.mu.Unlock()
 		return false
 	}
 	rec.Servers = serversBlock()
 	rec.Change++
+	var announce []string
+	if strings.Contains(strings.ToLower(key[1]), "qos") && rec.World == "" {
+		rec.World = key[2]
+		for _, mk := range rec.Members.Keys() {
+			if isDigits(mk) {
+				announce = append(announce, mk)
+			}
+		}
+		mpsdLog.Info(fmt.Sprintf("private game: session %s/%.8s got a server: it is a world of its own, its %d member(s) are put there (owner %s)", key[1], key[2], len(announce), rec.Owner))
+	}
+	world := rec.World
+	s.mu.Unlock()
+	for _, x := range announce {
+		s.AnnounceFollower(x, world)
+	}
 	return true
+}
+
+// privateGameLocked is the private game whose world has this name, or nil.
+func (s *Server) privateGameLocked(world string) *Session {
+	if world == "" {
+		return nil
+	}
+	for _, rec := range s.sessions {
+		if rec.World != "" && strings.EqualFold(rec.World, world) {
+			return rec
+		}
+	}
+	return nil
 }
 
 // PutSession creates or updates a session and returns (http status, document or nil). xuid is the authenticated caller; the server's own calls
@@ -573,13 +615,17 @@ func (s *Server) PutSession(path string, body []byte, xuid string) (int, pyjson.
 	status, doc, announce := s.putSession(path, body, xuid)
 	s.mu.Unlock()
 	for _, a := range announce {
-		s.AnnouncePlayer(a[0], a[1])
+		if a[2] == "follow" {
+			s.AnnounceFollower(a[0], a[1])
+		} else {
+			s.AnnouncePlayer(a[0], a[1])
+		}
 	}
 	return status, doc
 }
 
 // putSession does PutSession's work; the caller holds the lock.
-func (s *Server) putSession(path string, body []byte, xuid string) (int, pyjson.Obj, [][2]string) {
+func (s *Server) putSession(path string, body []byte, xuid string) (int, pyjson.Obj, [][3]string) {
 	key, ok := ParsePath(path)
 	if !ok {
 		p, _, _ := strings.Cut(path, "?")
@@ -673,6 +719,13 @@ func (s *Server) putSession(path string, body []byte, xuid string) (int, pyjson.
 					joining = true
 				}
 			}
+			if !isMember && !joining && len(req.Keys()) == 1 && req.Has("members") && membersReq.Len() > 0 {
+				// "me": null from a player who is not in the session: MPSD changes nothing and answers with the session. The game's
+				// session-ready join sends it for the session it is about to join (dev 2026-11-11: the invitee's GET 200, then this
+				// PUT); the 403 it got made the game say "The session you were trying to join no longer exists."
+				s.every(mpsdLog, "info", "leave/not-member", RefusalLogSeconds, fmt.Sprintf("PUT leave from a non-member: nothing to change, the session is answered as it is %s/%.8s ", key[1], key[2])+kv(f("xuid", xuid)))
+				return 200, ToJSON(s.SessionDocument(cur)).(pyjson.Obj), nil
+			}
 			if !isMember && !joining {
 				st, _ := s.refuse(403, &key, xuid, "not a member of this session and not joining it", f("owner", nilIfEmpty(cur.Owner)), f("members", cur.Members.Len()))
 				return st, nil, nil
@@ -718,6 +771,7 @@ func (s *Server) putSession(path string, body []byte, xuid string) (int, pyjson.
 		Merge(rec.Properties, p.(*Dict))
 	}
 	qos := strings.Contains(strings.ToLower(key[1]), "qos")
+	wroteSelf := false
 	for _, name := range membersReq.Keys() {
 		m, _ := membersReq.m[name].(*Dict)
 		if name == "me" && xuid != "" { // "me" is the caller: key members by xuid so several clients can share a session
@@ -727,7 +781,13 @@ func (s *Server) putSession(path string, body []byte, xuid string) (int, pyjson.
 			if _, had := rec.Members.Delete(name); had && xuid != "" && name == xuid && !qos {
 				s.left[xuid] = left{strings.ToLower(key[2]), s.Now()}
 			}
+			if xuid != "" && name == xuid && s.playing[xuid] == lk {
+				delete(s.playing, xuid)
+			}
 			continue
+		}
+		if xuid != "" && name == xuid {
+			wroteSelf = true
 		}
 		m = m.copyDict()
 		if xuid != "" {
@@ -758,11 +818,22 @@ func (s *Server) putSession(path string, body []byte, xuid string) (int, pyjson.
 		return st, nil, nil
 	}
 	s.sessions[lk] = rec
-	var announce [][2]string
-	if !qos {
+	if wroteSelf {
+		s.playing[xuid] = lk
+		if h := s.holds[xuid]; h != nil && h.Private && rec.World != "" && strings.EqualFold(h.ID, rec.World) {
+			delete(s.holds, xuid) // the invited player is in the private game now: its seat lease is used up
+			lobbyLog.Info("reservation used: the player joined the private game " + kv(f("xuid", xuid), f("lobby", trunc(h.ID, 8))))
+		}
+	}
+	var announce [][3]string
+	world, how := key[2], ""
+	if qos {
+		world, how = rec.World, "follow" // a private game's world; "" for any other QoS session
+	}
+	if world != "" {
 		for _, mk := range rec.Members.Keys() {
 			if isDigits(mk) && mk == xuid {
-				announce = append(announce, [2]string{mk, key[2]})
+				announce = append(announce, [3]string{mk, world, how})
 			}
 		}
 	}
@@ -917,7 +988,77 @@ func (s *Server) AnnouncePlayer(xuid, lobby string) {
 		s.every(hubLog, "warn", "send-assign", ControlLogSeconds, fmt.Sprintf("could not tell the game server that xuid=%s was matched into lobby %s, the player will not be placed there: ValueError: %v", xuid, trunc(lobby, 8), err))
 		return
 	}
+	s.assignMu.Lock()
+	s.assigned[xuid] = lobby
+	s.assignMu.Unlock()
 	s.Hub.Control(fmt.Sprintf("assign %x %s", n, lobby))
+}
+
+// AnnounceFollower tells the game server that this player belongs in a private game's world: the one of that name with players in it,
+// whatever lobby type the player's game asks for (an invite taken in a Car Meet).
+func (s *Server) AnnounceFollower(xuid, lobby string) {
+	n, err := strconv.ParseInt(xuid, 10, 64)
+	if xuid == "" || err != nil {
+		return
+	}
+	s.assignMu.Lock()
+	s.assigned[xuid] = lobby
+	s.assignMu.Unlock()
+	s.Hub.Control(fmt.Sprintf("assign %x %s follow", n, lobby))
+}
+
+// PrivateWorld is the world of a private game's session ("" when the session is not one).
+func (s *Server) PrivateWorld(scid, template, name string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if rec := s.sessions[lowerKey([3]string{scid, template, name})]; rec != nil {
+		return rec.World
+	}
+	return ""
+}
+
+// SessionOf is the session a player is in, as the game would name it to join them: the one the player last wrote itself into as a member and
+// has not left, when the directory still has it with that member. For a player in a matched lobby that is the lobby's session; for the host
+// of a private Free Roam it is the session the game made for it (template defaultTemplate_qos), not the Car Meet lobby it came from.
+func (s *Server) SessionOf(xuid string) (scid, template, name string, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lk, has := s.playing[xuid]
+	if !has {
+		return "", "", "", false
+	}
+	rec := s.sessions[lk]
+	if rec == nil || !rec.Members.Has(xuid) {
+		delete(s.playing, xuid)
+		return "", "", "", false
+	}
+	return rec.Scid, rec.Template, rec.Name, true
+}
+
+// ReserveMember puts xuid into a session as an inactive member, as the matchmaker does for a match and the held seat for its players: the
+// game's session-ready join (an accepted invite, Join) reads the session, looks for itself among the members and then PUTs
+// properties.system.active = true; when it is not there it sends a leave at once and says "The session you were trying to join no longer
+// exists" (dev 2026-11-12, win2 into win1's private Free Roam). A member already there is left as it is. False when there is no such session.
+func (s *Server) ReserveMember(scid, template, name, xuid string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec := s.sessions[lowerKey([3]string{scid, template, name})]
+	if rec == nil {
+		return false
+	}
+	if rec.Members.Has(xuid) {
+		return true
+	}
+	m, c, cs, p, ps := NewDict(), NewDict(), NewDict(), NewDict(), NewDict()
+	cs.Set("xuid", xuid)
+	c.Set("system", cs)
+	ps.Set("active", false)
+	p.Set("system", ps)
+	m.Set("constants", c)
+	m.Set("properties", p)
+	rec.Members.Set(xuid, m)
+	rec.Change++
+	return true
 }
 
 // AnnounceRun tells the game server the run id of the game this player started: it writes it on its lines about them.
@@ -1323,7 +1464,7 @@ func (s *Server) lobbyFor(scid, hopper string, attrs *Dict, ref *Dict, xuid stri
 		n, _ := strconv.ParseInt(xuid, 10, 64)
 		mine = flagged[n]
 	}
-	full, pooled, avoidedN := 0, 0, 0
+	full, pooled, avoidedN, private, closed := 0, 0, 0, 0, 0
 	for _, name := range append([]string(nil), names...) {
 		rec := s.lookup(scid, name)
 		if rec == nil {
@@ -1335,9 +1476,24 @@ func (s *Server) lobbyFor(scid, hopper string, attrs *Dict, ref *Dict, xuid stri
 			avoidedN++
 			continue
 		}
+		if name != preferred && s.privateFreeRoamLocked(name, pops) {
+			private++
+			continue
+		}
 		s.prune(rec)
 		cp := min(maxPlayers(rec, lobbyMax), lobbyMax)
 		n := s.lobbyOccupancy(name, rec, pops, havePops)
+		if CloseEmptyLobbies && havePops && n == 0 && name != preferred && rec.HasSeen && !hasPlayerMember(rec) {
+			// Everybody left this lobby: it is over, as on Xbox Live, whose session directory deleted a session with its last member.
+			// A game matched into such a lobby reads it and leaves without joining, and nothing it tries afterwards works (dev
+			// 2026-11-12 17:29: DebugFox was given the Car Meet DebugWolf had left 30 s before, 'fullest with room (0 of 12)', did not
+			// join it, and its private Free Roam after that never connected).
+			delete(s.sessions, [3]string{strings.ToLower(scid), strings.ToLower(TargetTemplate), strings.ToLower(name)})
+			names = removeName(names, name)
+			delete(s.reserved, name)
+			closed++
+			continue
+		}
 		if len(flagged) > 0 && !s.poolFits(name, pops, flagged, mine) {
 			pooled++
 			continue
@@ -1401,9 +1557,23 @@ func (s *Server) lobbyFor(scid, hopper string, attrs *Dict, ref *Dict, xuid stri
 		mineFlag = true
 	}
 	matchLog.Info("ticket matched " + kv(f("xuid", nilIfEmpty(xuid)), f("lobby", trunc(name, 8)), f("how", how), f("hopper", hopper), f("location", ToJSON(loc)), f("gsi", nilIfEmpty(gsi)),
-		f("lobbies", len(names)), f("full", nz(full)), f("pool_skipped", nz(pooled)), f("left_or_inside_skipped", nz(avoidedN)), f("released", nz(released)), f("flagged_player", mineFlag),
+		f("lobbies", len(names)), f("full", nz(full)), f("pool_skipped", nz(pooled)), f("left_or_inside_skipped", nz(avoidedN)), f("private_skipped", nz(private)), f("empty_closed", nz(closed)), f("released", nz(released)), f("flagged_player", mineFlag),
 		f("occupancy_source", src)))
 	return name, nil
+}
+
+// CloseEmptyLobbies: a lobby everybody left is closed at the next match instead of being matched again (lobbyFor). The Python server
+// matched it again, which the frozen vectors still hold; FH2MP_LOBBY_CLOSE_EMPTY=0 brings that back.
+var CloseEmptyLobbies = os.Getenv("FH2MP_LOBBY_CLOSE_EMPTY") != "0"
+
+// hasPlayerMember says whether a session has a player in it (active or reserved).
+func hasPlayerMember(rec *Session) bool {
+	for _, k := range rec.Members.Keys() {
+		if isDigits(k) {
+			return true
+		}
+	}
+	return false
 }
 
 func lastN(s string, n int) string {

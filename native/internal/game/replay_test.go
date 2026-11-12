@@ -138,6 +138,9 @@ func runTraceN(t *testing.T, name string, seed uint64, workers int) {
 	prevResend := StartResend
 	StartResend = tr.Env["FH2MP_START_RESEND"] == "1" // the traces were recorded with one start message per race
 	t.Cleanup(func() { StartResend = prevResend })
+	prevPopFR := PopFreeRoam
+	PopFreeRoam = tr.Env["FH2MP_POP_FREEROAM"] == "1" // the traces' pop replies were recorded without the Free Roam list
+	t.Cleanup(func() { PopFreeRoam = prevPopFR })
 	prevRtClass := RtClassMode
 	RtClassMode = "off" // the traces were recorded before the Road Trip class check
 	if v := tr.Env["FH2MP_RT_CLASS"]; v != "" {

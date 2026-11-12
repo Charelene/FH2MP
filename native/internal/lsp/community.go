@@ -2,7 +2,9 @@ package lsp
 
 import (
 	"fmt"
+	"math"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -43,13 +45,14 @@ type communityState struct {
 	hubOK    bool
 	hubValue pyjson.Obj
 	rate     *diag.RateLimit
+	invites  *inviteBook
 }
 
 func (l *Launcher) cstate() *communityState {
 	l.boardsMu.Lock()
 	defer l.boardsMu.Unlock()
 	if l.comm == nil {
-		l.comm = &communityState{seen: map[int64]float64{}, rate: diag.NewRateLimit(nil, 0)}
+		l.comm = &communityState{seen: map[int64]float64{}, rate: diag.NewRateLimit(nil, 0), invites: newInviteBook()}
 	}
 	return l.comm
 }
@@ -156,7 +159,9 @@ func (l *Launcher) profiles(xuids []int64, lobbies []any) (map[int64]card, error
 		return out, nil
 	}
 	in := marks(len(xuids))
-	rows, err := l.C.DB.Query("SELECT a.xuid, a.gamertag, p.career_level, COALESCE(g.gamerpic_at,0) AS gamerpic_version FROM accounts a LEFT JOIN players p ON p.xuid=a.xuid "+
+	rows, err := l.C.DB.Query("SELECT a.xuid, a.gamertag, p.career_level, COALESCE(g.gamerpic_at,0) AS gamerpic_version, "+
+		"GREATEST(a.last_login, COALESCE(p.last_seen,0)) AS last_seen, COALESCE(g.motto,'') AS motto, COALESCE(g.real_name,'') AS real_name, "+
+		"COALESCE(g.location,'') AS location, COALESCE(g.bio,'') AS bio, COALESCE(g.theme,'') AS theme FROM accounts a LEFT JOIN players p ON p.xuid=a.xuid "+
 		"LEFT JOIN player_profiles g ON g.xuid=a.xuid WHERE a.xuid IN ("+in+")", int64Args(xuids)...)
 	if err != nil {
 		return nil, err
@@ -174,10 +179,17 @@ func (l *Launcher) profiles(xuids []int64, lobbies []any) (map[int64]card, error
 	for i := range crows {
 		clubOf[crows[i].Int("xuid")] = &crows[i]
 	}
+	scores, err := l.gamerscores(xuids)
+	if err != nil {
+		return nil, err
+	}
 	for _, x := range xuids {
 		c, err := l.card(x, byXuid[x], clubOf[x], lobbies)
 		if err != nil {
 			return nil, err
+		}
+		if g, reported := scores[x]; reported {
+			c = append(c, pyjson.Pair{K: "gamerscore", V: g}) // from the achievements their Guide reported
 		}
 		out[x] = c
 	}
@@ -239,8 +251,18 @@ func (l *Launcher) card(xuid int64, row, club *db.Row, lobbies []any) (card, err
 		}
 		lobbyV = o
 	}
-	return pyjson.Obj{{K: "xuid", V: xuid}, {K: "gamertag", V: tag}, {K: "level", V: db.DisplayLevel(level)}, {K: "gamerpicVersion", V: version}, {K: "state", V: state},
-		{K: "club", V: clubV}, {K: "lobby", V: lobbyV}}, nil
+	out := pyjson.Obj{{K: "xuid", V: xuid}, {K: "gamertag", V: tag}, {K: "level", V: db.DisplayLevel(level)}, {K: "gamerpicVersion", V: version}, {K: "state", V: state},
+		{K: "club", V: clubV}, {K: "lobby", V: lobbyV}}
+	if row != nil {
+		// the Guide's profile: the four texts, and for a player who is offline how long ago they were last here
+		out = append(out, pyjson.Pair{K: "theme", V: row.Str("theme")})
+		out = append(out, pyjson.Pair{K: "motto", V: row.Str("motto")}, pyjson.Pair{K: "name", V: row.Str("real_name")},
+			pyjson.Pair{K: "location", V: row.Str("location")}, pyjson.Pair{K: "bio", V: row.Str("bio")})
+		if last := row.Float("last_seen"); state == "offline" && last > 0 {
+			out = append(out, pyjson.Pair{K: "lastSeenAgo", V: int64(math.Max(0, nowF()-last))})
+		}
+	}
+	return out, nil
 }
 
 // hubLobbies is the hub's answer, shared for a moment: a launcher open means one UDP query every 5 s, up to 0.3 s each.
@@ -260,7 +282,71 @@ func publicHold(h *xbl.Hold) any {
 	if h == nil {
 		return nil
 	}
-	return pyjson.Obj{{K: "id", V: h.ID}, {K: "kind", V: h.Kind}, {K: "expiresAt", V: h.ExpiresAt}}
+	out := pyjson.Obj{{K: "id", V: h.ID}, {K: "kind", V: h.Kind}, {K: "expiresAt", V: h.ExpiresAt}}
+	if h.Key != nil {
+		// the lobby as the game joins it: its session in the directory (the Guide hands this to the game's own session-ready flow)
+		out = append(out, pyjson.Pair{K: "session", V: pyjson.Obj{{K: "scid", V: h.Key.Scid}, {K: "templateName", V: xbl.TargetTemplate}, {K: "name", V: h.ID}}})
+	}
+	return out
+}
+
+// seatFor is the answer to a seat held to join another player (an accepted invite, Join Session In Progress): the hold, with the session the
+// other player is in (for the host of a private Free Roam that is the game's own session, not the lobby the world is named after), and
+// the game server told that the joiner belongs in that lobby's world (a session the game made itself is not announced when it is joined).
+func (l *Launcher) seatFor(me int64, h *xbl.Hold, host int64) any {
+	out, _ := publicHold(h).(pyjson.Obj)
+	if h == nil {
+		return nil
+	}
+	if scid, tmpl, name, ok := l.C.Xbl.SessionOf(fmt.Sprint(host)); ok {
+		ses := pyjson.Obj{{K: "scid", V: scid}, {K: "templateName", V: tmpl}, {K: "name", V: name}}
+		replaced := false
+		for i := range out {
+			if out[i].K == "session" {
+				out[i].V, replaced = ses, true
+			}
+		}
+		if !replaced {
+			out = append(out, pyjson.Pair{K: "session", V: ses})
+		}
+		reserved := l.C.Xbl.ReserveMember(scid, tmpl, name, fmt.Sprint(me))
+		communityLog.Info(fmt.Sprintf("seat to join a player: joiner=%#x host=%#x lobby=%.8s session=%s/%.8s (the joiner is a reserved member there: %s), the game server is told the joiner's world",
+			me, host, h.ID, tmpl, name, pyBool(reserved)))
+	} else {
+		reserved := h.Key != nil && l.C.Xbl.ReserveMember(h.Key.Scid, xbl.TargetTemplate, h.ID, fmt.Sprint(me))
+		communityLog.Info(fmt.Sprintf("seat to join a player: joiner=%#x host=%#x lobby=%.8s, the host is in no session of the directory: the lobby's own session is named (the joiner is a reserved member there: %s)",
+			me, host, h.ID, pyBool(reserved)))
+	}
+	if scid, tmpl, name, ok := l.C.Xbl.SessionOf(fmt.Sprint(host)); ok && l.C.Xbl.PrivateWorld(scid, tmpl, name) != "" {
+		l.C.Xbl.AnnounceFollower(fmt.Sprint(me), l.C.Xbl.PrivateWorld(scid, tmpl, name))
+	} else {
+		l.C.Xbl.AnnouncePlayer(fmt.Sprint(me), h.ID)
+	}
+	return out
+}
+
+// playersHere are the players in the caller's game right now, the caller left out (the Guide's Players tab): the other members of the
+// game server world the caller is in, from the hub's lobby list (memberXuids, hex).
+func playersHere(me int64, lobbies []any) []int64 {
+	var here []int64
+	meHex := fmt.Sprintf("%x", me)
+	for _, lv := range lobbies {
+		lo, _ := lv.(pyjson.Obj)
+		mv, _ := lo.Get("memberXuids")
+		members := anyList(mv)
+		if !slices.Contains(members, any(meHex)) {
+			continue
+		}
+		for _, m := range members {
+			if s, _ := m.(string); s != meHex {
+				if x, err := strconv.ParseInt(s, 16, 64); err == nil && x != 0 {
+					here = append(here, x)
+				}
+			}
+		}
+		break
+	}
+	return here
 }
 
 func (l *Launcher) snapshot(me int64) (any, error) {
@@ -285,9 +371,15 @@ func (l *Launcher) snapshot(me int64) (any, error) {
 	for _, r := range reqs {
 		all = append(all, r.IntAt(1))
 	}
+	here := playersHere(me, lobbies)
+	all = append(all, here...)
 	cards, err := l.profiles(all, lobbies)
 	if err != nil {
 		return nil, err
+	}
+	players := []any{}
+	for _, x := range here {
+		players = append(players, cards[x])
 	}
 	friends, incoming, outgoing := []any{}, []any{}, []any{}
 	for _, f := range people {
@@ -323,10 +415,48 @@ func (l *Launcher) snapshot(me int64) (any, error) {
 		counts = cnt
 	}
 	return pyjson.Obj{{K: "friends", V: friends}, {K: "incoming", V: incoming}, {K: "outgoing", V: outgoing}, {K: "me", V: cards[me]},
-		{K: "reservation", V: publicHold(l.C.Xbl.CurrentHold(fmt.Sprint(me)))}, {K: "chats", V: chats}, {K: "lobbyCounts", V: counts}}, nil
+		{K: "reservation", V: publicHold(l.C.Xbl.CurrentHold(fmt.Sprint(me)))}, {K: "chats", V: chats}, {K: "lobbyCounts", V: counts}, {K: "players", V: players}}, nil
 }
 
 func ok1() pyjson.Obj { return pyjson.Obj{{K: "ok", V: true}} }
+
+// player is GET /v1/community/player/<xuid>: any player's card and what they are to the caller ("friend", "incoming": they asked the caller,
+// "outgoing": the caller asked them, "none", or "self"). The Guide shows it when the game asks for a player's gamercard (a lobby's player
+// list, a leaderboard row), where the player need not be a friend.
+func (l *Launcher) player(me, target int64) (any, error) {
+	row, err := l.C.DB.One("SELECT 1 FROM accounts WHERE xuid=? AND (banned_at IS NULL OR ban_until <= ?)", target, nowF())
+	if err != nil {
+		return nil, err
+	}
+	if row == nil {
+		return nil, auth.NewError(404, "player_not_found", "No player has that gamertag or ID.").WithXuid(me).WithDetail(fmt.Sprintf("no unbanned account %#x", target))
+	}
+	var lobbies []any
+	if r := l.hubLobbies(); r != nil {
+		lv, _ := r.Get("lobbies")
+		lobbies = anyList(lv)
+	}
+	c, err := l.profile(target, lobbies)
+	if err != nil {
+		return nil, err
+	}
+	relation := "none"
+	if target == me {
+		relation = "self"
+	} else if r, err := l.C.DB.One("SELECT 1 FROM friendships WHERE a=? AND b=?", min(me, target), max(me, target)); err != nil {
+		return nil, err
+	} else if r != nil {
+		relation = "friend"
+	} else if r, err := l.C.DB.One("SELECT sender FROM friend_requests WHERE (sender=? AND recipient=?) OR (sender=? AND recipient=?)", target, me, me, target); err != nil {
+		return nil, err
+	} else if r != nil {
+		relation = "outgoing"
+		if r.IntAt(0) == target {
+			relation = "incoming"
+		}
+	}
+	return pyjson.Obj{{K: "player", V: c}, {K: "relation", V: relation}}, nil
+}
 
 func (l *Launcher) request(me int64, value string) (any, error) {
 	target, err := l.resolve(value)
@@ -775,8 +905,56 @@ func (l *Launcher) handleCommunity(r *Req, method, p string, u *url.URL, body py
 			return l.remove(me, target)
 		}
 	}
+	if p == "/v1/community/invites" {
+		switch method {
+		case "GET":
+			return l.listInvites(me)
+		case "POST":
+			v, _ := body.Get("player")
+			t, _ := body.Get("text")
+			return l.sendInvite(me, pyjson.PyStr(v), t)
+		}
+	}
+	if (len(parts) == 5 || len(parts) == 6) && strings.Join(parts[:4], "/") == "/v1/community/invites" && isDigits(parts[4]) {
+		id, err := strconv.ParseInt(parts[4], 10, 64)
+		if err != nil || id <= 0 {
+			return nil, auth.NewError(400, "bad_request", "")
+		}
+		switch {
+		case len(parts) == 6 && parts[5] == "accept" && method == "POST":
+			return l.acceptInvite(me, id)
+		case len(parts) == 5 && method == "DELETE":
+			cs.invites.Take(me, id)
+			return ok1(), nil
+		}
+	}
 	if p == "/v1/community/lobbies" && method == "GET" {
 		return l.lobbies(me)
+	}
+	if len(parts) == 5 && strings.Join(parts[:4], "/") == "/v1/community/player" && isDigits(parts[4]) && method == "GET" {
+		target, err := strconv.ParseInt(parts[4], 10, 64)
+		if err != nil || target <= 0 {
+			return nil, auth.NewError(400, "bad_request", "")
+		}
+		return l.player(me, target)
+	}
+	if len(parts) == 6 && strings.Join(parts[:4], "/") == "/v1/community/player" && isDigits(parts[4]) && parts[5] == "achievements" && method == "GET" {
+		target, err := strconv.ParseInt(parts[4], 10, 64)
+		if err != nil || target <= 0 {
+			return nil, auth.NewError(400, "bad_request", "")
+		}
+		return l.playerAchievements(me, target)
+	}
+	if p == "/v1/community/achievements" && method == "POST" {
+		return l.reportAchievements(me, body)
+	}
+	if p == "/v1/community/profile" {
+		switch method {
+		case "GET":
+			return l.ownProfile(me)
+		case "POST":
+			return l.setProfile(me, body)
+		}
 	}
 	if p == "/v1/community/reservation" {
 		switch method {
@@ -791,6 +969,12 @@ func (l *Launcher) handleCommunity(r *Req, method, p string, u *url.URL, body py
 			h, err := l.C.Xbl.Reserve(fmt.Sprint(me), lobby, kind)
 			if err != nil {
 				return nil, err
+			}
+			// "player": the friend whose game is joined (the Guide's Join Session In Progress)
+			if v, ok := body.Get("player"); ok && v != nil && lobby != "" {
+				if host, perr := strconv.ParseInt(pyjson.PyStr(v), 10, 64); perr == nil && host > 0 && host != me {
+					return pyjson.Obj{{K: "reservation", V: l.seatFor(me, h, host)}}, nil
+				}
 			}
 			return pyjson.Obj{{K: "reservation", V: publicHold(h)}}, nil
 		case "DELETE":
