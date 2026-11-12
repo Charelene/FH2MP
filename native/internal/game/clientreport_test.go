@@ -160,13 +160,30 @@ func TestRefusedReadyNoticeWaitsForTheStart(t *testing.T) {
 	}
 	r.w.PendingRace = nil
 	r.w.StartEvent(leader)
-	if !r.in(leader) || !r.in(fixed) || r.in(stuck) {
+	// An invitee refused on its car is in the event like an ineligible leader, so its game opens the event car select (S2 race with a class C car,
+	// dev 2026-11-12: it was left out and never got a pick). Nothing is said to it yet.
+	if !r.in(leader) || !r.in(fixed) || !r.in(stuck) {
 		t.Fatalf("participants %s", owners(r.w.Event.People))
+	}
+	if stuck.ReadyRetry != nil || !stuck.ConsoleVars[4] {
+		t.Fatalf("the selected invitee's refusal is not settled: retry %v ready %v", stuck.ReadyRetry, stuck.ConsoleVars[4])
+	}
+	mu.Lock()
+	early := len(got)
+	mu.Unlock()
+	if early != 0 {
+		t.Fatalf("a notice before the car select: %v", got)
+	}
+	// the cars are checked again when everybody has loaded: the leader switched to a car that fits, the invitee still has none
+	leader.Choices = &Choices{true, 3, 0.8}
+	r.w.ValidateEventCars()
+	if !r.in(leader) || !r.in(fixed) || r.in(stuck) {
+		t.Fatalf("participants after the car select %s", owners(r.w.Event.People))
 	}
 	select {
 	case <-arrived:
 	case <-time.After(time.Second):
-		t.Fatal("the invitee left out for its car got no notice")
+		t.Fatal("the invitee still in a car that does not fit got no notice")
 	}
 	time.Sleep(50 * time.Millisecond)
 	mu.Lock()
@@ -199,5 +216,35 @@ func TestCarselReportMalformed(t *testing.T) {
 		// With no clock and no tables the handler must stop at the shape check (a nil Clk would panic if it went further).
 		h.carselReport(b, Addr{"127.0.0.1", 1}, nil)
 		_ = name
+	}
+}
+
+// A Ready refused on the car is an answer: the event does not wait out the invite grace for that invitee (dev 2026-11-12: 45 s of "accepted the
+// invite but no Ready yet"). A custom car's refusal stays no answer, as that player is left out at the start.
+func TestRefusedOnClassInviteeDoesNotHoldTheStart(t *testing.T) {
+	r := newLoadRig(t, 2)
+	size, payload, err := gameopts.EncodeFields(map[int]gameopts.Field{30: {Width: 8, Value: bits.FromUint64(3)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.w.GameOptions = &gameopts.Options{Size: size, Payload: payload}
+	r.w.Event = nil
+	leader, invitee := r.peers[0], r.peers[1]
+	for _, p := range r.peers {
+		p.Entered = true
+		p.Choices = &Choices{true, 2, 0.6178034543991089}
+	}
+	r.w.RaceRequestedAt = r.clk.t
+	deadline := r.clk.t + RaceInviteSeconds
+	r.w.PendingRace = &PendingRace{Deadline: deadline, Leader: leader}
+	r.w.CheckInviteesReady()
+	if r.w.PendingRace.Deadline != deadline {
+		t.Fatal("the start did not wait for an invitee that has not answered")
+	}
+	at := r.w.RaceRequestedAt
+	invitee.ReadyRetry = &at
+	r.w.CheckInviteesReady()
+	if r.w.PendingRace.Deadline >= deadline {
+		t.Fatalf("a refused answer still held the start: deadline %.1f, was %.1f", r.w.PendingRace.Deadline, deadline)
 	}
 }

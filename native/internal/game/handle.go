@@ -534,6 +534,7 @@ loop:
 					// An invitee: its game's car select can still switch to a car that fits (RetryRefusedReady). The notice waits for StartEvent.
 					t := w.RaceRequestedAt
 					peer.ReadyRetry = &t
+					w.CheckInviteesReady() // a refused answer is still an answer: the event need not wait out the invite grace for it
 				} else {
 					w.noticeRefused(peer, notice)
 				}
