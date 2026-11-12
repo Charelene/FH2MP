@@ -186,11 +186,11 @@ void Guide::draw_achievements(ImDrawList* dl, const GuideAssets& a, ImVec2 origi
     int n = int(DEFS.size());
 
     // the game, its count and the Gamerscore earned in it
-    dl->AddRectFilled(v.pt(x, 96), v.pt(x + W, 386), alpha(PANEL, pop));
+    panel_fill(dl, v.pt(x, 96), v.pt(x + W, 386), pop);
     ImVec2 tp = v.pt(x + 27, 123);
-    text_mid(dl, a.text, a.text_m, v.sz(22), tp.x, tp.y, alpha(WHITE, pop), "Forza Horizon 2");
+    text_mid(dl, a.text, a.text_m, v.sz(22), tp.x, tp.y, alpha(TEXT, pop), "Forza Horizon 2");
     ImVec2 rp = v.pt(x + W - 30, 123);
-    float left = g_score(dl, a, v, rp.x, rp.y, 22, alpha(WHITE, pop), ach_.gamerscore());
+    float left = g_score(dl, a, v, rp.x, rp.y, 22, alpha(TEXT, pop), ach_.gamerscore());
     char count[48];
     snprintf(count, sizeof count, "%d of %d Achievements", ach_.count(), n);
     text_mid(dl, a.text, a.text_m, v.sz(20), left - v.sz(22), rp.y, alpha(MUTED, pop), count, true);
@@ -204,7 +204,7 @@ void Guide::draw_achievements(ImDrawList* dl, const GuideAssets& a, ImVec2 origi
         float tx = gx + (i % COLS) * (TILE + GAP), ty = gy + (i / COLS - ach_top_) * (TILE + GAP);
         ImVec2 p0 = v.pt(tx, ty), p1 = v.pt(tx + TILE, ty + TILE);
         tile(dl, a, p0, p1, ach_.has(DEFS[i].id), pop);
-        if (i == ach_focus_) dl->AddRect(ImVec2(p0.x - v.sz(2.5f), p0.y - v.sz(2.5f)), ImVec2(p1.x + v.sz(2.5f), p1.y + v.sz(2.5f)), alpha(WHITE, pop), 0, 0, v.sz(3));
+        if (i == ach_focus_) dl->AddRect(ImVec2(p0.x - v.sz(2.5f), p0.y - v.sz(2.5f)), ImVec2(p1.x + v.sz(2.5f), p1.y + v.sz(2.5f)), alpha(TEXT, pop), 0, 0, v.sz(3));
     }
     dl->PopClipRect();
     ImVec2 up = v.pt(x + W - 20, gy + 84), down = v.pt(x + W - 20, gy + 124);
@@ -223,18 +223,18 @@ void Guide::draw_achievements(ImDrawList* dl, const GuideAssets& a, ImVec2 origi
             std::string date = ach_date(ach_.when.at(d.id));
             if (!date.empty()) {
                 ImVec2 dp = v.pt(right, y0 + 16);
-                text_mid(dl, a.text, a.text_m, v.sz(20), dp.x, dp.y, alpha(WHITE, pop), date.c_str(), true);
+                text_mid(dl, a.text, a.text_m, v.sz(20), dp.x, dp.y, alpha(TEXT, pop), date.c_str(), true);
                 name_w -= a.text->CalcTextSizeA(20, FLT_MAX, 0, date.c_str()).x + 20;
             }
         }
         ImVec2 np = v.pt(ix, y0 + 16);
-        text_fit(dl, bf, a.bold_m, v.sz(26), np.x, np.y, v.sz(name_w), alpha(WHITE, pop), d.name);
+        text_fit(dl, bf, a.bold_m, v.sz(26), np.x, np.y, v.sz(name_w), alpha(TEXT, pop), d.name);
         // points: the mark, then the number
         ImVec2 gp = v.pt(ix + 11, y0 + 52);
-        g_mark(dl, a, gp.x, gp.y, v.sz(22), alpha(got ? WHITE : MUTED, pop));
+        g_mark(dl, a, gp.x, gp.y, v.sz(22), alpha(got ? TEXT : MUTED, pop));
         char pts[16];
         snprintf(pts, sizeof pts, "%d", d.g);
-        text_mid(dl, a.text, a.text_m, v.sz(22), gp.x + v.sz(11 + 8), gp.y, alpha(got ? WHITE : MUTED, pop), pts);
+        text_mid(dl, a.text, a.text_m, v.sz(22), gp.x + v.sz(11 + 8), gp.y, alpha(got ? TEXT : MUTED, pop), pts);
         wrapped(dl, a, v, 21, 1.35f, ix, y0 + 76, right - ix, alpha(MUTED, pop), d.desc);
     }
     const Hint hints[] = {{"B", "Back", RING_B}};
@@ -285,10 +285,10 @@ void Guide::draw_compare(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
     const AchUnlocks* theirs = it == social_.ach_of.end() ? nullptr : &it->second;  // null until the server answered
 
     // the two players: this one at the left, the other at the right, as their marks in the rows below
-    dl->AddRectFilled(v.pt(x, 96), v.pt(x + W, 164), alpha(PANEL, pop));
+    panel_fill(dl, v.pt(x, 96), v.pt(x + W, 164), pop);
     player_pic(dl, a, a.gamerpic, social_.me.xuid, v.pt(x + 14, 106), v.pt(x + 62, 154), pop);
     ImVec2 mn = v.pt(x + 74, 118), mg = v.pt(x + 74 + 10, 142);
-    text_fit(dl, a.text, a.text_m, v.sz(20), mn.x, mn.y, v.sz(250), alpha(WHITE, pop), gamertag);
+    text_fit(dl, a.text, a.text_m, v.sz(20), mn.x, mn.y, v.sz(250), alpha(TEXT, pop), gamertag);
     g_mark(dl, a, mg.x, mg.y, v.sz(20), alpha(MUTED, pop));
     char mine[16];
     snprintf(mine, sizeof mine, "%d", ach_.gamerscore());
@@ -296,8 +296,8 @@ void Guide::draw_compare(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
     player_pic(dl, a, a.pic(cmp_.xuid), cmp_.xuid, v.pt(x + W - 62, 106), v.pt(x + W - 14, 154), pop);
     ImVec2 tn = v.pt(x + W - 74, 118), tg = v.pt(x + W - 74, 142);
     float tw = a.text->CalcTextSizeA(20, FLT_MAX, 0, cmp_.tag.c_str()).x;
-    if (tw <= 250) text_mid(dl, a.text, a.text_m, v.sz(20), tn.x, tn.y, alpha(WHITE, pop), cmp_.tag.c_str(), true);
-    else text_fit(dl, a.text, a.text_m, v.sz(20), tn.x - v.sz(250), tn.y, v.sz(250), alpha(WHITE, pop), cmp_.tag);
+    if (tw <= 250) text_mid(dl, a.text, a.text_m, v.sz(20), tn.x, tn.y, alpha(TEXT, pop), cmp_.tag.c_str(), true);
+    else text_fit(dl, a.text, a.text_m, v.sz(20), tn.x - v.sz(250), tn.y, v.sz(250), alpha(TEXT, pop), cmp_.tag);
     int their_score = theirs ? theirs->gamerscore() : cmp_.gamerscore;
     if (their_score >= 0) g_score(dl, a, v, tg.x, tg.y, 20, alpha(MUTED, pop), their_score);
     float gw = a.text->CalcTextSizeA(20, FLT_MAX, 0, "Forza Horizon 2").x;
@@ -307,7 +307,7 @@ void Guide::draw_compare(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
     // the achievements: tile, name over description, then this player's mark and the other's
     const float top = 164, RH = 69, col_me = W - 112, col_them = W - 44;
     ImVec2 p0 = v.pt(x, top), p1 = v.pt(x + W, top + CMP_ROWS * RH);
-    dl->AddRectFilled(p0, p1, alpha(PANEL, pop));
+    panel_fill(dl, p0, p1, pop);
     dl->AddLine(v.pt(x, top), v.pt(x + W, top), alpha(LINE, pop), v.sz(1));
     dl->PushClipRect(p0, p1, true);
     float by = top + cmp_list_.bar.value(now) * RH;
@@ -319,10 +319,10 @@ void Guide::draw_compare(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
         if (!foc) dl->AddLine(v.pt(x, y + RH - 0.5f), v.pt(x + W, y + RH - 0.5f), alpha(LINE, pop), v.sz(1));
         ImVec2 t0 = v.pt(x + 12, y + 10.5f), t1 = v.pt(x + 60, y + 58.5f);
         dl->AddRectFilled(t0, t1, alpha(foc ? DARK : RAISED, pop));
-        icon_mid(dl, a, v.sz(28), (t0.x + t1.x) * 0.5f, (t0.y + t1.y) * 0.5f, alpha(got_me || got_them ? WHITE : DISABLED, pop), I_TROPHY);
+        icon_mid(dl, a, v.sz(28), (t0.x + t1.x) * 0.5f, (t0.y + t1.y) * 0.5f, alpha(got_me || got_them ? (foc ? INK : TEXT) : DISABLED, pop), I_TROPHY);
         ImVec2 n0 = v.pt(x + 74, cy - 13), n1 = v.pt(x + 74, cy + 14.15f);
         float room = col_me - 74 - 40;
-        text_fit(dl, a.text, a.text_m, v.sz(22), n0.x, n0.y, v.sz(room), alpha(WHITE, pop), d.name);
+        text_fit(dl, a.text, a.text_m, v.sz(22), n0.x, n0.y, v.sz(room), alpha(foc ? INK : TEXT, pop), d.name);
         text_fit(dl, a.text, a.text_m, v.sz(18), n1.x, n1.y, v.sz(room), alpha(foc ? INK : MUTED2, pop), d.desc);
         auto mark = [&](float cx, bool got) {
             ImVec2 c = v.pt(x + cx, cy);
@@ -333,7 +333,7 @@ void Guide::draw_compare(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
     }
     dl->PopClipRect();
     ImVec2 f0 = v.pt(x, top + CMP_ROWS * RH), f1 = v.pt(x + W, 607);
-    dl->AddRectFilled(f0, f1, alpha(PANEL, pop));
+    panel_fill(dl, f0, f1, pop);
     dl->AddLine(ImVec2(f0.x, f0.y + v.sz(0.5f)), ImVec2(f1.x, f0.y + v.sz(0.5f)), alpha(LINE, pop), v.sz(1));
     ImVec2 fr = v.pt(x + W - 30, (top + CMP_ROWS * RH + 607) / 2);
     icon_mid(dl, a, v.sz(24), fr.x - v.sz(12), fr.y, alpha(cmp_list_.top + CMP_ROWS < n ? MUTED : DISABLED, pop), I_EXPAND_MORE);
@@ -357,7 +357,7 @@ void Guide::draw_ach_detail(ImDrawList* dl, const GuideAssets& a, ImVec2 origin,
     page_motion(now, op, &slide, &pop, &title_op);
     draw_header(dl, a, origin, s, zoom, op, L, W, "Compare Games", title_op);
     float x = L + slide;
-    dl->AddRectFilled(v.pt(x, 96), v.pt(x + W, 607), alpha(PANEL, pop));
+    panel_fill(dl, v.pt(x, 96), v.pt(x + W, 607), pop);
     if (ach_detail_ >= 0 && ach_detail_ < int(DEFS.size())) {
         const AchDef& d = DEFS[ach_detail_];
         auto it = social_.ach_of.find(cmp_.xuid);
@@ -365,15 +365,15 @@ void Guide::draw_ach_detail(ImDrawList* dl, const GuideAssets& a, ImVec2 origin,
         const float y0 = 96 + 27, tx = x + 27, side = 96, ix = tx + side + 22, right = x + W - 30;
         tile(dl, a, v.pt(tx, y0), v.pt(tx + side, y0 + side), got, pop);
         ImVec2 np = v.pt(ix, y0 + 30);
-        text_fit(dl, bf, a.bold_m, v.sz(26), np.x, np.y, v.sz(right - ix), alpha(WHITE, pop), d.name);
+        text_fit(dl, bf, a.bold_m, v.sz(26), np.x, np.y, v.sz(right - ix), alpha(TEXT, pop), d.name);
         ImVec2 gp = v.pt(ix + 11, y0 + 68);
-        g_mark(dl, a, gp.x, gp.y, v.sz(22), alpha(WHITE, pop));
+        g_mark(dl, a, gp.x, gp.y, v.sz(22), alpha(TEXT, pop));
         char pts[16];
         snprintf(pts, sizeof pts, "%d", d.g);
-        text_mid(dl, a.text, a.text_m, v.sz(22), gp.x + v.sz(11 + 8), gp.y, alpha(WHITE, pop), pts);
+        text_mid(dl, a.text, a.text_m, v.sz(22), gp.x + v.sz(11 + 8), gp.y, alpha(TEXT, pop), pts);
         ImVec2 lp = v.pt(tx, y0 + side + 38);
         text_mid(dl, a.text, a.text_m, v.sz(18), lp.x, lp.y, alpha(MUTED, pop), "Achievement Description");
-        wrapped(dl, a, v, 22, 1.4f, tx, y0 + side + 60, W - 54, alpha(WHITE, pop), d.desc);
+        wrapped(dl, a, v, 22, 1.4f, tx, y0 + side + 60, W - 54, alpha(TEXT, pop), d.desc);
     }
     const Hint hints[] = {{"B", "Back", RING_B}};
     hint_bar(dl, a, v, L + 27, 617, hints, 1, op);
@@ -639,7 +639,7 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
     // the panel, and what runs over it
     ImVec2 p0 = at(bx + Q + shift, by), p1 = at(bx + Q + pw - shift, by + Q);
     if (unfold > 0.002f) {
-        dl->AddRectFilled(p0, p1, PANEL);
+        dl->AddRectFilled(p0, p1, TOAST);
         dl->PushClipRect(p0, p1, true);
         float tg = mythic ? TE + 2.631f : TE, len = mythic ? 3.95f : 3.0f, tau = (t - tg) * 1.3f;  // twice, 1.3 times as fast
         if ((rare || mythic) && tau >= 0 && tau < 2 * len) {
@@ -678,7 +678,7 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
                     float gd = TSZ * 0.82f * s;
                     dl->AddCircleFilled(ImVec2(x2 + gd / 2, y2), gd / 2, col, 32);
                     float gsz = gd * 0.66f, gw = bf->CalcTextSizeA(gsz, FLT_MAX, 0, "G").x;
-                    dl->AddText(bf, gsz, ImVec2(x2 + gd / 2 - gw / 2, caps_top(a.bold_m, gsz, y2)), alpha(PANEL, text_op), "G");
+                    dl->AddText(bf, gsz, ImVec2(x2 + gd / 2 - gw / 2, caps_top(a.bold_m, gsz, y2)), alpha(TOAST, text_op), "G");
                     x2 += gd + 6 * s;
                 }
                 text_fit(dl, a.text, a.text_m, TSZ * s, x2, y2, (area - gmark) * s, col, second);
@@ -703,7 +703,7 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
             float w = wa + gap + ed + gap + wb, hx = bx + Q + half - w / 2 + hint_dx;
             float cy = at(0, by + Q / 2).y;
             text_mid(dl, a.text, a.text_m, TSZ * s, at(hx, 0).x, cy, alpha(WHITE, hint_op), "Hold");
-            emblem(dl, a, ImVec2(at(hx + wa + gap + ed / 2, 0).x, cy), ed * s, PANEL, 0, hint_op, I_GAMES);  // the button: a gamepad (user 2026-11-11)
+            emblem(dl, a, ImVec2(at(hx + wa + gap + ed / 2, 0).x, cy), ed * s, TOAST, 0, hint_op, I_GAMES);  // the button: a gamepad (user 2026-11-11)
             text_mid(dl, a.text, a.text_m, TSZ * s, at(hx + wa + gap + ed + gap, 0).x, cy, alpha(WHITE, hint_op), "to open");
         }
         dl->PopClipRect();

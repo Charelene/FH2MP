@@ -88,13 +88,13 @@ void Guide::draw_theme(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, floa
     for (int t = 0; t < 2; t++) {
         bool on = t == theme_tab_;
         float tx = x + t * 431;
-        dl->AddRectFilled(v.pt(tx, 96), v.pt(tx + 431, 152), alpha(on ? PANEL : TAB, pop));
+        dl->AddRectFilled(v.pt(tx, 96), v.pt(tx + 431, 152), alpha(on ? PANEL_HI : TAB, pop));
         float lw = a.text->CalcTextSizeA(24, FLT_MAX, 0, names[t]).x;
         ImVec2 lp = v.pt(on ? tx + 30 : tx + (431 - lw) / 2, 124);
-        text_mid(dl, a.text, a.text_m, v.sz(24), lp.x, lp.y, alpha(on ? WHITE : TAB_TEXT, pop), names[t]);
+        text_mid(dl, a.text, a.text_m, v.sz(24), lp.x, lp.y, alpha(on ? TEXT : TAB_TEXT, pop), names[t]);
     }
     ImVec2 p0 = v.pt(x, 152), p1 = v.pt(x + W, 607);
-    dl->AddRectFilled(p0, p1, alpha(PANEL, pop));
+    panel_fill(dl, p0, p1, pop);
     dl->PushClipRect(p0, p1, true);
 
     // the themes (they slide in when the tab changes), each with its saturated, bright and dark squares at the row's end

@@ -51,14 +51,14 @@ void Guide::draw_voice(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, floa
     draw_header(dl, a, origin, s, zoom, op, L, W, "Voice", title_op);
     float x = L + slide;
     ImVec2 p0 = v.pt(x, 96), p1 = v.pt(x + W, 607);
-    dl->AddRectFilled(p0, p1, alpha(PANEL, pop));
+    panel_fill(dl, p0, p1, pop);
     dl->PushClipRect(p0, p1, true);
     const float RH = 56, TOP = 100;
     std::vector<Opt> opts = {{"Microphone", 0, true, I_MIC}, {"Voice Chat", 0, true, I_CHAT}, {"Volume", 0, true, I_VOLUME}};
     option_list(dl, a, v, x, TOP, W, RH, 24, 27, opts, voice_row_, voice_bar_.value(now), pop, 30, 34, 14);
     for (int i = 0; i < 3; i++) {
         float cy = TOP + i * RH + RH * 0.5f;
-        ImU32 fg = alpha(i == voice_row_ ? INK : WHITE, pop);
+        ImU32 fg = alpha(i == voice_row_ ? INK : TEXT, pop);
         if (i < 2) {
             bool on = i == 0 ? voice_mic_ : voice_chat_;
             ImVec2 tp = v.pt(x + W - 27, cy);

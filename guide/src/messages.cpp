@@ -131,7 +131,7 @@ void Guide::draw_message(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
     page_motion(now, op, &slide, &pop, &title_op);
     draw_header(dl, a, origin, s, zoom, op, L, W, type_name(m), title_op);
     float x = L + slide;
-    dl->AddRectFilled(v.pt(x, 96), v.pt(x + 431, 607), alpha(PANEL, pop));
+    panel_fill(dl, v.pt(x, 96), v.pt(x + 431, 607), pop);
     std::vector<std::string> lines = {"Message Received"};
     if (m.age >= 0) {
         SYSTEMTIME st;
@@ -152,7 +152,7 @@ void Guide::draw_message(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
     if (m.expires_in >= 0) lines.push_back(expires(m.expires_in));
     for (size_t i = 0; i < lines.size(); i++) {
         ImVec2 p = v.pt(x + 27, 96 + 26 + 13.2f + i * 32.4f);
-        text_mid(dl, a.text, a.text_m, v.sz(22), p.x, p.y, alpha(i == 0 ? MUTED : WHITE, pop), lines[i].c_str());
+        text_mid(dl, a.text, a.text_m, v.sz(22), p.x, p.y, alpha(i == 0 ? MUTED : TEXT, pop), lines[i].c_str());
     }
     float my = 96 + 231;
     dl->AddLine(v.pt(x, my - 0.5f), v.pt(x + 431, my - 0.5f), alpha(LINE, pop), v.sz(1));
@@ -161,7 +161,7 @@ void Guide::draw_message(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
     float rx = x + 431;
     dl->AddRectFilled(v.pt(rx, 96), v.pt(rx + 431, 607), alpha(PANE, pop));
     float cx = rx + 22, cw = 431 - 44, cy0 = 96 + 22;
-    dl->AddRectFilled(v.pt(cx, cy0), v.pt(cx + cw, cy0 + 46 + 128), alpha(PANEL, pop));
+    panel_fill(dl, v.pt(cx, cy0), v.pt(cx + cw, cy0 + 46 + 128), pop);
     // the sender's card: its title bar in the sender's theme
     const Friend* sender = find(m.from.xuid);
     const ThemeDef& own = theme_preset(sender ? sender->theme : m.from.theme);
@@ -177,8 +177,8 @@ void Guide::draw_message(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
     for (int i = 0; i < 3; i++) {
         float fy = cy0 + 46 + 64 + (i - 1) * 31.2f;
         ImVec2 l = v.pt(cx + 128 + 16, fy), r = v.pt(cx + cw - 16, fy);
-        text_mid(dl, a.text, a.text_m, v.sz(21), l.x, l.y, alpha(WHITE, pop), facts[i][0].c_str());
-        text_mid(dl, a.text, a.text_m, v.sz(21), r.x, r.y, alpha(WHITE, pop), facts[i][1].c_str(), true);
+        text_mid(dl, a.text, a.text_m, v.sz(21), l.x, l.y, alpha(TEXT, pop), facts[i][0].c_str());
+        text_mid(dl, a.text, a.text_m, v.sz(21), r.x, r.y, alpha(TEXT, pop), facts[i][1].c_str(), true);
     }
     float my2 = cy0 + 46 + 128 + 30;
     ImVec2 mi = v.pt(rx + 32 + 15, my2 + 16);
@@ -190,7 +190,7 @@ void Guide::draw_message(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
                        : m.kind == MessageItem::FriendRequest ? m.from.tag + " wants to be your friend."
                                                               : m.text;
     dl->PushClipRect(v.pt(rx, 96), v.pt(rx + 431, 607), true);
-    float used = wrapped(dl, a, v, 24, 1.35f, rx + 32, my2 + 40, 431 - 64, alpha(WHITE, pop), body);
+    float used = wrapped(dl, a, v, 24, 1.35f, rx + 32, my2 + 40, 431 - 64, alpha(TEXT, pop), body);
     if (m.kind == MessageItem::GameInvite && !m.text.empty()) wrapped(dl, a, v, 22, 1.35f, rx + 32, my2 + 40 + used + 8, 431 - 64, alpha(MUTED, pop), m.text);
     dl->PopClipRect();
     const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}};
@@ -239,13 +239,13 @@ void Guide::draw_create(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, flo
     page_motion(now, op, &slide, &pop, &title_op);
     draw_header(dl, a, origin, s, zoom, op, L, W, "Create New", title_op);
     float x = L + slide;
-    dl->AddRectFilled(v.pt(x, 96), v.pt(x + 431, 607), alpha(PANEL, pop));
+    panel_fill(dl, v.pt(x, 96), v.pt(x + 431, 607), pop);
     std::vector<Opt> opts = create_options();
     option_list(dl, a, v, x, 96, 431, 88, 24, 22, opts, new_row_, new_bar_.value(now), pop, 48, 52, 20);
     dl->AddRectFilled(v.pt(x + 431, 96), v.pt(x + W, 607), alpha(PANE, pop));
     const char* words[3] = {"Send a message to one or more people.", "Invite others to play a game.", "Ask another player to join your friends list."};
     if (new_row_ >= 0 && new_row_ < int(opts.size()))
-        wrapped(dl, a, v, 24, 1.4f, x + 431 + 34, 96 + 30, 431 - 68, alpha(WHITE, pop), words[opts[new_row_].cmd]);
+        wrapped(dl, a, v, 24, 1.4f, x + 431 + 34, 96 + 30, 431 - 68, alpha(TEXT, pop), words[opts[new_row_].cmd]);
     const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}};
     hint_bar(dl, a, v, L + 27, 617, hints, 2, op);
 }
@@ -377,7 +377,7 @@ void Guide::draw_pick(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float
     std::vector<const Friend*> rows = pick_rows();
     int n = int(rows.size());
     ImVec2 p0 = v.pt(x, 96), p1 = v.pt(x + W, 552);
-    dl->AddRectFilled(p0, p1, alpha(PANEL, pop));
+    panel_fill(dl, p0, p1, pop);
     dl->PushClipRect(p0, p1, true);
     if (!n) {
         const char* why = !social_.session ? "Not signed in" : !social_.loaded && !social_.error.empty() ? "Server unavailable" : g.on ? "" : social_.loaded ? "No friends" : "";
@@ -406,7 +406,7 @@ void Guide::draw_pick(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float
     }
     dl->PopClipRect();
     ImVec2 f0 = v.pt(x, 552), f1 = v.pt(x + W, 607);
-    dl->AddRectFilled(f0, f1, alpha(PANEL, pop));
+    panel_fill(dl, f0, f1, pop);
     dl->AddLine(ImVec2(f0.x, f0.y + v.sz(0.5f)), ImVec2(f1.x, f0.y + v.sz(0.5f)), alpha(LINE, pop), v.sz(1));
     ImVec2 fr = v.pt(x + W - 30, 579.5f);
     icon_mid(dl, a, v.sz(28), fr.x - v.sz(14), fr.y, alpha(pick_.top + PICK_ROWS < n ? MUTED : DISABLED, pop), I_EXPAND_MORE);
@@ -513,7 +513,7 @@ void Guide::draw_compose(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
     page_motion(now, op, &slide, &pop, &title_op);
     draw_header(dl, a, origin, s, zoom, op, L, W, d.kind == Draft::GameInvite ? "Game Invite" : d.kind == Draft::FriendRequest ? "Friend Request" : "Message", title_op);
     float x = L + slide;
-    dl->AddRectFilled(v.pt(x, 96), v.pt(x + 431, 607), alpha(PANEL, pop));
+    panel_fill(dl, v.pt(x, 96), v.pt(x + 431, 607), pop);
     option_list(dl, a, v, x, 96, 431, 76, 24, 24, draft_options(), draft_row_, draft_bar_.value(now), pop, 40, 44, 20);
     float rx = x + 431;
     dl->AddRectFilled(v.pt(rx, 96), v.pt(rx + 431, 607), alpha(PANE, pop));
@@ -526,7 +526,7 @@ void Guide::draw_compose(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
         for (size_t i = 0; i < d.to.size(); i++) to += (i ? ", " : "") + d.to[i].tag;
     }
     float y = 96 + 30 + 26 + 6;
-    y += wrapped(dl, a, v, 26, 1.2f, rx + 32, y, 431 - 64, alpha(WHITE, pop), to);
+    y += wrapped(dl, a, v, 26, 1.2f, rx + 32, y, 431 - 64, alpha(TEXT, pop), to);
     if (d.kind != Draft::FriendRequest) {
         y += 40;
         ImVec2 mi = v.pt(rx + 32 + 14, y + 14), ml = v.pt(rx + 32 + 38, y + 14);
@@ -534,8 +534,8 @@ void Guide::draw_compose(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
         text_mid(dl, a.text, a.text_m, v.sz(22), ml.x, ml.y, alpha(MUTED, pop), "Message Text:");
         y += 28 + 6;
         // a game invite reads as the 360's did, with the player's own words after it
-        if (d.kind == Draft::GameInvite) y += wrapped(dl, a, v, 24, 1.35f, rx + 32, y, 431 - 64, alpha(WHITE, pop), gamertag + " invites you to play Forza Horizon 2.") + 8;
-        if (!d.text.empty()) wrapped(dl, a, v, d.kind == Draft::GameInvite ? 22 : 24, 1.35f, rx + 32, y, 431 - 64, alpha(d.kind == Draft::GameInvite ? MUTED : WHITE, pop), d.text);
+        if (d.kind == Draft::GameInvite) y += wrapped(dl, a, v, 24, 1.35f, rx + 32, y, 431 - 64, alpha(TEXT, pop), gamertag + " invites you to play Forza Horizon 2.") + 8;
+        if (!d.text.empty()) wrapped(dl, a, v, d.kind == Draft::GameInvite ? 22 : 24, 1.35f, rx + 32, y, 431 - 64, alpha(d.kind == Draft::GameInvite ? MUTED : TEXT, pop), d.text);
     }
     dl->PopClipRect();
     const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}};
@@ -747,14 +747,14 @@ void Guide::draw_keyboard(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, f
     float shift = bw > room ? bw - room : 0;
     dl->PushClipRect(v.pt(fx + 16, fy), v.pt(fx + fw - 16, fy + 52), true);
     ImVec2 tp = v.pt(fx + 16 - shift, fy + 26);
-    text_mid(dl, a.text, a.text_m, v.sz(22), tp.x, tp.y, alpha(WHITE, pop), before.c_str());
+    text_mid(dl, a.text, a.text_m, v.sz(22), tp.x, tp.y, alpha(TEXT, pop), before.c_str());
     ImVec2 c0 = v.pt(fx + 16 - shift + bw, fy + 11), c1 = v.pt(fx + 16 - shift + bw + 3, fy + 41);
     dl->AddRectFilled(c0, c1, alpha(ACCENT, pop));
     ImVec2 ap = v.pt(fx + 16 - shift + bw + 3, fy + 26);
-    text_mid(dl, a.text, a.text_m, v.sz(22), ap.x, ap.y, alpha(WHITE, pop), after.c_str());
+    text_mid(dl, a.text, a.text_m, v.sz(22), ap.x, ap.y, alpha(TEXT, pop), after.c_str());
     dl->PopClipRect();
 
-    dl->AddRectFilled(v.pt(x, 264), v.pt(x + W, 607), alpha(PANEL, pop));
+    panel_fill(dl, v.pt(x, 264), v.pt(x + W, 607), pop);
     KeyGrid g{x + 26, 264 + 20, (W - 52 - 2 * 116 - 11 * 5) / 10};
     std::vector<Key> keys = keyboard();
     ImFont* bf = a.text_bold ? a.text_bold : a.text;

@@ -12,7 +12,7 @@ namespace {
 ImU32 hex(unsigned v) { return IM_COL32((v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff, 255); }
 
 const std::vector<ThemeDef> g_presets = {
-    {"xbox", "Xbox", hex(0x108A10), hex(0x8ED61E), hex(0x0A4F0A), hex(0xFFFFFF), false},
+    {"xbox", "Xbox", hex(0x008A00), hex(0x107C10), hex(0x0A4F0A), hex(0xEBEBEB), false},
     {"fh2mp", "FH2MP", hex(0xC9A0F7), hex(0xFF9F6E), hex(0x2E2A48), hex(0x1A1630), false},
     {"red", "Red", hex(0xC4262E), hex(0xFF6B6B), hex(0x5C0F13), hex(0xFFFFFF), true},
     {"orange", "Orange", hex(0xC2500A), hex(0xFFA347), hex(0x5E2604), hex(0xFFFFFF), true},
@@ -22,10 +22,19 @@ const std::vector<ThemeDef> g_presets = {
     {"pink", "Pink", hex(0xC22872), hex(0xFF7DB8), hex(0x5E0D35), hex(0xFFFFFF), true},
 };
 
-// The surfaces: panel, pane, line, tab, raised, muted, muted2, muted3, tab text, disabled, key, key line.
+// The surfaces: panel, pane, line, tab, raised, muted, muted2, muted3, tab text, disabled, key, key line; then the text on a panel, the open
+// blade's name, the panel's gradient (0: flat), the toasts' surface (0: the panel) and the online mark. The dark themes leave the last ones.
 struct Neutrals {
     ImU32 panel, pane, line, tab, raised, muted, muted2, muted3, tab_text, disabled, key, key_line;
+    ImU32 text = IM_COL32(255, 255, 255, 255), spine_text = IM_COL32(255, 255, 255, 255), panel_hi = 0, panel_lo = 0, toast = 0,
+          online = IM_COL32(0xe8, 0xe9, 0xeb, 255);
 };
+// Xbox: the 360 Guide's own skin (huduiskin.xex): the blade's gradient 232,235,236 -> 201,207,209, the row hairlines 194,196,200, the side
+// blades 91,104,117 with 235 text, XuiButtonGuide's Normal text 51,58,64, its NormalDisable 185,189,194 and the 101,109,114 secondary
+// text, the open blade's spine 205,208,211 -> 185,189,194 with its name in 88,96,102. The keyboard and the toasts stay dark.
+const Neutrals XBOX360 = {hex(0xd8ddde), hex(0xc9cfd1), hex(0xc2c4c8), hex(0x5b6875), hex(0xc3c7cb), hex(0x656d72),
+                          hex(0x656d72), hex(0xc9ccd2), hex(0xebebeb), hex(0xb9bdc2), hex(0x2f3034), hex(0x48494e),
+                          hex(0x333a40), hex(0x586066), hex(0xe8ebec), hex(0xc9cfd1), hex(0x2a2b2e), hex(0x333a40)};
 const Neutrals BASE = {hex(0x2a2b2e), hex(0x1e1f22), hex(0x3a3b3f), hex(0x45474c), hex(0x34363a), hex(0xb4b6bb),
                        hex(0x9c9fa5), hex(0xc9ccd2), hex(0xd4d6da), hex(0x6e7076), hex(0x2f3034), hex(0x48494e)};
 const Neutrals FH2MP = {hex(0x242740), hex(0x1f2134), hex(0x31344e), hex(0x363a54), hex(0x2a2e4a), hex(0xb5bad8),
@@ -86,11 +95,14 @@ std::string theme_name(const std::string& key) {
 void theme_apply(const std::string& key) {
     const ThemeDef& t = theme_preset(key);
     bool plastic = theme_plastic(key) && t.plastic_too;
-    Neutrals n = plastic ? plastic_of(t.accent) : std::string(t.key) == "fh2mp" ? FH2MP : BASE;
+    Neutrals n = plastic ? plastic_of(t.accent) : std::string(t.key) == "fh2mp" ? FH2MP : std::string(t.key) == "xbox" ? XBOX360 : BASE;
     using namespace ui;
     ACCENT = t.accent, BRIGHT = t.bright, DARK = t.dark, INK = t.ink;
     PANEL = n.panel, PANE = n.pane, LINE = n.line, TAB = n.tab, RAISED = n.raised, MUTED = n.muted, MUTED2 = n.muted2, MUTED3 = n.muted3;
     TAB_TEXT = n.tab_text, DISABLED = n.disabled, KEY = n.key, KEY_LINE = n.key_line;
+    TEXT = n.text, SPINE_TEXT = n.spine_text, PANEL_HI = n.panel_hi ? n.panel_hi : n.panel, PANEL_LO = n.panel_lo ? n.panel_lo : n.panel;
+    TOAST = n.toast ? n.toast : n.panel, ONLINE = n.online;
+
     g_current = plastic ? std::string(t.key) + "-plastic" : t.key;
 }
 

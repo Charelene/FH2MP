@@ -725,7 +725,7 @@ bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double 
     if (open) {
         float k = ease_guide(std::clamp(float((now - opened_) / 0.26), 0.0f, 1.0f));
         float zoom = 0.92f + 0.08f * k, op = k;
-        dl->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), IM_COL32(0, 0, 0, int(153 * op)));
+        dl->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), IM_COL32(0, 0, 0, int(178 * op)));
         switch (page()) {
         case Page::Home: draw_home(dl, a, origin, s, zoom, op, now); break;
         case Page::Community: draw_community(dl, a, origin, s, zoom, op, now); break;
@@ -789,16 +789,17 @@ void Guide::draw_home(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float
     for (int bi = 0; bi < 3; bi++) {
         float bw = width_[bi].value(now);
         bool on = bi == blade_;
-        float bh = on ? 500 : 452, top = 96 + (500 - bh) / 2, lw = on ? 96.0f : 64.0f;
+        float bh = 500, top = 96, lw = on ? 96.0f : 64.0f;  // the 360's blades are all the panel's height
+
         ImVec2 l0 = v.pt(x, top), l1 = v.pt(x + std::min(lw, bw), top + bh);
         dl->AddRectFilled(l0, l1, alpha(on ? RAISED : TAB, pop));
         // canvas: 26 units, vertical-rl, centred across the tab, 24 from its top
         const char* name = bi == 1 ? gamertag.c_str() : BLADE[bi];
-        vertical_text(dl, tf, a.text_m, v.sz(26), (l0.x + l1.x) * 0.5f, l0.y + v.sz(24), alpha(on ? WHITE : TAB_TEXT, pop), name);
+        vertical_text(dl, tf, a.text_m, v.sz(26), (l0.x + l1.x) * 0.5f, l0.y + v.sz(24), alpha(on ? SPINE_TEXT : TAB_TEXT, pop), name);
         if (bw > lw + 1) {
             std::vector<Opt> rows = home_rows(bi);
             ImVec2 b0 = v.pt(x + lw, top), b1 = v.pt(x + bw, top + bh);
-            dl->AddRectFilled(b0, b1, alpha(PANEL, pop));
+            panel_fill(dl, b0, b1, pop);
             dl->PushClipRect(b0, b1, true);
             bool barred = on && focus_[bi] >= 0;
             if (barred) {
@@ -820,14 +821,15 @@ void Guide::draw_home(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float
                 ImVec2 r0 = v.pt(x + lw + slide, y), r1 = v.pt(x + lw + 736 + slide, y + 66);
                 if (!hi) dl->AddLine(ImVec2(r0.x, r1.y - v.sz(0.5f)), ImVec2(r1.x, r1.y - v.sz(0.5f)), alpha(LINE, pop * rop), v.sz(1));
                 float cy = (r0.y + r1.y) * 0.5f;
-                ImU32 fg = alpha(r.enabled ? WHITE : DISABLED, pop * rop);
+                ImU32 fg = alpha(!r.enabled ? DISABLED : hi ? INK : TEXT, pop * rop);
+
                 text_mid(dl, tf, a.text_m, v.sz(26), r0.x + v.sz(30), cy, fg, r.label.c_str());
                 float right = r1.x - v.sz(22);
                 if (r.icon) icon_mid(dl, a, v.sz(32), right - v.sz(16), cy, fg, r.icon);
                 right -= v.sz(32 + 16);
                 const char* meta = r.cmd == HomeFriends ? friends_meta : r.cmd == HomeMessages ? messages_meta : r.cmd == HomeResume ? "Now playing"
                                    : r.cmd == HomeAchievements ? ach_meta : "";
-                if (*meta) text_mid(dl, tf, a.text_m, v.sz(20), right, cy, alpha(hi ? WHITE : MUTED, pop * rop), meta, true);
+                if (*meta) text_mid(dl, tf, a.text_m, v.sz(20), right, cy, alpha(hi ? INK : MUTED, pop * rop), meta, true);
             }
             dl->PopClipRect();
         }
@@ -860,11 +862,11 @@ void Guide::draw_box(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float 
     float H = head + body_h + rows, Y = 360 - H / 2;
     dl->AddRectFilled(v.pt(X, Y), v.pt(X + W, Y + head), alpha(RAISED, k));
     ImVec2 t = v.pt(X + PAD, Y + head / 2);
-    text_mid(dl, a.text, a.text_m, v.sz(24), t.x, t.y, alpha(WHITE, k), box_.title.c_str());
+    text_mid(dl, a.text, a.text_m, v.sz(24), t.x, t.y, alpha(TEXT, k), box_.title.c_str());
     dl->AddRectFilled(v.pt(X, Y + head), v.pt(X + W, Y + head + body_h), alpha(PANE, k));
-    wrapped(dl, a, v, 22, 1.35f, X + PAD, Y + head + 22, W - 2 * PAD, alpha(WHITE, k), box_.body);
+    wrapped(dl, a, v, 22, 1.35f, X + PAD, Y + head + 22, W - 2 * PAD, alpha(TEXT, k), box_.body);
     float by = Y + head + body_h;
-    dl->AddRectFilled(v.pt(X, by), v.pt(X + W, by + rows), alpha(PANEL, k));
+    panel_fill(dl, v.pt(X, by), v.pt(X + W, by + rows), k);
     std::vector<Opt> opts;
     for (const std::string& b : box_.buttons) opts.push_back({b, 0, true, 0});
     option_list(dl, a, v, X, by, W, 56, 24, PAD, opts, box_.focus, box_.bar.value(now), k);
@@ -905,7 +907,7 @@ void Guide::draw_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 ori
     ImU32 kc = toast_color(toast_.kind);
     if (unfold > 0.001f) {
         ImVec2 p0 = at(bx + 64 + shift, by), p1 = at(bx + 64 + pw - shift, by + 64);
-        dl->AddRectFilled(p0, p1, PANEL);
+        dl->AddRectFilled(p0, p1, TOAST);
         dl->PushClipRect(p0, p1, true);
         float x = at(bx + 64 + 22, 0).x;
         if (toast_.detail.empty()) {

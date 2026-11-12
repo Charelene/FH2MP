@@ -214,7 +214,7 @@ void Guide::player_row(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, floa
     bool here = same_game(f, social_.me), off = f.state == Friend::Offline, sent = sent_.count(f.xuid) > 0;
     if (!focused) dl->AddLine(v.pt(x, y + 68.5f), v.pt(x + W, y + 68.5f), alpha(LINE, op), v.sz(1));
     player_pic(dl, a, a.pic(f.xuid), f.xuid, v.pt(x + 9, y + 4.5f), v.pt(x + 69, y + 64.5f), greyed ? op * 0.45f : op);
-    ImU32 fg = greyed ? DISABLED : focused ? INK : off ? MUTED2 : WHITE, sub = greyed ? DISABLED : focused ? INK : MUTED2;
+    ImU32 fg = greyed ? DISABLED : focused ? INK : off ? MUTED2 : TEXT, sub = greyed ? DISABLED : focused ? INK : MUTED2;
     // name column: 22 and 20 units, line-height 1.15, 3 apart, centred: the lines' centres 13 above and 14 below the row's
     std::string second = !f.motto.empty() ? f.motto : !f.club.empty() ? "[" + f.club + "]" : f.level > 0 ? "Level " + std::to_string(f.level) : "";
     ImVec2 n0 = v.pt(x + 78, second.empty() ? cy : cy - 13), n1 = v.pt(x + 78, cy + 14.15f);
@@ -232,7 +232,7 @@ void Guide::player_row(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, floa
     if (!detail.empty()) text_fit(dl, a.text, a.text_m, v.sz(20), s1.x, s1.y, v.sz(sw), alpha(lit ? BRIGHT : sub, op), detail);
     if (check >= 0) {
         ImVec2 cp = v.pt(x + W - 20 - 16, cy);
-        icon_mid(dl, a, v.sz(32), cp.x, cp.y, alpha(greyed ? DISABLED : WHITE, op), check ? I_CHECK_BOX : I_CHECK_BLANK);
+        icon_mid(dl, a, v.sz(32), cp.x, cp.y, alpha(greyed ? DISABLED : focused ? INK : TEXT, op), check ? I_CHECK_BOX : I_CHECK_BLANK);
     }
 }
 
@@ -258,14 +258,14 @@ void Guide::draw_community(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, 
     for (int t = 0; t < 4; t++) {
         bool on = t == comm_tab_;
         float tw = on ? 388 : 158;
-        dl->AddRectFilled(v.pt(tx, 96), v.pt(tx + tw, 138), alpha(on ? PANEL : TAB, pop));
+        dl->AddRectFilled(v.pt(tx, 96), v.pt(tx + tw, 138), alpha(on ? PANEL_HI : TAB, pop));
         char label[48];
         if (!on) snprintf(label, sizeof label, "%d", counts[t]);
         else if (t == TabParty) snprintf(label, sizeof label, "Party (%d)", counts[t]);
         else if (t == TabFriends) snprintf(label, sizeof label, "Friends (%d Online)", online);
         else if (t == TabMessages) snprintf(label, sizeof label, "Messages (%d New)", unread);
         else snprintf(label, sizeof label, "Players (%d Online)", counts[t]);
-        ImU32 fg = on ? WHITE : TAB_TEXT;
+        ImU32 fg = on ? TEXT : TAB_TEXT;
         if (on) {
             // canvas: the chosen tab's icon and name start 27 in, 14 apart
             ImVec2 ic = v.pt(tx + 27 + 14, 117), lp = v.pt(tx + 27 + 28 + 14, 117);
@@ -281,7 +281,7 @@ void Guide::draw_community(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, 
         tx += tw;
     }
     ImVec2 p0 = v.pt(x, 138), p1 = v.pt(x + W, 607);
-    dl->AddRectFilled(p0, p1, alpha(PANEL, pop));
+    panel_fill(dl, p0, p1, pop);
     dl->PushClipRect(p0, p1, true);
     float ce = ease_guide(std::clamp(float((now - comm_at_) / 0.26), 0.0f, 1.0f));
     float cxs = x + (1 - ce) * 110 * comm_dir_, cop = pop * ce;
@@ -310,8 +310,8 @@ void Guide::draw_community(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, 
                 if (!foc) dl->AddLine(v.pt(cxs, y + 68.5f), v.pt(cxs + W, y + 68.5f), alpha(LINE, cop), v.sz(1));
                 dl->AddRectFilled(v.pt(cxs + 9, y + 4.5f), v.pt(cxs + 69, y + 64.5f), alpha(foc ? DARK : RAISED, cop));
                 ImVec2 ip = v.pt(cxs + 39, y + 34.5f), lp = v.pt(cxs + 78, y + 34.5f);
-                icon_mid(dl, a, v.sz(36), ip.x, ip.y, alpha(WHITE, cop), I_PERSON_ADD);
-                text_mid(dl, a.text, a.text_m, v.sz(22), lp.x, lp.y, alpha(WHITE, cop), "Add Friend");
+                icon_mid(dl, a, v.sz(36), ip.x, ip.y, alpha(foc ? INK : TEXT, cop), I_PERSON_ADD);
+                text_mid(dl, a.text, a.text_m, v.sz(22), lp.x, lp.y, alpha(foc ? INK : TEXT, cop), "Add Friend");
                 continue;
             }
             const FriendRow& r = friends[i - 1];
@@ -330,11 +330,11 @@ void Guide::draw_community(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, 
             if (!foc) dl->AddLine(v.pt(cxs, y + 55.5f), v.pt(cxs + W, y + 55.5f), alpha(LINE, cop), v.sz(1));
             ImVec2 np = v.pt(cxs + 27, cy);
             if (i == 0) {
-                text_mid(dl, a.text, a.text_m, v.sz(24), np.x, np.y, alpha(WHITE, cop), "Create New");
+                text_mid(dl, a.text, a.text_m, v.sz(24), np.x, np.y, alpha(foc ? INK : TEXT, cop), "Create New");
                 continue;
             }
             const MessageItem& m = msgs[i - 1];
-            ImU32 fg = foc || m.unread ? WHITE : MUTED;
+            ImU32 fg = foc ? INK : m.unread ? TEXT : MUTED;
             text_fit(dl, a.text, a.text_m, v.sz(24), np.x, np.y, v.sz(380), alpha(fg, cop), m.from.tag);
             ImVec2 ip = v.pt(cxs + 431 + 18, cy);
             icon_mid(dl, a, v.sz(30), ip.x, ip.y, alpha(fg, cop), kind_icon(m));
@@ -553,13 +553,13 @@ void Guide::draw_profile(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
     for (int t = 0; t < 2; t++) {
         bool on = t == prof_tab_;
         float tx = x + t * 431;
-        dl->AddRectFilled(v.pt(tx, 96), v.pt(tx + 431, 152), alpha(on ? PANEL : TAB, pop));
+        dl->AddRectFilled(v.pt(tx, 96), v.pt(tx + 431, 152), alpha(on ? PANEL_HI : TAB, pop));
         float lw = a.text->CalcTextSizeA(24, FLT_MAX, 0, names[t]).x;
         ImVec2 lp = v.pt(on ? tx + 30 : tx + (431 - lw) / 2, 124);
-        text_mid(dl, a.text, a.text_m, v.sz(24), lp.x, lp.y, alpha(on ? WHITE : TAB_TEXT, pop), names[t]);
+        text_mid(dl, a.text, a.text_m, v.sz(24), lp.x, lp.y, alpha(on ? TEXT : TAB_TEXT, pop), names[t]);
     }
     ImVec2 p0 = v.pt(x, 152), p1 = v.pt(x + W, 607);
-    dl->AddRectFilled(p0, p1, alpha(PANEL, pop));
+    panel_fill(dl, p0, p1, pop);
     dl->PushClipRect(p0, p1, true);
 
     // the options (they slide in when the tab changes)
@@ -611,12 +611,12 @@ void Guide::profile_side(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
     float fh = 28.0f * facts.size() + 4.0f * (facts.size() - 1), fy = cy0 + 46 + (112 - fh) / 2 + 14;
     for (size_t i = 0; i < facts.size(); i++) {
         ImVec2 l = v.pt(cx + 112 + 16, fy + i * 32), r = v.pt(cx + cw - 16, fy + i * 32);
-        text_mid(dl, a.text, a.text_m, v.sz(21), l.x, l.y, alpha(WHITE, pop), facts[i].first.c_str());
+        text_mid(dl, a.text, a.text_m, v.sz(21), l.x, l.y, alpha(TEXT, pop), facts[i].first.c_str());
         float lw = a.text->CalcTextSizeA(21, FLT_MAX, 0, facts[i].first.c_str()).x;
         std::string val = facts[i].second;
         float vw = a.text->CalcTextSizeA(21, FLT_MAX, 0, val.c_str()).x, room = cw - 112 - 32 - lw - 12;
-        if (vw <= room) text_mid(dl, a.text, a.text_m, v.sz(21), r.x, r.y, alpha(WHITE, pop), val.c_str(), true);
-        else text_fit(dl, a.text, a.text_m, v.sz(21), l.x + v.sz(lw + 12), l.y, v.sz(room), alpha(WHITE, pop), val);
+        if (vw <= room) text_mid(dl, a.text, a.text_m, v.sz(21), r.x, r.y, alpha(TEXT, pop), val.c_str(), true);
+        else text_fit(dl, a.text, a.text_m, v.sz(21), l.x + v.sz(lw + 12), l.y, v.sz(room), alpha(TEXT, pop), val);
     }
 
     float py = cy0 + 46 + 112 + 14, pb = 607 - 14;
@@ -629,17 +629,17 @@ void Guide::profile_side(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
         float y = py + 16;
         if (!p.location.empty()) {
             ImVec2 lp = v.pt(ix, y + 14);
-            text_fit(dl, a.text, a.text_m, v.sz(22), lp.x, lp.y, v.sz(iw), alpha(WHITE, fade), p.location);
+            text_fit(dl, a.text, a.text_m, v.sz(22), lp.x, lp.y, v.sz(iw), alpha(TEXT, fade), p.location);
             y += 28 + 16;
         }
         if (p.state == Friend::Playing) {
             // what they are playing: the accent circle, the game, where in it
             ImVec2 c = v.pt(ix + 26, y + 26);
             dl->AddCircleFilled(c, v.sz(26), alpha(ACCENT, fade), 48);
-            icon_mid(dl, a, v.sz(30), c.x, c.y, alpha(WHITE, fade), I_CAR);
+            icon_mid(dl, a, v.sz(30), c.x, c.y, alpha(TEXT, fade), I_CAR);
             std::string where = !me && same_game(p, social_.me) ? "In Your Game" : lobby_words(p);
             ImVec2 g0 = v.pt(ix + 52 + 14, where.empty() ? y + 26 : y + 14), g1 = v.pt(ix + 52 + 14, y + 39);
-            text_fit(dl, a.text, a.text_m, v.sz(21), g0.x, g0.y, v.sz(iw - 66), alpha(WHITE, fade), "Forza Horizon 2");
+            text_fit(dl, a.text, a.text_m, v.sz(21), g0.x, g0.y, v.sz(iw - 66), alpha(TEXT, fade), "Forza Horizon 2");
             if (!where.empty()) text_fit(dl, a.text, a.text_m, v.sz(17), g1.x, g1.y, v.sz(iw - 66), alpha(MUTED, fade), where);
         }
         // presence, at the pane's foot
@@ -649,7 +649,7 @@ void Guide::profile_side(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
         if (!waiting.empty()) pres += " \xC2\xB7 " + waiting;
         ImVec2 ip = v.pt(ix + 12, pb - 16 - 13), tp = v.pt(ix + 32, pb - 16 - 13);
         icon_mid(dl, a, v.sz(24), ip.x, ip.y, alpha(on ? BRIGHT : OFFLINE, fade), I_PERSON);
-        text_fit(dl, a.text, a.text_m, v.sz(22), tp.x, tp.y, v.sz(iw - 32), alpha(WHITE, fade), pres);
+        text_fit(dl, a.text, a.text_m, v.sz(22), tp.x, tp.y, v.sz(iw - 32), alpha(TEXT, fade), pres);
     } else {
         // a 15-unit label over 19-unit text; the 360's words when there is none
         const std::string* vals[4] = {&p.motto, &p.name, &p.location, &p.bio};
@@ -660,7 +660,7 @@ void Guide::profile_side(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
             text_mid(dl, a.text, a.text_m, v.sz(15), lp.x, lp.y, alpha(MUTED, fade), FIELD_NAME[i]);
             y += 20;
             bool has = !vals[i]->empty();
-            y += wrapped(dl, a, v, 19, 1.25f, ix, y, iw, alpha(has ? WHITE : MUTED2, fade), has ? *vals[i] : none[i]);
+            y += wrapped(dl, a, v, 19, 1.25f, ix, y, iw, alpha(has ? TEXT : MUTED2, fade), has ? *vals[i] : none[i]);
             y += 8;
         }
     }
@@ -707,7 +707,7 @@ void Guide::draw_edit(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float
     draw_header(dl, a, origin, s, zoom, op, L, W, "Edit Profile", title_op);
     float x = L + slide;
     ImVec2 p0 = v.pt(x, 96), p1 = v.pt(x + W, 607);
-    dl->AddRectFilled(p0, p1, alpha(PANEL, pop));
+    panel_fill(dl, p0, p1, pop);
     dl->PushClipRect(p0, p1, true);
     option_list(dl, a, v, x, 100, 431, 50, 23, 30, edit_options(), edit_row_, edit_bar_.value(now), pop);
     Friend me = social_.me;

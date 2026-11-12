@@ -14,16 +14,18 @@
 
 namespace ui {
 
-// The theme's colours (theme.cpp sets them; these are Xbox's): the accent, a bright and a dark of it, the ink for text on the accent, and the
-// surfaces. White, black and the presence colours stay.
-inline ImU32 ACCENT = IM_COL32(0x10, 0x8a, 0x10, 255), DARK = IM_COL32(0x0a, 0x4f, 0x0a, 255), BRIGHT = IM_COL32(0x8e, 0xd6, 0x1e, 255),
-             INK = IM_COL32(255, 255, 255, 255), PANEL = IM_COL32(0x2a, 0x2b, 0x2e, 255), PANE = IM_COL32(0x1e, 0x1f, 0x22, 255),
-             LINE = IM_COL32(0x3a, 0x3b, 0x3f, 255), TAB = IM_COL32(0x45, 0x47, 0x4c, 255), RAISED = IM_COL32(0x34, 0x36, 0x3a, 255),
-             MUTED = IM_COL32(0xb4, 0xb6, 0xbb, 255), MUTED2 = IM_COL32(0x9c, 0x9f, 0xa5, 255), TAB_TEXT = IM_COL32(0xd4, 0xd6, 0xda, 255),
-             MUTED3 = IM_COL32(0xc9, 0xcc, 0xd2, 255), DISABLED = IM_COL32(0x6e, 0x70, 0x76, 255), KEY = IM_COL32(0x2f, 0x30, 0x34, 255),
-             KEY_LINE = IM_COL32(0x48, 0x49, 0x4e, 255);
-const ImU32 WHITE = IM_COL32(255, 255, 255, 255), BLACK = IM_COL32(0, 0, 0, 255), ONLINE = IM_COL32(0xe8, 0xe9, 0xeb, 255),
-            OFFLINE = IM_COL32(0xe0, 0x55, 0x2f, 255);
+// The theme's colours (theme.cpp sets them; these are Xbox's, the 360 Guide's own skin): the accent, a bright and a dark of it, the ink for
+// text on the accent, and the surfaces. TEXT is the text on a panel, SPINE_TEXT the open blade's name, PANEL_HI and PANEL_LO the panel's
+// gradient top and bottom, TOAST the toasts' surface (they stay dark in every theme). White, black and the offline colour stay.
+inline ImU32 ACCENT = IM_COL32(0x00, 0x8a, 0x00, 255), DARK = IM_COL32(0x0a, 0x4f, 0x0a, 255), BRIGHT = IM_COL32(0x10, 0x7c, 0x10, 255),
+             INK = IM_COL32(235, 235, 235, 255), PANEL = IM_COL32(216, 221, 222, 255), PANE = IM_COL32(201, 207, 209, 255),
+             LINE = IM_COL32(194, 196, 200, 255), TAB = IM_COL32(91, 104, 117, 255), RAISED = IM_COL32(195, 199, 203, 255),
+             MUTED = IM_COL32(101, 109, 114, 255), MUTED2 = IM_COL32(101, 109, 114, 255), TAB_TEXT = IM_COL32(235, 235, 235, 255),
+             MUTED3 = IM_COL32(0xc9, 0xcc, 0xd2, 255), DISABLED = IM_COL32(185, 189, 194, 255), KEY = IM_COL32(0x2f, 0x30, 0x34, 255),
+             KEY_LINE = IM_COL32(0x48, 0x49, 0x4e, 255), TEXT = IM_COL32(51, 58, 64, 255), SPINE_TEXT = IM_COL32(88, 96, 102, 255),
+             PANEL_HI = IM_COL32(232, 235, 236, 255), PANEL_LO = IM_COL32(201, 207, 209, 255), TOAST = IM_COL32(0x2a, 0x2b, 0x2e, 255),
+             ONLINE = IM_COL32(51, 58, 64, 255);
+const ImU32 WHITE = IM_COL32(255, 255, 255, 255), BLACK = IM_COL32(0, 0, 0, 255), OFFLINE = IM_COL32(0xe0, 0x55, 0x2f, 255);
 const ImU32 PIC_COLORS[] = {IM_COL32(0xc9, 0x66, 0x2f, 255), IM_COL32(0x3f, 0x6f, 0xc4, 255), IM_COL32(0xc4, 0x9a, 0x2b, 255),
                             IM_COL32(0x3e, 0x9a, 0x5a, 255), IM_COL32(0x2f, 0x8f, 0xa8, 255), IM_COL32(0x9a, 0x4f, 0xb8, 255),
                             IM_COL32(0xa8, 0x3a, 0x3a, 255)};
@@ -76,6 +78,12 @@ inline ImU32 alpha(ImU32 c, float a) {
     a = std::clamp(a, 0.0f, 1.0f);
     unsigned int al = (c >> IM_COL32_A_SHIFT) & 0xff;
     return (c & ~IM_COL32_A_MASK) | (ImU32(al * a + 0.5f) << IM_COL32_A_SHIFT);
+}
+
+// A panel: the theme's gradient from PANEL_HI at the top to PANEL_LO at the bottom (one colour in the dark themes).
+inline void panel_fill(ImDrawList* dl, ImVec2 p0, ImVec2 p1, float op) {
+    ImU32 hi = alpha(PANEL_HI, op), lo = alpha(PANEL_LO, op);
+    dl->AddRectFilledMultiColor(p0, p1, hi, hi, lo, lo);
 }
 
 inline float ease_guide(float t) { return css_bezier(0.1f, 0.9f, 0.2f, 1.0f, t); }
@@ -134,12 +142,13 @@ inline float badge(ImDrawList* dl, const GuideAssets& a, const char* key, ImU32 
     bool wide = strlen(key) > 1;
     float kw = (w > 0 ? w : wide ? 34 : 20) * s, kh = (wide || w > 0 ? 22 : 20) * s, rr = (r >= 0 ? std::min(r, 11.0f) : wide ? 6 : 10) * s;
     ImVec2 k0(x, cy - kh / 2), k1(x + kw, cy + kh / 2);
-    dl->AddRectFilled(k0, k1, alpha(BLACK, op), rr);
-    dl->AddRect(ImVec2(k0.x + s, k0.y + s), ImVec2(k1.x - s, k1.y - s), alpha(ring, op), std::max(0.0f, rr - s), 0, 2 * s);
+    bool disc = !wide && w <= 0;  // A, B, X, Y: the 360's legend draws a disc filled with the button's colour and a light letter
+    dl->AddRectFilled(k0, k1, alpha(disc ? ring : BLACK, op), rr);
+    if (!disc) dl->AddRect(ImVec2(k0.x + s, k0.y + s), ImVec2(k1.x - s, k1.y - s), alpha(ring, op), std::max(0.0f, rr - s), 0, 2 * s);
     ImFont* kf = a.text_bold ? a.text_bold : a.text;
     float size = (wide || w > 0 ? 11 : 12) * s;
     float tw = kf->CalcTextSizeA(size, FLT_MAX, 0, key).x;
-    dl->AddText(kf, size, ImVec2(x + (kw - tw) * 0.5f, caps_top(a.bold_m, size, cy)), alpha(ring, op), key);
+    dl->AddText(kf, size, ImVec2(x + (kw - tw) * 0.5f, caps_top(a.bold_m, size, cy)), alpha(disc ? IM_COL32(245, 245, 245, 255) : ring, op), key);
     return kw;
 }
 
@@ -226,7 +235,8 @@ inline void option_list(ImDrawList* dl, const GuideAssets& a, const View& v, flo
     for (size_t i = 0; i < opts.size(); i++) {
         float y = top + i * row_h, cy = y + row_h * 0.5f;
         if (int(i) != focus) dl->AddLine(v.pt(x, y + row_h - 0.5f), v.pt(x + w, y + row_h - 0.5f), alpha(LINE, op), v.sz(1));
-        ImU32 fg = alpha(!opts[i].enabled ? DISABLED : int(i) == focus ? INK : WHITE, op);
+        ImU32 fg = alpha(!opts[i].enabled ? DISABLED : int(i) == focus ? INK : TEXT, op);
+
         float tx = x + pad;
         if (icon_size > 0) {
             ImVec2 ip = v.pt(tx + icon_w * 0.5f, cy);
