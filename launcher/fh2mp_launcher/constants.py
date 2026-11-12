@@ -128,16 +128,16 @@ UPSTREAM = {
     },
     # Only the mod's DLL is taken: the zip also carries a build of the FH2 Mod Platform (DWrite.dll), which stays the pinned one above.
     "anna": {
-        "name": "FH2 ANNA", "author": "qiangqiang101", "license": "MIT", "version": "1.1.1",
-        "url": "https://github.com/qiangqiang101/FH2_ANNA/releases/download/1.1.1/FH2ANNA-1.1.1.zip",
-        "mirror": MIRROR_BASE + "FH2ANNA-1.1.1.zip",
-        "sha256": "423faa3c505d4271a68d4dcc0e91a914226c744d2edf0aa793bee636e88820fc", "size": 1333643,
-        "dll": "fh2-mods/FH2ANNA.dll", "dllSha256": "6955cbd35d35408a8e9ed8de132e75b877d52c681c645dcec6d24c50d8d974b6",
+        "name": "FH2 ANNA", "author": "qiangqiang101", "license": "MIT", "version": "1.2.0",
+        "url": "https://github.com/qiangqiang101/FH2_ANNA/releases/download/1.2.0/FH2ANNA-1.2.0.zip",
+        "mirror": MIRROR_BASE + "FH2ANNA-1.2.0.zip",
+        "sha256": "b339186683f1b4f7949ec0ffce88e4ed00729c885085419105fa608c979554e8", "size": 1341846,
+        "dll": "fh2-mods/FH2ANNA.dll", "dllSha256": "da7032e35f3444fc77dc80b744f22418cb6fcffafd02617f7f597ce241cab02d",
         "files": {
             "fh2-mods/FH2ANNA.dll": "fh2-mods/FH2ANNA.dll",
         },
         "fileSha256": {
-            "fh2-mods/FH2ANNA.dll": "6955cbd35d35408a8e9ed8de132e75b877d52c681c645dcec6d24c50d8d974b6",
+            "fh2-mods/FH2ANNA.dll": "da7032e35f3444fc77dc80b744f22418cb6fcffafd02617f7f597ce241cab02d",
         },
     },
 }

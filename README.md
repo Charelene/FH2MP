@@ -77,7 +77,7 @@ another computer. Keep that code private.
 installed. The server refuses launchers and shims older than the minimum it announces (1.2.0 after this release is deployed), so an old install shows
 "update required" and has to update before it can play.
 
-Version 1.3.3 uses Azimuth 1.0.4, FH2 Extra Options 0.6.0, FH2 Mod Platform 2.8.0, HonkHonk 0.4.0 and FH2 ANNA 1.1.1. Setup installs the supported combination and preserves your existing settings and saves. The launcher downloads them from FH2MP's server (the authors' releases are the fallback) and checks every file against its pinned hash.
+Version 1.3.5 uses Azimuth 1.0.4, FH2 Extra Options 0.6.0, FH2 Mod Platform 2.8.0, HonkHonk 0.4.0 and FH2 ANNA 1.2.0. Setup installs the supported combination and preserves your existing settings and saves. The launcher downloads them from FH2MP's server (the authors' releases are the fallback) and checks every file against its pinned hash.
 
 **Linux.** Azimuth runs under Wine/Proton. The launcher picks the newest Proton it finds in the usual Steam folders and starts the game with
 `WINEDLLOVERRIDES="winmm,dwrite,d3dcompiler_47=n,b"`, so Wine loads FH2 Extra Options (`winmm.dll`) and the FH2 Mod Platform (`DWrite.dll` and `d3dcompiler_47.dll`)
