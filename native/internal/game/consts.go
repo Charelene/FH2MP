@@ -120,12 +120,20 @@ const (
 	SHRaceReady                = 4
 	SHRaceParticipantsSelected = 5
 	SHInRace                   = 6
-	SHCountdownType            = 2
-	SHCountdownTypeBits        = 2
-	SHCountdownStartRace       = 2
-	SHRaceStartTime            = 9
-	SHNumLapsCompleted         = 10
-	SHFurthestProgress         = 11
+	SHLobbyType                = 0
+	SHLobbyTypeBits            = 3
+	// SessionHostSynced.PrivacyMode (var 1, SyncedEnum<SessionPrivacy,0,2,0>: 2 bits): 0 Public, 1 InviteOnly. The game's session object reads
+	// it (States::NetworkGetSessionPrivacy, game+0x8c80c0); InviteOnly shows the leader's crown in the HUD list and lets only the leader
+	// start events (NotPrivateLeader for everybody else), docs/protocol.md "Event leader".
+	SHPrivacyMode        = 1
+	SHPrivacyModeBits    = 2
+	SHPrivacyInviteOnly  = 1
+	SHCountdownType      = 2
+	SHCountdownTypeBits  = 2
+	SHCountdownStartRace = 2
+	SHRaceStartTime      = 9
+	SHNumLapsCompleted   = 10
+	SHFurthestProgress   = 11
 
 	PlayerVarTeamID          = 90
 	PlayerVarIsLeader        = 5

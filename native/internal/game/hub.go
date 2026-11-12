@@ -1008,6 +1008,10 @@ func (h *Hub) Handle(data []byte, addr Addr) {
 		var target *World
 		if assigned && name != "" {
 			target = h.WorldFor(h.followType(player, ltype, name, addr), name)
+			if h.Follow[player] && !target.Private && !target.Roadtrip && !target.Carmeet {
+				target.Private = true
+				target.Logf("private game: this world is invite-only (its first member is %#x): its players are told PrivacyMode = InviteOnly and it keeps a leader", player)
+			}
 		} else {
 			target = h.openWorldFor(ltype, player, &addr)
 		}

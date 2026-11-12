@@ -40,6 +40,7 @@ const (
 	MsgLapScore                = 44
 	MsgScoreKeyframe           = 45
 	MsgRequestRace             = 38
+	MsgRequestLeaderChange     = 59 // "a request to change the leader to the player specified": a player key (the popup's Make Session Leader)
 	MsgDropLeadership          = 60
 	MsgReadyRequest            = 41
 	MsgStartingGrid            = 39

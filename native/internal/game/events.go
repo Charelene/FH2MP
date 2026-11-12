@@ -77,7 +77,9 @@ func (w *World) EndEvent(why string, keepLeader bool) {
 		if former == nil {
 			former = w.GameOptionsOwner
 		}
-		w.SetLeader(nil, "event over: "+why)
+		if !w.Private { // a private game's leader stays its leader between events
+			w.SetLeader(nil, "event over: "+why)
+		}
 		w.ReleaseOptions(former, "event over: "+why)
 	}
 	w.RefreshCarPhasing()

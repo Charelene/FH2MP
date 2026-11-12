@@ -333,24 +333,7 @@ loop:
 					w.RelayHeldObjects(peer)
 				}
 				replies = append(replies, netv2.TimeSync(0, uint64(w.NowMs())), netv2.ConnectionSyncDone(w.ServerCounter))
-				if w.Roadtrip || peer.LobbyType == LobbyTypeCarMeet {
-					lobby := uint64(LobbyTypeCarMeet)
-					if w.Roadtrip {
-						lobby = LobbyTypeRoadTrip
-					}
-					replies = append(replies, netv2.SessionHostCreate(1, func(b *bits.Writer) {
-						b.Bits(0, netv2.SessionHostVarBits)
-						b.Bits(lobby, 3)
-					}))
-				} else if peer.ClaimedLobbyType != 0 && peer.ClaimedLobbyType != peer.LobbyType {
-					// a game that came in as another lobby type (an accepted invite enters through a Car Meet) is told this is Free Roam
-					replies = append(replies, netv2.SessionHostCreate(1, func(b *bits.Writer) {
-						b.Bits(0, netv2.SessionHostVarBits)
-						b.Bits(uint64(peer.LobbyType), 3)
-					}))
-				} else {
-					replies = append(replies, netv2.SessionHostCreate(1, nil))
-				}
+				replies = append(replies, netv2.SessionHostCreate(1, w.sessionHostCreateVars(peer)))
 				replies = append(replies, netv2.WeatherCreate(uint64(peer.WxSeq), w.Wx))
 				if !w.Roadtrip && peer.LobbyType != LobbyTypeCarMeet {
 					peer.BlSlotSeq = 1
@@ -418,6 +401,7 @@ loop:
 				w.SendGameOptions(peer, nil)
 				w.Traffic.Join(peer, false)
 				w.AssignPrivateUniverse(peer)
+				w.KeepPrivateLeader("the private game's first player")
 				if peer.VipHidden != nil {
 					w.SendPlayerVar(peer, PlayerVarFlags, peer.VipHidden.Width, uint64(peer.VipHidden.Value), false)
 					peer.VipHidden = nil
@@ -481,6 +465,11 @@ loop:
 				parts += fmt.Sprintf("%srequest of owner %d pending, %.0f s ago", sep, pr.Leader.Owner, w.Mono()-w.RaceRequestedAt)
 			}
 			w.Logf("%d MsgRequestRace (owner %d) ignored: an event is already being set up or running in this lobby (%s)", addr.Port, peer.Owner, parts)
+		case mtype == netv2.MsgRequestRace && w.Private && w.Leader != nil && w.Leader != peer && w.Leader.Connected:
+			if !w.admit(peer, mtype) {
+				continue
+			}
+			w.Logf("%d MsgRequestRace (owner %d) ignored: this is a private game and only its leader (owner %d) starts events", addr.Port, peer.Owner, w.Leader.Owner)
 		case mtype == netv2.MsgRequestRace:
 			if !w.admit(peer, mtype) {
 				continue
@@ -738,11 +727,23 @@ loop:
 			}
 			w.blApply(peer, fmt.Sprintf("ChallengeEnded ok=%d", ok), out, "partner "+partner)
 			w.ev("bucketlist_end", kv("owner", peer.Owner), kv("ok", ok != 0), kv("partner", partnerV))
+		case mtype == netv2.MsgRequestLeaderChange && w.Private:
+			kind, _, owner, err := netv2.ReadCarKey(br)
+			if err != nil {
+				panic(err)
+			}
+			if !w.admit(peer, mtype) {
+				continue
+			}
+			w.RequestLeaderChange(peer, kind, int(owner))
 		case mtype == netv2.MsgDropLeadership:
 			if !w.admit(peer, mtype) {
 				continue
 			}
-			if w.Leader == peer && w.Event == nil {
+			if w.Leader == peer && w.Event == nil && w.Private {
+				w.ReleaseOptions(peer, "the leader cancelled the event setup")
+				w.Logf("%d DropLeadership (owner %d): the event options are taken back; a private game's leader stays its leader", addr.Port, peer.Owner)
+			} else if w.Leader == peer && w.Event == nil {
 				w.SetLeader(nil, "dropped leadership")
 				w.ReleaseOptions(peer, "dropped leadership")
 			} else {
