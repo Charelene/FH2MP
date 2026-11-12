@@ -91,6 +91,30 @@ void hk_update(void* module, float dt) {
 
 bool starts_with(const unsigned char* at, const unsigned char* want, size_t n) { return memcmp(at, want, n) == 0; }
 
+// NetworkMatchmakingModule::OnNetworkMatchmakingComplete (game+0x813a50) builds the player's online status; in a Car Meet (the network
+// mode, game+0xa2aea0, is 3 or 6) it reads a property of the meet's entity (call game+0x52b6c0 at game+0x813c66) and then its +0xb0 with
+// no check. An accepted invite taken in a Car Meet ends matchmaking while that entity has no properties yet or any more: win1 2026-11-12
+// stopped at game+0x2d8ead reading 0x0 (list head of entity+0x68 null), stack 0x52b740 <- 0x813c6b. Then the game gets a zeroed stand-in
+// (status value 0) instead of a null.
+typedef void** (*PropFn)(void* entity, void** out);
+PropFn o_meet_prop;
+unsigned char g_zero_prop[0x100];
+void** hk_meet_prop(void* entity, void** out) {
+    if (!entity || !*(void**)((unsigned char*)entity + 0x68)) {
+        static bool told;
+        if (!told) {
+            told = true;
+            logf("guide: matchmaking ended in a Car Meet whose entity has no properties (an invite taken there): its online status uses 0 "
+                 "instead of a null read (game+0x813c66)");
+        }
+        out[0] = g_zero_prop, out[1] = nullptr;
+        return out;
+    }
+    void** r = o_meet_prop(entity, out);
+    if (!out[0]) out[0] = g_zero_prop;  // the property is not there (game+0x2d8e90's not-found answer): the same stand-in
+    return r;
+}
+
 }  // namespace
 
 bool join_install(const FH2ModApi* api, FH2Mod* mod, unsigned char* base, void (*log)(const char*)) {
@@ -111,6 +135,16 @@ bool join_install(const FH2ModApi* api, FH2Mod* mod, unsigned char* base, void (
     if (!h || !api->enable_hooks(mod, h)) {
         logf("guide: the matchmaking module's update could not be hooked: an accepted invite holds the seat, the player goes online by hand");
         return false;
+    }
+    // the call at game+0x813c66 must be `call game+0x52b6c0` (E8 rel32)
+    unsigned char* site = base + 0x813c66;
+    if (site[0] == 0xe8 && site + 5 + *(int32_t*)(site + 1) == base + 0x52b6c0) {
+        FH2Hook* g = api->hook_call(mod, "guide: the Car Meet status read when matchmaking ends (game+0x813c66)", site, (void*)hk_meet_prop,
+                                    (void**)&o_meet_prop);
+        if (!g || !api->enable_hooks(mod, g))
+            logf("guide: the Car Meet status read when matchmaking ends could not be guarded: accepting an invite in a Car Meet may stop the game");
+    } else {
+        logf("guide: game+0x813c66 is not the Car Meet status read this Guide knows: accepting an invite in a Car Meet may stop the game");
     }
     g_ready = true;
     logf("guide: an accepted invite joins through the game's own session-ready flow");
