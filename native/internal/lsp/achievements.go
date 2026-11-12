@@ -2,6 +2,9 @@ package lsp
 
 import (
 	"fmt"
+	"math"
+	"os"
+	"strconv"
 	"time"
 
 	"fh2mp/internal/achievements"
@@ -15,7 +18,8 @@ import (
 // once kept, stays: a report only adds.
 
 // reportAchievements is POST /v1/community/achievements {"unlocked": {"<id>": "YYYY-MM-DD HH:MM:SS UTC", ...}}: the ids the list has
-// are kept with their times, ids already kept keep the time they have. The answer is the player's count and Gamerscore.
+// are kept with their times, ids already kept keep the time they have. The answer is the player's count and Gamerscore, and "rarity":
+// how many players report achievements and what share of them has each one (the Guide's rare toast).
 func (l *Launcher) reportAchievements(me int64, body pyjson.Obj) (any, error) {
 	v, _ := body.Get("unlocked")
 	obj, isObj := v.(pyjson.Obj)
@@ -54,7 +58,58 @@ func (l *Launcher) reportAchievements(me int64, body pyjson.Obj) (any, error) {
 		communityLog.Info(fmt.Sprintf("achievements reported: xuid=%#x reported=%d new=%d unknown_ids=%d, now %d unlocked for %dG", me, len(obj), added, unknown,
 			len(ids), achievements.Gamerscore(ids)))
 	}
-	return pyjson.Obj{{K: "count", V: int64(len(ids))}, {K: "gamerscore", V: int64(achievements.Gamerscore(ids))}}, nil
+	rarity, err := l.achievementRarity()
+	if err != nil {
+		return nil, err
+	}
+	return pyjson.Obj{{K: "count", V: int64(len(ids))}, {K: "gamerscore", V: int64(achievements.Gamerscore(ids))}, {K: "rarity", V: rarity}}, nil
+}
+
+// RarePercent: an achievement fewer than this share of the players have is rare (Xbox Live's rule: under 10% of the game's players).
+// RareMinPlayers: with fewer reporting players a share says nothing, and nothing is rare.
+const (
+	RarePercent    = 10.0
+	RareMinPlayers = 10
+)
+
+// rarityOf turns the kept unlocks into shares: holders is achievement -> players who have it, players the number of players who report
+// achievements (every player with the Guide and the Achievements mod reports its whole list). phantom is added to players: the dev stack's
+// FH2MP_ACH_PHANTOM_PLAYERS, so two test accounts can see a rare toast; never set on prod.
+func rarityOf(holders map[string]int64, players, phantom int64) pyjson.Obj {
+	players += phantom
+	percent := pyjson.Obj{}
+	for _, d := range achievements.Defs() {
+		share := 0.0
+		if players > 0 {
+			share = math.Round(float64(holders[d.ID])*1000/float64(players)) / 10
+		}
+		percent = append(percent, pyjson.Pair{K: d.ID, V: share})
+	}
+	return pyjson.Obj{{K: "players", V: players}, {K: "rareBelow", V: RarePercent}, {K: "minPlayers", V: int64(RareMinPlayers)}, {K: "percent", V: percent}}
+}
+
+func (l *Launcher) achievementRarity() (pyjson.Obj, error) {
+	rows, err := l.C.DB.Query("SELECT achievement, COUNT(*) FROM player_achievements GROUP BY achievement")
+	if err != nil {
+		return nil, err
+	}
+	holders := map[string]int64{}
+	for i := range rows {
+		holders[rows[i].StrAt(0)] = rows[i].IntAt(1)
+	}
+	one, err := l.C.DB.Query("SELECT COUNT(DISTINCT xuid) FROM player_achievements")
+	if err != nil {
+		return nil, err
+	}
+	players := int64(0)
+	if len(one) > 0 {
+		players = one[0].IntAt(0)
+	}
+	phantom, _ := strconv.ParseInt(os.Getenv("FH2MP_ACH_PHANTOM_PLAYERS"), 10, 64)
+	if phantom < 0 {
+		phantom = 0
+	}
+	return rarityOf(holders, players, phantom), nil
 }
 
 // achievementsOf is a player's kept unlocks: the ids, and id -> when in the mod's form.
