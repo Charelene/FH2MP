@@ -433,8 +433,20 @@ void load_ach_art() {
     logf("guide: achievement toast: %d pictures and %d sounds loaded from data\\bin\\achievement-toast (%d pictures missing: drawn without)", pictures, wavs, missing);
 }
 
-// The toast's sound, from the real winmm.dll in the system folder (the one next to azimuth.exe is Extra Options').
+void log_line(const char* s) {
+    if (g_api && g_mod) g_api->log(g_mod, s);
+}
+
+// The Xbox 360 theme's Guide sounds, which the launcher puts into data/bin/guide-360 (constants.GUIDE_360; sfx.h).
+void load_360_sounds() {
+    int n = sfx_load(std::wstring(g_api->azimuth_dir) + L"\\data\\bin\\guide-360\\", log_line);
+    logf("guide: 360 sounds: %d of %d loaded from data\\bin\\guide-360 (the Xbox 360 theme plays them, a missing one is silent)", n, int(Sfx::Count));
+}
+
+// The toast's sound, from the real winmm.dll in the system folder (the one next to azimuth.exe is Extra Options'). The Xbox 360 theme has
+// the 360's own for every toast, NotifyPopup.
 void play_ach_sound(AchTier tier) {
+    if (theme_current() == "xbox360" && sfx_has(Sfx::Notify)) return sfx_play(Sfx::Notify);
     typedef BOOL(WINAPI * PlaySoundWFn)(LPCWSTR, HMODULE, DWORD);
     static PlaySoundWFn play = [] {
         wchar_t sys[MAX_PATH];
@@ -585,6 +597,7 @@ bool setup(IDXGISwapChain3* sc) {
 
     g_assets.gamerpic = load_gamerpic();
     load_ach_art();
+    load_360_sounds();
     load_theme();
     load_voice();
     g_guide.gamertag = read_gamertag();
@@ -789,6 +802,7 @@ void render(IDXGISwapChain3* sc) {
         sys_op = nullptr;
     }
     for (const GuideRequest& r : g_guide.take_requests()) ask(r);
+    for (Sfx s : g_guide.take_sounds()) sfx_play(s);  // before the return below: closing the Guide has a sound too
     if (g_open.load() != g_guide.open) net_guide_open(g_guide.open), g_open.store(g_guide.open);
     g_typing.store(g_guide.typing());
     if (!g_guide.busy(now)) return;

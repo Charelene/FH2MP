@@ -6,6 +6,7 @@
 #   build.sh           the mod
 #   build.sh preview   guide/build/guide-preview.exe: the same drawing off screen into a PNG (tests/preview.cpp)
 #   build.sh voicetest guide/build/voice-test.exe: the voice engine in a loopback without a game (tests/voice_test.cpp)
+#   build.sh sfxtest   guide/build/sfx-test.exe: the Xbox 360 theme's Guide sounds for a walk through the Guide (tests/sfx_test.cpp)
 set -euo pipefail
 cd "$(dirname "$0")"
 CXX=${CXX:-g++}
@@ -28,10 +29,15 @@ if [ "${1:-}" = voicetest ]; then
     echo "built: guide/build/voice-test.exe"
     exit 0
 fi
+if [ "${1:-}" = sfxtest ]; then
+    "$CXX" "${flags[@]}" -o build/sfx-test.exe tests/sfx_test.cpp src/sfx.cpp "${common[@]}" "${libs[@]}"
+    echo "built: guide/build/sfx-test.exe"
+    exit 0
+fi
 if [ "${1:-}" = preview ]; then
     "$CXX" "${flags[@]}" -o build/guide-preview.exe tests/preview.cpp "${common[@]}" "${libs[@]}" -lwindowscodecs
     echo "built: guide/build/guide-preview.exe"
     exit 0
 fi
-"$CXX" "${flags[@]}" -s -shared -DFH2MOD_PLATFORM_VERSION="\"$PLATFORM\"" -o build/FH2MPGuide.dll src/overlay.cpp src/voice.cpp "${common[@]}" "${libs[@]}" -l:libopus.a
+"$CXX" "${flags[@]}" -s -shared -DFH2MOD_PLATFORM_VERSION="\"$PLATFORM\"" -o build/FH2MPGuide.dll src/overlay.cpp src/voice.cpp src/sfx.cpp "${common[@]}" "${libs[@]}" -l:libopus.a
 echo "built: guide/build/FH2MPGuide.dll"

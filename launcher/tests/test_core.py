@@ -2248,6 +2248,49 @@ class AchToastTests(unittest.TestCase):
             self.assertEqual(len(self_calls), 1)
 
 
+class Guide360Tests(unittest.TestCase):
+    """The Guide's Xbox 360 theme sounds (Launcher.ensure_guide_360): every file the Guide plays, from the FH2MP mirror, checked by the
+    pinned hash, downloaded once, without the achievements setting."""
+    GUIDE_FILES = ("HUD_open.wav", "HUD_close.wav", "BladeOpen.wav", "BladeSwitch_1.wav", "BladeSwitch_2.wav", "BladeSwitch_3.wav",
+                   "BladeSwitch_4.wav", "btn_focusG.wav", "btn_InactiveFocus.wav", "btn_selectG.wav", "btn_InactiveSelect.wav", "btn_backG.wav",
+                   "tab_Switch.wav", "vk_Focus.wav", "vk_Select.wav", "NotifyPopup.wav")   # guide/src/sfx.cpp, sfx_file
+
+    def test_the_pins_are_the_guides_files(self):
+        from fh2mp_launcher.constants import GUIDE_360, MIRROR_BASE
+        self.assertTrue(GUIDE_360["base"].startswith(MIRROR_BASE))
+        self.assertEqual(GUIDE_360["dir"], "data/bin/guide-360")
+        self.assertEqual(sorted(GUIDE_360["files"]), sorted(self.GUIDE_FILES))
+        for name, (sha, size) in GUIDE_360["files"].items():
+            self.assertRegex(sha, r"^[0-9a-f]{64}$", name)
+            self.assertGreater(size, 0, name)
+
+    def test_files_in_place_are_not_downloaded_again(self):
+        from fh2mp_launcher import core, updater
+        from fh2mp_launcher.constants import GUIDE_360
+        from fh2mp_launcher.settings import Settings
+        az = tempfile.mkdtemp()
+        lc = core.Launcher(Settings(os.path.join(az, "settings.json")), load_identity=False)
+        lc.settings["azimuth_dir"] = az
+        lc.settings["achievements"] = False
+        data = b"RIFF-sound"
+        files = {"NotifyPopup.wav": (hashlib.sha256(data).hexdigest(), len(data))}
+        calls = []
+        def fake(self, url, entry, progress=None, cancelled=lambda: False, dest_dir=None):
+            calls.append(url)
+            path = os.path.join(dest_dir, entry["name"])
+            with open(path, "wb") as f:
+                f.write(data)
+            return path
+        with mock.patch.dict(GUIDE_360, files=files), mock.patch.object(updater.Updater, "download_url", fake):
+            self.assertTrue(lc.ensure_guide_360())
+            self.assertEqual(calls, [GUIDE_360["base"] + "NotifyPopup.wav"])
+            self.assertTrue(os.path.isfile(os.path.join(az, "data", "bin", "guide-360", "NotifyPopup.wav")))
+            self.assertEqual(lc.ensure_guide_360(), [])
+            self.assertEqual(len(calls), 1)
+            lc.settings["azimuth_dir"] = os.path.join(az, "gone")
+            self.assertEqual(lc.ensure_guide_360(), [])
+
+
 class AnnaTests(unittest.TestCase):
     """FH2 ANNA (shim.install_anna, anna_bindings): only its DLL comes from the release, the platform build in its zip stays out; Extra Options'
     D-pad autodrive and hazard buttons go to None only where they are still the defaults."""

@@ -13,6 +13,7 @@
 #include "achievements.h"
 #include "imgui.h"
 #include "net.h"
+#include "sfx.h"
 #include "theme.h"
 
 enum class PadEvent { Toggle, Up, Down, Left, Right, A, B, X, Y, Lb, Rb, Lt, Rt, L3, Start, OpenInvite };
@@ -185,6 +186,8 @@ public:
     void ach_toast(AchTier tier, int gamerscore, const std::string& name, const std::string& desc, float percent, int index, double now);
     // A toast started just now: the sound that goes with it, once.
     bool take_ach_sound(AchTier* tier);
+    // The Xbox 360 theme's Guide sounds since the last call, in order (none in the other themes; a toast's sound is take_ach_sound's).
+    std::vector<Sfx> take_sounds();
     bool ach_toast_showing(double now) const;
     // What came of a request, or what arrived: the 360's toasts and message boxes.
     void on_result(const NetResult& r, const GuideAssets& a, double now);
@@ -260,6 +263,18 @@ private:
         float badge_w = 20, badge_r = 999, size = 22;
     };
 
+    // the 360 theme's sounds: what an event changed decides which (guide.cpp, sounds_for)
+    std::vector<Sfx> sounds_;
+    void sound(Sfx s);
+    struct UiSnap {
+        bool open = false;
+        size_t depth = 0;
+        int blade = 0;
+        uint64_t focus = 0, tabs = 0, keys = 0, state = 0;
+    };
+    UiSnap snap() const;
+    void sounds_for(PadEvent e, const UiSnap& was, bool asked);
+    std::vector<GuideRequest> handle_event(PadEvent e, double now);
     // home
     int blade_ = 1;
     int focus_[3] = {0, 1, -1};

@@ -146,6 +146,8 @@ void Guide::ListFocus::move(int dy, int n, int visible, double now) {
 
 void Guide::toggle(double now) {
     open = !open;
+    sound(open ? Sfx::HudOpen : Sfx::HudClose);  // the 360's Guide background (hudbkgnd.xur)
+    if (open) sound(Sfx::BladeOpen);              // and its blades unfolding (GuideMain.xur)
     if (open) {
         opened_ = now, stack_ = {Page::Home}, page_at_ = -10, flow_base_ = -1;
         if (box_waiting_.on) box_ = box_waiting_, box_.at = now, box_waiting_.on = false;
@@ -476,9 +478,93 @@ void Guide::box_done(int tag, int button, std::vector<GuideRequest>& out, double
     if (tag == BoxThenClose && open) toggle(now);
 }
 
+// ---- the Xbox 360 theme's sounds
+
+void Guide::sound(Sfx s) {
+    if (theme_current() == "xbox360") sounds_.push_back(s);
+}
+
+std::vector<Sfx> Guide::take_sounds() {
+    std::vector<Sfx> out;
+    out.swap(sounds_);
+    return out;
+}
+
+namespace {
+struct Mix {
+    uint64_t h = 1469598103934665603ull;
+    Mix& add(uint64_t v) {
+        h = (h ^ v) * 1099511628211ull;
+        return *this;
+    }
+};
+}  // namespace
+
+// What an event can change, folded into numbers: where the focus is, which tab, the keyboard, and everything else an A can do. A page
+// with focus of its own adds it to focus here, or its moves are silent.
+Guide::UiSnap Guide::snap() const {
+    UiSnap s;
+    s.open = open, s.depth = stack_.size(), s.blade = blade_;
+    Mix f;
+    for (int v : focus_) f.add(uint64_t(v));
+    for (int v : {friends_.row, messages_.row, players_.row, party_.row, prof_row_[0], prof_row_[1], theme_row_[0], theme_row_[1], voice_row_,
+                  voice_volume_, edit_row_, msg_opt_, new_row_, pick_.row, draft_row_, ach_focus_, cmp_list_.row, ach_detail_, box_.focus})
+        f.add(uint64_t(v));
+    s.focus = f.h;
+    s.tabs = Mix().add(uint64_t(comm_tab_)).add(uint64_t(prof_tab_)).add(uint64_t(theme_tab_)).h;
+    s.keys = Mix().add(uint64_t(keys_.focus)).h;
+    Mix st;
+    st.add(uint64_t(page())).add(box_.on).add(draft_.to.size()).add(draft_.sending).add(game_pick_.chosen.size()).add(sent_.size()).add(uint64_t(held_));
+    for (const Friend& x : draft_.to) st.add(x.xuid);
+    for (uint64_t x : game_pick_.chosen) st.add(x);
+    st.add(voice_mic_).add(voice_chat_).add(keys_.text.size()).add(keys_.caret).add(keys_.caps).add(uint64_t(keys_.mode)).add(wanted_.size());
+    for (char32_t c : keys_.text) st.add(uint64_t(c));
+    s.state = st.h;
+    return s;
+}
+
+// The 360's sound for what an event did (none when it did nothing): a blade to the side BladeSwitch_<its tab>, another tab tab_Switch,
+// the focus moving btn_focusG (vk_Focus on the keyboard), A/X/Y doing something btn_selectG (vk_Select on the keyboard), A on a greyed
+// entry btn_InactiveSelect, B going back btn_backG. Opening and closing are toggle's. The theme page's preview of a theme is a focus move:
+// the theme is not part of the state.
+void Guide::sounds_for(PadEvent e, const UiSnap& was, bool asked) {
+    UiSnap now = snap();
+    if (now.open != was.open || !open) return;
+    bool keyboard = page() == Page::Keyboard && !box_.on;
+    // the 360's GuideMain has four tabs, Games & Apps 1, Home 2, Media 3, Settings 4, and a sound for arriving at each; ours are its
+    // Games, the player's own (Home) and Settings
+    static const Sfx tab_sound[3] = {Sfx::BladeSwitch1, Sfx::BladeSwitch2, Sfx::BladeSwitch4};
+    if (now.blade != was.blade) return sound(tab_sound[std::clamp(now.blade, 0, 2)]);
+    switch (e) {
+    case PadEvent::B:
+        if (now.depth != was.depth || now.state != was.state || asked) sound(Sfx::Back);
+        return;
+    case PadEvent::A:
+    case PadEvent::X:
+    case PadEvent::Y:
+    case PadEvent::Start:
+        if (now.depth != was.depth || now.state != was.state || now.tabs != was.tabs || asked) sound(keyboard && now.depth == was.depth ? Sfx::KeySelect : Sfx::Select);
+        else if (e == PadEvent::A) sound(Sfx::InactiveSelect);
+        return;
+    default: break;
+    }
+    if (now.depth != was.depth || now.state != was.state) sound(Sfx::Select);
+    else if (now.tabs != was.tabs) sound(Sfx::TabSwitch);
+    else if (now.keys != was.keys) sound(Sfx::KeyFocus);
+    else if (now.focus != was.focus) sound(Sfx::Focus);
+}
+
 // ---- events
 
 std::vector<GuideRequest> Guide::handle(PadEvent e, double now) {
+    if (e == PadEvent::Toggle) return handle_event(e, now);
+    UiSnap was = snap();
+    std::vector<GuideRequest> out = handle_event(e, now);
+    sounds_for(e, was, !out.empty());
+    return out;
+}
+
+std::vector<GuideRequest> Guide::handle_event(PadEvent e, double now) {
     std::vector<GuideRequest> out;
     if (e == PadEvent::Toggle) {
         toggle(now);

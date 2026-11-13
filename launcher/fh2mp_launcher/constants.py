@@ -219,6 +219,31 @@ ACH_TOAST = {
     "ach-sound-rare.wav": ("a751d4c56801951fb47b98a4d0c6ccc2b9ec9b8adbe1bbe54acd4a56c259ee7e", 2294656),
     },
 }
+# The Guide's Xbox 360 theme sounds: the 360's own (system update 2.0.17559: xam's HUD, button, keyboard and notification sounds, hud's blade
+# sounds; decoded from XMA to 16-bit PCM WAV, 44.1 kHz mono). Microsoft's files, mirrored on the FH2MP website like the toast's, never in this
+# repo; put into the Azimuth folder's data/bin/guide-360 by name -> (SHA-256, size). The Guide plays them in that theme only (guide/src/sfx.h).
+GUIDE_360 = {
+    "base": MIRROR_BASE + "guide-360/",
+    "dir": "data/bin/guide-360",
+    "files": {
+    "BladeOpen.wav": ("5815171d3cdfa81f1324219173b03945950da4146e361c76ce85e8d49058d204", 96326),
+    "BladeSwitch_1.wav": ("62bb8aee5a04c7f99d9261d333a5d5c044ac6b6ce7766542f97bafd2072e25be", 30710),
+    "BladeSwitch_2.wav": ("f1e1f0c2ca92246aee0107ff54a8cd7931b27b7276cf1f25b82177a65dfde7ba", 29412),
+    "BladeSwitch_3.wav": ("b3b9793717b1e7c71aacce09e698bce1d53001c065ccf8e4d39dbb3e6ccd3a5b", 28170),
+    "BladeSwitch_4.wav": ("48b1cbe24d9883ae646ea28dddf584faae8e6a5ae637358046584d9325e36897", 26802),
+    "HUD_close.wav": ("25d609c636197edec8dabb140a804793f11f95eedc2e9a891bca34753bcd03aa", 63942),
+    "HUD_open.wav": ("c0e8bf04a6a2b67961226869cd6df825cc86b6f16efa633b513b4d5833becda7", 122524),
+    "NotifyPopup.wav": ("2a853b05ed3540605683eb70a5c40f99739b8c2c7f80b4ffe60c3f36bf7f165c", 45908),
+    "btn_InactiveFocus.wav": ("f138eb3ea33c8c32b8a98e932a77e27e1d97203f1f4480e19e9692b762a2e3e5", 1980),
+    "btn_InactiveSelect.wav": ("373523a865018b3e37e74c975e268282873b4210af5ecca552d69a4931eeef98", 14156),
+    "btn_backG.wav": ("e268aececc2de6fa3d8cb309a95b9ec12acf3c3d1b21c528b8f9680d2bb2273c", 5574),
+    "btn_focusG.wav": ("aecf7b5c336c4edfae39c24374a1d693061a02599b3a38685470ed18e03036ae", 11494),
+    "btn_selectG.wav": ("02fa2ee73c252e86255ed18a435b17e5d7d4ccd49a0347662afc2832e2ec7993", 4774),
+    "tab_Switch.wav": ("37a60c23a73c89ce57ed9daa939492ea4e7b7be25885de0db86f73f206dd3f91", 81894),
+    "vk_Focus.wav": ("2df982e34235a380b976787a8a0440b0afdde06e2fddebcaa4bdbc9696543fb8", 41388),
+    "vk_Select.wav": ("f7dcad7d6d08ddcc4019c4f5105b91dbb04b8a15b5bc1c1172e1203f245e1707", 45206),
+    },
+}
 
 # The Extra Options build launchers up to 1.3.2 installed (0.4.4, zip FH2_Extra_Options_0.4.4-azimuth.zip): only to recognise FH2MP's own earlier
 # install when 0.6.0 replaces it. Its bundled packages were at the mods root; 0.6.0 brings its own copies in mods/Forza Horizon 2, so the old

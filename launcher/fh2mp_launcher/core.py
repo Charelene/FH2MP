@@ -702,6 +702,11 @@ class Launcher:
             from .api import log_failure
             log_failure("PLAY", "ach_toast", e, str(e))
         try:
+            self.ensure_guide_360()
+        except Exception as e:  # noqa: BLE001       # not worth stopping a game over: the Xbox 360 theme is then silent
+            from .api import log_failure
+            log_failure("PLAY", "guide_360", e, str(e))
+        try:
             self.ensure_controls()
         except shim.ShimError as e:                  # not worth stopping a game over: the toggles just stay where they are
             from .api import log_failure
@@ -1203,20 +1208,35 @@ class Launcher:
         """The achievement toast's sounds and pictures (constants.ACH_TOAST) from the FH2MP mirror, each checked by size and SHA-256, where
         the player wants achievements and a file is missing or not the pinned one. -> list of things done."""
         from .constants import ACH_TOAST
-        d = self.settings["azimuth_dir"]
-        if not self.settings["achievements"] or not d or not os.path.isdir(d):
+        if not self.settings["achievements"]:
             return []
-        dest = os.path.join(d, *ACH_TOAST["dir"].split("/"))
+        got = self._fetch_pinned_files(ACH_TOAST, progress, cancelled)
+        return [f"downloaded {got} sound and picture file(s) for the Guide's achievement toast"] if got else []
+
+    def ensure_guide_360(self, progress=None, cancelled=lambda: False):
+        """The Guide's Xbox 360 theme sounds (constants.GUIDE_360) from the FH2MP mirror, each checked by size and SHA-256, where a file is
+        missing or not the pinned one. -> list of things done."""
+        from .constants import GUIDE_360
+        got = self._fetch_pinned_files(GUIDE_360, progress, cancelled)
+        return [f"downloaded {got} sound file(s) for the Guide's Xbox 360 theme"] if got else []
+
+    def _fetch_pinned_files(self, pin, progress, cancelled):
+        """Puts pin["files"] (name -> (SHA-256, size)) from pin["base"] into the Azimuth folder's pin["dir"], skipping the ones already there
+        with the pinned hash. -> how many were downloaded (0 without an Azimuth folder)."""
+        d = self.settings["azimuth_dir"]
+        if not d or not os.path.isdir(d):
+            return 0
+        dest = os.path.join(d, *pin["dir"].split("/"))
         os.makedirs(dest, exist_ok=True)
         up = updater.Updater(channel=self.settings["channel"])
         got = 0
-        for name, (sha, size) in ACH_TOAST["files"].items():
+        for name, (sha, size) in pin["files"].items():
             target = os.path.join(dest, name)
             if os.path.isfile(target) and updater.sha256_file(target) == sha:
                 continue
-            up.download_url(ACH_TOAST["base"] + name, {"name": name, "sha256": sha, "size": size}, progress, cancelled, dest_dir=dest)
+            up.download_url(pin["base"] + name, {"name": name, "sha256": sha, "size": size}, progress, cancelled, dest_dir=dest)
             got += 1
-        return [f"downloaded {got} sound and picture file(s) for the Guide's achievement toast"] if got else []
+        return got
 
     def ensure_anna_bindings(self):
         """Extra Options' D-pad autodrive and hazard buttons (ANNA's buttons) go to None once; a binding the player chose is never touched, and a
