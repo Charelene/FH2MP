@@ -239,9 +239,9 @@ func (h *Hub) WorldFor(lobbyType int, name string) *World {
 		}
 		if _, err := os.Stat(gamedb); err == nil {
 			w.RtGamedb = gamedb
-			if cand, err := PickRoadTripCandidates(h.PickRng(), gamedb, 1); err == nil {
+			if cand, err := w.rtPickCandidates(h.PickRng(), 1); err == nil {
 				w.RtCandidates = cand
-				w.Logf("road trip candidates: locations %s events %s classes %s", locsRepr(cand), eventsRepr(cand), intList(cand.Classes[:]))
+				w.Logf("road trip candidates: %s %s events %s classes %s", w.rtOptionsWord(), locsRepr(cand), eventsRepr(cand), intList(cand.Classes[:]))
 			}
 		} else {
 			w.Logf("road trip: no game database (%s); the vote will be empty. Build %s with tools/gamedata/make_roadtrip_db.py or point FH2MP_GAMEDB at gamedbRC.slt", gamedb, roadTripDBPath())

@@ -321,7 +321,7 @@ func (w *World) RtNewRound() {
 				here++
 			}
 		}
-		if cand, err := PickRoadTripCandidates(w.pickRng(), w.RtGamedb, here); err == nil {
+		if cand, err := w.rtPickCandidates(w.pickRng(), here); err == nil {
 			w.RtCandidates = cand
 		} else {
 			panic(err)
@@ -507,7 +507,7 @@ func (w *World) RtFinishVote() {
 	w.RtState = RTCarSelect
 	w.RtEndMs = w.NowMs() + RTCarSelectMs
 	loc := w.RtCandidates.Locs[winner]
-	w.Logf("vote closed %s: location %d wins; State -> CarSelect", intList(counts[:]), loc)
+	w.Logf("vote closed %s: %s %d wins; State -> CarSelect", intList(counts[:]), w.rtOptionWord(), loc)
 	race := w.RtCandidates.Events[winner][0]
 	w.RtPicked = map[*Peer]bool{}
 	w.RtIdx = 0
@@ -578,13 +578,13 @@ func (w *World) RtStartDrive() {
 	if w.RtLastRace != nil {
 		from = w.RtLastLoc
 	}
-	w.RtDriveMs = RoadTripDriveMs(from, &loc)
+	w.RtDriveMs = w.rtDriveMs(from, &loc)
 	w.RtEndMs = w.NowMs() + w.RtDriveMs
 	src := "none: the festival"
 	if w.RtLastRace != nil {
 		src = fmt.Sprint(prev)
 	}
-	w.Logf("car select over: State -> DriveToEvent (location %d, event %d, from the end of event %s, %d s)", loc, race, src, w.RtDriveMs/1000)
+	w.Logf("car select over: State -> DriveToEvent (%s %d, event %d, from the end of event %s, %d s)", w.rtOptionWord(), loc, race, src, w.RtDriveMs/1000)
 	w.SetSessionHostBool(SHRaceReady, 1, "road trip: the next event is chosen")
 	w.RtBroadcast(rtv("CurrentLocationId", loc), rtv("CompletedEventCount", int64(w.RtIdx)), rtv("EventRaceId", prev), rtv("NextRaceId", race),
 		rtv("State", RTDriveToEvent), rtv("StateEndTime", 0))
@@ -619,7 +619,7 @@ func (w *World) RoadTripTick(now float64) {
 		}
 		if w.RtState == RTInitialising {
 			if w.RtGamedb != "" {
-				cand, err := PickRoadTripCandidates(w.pickRng(), w.RtGamedb, here)
+				cand, err := w.rtPickCandidates(w.pickRng(), here)
 				if err != nil {
 					panic(err)
 				}
@@ -627,7 +627,7 @@ func (w *World) RoadTripTick(now float64) {
 				w.RtPickPlayers = here
 				w.RtVotes = omap.New[*Peer, int]()
 				w.RtWinner = -1
-				w.Logf("road trip candidates: locations %s events %s classes %s", locsRepr(cand), eventsRepr(cand), intList(cand.Classes[:]))
+				w.Logf("road trip candidates: %s %s events %s classes %s", w.rtOptionsWord(), locsRepr(cand), eventsRepr(cand), intList(cand.Classes[:]))
 			}
 			w.RtState = RTDestinationVote
 			w.RtEndMs = w.NowMs() + RTVoteMs
@@ -639,13 +639,13 @@ func (w *World) RoadTripTick(now float64) {
 				}
 			}
 			if here > w.RtPickPlayers && !shown {
-				cand, err := PickRoadTripCandidates(w.pickRng(), w.RtGamedb, here)
+				cand, err := w.rtPickCandidates(w.pickRng(), here)
 				if err != nil {
 					panic(err)
 				}
 				w.RtCandidates = cand
 				w.RtPickPlayers = here
-				w.Logf("road trip: %d players, vote drawn again: locations %s events %s", here, locsRepr(cand), eventsRepr(cand))
+				w.Logf("road trip: %d players, vote drawn again: %s %s events %s", here, w.rtOptionsWord(), locsRepr(cand), eventsRepr(cand))
 				for _, o := range w.Peers.Values() {
 					if o != q && o.Connected && o.RtStarted {
 						w.Send(o, false, netv2.RoadTripEventSelectionUpdate(uint64(o.EsSeq), w.RtCandidates.selection(w.rtCounts())))
