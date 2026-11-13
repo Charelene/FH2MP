@@ -15,7 +15,17 @@ from .social_widgets import Button, MessageBubble, Overlay, PersonAvatar, Search
 from .workers import run_async
 
 MODES = {"freeroam": "Online Free Roam", "roadtrip": "Online Road Trip"}
-STATES = {"playing": "In game", "online": "Online", "offline": "Offline"}
+# Storm Island lobbies sit in the column of their mode, under their own name.
+NAMES = {**MODES, "islandfreeroam": "Storm Island Free Roam", "islandroadtrip": "Storm Island Road Trip"}
+ISLAND = {"islandfreeroam": "freeroam", "islandroadtrip": "roadtrip"}
+
+
+def mode_of(kind):
+    """The lobby list column (MODES key) of a lobby kind, on either side."""
+    return ISLAND.get(kind, kind)
+
+
+STATES ={"playing": "In game", "online": "Online", "offline": "Offline"}
 
 
 def label(text, name="", wrap=False):
@@ -835,7 +845,7 @@ class ReservationDialog(SocialDialog):
             row.setContentsMargins(16, 14, 16, 14)
             text = QVBoxLayout()
             text.setSpacing(2)
-            tag = label(MODES[lobby['kind']].upper(), 'small')
+            tag = label(NAMES.get(lobby['kind'], lobby['kind']).upper(), 'small')
             tag.setFont(font(12, 700, spacing=.08))
             text.addWidget(tag)
             title = label('Lobby ' + lobby['id'][:8])
@@ -856,15 +866,18 @@ class ReservationDialog(SocialDialog):
             title = label('We hold one slot for 5 minutes')
             title.setFont(font(16, 700))
             text.addWidget(title)
-            text.addWidget(label('Press PLAY, then enter ' + MODES[lobby['kind']] + '. The slot is released if you miss the timer. One hold at a time.', 'muted', True))
+            text.addWidget(label('Press PLAY, then enter ' + NAMES.get(lobby['kind'], lobby['kind']) + '. The slot is released if you miss the timer. One hold at a time.', 'muted', True))
             notice.addLayout(text, 1)
             self.lay.addLayout(notice)
         else:
             self.lay.addWidget(label("Pick a mode. A spot in the new lobby is held for you for 5 minutes.", 'muted', True))
             self.roam = QRadioButton('Online Free Roam\nOpen world exploration, pick any event.')
             self.trip = QRadioButton('Online Road Trip\nVote for destination, travel to events.')
+            self.island_roam = QRadioButton("Storm Island Free Roam\nThe island's open world, pick any event.")
+            self.island_trip = QRadioButton('Storm Island Road Trip\nVote for a championship, travel to events.')
+            self.kinds = {self.roam: 'freeroam', self.trip: 'roadtrip', self.island_roam: 'islandfreeroam', self.island_trip: 'islandroadtrip'}
             self.roam.setChecked(True)
-            for choice in (self.roam, self.trip):
+            for choice in self.kinds:
                 choice.setMinimumHeight(66)
                 choice.setStyleSheet(f'QRadioButton {{background:{theme.MANTLE};border:1px solid {theme.LINE};border-radius:12px;padding:4px 16px;}} QRadioButton:checked {{border-color:{theme.ACCENT};}}')
                 self.lay.addWidget(choice)
@@ -879,7 +892,7 @@ class ReservationDialog(SocialDialog):
 
     def reserve(self):
         self.submit.setEnabled(False)
-        body = {'lobby': self.lobby['id']} if self.lobby else {'kind': 'freeroam' if self.roam.isChecked() else 'roadtrip'}
+        body = {'lobby': self.lobby['id']} if self.lobby else {'kind': next(k for b, k in self.kinds.items() if b.isChecked())}
         self.c.action('/reservation', body=body, owner=self, done=lambda _: (self.close(), self.c.load_lobbies()))
 
     def failed(self, error):
@@ -951,7 +964,7 @@ class LobbiesDialog(SocialDialog):
         self.error.setVisible(bool(data.get('error')))
         max_rows = 1
         for column, (kind, title) in enumerate(MODES.items()):
-            group = [r for r in data.get('lobbies', []) if r['kind'] == kind]
+            group = [r for r in data.get('lobbies', []) if mode_of(r['kind']) == kind]
             max_rows = max(max_rows, len(group))
             section = QFrame()
             section.setObjectName('lobbySection')

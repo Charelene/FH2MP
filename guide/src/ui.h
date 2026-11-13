@@ -386,6 +386,8 @@ inline std::string lobby_words(const Friend& f) {
     if (!f.lobby_status.empty()) return f.lobby_status;
     if (f.lobby_kind == "freeroam") return "Free Roam";
     if (f.lobby_kind == "roadtrip") return "Road Trip";
+    if (f.lobby_kind == "islandfreeroam") return "Storm Island Free Roam";
+    if (f.lobby_kind == "islandroadtrip") return "Storm Island Road Trip";
     return f.lobby_kind;
 }
 

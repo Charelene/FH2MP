@@ -18,7 +18,7 @@ from .widgets import (AccountButton, Banner, Brand, Carousel, DetailSheet, Gradi
                       has_detail, link_colour, menu)
 from .wizard import Wizard
 from .workers import run_async
-from .community import CommunityController, FriendsPanel
+from .community import CommunityController, FriendsPanel, mode_of
 from .social_widgets import BadgeIcon
 
 
@@ -201,8 +201,8 @@ class MainWindow(QMainWindow):
         text = f"Spot held · {self.community.remaining()}" if hold else "Hold a slot for 5 min"
         lobbies = self.community.lobby_data.get('lobbies')
         live_counts = self.community.data.get('lobbyCounts')
-        counts = [f"{live_counts[kind]} active" if live_counts is not None else
-                  f"{sum(r['kind'] == kind for r in lobbies)} active" if lobbies is not None else "Browse" for kind in ('freeroam', 'roadtrip')]
+        counts = [f"{live_counts.get(kind, 0) + live_counts.get('island' + kind, 0)} active" if live_counts is not None else
+                  f"{sum(mode_of(r['kind']) == kind for r in lobbies)} active" if lobbies is not None else "Browse" for kind in ('freeroam', 'roadtrip')]
         return [{"kind": "lobbies", "tag": "ONLINE LOBBIES", "title": "Reserve a spot", "text": text,
                  "glyph": "|".join(counts), "image": "", "url": "", "link": ""}] + cards
 

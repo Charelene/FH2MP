@@ -219,6 +219,36 @@ class FriendsUi(unittest.TestCase):
         self.c.load_lobbies.assert_called_once()
         self.assertEqual(card.cursor().shape(), Qt.CursorShape.PointingHandCursor)
 
+    def test_storm_island_lobbies_sit_in_their_mode_column(self):
+        rows = [{'id': 'aaaa1111', 'kind': 'freeroam', 'status': 'Free roaming', 'players': 1, 'occupied': 1, 'capacity': 12, 'held': 0},
+                {'id': 'bbbb2222', 'kind': 'islandfreeroam', 'status': 'Free roaming on Storm Island', 'players': 2, 'occupied': 2,
+                 'capacity': 12, 'held': 0},
+                {'id': 'cccc3333', 'kind': 'islandroadtrip', 'status': 'Voting for a championship on Storm Island', 'players': 1,
+                 'occupied': 1, 'capacity': 12, 'held': 0, 'event': 1, 'events': 4}]
+        self.c.lobby_data = {'lobbies': rows}
+        dlg = self.c.lobbies()
+        QTest.qWait(250)
+        texts = [l.text() for l in dlg.findChildren(QLabel)]
+        self.assertIn('Lobby bbbb2222', texts)
+        self.assertIn('Lobby cccc3333', texts)
+        self.assertIn('Free roaming on Storm Island', texts)
+        self.assertEqual(texts.count('2 active'), 1)        # Free Roam: the mainland and the island lobby
+        self.assertEqual(texts.count('1 active'), 1)        # Road Trip: the island one
+
+    def test_lobby_request_can_ask_for_storm_island(self):
+        dlg = community.ReservationDialog(self.c, None, self.window)
+        dlg.island_trip.setChecked(True)
+        dlg.reserve()
+        self.assertEqual(self.c.action.call_args.kwargs['body'], {'kind': 'islandroadtrip'})
+        dlg.close()
+
+    def test_home_lobby_card_counts_both_sides(self):
+        self.c.data['lobbyCounts'] = {'freeroam': 1, 'roadtrip': 0, 'islandfreeroam': 2, 'islandroadtrip': 1}
+        cards = self.window._home_cards()
+        self.assertEqual(cards[0]['glyph'], '3 active|1 active')
+        self.c.data['lobbyCounts'] = {'freeroam': 4, 'roadtrip': 2}     # an LSP without island lobbies
+        self.assertEqual(self.window._home_cards()[0]['glyph'], '4 active|2 active')
+
     def click_menu_action(self, button, text):
         QTest.mouseClick(button, Qt.MouseButton.LeftButton)
         QTest.qWait(30)

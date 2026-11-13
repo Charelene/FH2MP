@@ -538,7 +538,15 @@ func (h *Hub) lobbyStatus() pyjson.Obj {
 			if !ok {
 				st = "Getting ready"
 			}
+			if world.Island {
+				if world.RtState == RTDestinationVote {
+					st = "Voting for a championship"
+				}
+				st += " on Storm Island"
+			}
 			obj = append(obj, pyjson.Pair{K: "status", V: st}, pyjson.Pair{K: "event", V: world.RtIdx + 1}, pyjson.Pair{K: "events", V: 4})
+		} else if world.Island {
+			obj = append(obj, pyjson.Pair{K: "status", V: "Free roaming on Storm Island"})
 		} else {
 			obj = append(obj, pyjson.Pair{K: "status", V: "Free roaming"})
 		}

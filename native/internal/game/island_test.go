@@ -165,6 +165,9 @@ func TestIslandLobbiesAreListed(t *testing.T) {
 	if k, _ := row.Get("kind"); k != "islandfreeroam" {
 		t.Fatalf("kind %v, want islandfreeroam", k)
 	}
+	if st, _ := row.Get("status"); st != "Free roaming on Storm Island" {
+		t.Fatalf("status %v", st)
+	}
 	if c, _ := row.Get("capacity"); c != capacity.FreeRoam() {
 		t.Fatalf("capacity %v, want the Free Roam capacity %d", c, capacity.FreeRoam())
 	}

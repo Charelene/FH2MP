@@ -49,7 +49,12 @@ std::string failure_text(const NetResult& r, const char* fallback) {
     return fallback;
 }
 
-const char* game_words(const std::string& kind) { return kind == "roadtrip" ? "Road Trip" : "Free Roam"; }
+const char* game_words(const std::string& kind) {
+    if (kind == "roadtrip") return "Road Trip";
+    if (kind == "islandroadtrip") return "Storm Island Road Trip";
+    if (kind == "islandfreeroam" || kind == "islandcarmeet") return "Storm Island Free Roam";
+    return "Free Roam";
+}
 
 }  // namespace
 
