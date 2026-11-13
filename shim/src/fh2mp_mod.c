@@ -1293,8 +1293,8 @@ static int patch_secure_association(void)
  * invite names with FUN_1417b8c50 (MatchRequester::SetSession: stores the session at +0x118, state 8). The lobby type that
  * the connect request then carries (OpenConnection field a) is MatchRequester+0x160, which only CreatePrivateGame
  * (FUN_1417b6de0) and a match set; a joiner would still send the Car Meet type (3) and land in a Car Meet world. So set it
- * from the synced invite type the way the creator does (FUN_1407d00e0): Road Trip = 1, Free Roam = 2. Takes over the whole
- * function (it is small). Disable with env FH2MP_NO_INVITETYPE.
+ * from the synced invite type the way the creator does (FUN_1407d00e0): Road Trip = 1, Free Roam = 2, on Storm Island 4 and 5.
+ * Takes over the whole function (it is small). Disable with env FH2MP_NO_INVITETYPE.
  */
 #define FH2_SETSESSION_RVA 0x17b8c50u
 #define FH2_CARMEET_SYNCED_GLOBAL_RVA 0x34d5c68u
@@ -1313,10 +1313,19 @@ static void set_session_stub(void *mr, void **refp)
         if (obj) {
             unsigned char invite = ((unsigned char (*)(void *))(*(void ***)obj)[0xa0 / 8])(obj);
             if (invite == 1 || invite == 2) {
-                *(int *)((unsigned char *)mr + 0x160) = invite == 2 ? 1 : 2;
+                /* On Storm Island the creator's FUN_1407d00e0 picks 4 / 5 instead of 1 / 2. The joiner's request still holds the type of
+                 * the Car Meet it is in (3 on the mainland, 6 on the island), which says the side. */
+                int cur = *(int *)((unsigned char *)mr + 0x160);
+                int island = cur >= 4 && cur <= 6;
+                int type = invite == 2 ? (island ? 4 : 1) : (island ? 5 : 2);
+                *(int *)((unsigned char *)mr + 0x160) = type;
                 log_begin();
-                log_raw(invite == 2 ? "invitetype: joining a Road Trip invite, lobby type 1\n"
-                                    : "invitetype: joining a Free Roam invite, lobby type 2\n");
+                log_raw(invite == 2 ? "invitetype: joining a Road Trip invite" : "invitetype: joining a Free Roam invite");
+                log_raw(island ? " on Storm Island, lobby type " : ", lobby type ");
+                log_dec((unsigned long)type);
+                log_raw(" (the request held lobby type ");
+                log_dec((unsigned long)(unsigned)cur);
+                log_raw(")\n");
             }
         }
     }
