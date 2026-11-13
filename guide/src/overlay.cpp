@@ -1,9 +1,13 @@
 // FH2MPGuide.dll, the in-game Guide as a FH2 Mod Platform mod, drawn into the game's own frames the way the Steam and Discord overlays
 // do: it hooks DXGI's Present/Present1 and ResizeBuffers, and on each present that has something to show it records one command list with
 // Dear ImGui's DX12 backend onto the back buffer, on the swap chain's own queue, before the frame goes out. That queue is learnt when the
-// swap chain is made (DXGI's CreateSwapChain* are hooked from the mod's start, before Azimuth makes its own; GetDevice does not name it).
-// Never on another queue: drawing on the first direct queue the game used removed the device under Azimuth (2026-11-11). Nothing is
-// drawn or recorded while the Guide is closed and no toast plays.
+// swap chain is made (DXGI's CreateSwapChain* are hooked in fh2mod_init, before the later mods' and usually before Azimuth makes its own;
+// GetDevice does not name it), or, when Azimuth was faster, read from the swap chain where DXGI keeps it (src/chainfind.h). Never on
+// another queue: drawing on the first direct queue the game used removed the device under Azimuth (2026-11-11). Nothing is drawn or
+// recorded while the Guide is closed and no toast plays.
+// Other overlays (player logs 2026-11-13, ShowFPS 1.1.1): a mod that gives the game's swap chain a copy of DXGI's vtable with its own
+// Present skips the Guide's later hook on DXGI's Present, so that copy's slots are hooked too (chain_watch); the probe swap chain that
+// tells DXGI's Present is made past the later mods' CreateSwapChain* detours, and checked to be DXGI's own.
 // Opening: the pad's Guide button held for half a second (XInputGetStateEx, a reader thread) or Home in the game window. While open the
 // game gets an idle pad (Windows.Gaming.Input's IGamepad::GetCurrentReading, which Azimuth reads, is hooked) and the Guide takes the
 // keyboard's arrows, Enter, Escape, Q and E from the game window. FH2MP_NO_GUIDE=1 keeps it off. Log: the platform's log.
@@ -18,6 +22,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <map>
 #include <mutex>
@@ -25,6 +30,7 @@
 #include <vector>
 
 #include "backends/imgui_impl_dx12.h"
+#include "chainfind.h"
 #include "fh2mod.h"
 #include "gfx.h"
 #include "guide.h"
@@ -61,6 +67,10 @@ struct Ev {
 std::mutex g_ev_mu;
 std::deque<Ev> g_events;
 std::atomic<bool> g_open{false}, g_typing{false}, g_join_ok{false};
+// Whether the Guide draws: 0 = no frame of the game's swap chain has reached it yet, 1 = drawing, 2 = off for this run (g_off_reason).
+std::atomic<int> g_draw_state{0};
+const char* const k_waiting = "no frame of the game has reached it yet";
+std::atomic<const char*> g_off_reason{k_waiting};
 
 void push(PadEvent e) {
     std::lock_guard<std::mutex> l(g_ev_mu);
@@ -193,9 +203,13 @@ DWORD WINAPI pad_thread(LPVOID) {
         PadEvent out[16];
         int n = reader.feed(st.buttons, st.lt, st.rt, st.lx, st.ly, now, g_open.load(), out);
         for (int i = 0; i < n; i++) {
-            if (out[i] == PadEvent::Toggle)
+            if (out[i] == PadEvent::Toggle && g_draw_state.load() != 1) {
+                static bool told;
+                if (!told) told = true, logf("guide: the Guide button was held, but the Guide is not drawing: %s", g_off_reason.load());
+            } else if (out[i] == PadEvent::Toggle) {
                 logf("guide: the Guide button %s (held %llu ms)", reader.guide_fired ? "was held long enough: the Guide toggles" : "was tapped: the open Guide closes",
                      (unsigned long long)(now - reader.guide_since));
+            }
             push(out[i]);
         }
     }
@@ -259,6 +273,20 @@ typedef HRESULT(STDMETHODCALLTYPE* ResizeBuffersFn)(IDXGISwapChain3*, UINT, UINT
 PresentFn o_present;
 Present1Fn o_present1;
 ResizeBuffersFn o_resize;
+// the same three in another mod's copy of the game's swap chain vtable (chain_watch)
+PresentFn o_clone_present;
+Present1Fn o_clone_present1;
+ResizeBuffersFn o_clone_resize;
+
+// From the probe swap chain: DXGI's own swap chain vtable (entries 0..22 and where it is), where DXGI keeps a swap chain's queue, and
+// the vtable every Direct3D 12 queue of this process has.
+void* g_dxgi_vt[chainfind::VT_SLOTS];
+const void* g_dxgi_vt_addr;
+std::vector<long> g_queue_offsets;
+const void* g_queue_vt;
+std::atomic<void*> g_last_chain{nullptr};  // the latest Direct3D 12 swap chain made since the factory hooks (not held: a reference
+                                           // would keep Azimuth from making a new one on the same window)
+std::atomic<int> g_presents{0};             // frames that reached render()
 
 ID3D12CommandQueue* g_queue;  // the swap chain's own queue
 
@@ -277,6 +305,7 @@ void note_chain(IUnknown* device, IUnknown* made) {
     ID3D12CommandQueue* q = nullptr;
     IUnknown* chain = identity(made);
     if (!device || !chain || FAILED(device->QueryInterface(IID_PPV_ARGS(&q))) || !q) return;  // not Direct3D 12
+    g_last_chain.store(made);
     std::lock_guard<std::mutex> l(g_chains_mu);
     for (auto& c : g_chains)
         if (c.first == chain) {
@@ -343,7 +372,6 @@ DXGI_FORMAT g_format;
 GuideAssets g_assets;
 Guide g_guide;
 double g_last_frame;
-thread_local bool t_in_present;
 
 void srv_alloc(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE* cpu, D3D12_GPU_DESCRIPTOR_HANDLE* gpu) {
     if (g_srv_free.empty()) {  // all in use: share the last one (a picture shows wrong; nothing breaks)
@@ -548,11 +576,23 @@ std::string read_gamertag() {
 bool setup(IDXGISwapChain3* sc) {
     g_queue = queue_of(sc);
     if (!g_queue) {
-        logf("guide: this swap chain was made before the Guide could see it, so its command queue is unknown: no Guide this run");
+        long at = 0;
+        if ((g_queue = chainfind::queue_in_chain(sc, g_queue_offsets, g_queue_vt, &at)))
+            logf("guide: the game's swap chain was made before the Guide's hooks; its queue was read from the swap chain (+0x%lx), a direct "
+                 "queue on the swap chain's device",
+                 at);
+    }
+    if (!g_queue) {
+        logf(g_queue_offsets.empty() ? "guide: the game's swap chain was made before the Guide's hooks, and where DXGI keeps a swap chain's queue "
+                                       "was not found on the probe: no Guide this run"
+                                     : "guide: the game's swap chain was made before the Guide's hooks, and no direct queue of its device is "
+                                       "where DXGI keeps a swap chain's queue: no Guide this run");
+        g_off_reason.store("the game's swap chain was made before the Guide's hooks and its queue is unknown");
         return false;
     }
     if (g_queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT) {
         logf("guide: the swap chain's queue is not a direct queue (%d): no Guide", int(g_queue->GetDesc().Type));
+        g_off_reason.store("the game's swap chain's queue is not a direct queue");
         return false;
     }
     DXGI_SWAP_CHAIN_DESC desc{};
@@ -754,13 +794,17 @@ void ask(const GuideRequest& r) {
 
 void render(IDXGISwapChain3* sc) {
     if (g_failed) return;
+    g_presents.fetch_add(1, std::memory_order_relaxed);
     if (!g_ready) {
         g_ready = setup(sc);
         if (!g_ready) {
             g_failed = true;
+            if (g_off_reason.load() == k_waiting) g_off_reason.store("it could not set up on the game's swap chain");
+            g_draw_state.store(2);
             logf("guide: could not set up on the game's swap chain: the Guide stays off for this run");
             return;
         }
+        g_draw_state.store(1);
         sysui_showing(true);
     }
     if (sc != g_swapchain) return;  // a second swap chain (a video, say): the Guide only draws on the game's
@@ -861,37 +905,57 @@ void render(IDXGISwapChain3* sc) {
     g_queue->Signal(g_fence, f.fence = ++g_fence_value);
 }
 
+// The Guide's present and resize detours, on DXGI's own functions (hk_*) and in another mod's copy of the vtable (hk_clone_*): a call
+// that passes both is handled at the outer one only (chainfind::Once, held across the original).
 HRESULT STDMETHODCALLTYPE hk_present(IDXGISwapChain3* sc, UINT sync, UINT flags) {
-    if (!t_in_present && !(flags & DXGI_PRESENT_TEST)) {
-        t_in_present = true;
-        render(sc);
-        t_in_present = false;
-    }
+    chainfind::Once once;
+    if (once.first && !(flags & DXGI_PRESENT_TEST)) render(sc);
     return o_present(sc, sync, flags);
 }
 
 HRESULT STDMETHODCALLTYPE hk_present1(IDXGISwapChain3* sc, UINT sync, UINT flags, const DXGI_PRESENT_PARAMETERS* p) {
-    if (!t_in_present && !(flags & DXGI_PRESENT_TEST)) {
-        t_in_present = true;
-        render(sc);
-        t_in_present = false;
-    }
+    chainfind::Once once;
+    if (once.first && !(flags & DXGI_PRESENT_TEST)) render(sc);
     return o_present1(sc, sync, flags, p);
 }
 
-HRESULT STDMETHODCALLTYPE hk_resize(IDXGISwapChain3* sc, UINT n, UINT w, UINT h, DXGI_FORMAT fmt, UINT flags) {
+HRESULT STDMETHODCALLTYPE hk_clone_present(IDXGISwapChain3* sc, UINT sync, UINT flags) {
+    chainfind::Once once;
+    if (once.first && !(flags & DXGI_PRESENT_TEST)) render(sc);
+    return o_clone_present(sc, sync, flags);
+}
+
+HRESULT STDMETHODCALLTYPE hk_clone_present1(IDXGISwapChain3* sc, UINT sync, UINT flags, const DXGI_PRESENT_PARAMETERS* p) {
+    chainfind::Once once;
+    if (once.first && !(flags & DXGI_PRESENT_TEST)) render(sc);
+    return o_clone_present1(sc, sync, flags, p);
+}
+
+HRESULT resize(ResizeBuffersFn original, IDXGISwapChain3* sc, UINT n, UINT w, UINT h, DXGI_FORMAT fmt, UINT flags) {
+    chainfind::Once once;
+    if (!once.first) return original(sc, n, w, h, fmt, flags);
     if (g_ready && sc == g_swapchain) release_buffers();
-    HRESULT hr = o_resize(sc, n, w, h, fmt, flags);
+    HRESULT hr = original(sc, n, w, h, fmt, flags);
     if (g_ready && sc == g_swapchain && SUCCEEDED(hr)) {
         DXGI_SWAP_CHAIN_DESC d{};
         sc->GetDesc(&d);
         if (d.BufferCount != g_frames.size() || d.BufferDesc.Format != g_format) {
             logf("guide: the game changed its swap chain's buffers (%u, format %d): the Guide stays off for this run", d.BufferCount, int(d.BufferDesc.Format));
             g_failed = true;
+            g_off_reason.store("the game changed its swap chain's buffers");
+            g_draw_state.store(2);
             sysui_showing(false);
         }
     }
     return hr;
+}
+
+HRESULT STDMETHODCALLTYPE hk_resize(IDXGISwapChain3* sc, UINT n, UINT w, UINT h, DXGI_FORMAT fmt, UINT flags) {
+    return resize(o_resize, sc, n, w, h, fmt, flags);
+}
+
+HRESULT STDMETHODCALLTYPE hk_clone_resize(IDXGISwapChain3* sc, UINT n, UINT w, UINT h, DXGI_FORMAT fmt, UINT flags) {
+    return resize(o_clone_resize, sc, n, w, h, fmt, flags);
 }
 
 LRESULT CALLBACK dummy_proc(HWND h, UINT m, WPARAM w, LPARAM l) { return DefWindowProcW(h, m, w, l); }
@@ -923,7 +987,9 @@ void on_game_invite_ui() { push(PadEvent::OpenInvite); }
 // The Party probe (probe.cpp), on with FH2MP_GUIDE_PROBE=1: logs the Party statics calls, to find the one behind the game's Invite Friends.
 // (game+0x179a110 is not it: it runs when Free Roam is joined and then every frame, 2026-11-11.)
 
-// DXGI's swap chain makers, hooked as early as possible: they tell which queue each swap chain belongs to.
+// DXGI's swap chain makers: they tell which queue each swap chain belongs to. Hooked in fh2mod_init: mods start in alphabetical order,
+// so these detours are on before those of the mods after this one (ShowFPS's among them), and the probe's call through o_create_hwnd
+// runs past those. They are this mod's first hooks, so all four go on in one go (the game's threads are paused once).
 bool hook_factory() {
     IDXGIFactory2* fac = nullptr;
     if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&fac))) || !fac) {
@@ -936,21 +1002,80 @@ bool hook_factory() {
                      g_api->hook_function(g_mod, "guide: IDXGIFactory2::CreateSwapChainForCoreWindow", fvt[16], (void*)hk_create_core, (void**)&o_create_core),
                      g_api->hook_function(g_mod, "guide: IDXGIFactory2::CreateSwapChainForComposition", fvt[24], (void*)hk_create_comp, (void**)&o_create_comp)};
     fac->Release();
-    bool ok = true;
-    for (FH2Hook* x : h) ok = ok && x && g_api->enable_hooks(g_mod, x);
+    bool ok = h[0] && h[1] && h[2] && h[3] && g_api->enable_hooks(g_mod, nullptr);
     if (!ok) logf("guide: the swap chain makers could not be hooked: no Guide");
     return ok;
 }
 
-// The present vtable addresses come from a throw-away device, queue and swap chain on a hidden window (DXGI and Direct3D 12 share them).
+// Another mod's copy of DXGI's vtable on the game's swap chain (ShowFPS 1.1.1 makes one when the swap chain is made; its Present calls on
+// past the Guide's later hook on DXGI's own): the copy's Present, Present1 and ResizeBuffers that are not DXGI's get the Guide's detours
+// too. All or none: a copy whose Present is hooked but whose ResizeBuffers is not would resize with the Guide's buffers still held.
+void hook_clone(void** vt) {
+    using chainfind::PRESENT, chainfind::PRESENT1, chainfind::RESIZE;
+    std::string present = chainfind::where(vt[PRESENT]);
+    struct Slot { int at; void* detour; void** original; const char* name; } slots[3] = {
+        {PRESENT, (void*)hk_clone_present, (void**)&o_clone_present, "guide: IDXGISwapChain::Present in another mod's copy of the vtable"},
+        {PRESENT1, (void*)hk_clone_present1, (void**)&o_clone_present1, "guide: IDXGISwapChain1::Present1 in another mod's copy of the vtable"},
+        {RESIZE, (void*)hk_clone_resize, (void**)&o_clone_resize, "guide: IDXGISwapChain::ResizeBuffers in another mod's copy of the vtable"}};
+    FH2Hook* made[3] = {};
+    bool ok = true;
+    for (int i = 0; i < 3 && ok; i++) {
+        if (vt[slots[i].at] == g_dxgi_vt[slots[i].at]) continue;
+        made[i] = g_api->hook_pointer(g_mod, slots[i].name, &vt[slots[i].at], slots[i].detour, slots[i].original);
+        ok = made[i] && g_api->enable_hooks(g_mod, made[i]);
+    }
+    if (!ok)
+        for (FH2Hook* h : made)
+            if (h) g_api->disable_hooks(g_mod, h);
+    logf(ok ? "guide: the game's swap chain calls through another mod's copy of DXGI's vtable (its Present is %s): the Guide's present hooks are in that copy too"
+            : "guide: the game's swap chain calls through another mod's copy of DXGI's vtable (its Present is %s), and the Guide's hooks could not be put there",
+         present.c_str());
+}
+
+// Until the Guide draws (at most 10 minutes): once a second the game's latest swap chain is checked for another mod's copy of DXGI's
+// vtable (hook_clone), and 30 s without a frame are logged with what the game's Present is.
+DWORD WINAPI chain_watch(LPVOID) {
+    const ULONGLONG start = GetTickCount64();
+    void** hooked = nullptr;
+    bool told_quiet = false, told_other = false;
+    while (g_draw_state.load() == 0 && GetTickCount64() - start < 600000) {
+        Sleep(1000);
+        void* chain = g_last_chain.load();
+        void** vt = chain ? chainfind::cloned_vtable(chain, g_dxgi_vt, g_dxgi_vt_addr) : nullptr;
+        if (vt && !hooked) {
+            hooked = vt;
+            hook_clone(vt);
+        } else if (vt && vt != hooked && !told_other) {
+            told_other = true;
+            logf("guide: the game's swap chain now calls through another copy of DXGI's vtable (its Present is %s); only the first copy has the "
+                 "Guide's hooks",
+                 chainfind::where(vt[chainfind::PRESENT]).c_str());
+        }
+        if (!told_quiet && g_presents.load() == 0 && GetTickCount64() - start >= 30000) {
+            told_quiet = true;
+            void** cvt = nullptr;
+            void* present = nullptr;
+            if (chain && chainfind::read(chain, &cvt, sizeof cvt) && chainfind::read(cvt + chainfind::PRESENT, &present, sizeof present))
+                logf("guide: no frame reached the Guide in the 30 s since its present hooks were made; the game's latest swap chain presents through %s",
+                     chainfind::where(present).c_str());
+            else
+                logf("guide: no frame reached the Guide in the 30 s since its present hooks were made, and no swap chain was made after its hooks");
+        }
+    }
+    return 0;
+}
+
+// The present vtable addresses come from a throw-away device, queue and swap chain on a hidden window (DXGI and Direct3D 12 share them),
+// made through o_create_hwnd so that no later mod's CreateSwapChain* detour sees it; the same swap chain tells where DXGI keeps a swap
+// chain's queue. The device is made once the game has started, as before, never ahead of Azimuth's own.
 void net_log(const char* line) { logf("%s", line); }
 
-DWORD WINAPI hook_thread(LPVOID) {
-    if (!hook_factory()) return 0;
+DWORD WINAPI hook_thread(LPVOID late_factory) {
     if (!g_api->wait_for_game(180000)) {
         logf("guide: the game never came up: no Guide");
         return 0;
     }
+    if (late_factory && !hook_factory()) return 0;
     net_start(g_api->azimuth_dir, net_log);
     WNDCLASSEXW wc{sizeof wc};
     wc.lpfnWndProc = dummy_proc, wc.hInstance = GetModuleHandleW(nullptr), wc.lpszClassName = L"FH2MPGuideProbe";
@@ -965,27 +1090,53 @@ DWORD WINAPI hook_thread(LPVOID) {
     sd.Width = 64, sd.Height = 64, sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM, sd.SampleDesc.Count = 1;
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT, sd.BufferCount = 2, sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     bool ok = SUCCEEDED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dev))) && SUCCEEDED(dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&q))) &&
-              SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&fac))) && SUCCEEDED(fac->CreateSwapChainForHwnd(q, w, &sd, nullptr, nullptr, &sc));
+              SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&fac))) && SUCCEEDED(o_create_hwnd(fac, q, w, &sd, nullptr, nullptr, &sc));
+    bool on = false;
     if (!ok) {
         logf("guide: could not make the probe swap chain: no Guide");
     } else {
+        // DXGI's own vtable: the probe's, unless a mod before this one in the start order gave it a copy (then found in dxgi.dll from it)
+        HMODULE dxgi = GetModuleHandleW(L"dxgi.dll");
         void** svt = *(void***)sc;
-        FH2Hook* hooks[3] = {
-            g_api->hook_function(g_mod, "guide: IDXGISwapChain::Present", svt[8], (void*)hk_present, (void**)&o_present),
-            g_api->hook_function(g_mod, "guide: IDXGISwapChain1::Present1", svt[22], (void*)hk_present1, (void**)&o_present1),
-            g_api->hook_function(g_mod, "guide: IDXGISwapChain::ResizeBuffers", svt[13], (void*)hk_resize, (void**)&o_resize)};
-        bool on = hooks[0] && hooks[2] && g_api->enable_hooks(g_mod, hooks[0]) && g_api->enable_hooks(g_mod, hooks[2]) &&
-                  (!hooks[1] || g_api->enable_hooks(g_mod, hooks[1]));
-        if (!on)
-            logf("guide: the present hooks could not be made: no Guide");
-        else
-            logf("guide: hooked the game's presents; waiting for its first frame");
+        int foreign = chainfind::first_foreign(svt, dxgi);
+        void* const* own = foreign < 0 ? svt : chainfind::find_dxgi_vtable(svt, dxgi);
+        if (foreign >= 0)
+            logf(own ? "guide: the probe swap chain came back with another mod's copy of DXGI's vtable (entry %d is %s); DXGI's own was found in dxgi.dll"
+                     : "guide: the probe swap chain came back with another mod's copy of DXGI's vtable (entry %d is %s), and DXGI's own was not found: no Guide",
+                 foreign, chainfind::where(svt[foreign]).c_str());
+        if (own) {
+            memcpy(g_dxgi_vt, own, sizeof g_dxgi_vt);
+            g_dxgi_vt_addr = own;
+            g_queue_vt = *(void* const*)q;
+            g_queue_offsets = chainfind::queue_offsets(sc, q);
+            if (g_queue_offsets.empty())
+                logf("guide: where DXGI keeps a swap chain's queue was not found on the probe: a game swap chain made before the Guide's hooks gets no Guide");
+            else
+                logf("guide: DXGI keeps a swap chain's queue at %s0x%lx (read there when the game's swap chain was made before the Guide's hooks)",
+                     g_queue_offsets[0] < 0 ? "-" : "+", std::labs(g_queue_offsets[0]));
+            using chainfind::PRESENT, chainfind::PRESENT1, chainfind::RESIZE;
+            FH2Hook* hooks[3] = {
+                g_api->hook_function(g_mod, "guide: IDXGISwapChain::Present", g_dxgi_vt[PRESENT], (void*)hk_present, (void**)&o_present),
+                g_api->hook_function(g_mod, "guide: IDXGISwapChain1::Present1", g_dxgi_vt[PRESENT1], (void*)hk_present1, (void**)&o_present1),
+                g_api->hook_function(g_mod, "guide: IDXGISwapChain::ResizeBuffers", g_dxgi_vt[RESIZE], (void*)hk_resize, (void**)&o_resize)};
+            on = hooks[0] && hooks[2] && g_api->enable_hooks(g_mod, hooks[0]) && g_api->enable_hooks(g_mod, hooks[2]) &&
+                 (!hooks[1] || g_api->enable_hooks(g_mod, hooks[1]));
+            if (!on)
+                logf("guide: the present hooks could not be made: no Guide");
+            else
+                logf("guide: hooked the game's presents; waiting for its first frame");
+        }
     }
     if (sc) sc->Release();
     if (fac) fac->Release();
     if (q) q->Release();
     if (dev) dev->Release();
     DestroyWindow(w);
+    if (!on) {
+        g_off_reason.store("its present hooks could not be made");
+        g_draw_state.store(2);
+    }
+    if (on) CloseHandle(CreateThread(nullptr, 0, chain_watch, nullptr, 0, nullptr));
     if (ok) CloseHandle(CreateThread(nullptr, 0, pad_thread, nullptr, 0, nullptr));
     if (unsigned char* base = (unsigned char*)g_api->wait_for_code(180000)) {
         sysui_install(g_api, g_mod, base, net_log, on_game_invite_ui);
@@ -1016,6 +1167,13 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi* api) {
         logf("guide: off (FH2MP_NO_GUIDE=1)");
         return 0;
     }
-    CreateThread(nullptr, 0, hook_thread, nullptr, 0, nullptr);
+    // FH2MP_GUIDE_LATE_FACTORY=1, a test switch: the swap chain makers are hooked only once the game has started, after Azimuth made its
+    // swap chain (the order of the player's third run on 2026-11-13), so the queue is read from the swap chain
+    bool late = GetEnvironmentVariableW(L"FH2MP_GUIDE_LATE_FACTORY", env, 8) && env[0] == L'1';
+    if (late)
+        logf("guide: FH2MP_GUIDE_LATE_FACTORY=1: the swap chain makers are hooked only once the game has started");
+    else if (!hook_factory())
+        return 0;
+    CreateThread(nullptr, 0, hook_thread, (LPVOID)(uintptr_t)late, 0, nullptr);
     return 0;
 }
