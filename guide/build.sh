@@ -6,6 +6,7 @@
 #   build.sh           the mod
 #   build.sh preview   guide/build/guide-preview.exe: the same drawing off screen into a PNG (tests/preview.cpp)
 #   build.sh voicetest guide/build/voice-test.exe: the voice engine in a loopback without a game (tests/voice_test.cpp)
+#   build.sh memtest   guide/build/memnotice-test.exe: the memory notice's rule (tests/memnotice_test.cpp)
 set -euo pipefail
 cd "$(dirname "$0")"
 CXX=${CXX:-g++}
@@ -23,6 +24,11 @@ common=(src/guide.cpp src/theme.cpp src/theme_page.cpp src/voice_page.cpp src/co
         "$imgui/imgui.cpp" "$imgui/imgui_draw.cpp" "$imgui/imgui_tables.cpp" "$imgui/imgui_widgets.cpp" "$imgui/backends/imgui_impl_dx12.cpp"
         build/icons.o)
 libs=(-ld3d12 -ldxgi -ldxguid -luuid -lole32 -luser32 -lgdi32 -lwinhttp)
+if [ "${1:-}" = memtest ]; then
+    "$CXX" "${flags[@]}" -o build/memnotice-test.exe tests/memnotice_test.cpp
+    echo "built: guide/build/memnotice-test.exe"
+    exit 0
+fi
 if [ "${1:-}" = voicetest ]; then
     "$CXX" "${flags[@]}" -o build/voice-test.exe tests/voice_test.cpp -l:libopus.a -luuid
     echo "built: guide/build/voice-test.exe"

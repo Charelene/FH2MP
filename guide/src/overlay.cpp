@@ -9,6 +9,7 @@
 // keyboard's arrows, Enter, Escape, Q and E from the game window. FH2MP_NO_GUIDE=1 keeps it off. Log: the platform's log.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <psapi.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <hstring.h>
@@ -29,8 +30,10 @@
 #include "guide.h"
 #include "imgui.h"
 #include "join.h"
+#include "memnotice.h"
 #include "net.h"
 #include "sysui.h"
+#include "ui.h"
 #include "voice.h"
 
 // probe.cpp
@@ -595,8 +598,36 @@ bool setup(IDXGISwapChain3* sc) {
     return true;
 }
 
+// Memory running out (src/memnotice.h): sampled every 5 s on the render thread (two cheap calls); a toast when the rule says so. Off under
+// Wine: Linux overcommits, a Windows commit limit is not what ends a game there.
+static void memory_notice(double now) {
+    static MemNotice rule;
+    static double last = -100;
+    static int wine = -1;
+    if (wine < 0) {
+        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        wine = ntdll && GetProcAddress(ntdll, "wine_get_version") ? 1 : 0;
+        if (wine) logf("guide: memory notice off: Wine has no Windows commit limit");
+    }
+    if (wine || now - last < MemNotice::PERIOD) return;
+    last = now;
+    MEMORYSTATUSEX m = {};
+    m.dwLength = sizeof m;
+    PROCESS_MEMORY_COUNTERS_EX p = {};
+    p.cb = sizeof p;
+    if (!GlobalMemoryStatusEx(&m) || !GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&p, sizeof p)) return;
+    uint64_t used = m.ullTotalPageFile - m.ullAvailPageFile;
+    if (!rule.sample(p.PrivateUsage, m.ullTotalPhys, used, m.ullTotalPageFile)) return;
+    logf("guide: memory notice %d of %d: the game's commit %llu MB of %llu MB RAM, system commit %llu of %llu MB (%d%%), %llu MB RAM free",
+         rule.shown, MemNotice::MAX_SHOWN, (unsigned long long)(p.PrivateUsage >> 20), (unsigned long long)(m.ullTotalPhys >> 20),
+         (unsigned long long)(used >> 20), (unsigned long long)(m.ullTotalPageFile >> 20), int(100.0 * double(used) / double(m.ullTotalPageFile)),
+         (unsigned long long)(m.ullAvailPhys >> 20));
+    g_guide.toast(ToastKind::Warning, "Memory almost full", "Restart the game soon", ui::I_MEMORY, 0, now);
+}
+
 // The server's side: the friend list (re-read twice a second at most), pictures that arrived, and what came of the player's actions.
 void social_and_toasts(double now) {
+    memory_notice(now);
     static double last_read;
     static uint64_t version = ~0ull;
     if (now - last_read > 0.5) {
