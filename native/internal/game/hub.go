@@ -102,6 +102,9 @@ type Hub struct {
 	FlagsError     string
 	FlagsReleased  int // entries of a restricted-tools report dropped by loadFlags (NitroSystem stopped being one 2026-11-07)
 	FlagFile       string
+	Trusted        map[uint64]float64 // operator-trusted accounts -> unix seconds since (trusted.go)
+	TrustFile      string
+	TrustError     string
 	Revoked        map[uint64]float64
 	UDPAuth        string
 	Keys           map[uint64]map[string]float64
@@ -140,7 +143,7 @@ func NewHub(cfg HubConfig) (*Hub, error) {
 		return nil, err
 	}
 	h := &Hub{cfg: cfg, Clk: cfg.Clock, Rng: cfg.Rng, Sock: cfg.Sock, Out: cfg.Out, Sinks: cfg.Sinks, CtlSend: cfg.CtlSend,
-		Assign: map[uint64]string{}, Follow: map[uint64]bool{}, Standins: map[uint64]map[int64]int64{}, CustomCars: map[uint64]map[int64]bool{}, Runs: map[uint64]string{}, Authed: map[uint64]authEnt{}, Flagged: omap.New[uint64, flagEnt](), Revoked: map[uint64]float64{},
+		Assign: map[uint64]string{}, Follow: map[uint64]bool{}, Standins: map[uint64]map[int64]int64{}, CustomCars: map[uint64]map[int64]bool{}, Runs: map[uint64]string{}, Authed: map[uint64]authEnt{}, Flagged: omap.New[uint64, flagEnt](), Trusted: map[uint64]float64{}, Revoked: map[uint64]float64{},
 		Keys: map[uint64]map[string]float64{}, TicketEpochs: map[Addr][]byte{}, Bound: map[Addr]boundEnt{}, Nonces: omap.New[nonceKey, float64](), NonceCount: map[uint64]int{},
 		AuthLog: map[any]float64{}, Worlds: omap.New[WorldKey, *World](), Route: omap.New[Addr, *World](), EmptySince: map[WorldKey]float64{},
 		LightingRoutes: map[uint64]Addr{}, HonkRoutes: map[uint64]Addr{}, CarselRoutes: map[uint64]Addr{}, ModsRoutes: map[uint64]Addr{}, probeSeen: map[Addr]probeEnt{}, nxt: math.Inf(1)}
@@ -157,8 +160,10 @@ func NewHub(cfg HubConfig) (*Hub, error) {
 		dir := filepath.Dir(cfg.LogPath)
 		h.Events = eventlog.Open(filepath.Join(dir, "events.jsonl"))
 		h.FlagFile = filepath.Join(dir, "cheaters.json")
+		h.TrustFile = filepath.Join(dir, "trusted.json")
 	}
 	h.loadFlags()
+	h.loadTrusted()
 	h.UDPAuth = envStr("FH2MP_UDP_AUTH", "off")
 	okMode := false
 	for _, m := range UDPAuthModes {
@@ -183,6 +188,9 @@ func NewHub(cfg HubConfig) (*Hub, error) {
 	}
 	if h.FlagsError != "" {
 		idle.Warnf("cheater pool file %s not read (%s): the pool starts empty", h.FlagFile, h.FlagsError)
+	}
+	if h.TrustError != "" {
+		idle.Warnf("trusted players file %s not read (%s): nobody is trusted until it is fixed or rewritten by a trust message", h.TrustFile, h.TrustError)
 	}
 	if h.FlagsReleased > 0 {
 		h.saveFlags()
@@ -282,7 +290,7 @@ func parseHex(s string) (uint64, error) {
 	return strconv.ParseUint(s, 16, 64)
 }
 
-// ControlText handles one control message: assign, auth, logout, revoke, allow, unflag, flags, run, tools, pop, lobbies, positions, bots.
+// ControlText handles one control message: assign, auth, logout, revoke, allow, unflag, flags, trust, untrust, trusted, run, tools, pop, lobbies, positions, bots.
 func (h *Hub) ControlText(text string, replyTo *Addr) {
 	parts := strings.Fields(text)
 	n := len(parts)
@@ -297,6 +305,19 @@ func (h *Hub) ControlText(text string, replyTo *Addr) {
 		h.ctlReply(replyTo, "positions", []byte(jsonDumps(h.mapStatus())))
 	case n == 1 && parts[0] == "flags":
 		h.ctlReply(replyTo, "flags", []byte(jsonDumps(h.flagStatus())))
+	case n == 1 && parts[0] == "trusted":
+		h.ctlReply(replyTo, "trusted", []byte(jsonDumps(h.trustStatus())))
+	case n == 2 && (parts[0] == "trust" || parts[0] == "untrust"):
+		xuid, err := parseHex(parts[1])
+		if err != nil || xuid == 0 {
+			h.ctlIgnored(parts, fmt.Sprintf("%s message unreadable (xuid %q)", parts[0], parts[1]))
+			return
+		}
+		if parts[0] == "trust" {
+			h.Trust(xuid)
+		} else {
+			h.Untrust(xuid)
+		}
 	case n == 3 && parts[0] == "tools":
 		tools := map[string]bool{}
 		for _, t := range strings.Split(parts[2], ",") {
@@ -751,6 +772,10 @@ func (h *Hub) saveFlags() {
 // Flag puts a kicked player into the cheater pool for CheaterPoolHours (renewed by every kick).
 func (h *Hub) Flag(xuid uint64, reason string) {
 	if CheaterPoolHours <= 0 || xuid == 0 {
+		return
+	}
+	if h.IsTrusted(xuid) {
+		h.Log(fmt.Sprintf("control: %#x not put in the cheater pool (%s): the account is trusted", xuid, reason))
 		return
 	}
 	h.Flagged.Set(xuid, flagEnt{h.Clk.Wall() + CheaterPoolHours*3600.0, reason})

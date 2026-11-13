@@ -1965,6 +1965,13 @@ func (s *Server) HubFlags() pyjson.Obj { return s.Hub.Query("flags") }
 // HubUnflag takes a player out of the cheater pool.
 func (s *Server) HubUnflag(xuid int64) { s.Hub.Control(fmt.Sprintf("unflag %x", uint64(xuid))) }
 
+// HubTrusted is the trusted players ("trusted" list of xuid, since), or nil when the hub cannot be reached.
+func (s *Server) HubTrusted() pyjson.Obj { return s.Hub.Query("trusted") }
+
+// HubTrust adds a player to the trusted list (never kicked by the speed and flight checks, never pooled); HubUntrust takes them off it.
+func (s *Server) HubTrust(xuid int64)   { s.Hub.Control(fmt.Sprintf("trust %x", uint64(xuid))) }
+func (s *Server) HubUntrust(xuid int64) { s.Hub.Control(fmt.Sprintf("untrust %x", uint64(xuid))) }
+
 // HubPositions is HubLobbies plus where each car is in those lobbies, or nil when the hub cannot be reached.
 func (s *Server) HubPositions() pyjson.Obj { return s.Hub.Query("positions") }
 

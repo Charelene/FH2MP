@@ -317,6 +317,88 @@ func (o *Ops) unflag(decimalXuid string) pyjson.Obj {
 	return pyjson.Obj{{K: "ok", V: !still}, {K: "xuid", V: x}}
 }
 
+// trustedList is the game server's trusted players with gamertags: {"trusted": [{xuid, gamertag, since}]}.
+func (o *Ops) trustedList() pyjson.Obj {
+	result := o.C.Xbl.HubTrusted()
+	if result == nil {
+		panic(opsErr(503, "unavailable", "the game server did not answer").with("trusted query got no answer"))
+	}
+	tv, _ := result.Get("trusted")
+	out := []any{}
+	for _, t := range anyList(tv) {
+		to, _ := t.(pyjson.Obj)
+		xv, _ := to.Get("xuid")
+		sv, _ := to.Get("since")
+		xs := pyjson.PyStr(xv)
+		x, _ := strconv.ParseInt(xs, 16, 64)
+		out = append(out, pyjson.Obj{{K: "xuid", V: x}, {K: "gamertag", V: o.nickname(xs)}, {K: "since", V: sv}})
+	}
+	return pyjson.Obj{{K: "trusted", V: out}}
+}
+
+// trustTarget reads {"xuid": n} or {"gamertag": "name"} (any case; the players table, most recently seen first).
+func (o *Ops) trustTarget(body pyjson.Obj) int64 {
+	if v, ok := body.Get("xuid"); ok {
+		var x int64
+		switch n := v.(type) {
+		case int64:
+			x = n
+		case float64:
+			x = int64(n)
+		case string:
+			x, _ = strconv.ParseInt(n, 10, 64)
+		}
+		if x <= 0 {
+			panic(opsErr(400, "bad_xuid", "that is not a player id"))
+		}
+		return x
+	}
+	gv, _ := body.Get("gamertag")
+	tag, _ := gv.(string)
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		panic(opsErr(400, "bad_request", "send xuid or gamertag"))
+	}
+	rows := must(o.C.DB.Query("SELECT xuid FROM players WHERE LOWER(gamertag) = LOWER(?) ORDER BY last_seen DESC LIMIT 3", tag))
+	switch len(rows) {
+	case 0:
+		panic(opsErr(404, "unknown_player", "no player has that gamertag"))
+	case 1:
+		return rows[0].Int("xuid")
+	}
+	panic(opsErr(409, "ambiguous_gamertag", "more than one player has that gamertag: send the xuid"))
+}
+
+// trust adds a player to the trusted list (on) or takes them off it, and answers with whether the game server lists them afterwards.
+func (o *Ops) trust(x int64, on bool) pyjson.Obj {
+	if o.C.Xbl.HubTrusted() == nil {
+		panic(opsErr(503, "unavailable", "the game server did not answer").with("trusted query got no answer"))
+	}
+	if on {
+		o.C.Xbl.HubTrust(x)
+	} else {
+		o.C.Xbl.HubUntrust(x)
+	}
+	time.Sleep(150 * time.Millisecond) // the control datagram and the query travel on separate sockets
+	listed := false
+	if result := o.C.Xbl.HubTrusted(); result != nil {
+		tv, _ := result.Get("trusted")
+		for _, t := range anyList(tv) {
+			to, _ := t.(pyjson.Obj)
+			xv, _ := to.Get("xuid")
+			if v, err := strconv.ParseInt(pyjson.PyStr(xv), 16, 64); err == nil && v == x {
+				listed = true
+			}
+		}
+	}
+	verb := "trusted"
+	if !on {
+		verb = "untrusted"
+	}
+	opsLog.Info(fmt.Sprintf("operator %s %#x (on the trusted list afterwards: %v)", verb, x, listed))
+	return pyjson.Obj{{K: "ok", V: listed == on}, {K: "xuid", V: x}, {K: "gamertag", V: o.nickname(fmt.Sprintf("%x", x))}, {K: "trusted", V: listed}}
+}
+
 func must[T any](v T, err error) T {
 	if err != nil {
 		panic(err)
@@ -399,6 +481,21 @@ func (o *Ops) route(r *Req, method, path string, body []byte) (int, any, *Downlo
 		}
 		if len(rest) == 2 && rest[1] == "unflag" && method == "POST" && isDigits(rest[0]) {
 			return 200, o.unflag(rest[0]), nil
+		}
+	}
+	if what == "trusted" {
+		if len(rest) == 0 && method == "GET" {
+			return 200, o.trustedList(), nil
+		}
+		if len(rest) == 0 && method == "POST" {
+			return 200, o.trust(o.trustTarget(opsJSON(body)), true), nil
+		}
+		if len(rest) == 1 && isDigits(rest[0]) && (method == "POST" || method == "DELETE") {
+			x, err := strconv.ParseInt(rest[0], 10, 64)
+			if err != nil || x <= 0 {
+				panic(opsErr(400, "bad_xuid", "that is not a player id"))
+			}
+			return 200, o.trust(x, method == "POST"), nil
 		}
 	}
 	if what == "positions" && len(rest) == 0 && method == "GET" {
