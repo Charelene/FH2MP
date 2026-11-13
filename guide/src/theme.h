@@ -1,6 +1,7 @@
 // The Guide's themes, as the design canvas draws them (Themes and ThemesPlastic boards): eight presets, each a saturated accent, a bright
 // and a dark of it and the ink for text on the accent; the six colours also come as "plastic", every surface tinted in the colour's hue.
-// Xbox is the default. The picked theme is the player's own (kept on their profile); their gamercard's title bar shows it to others.
+// A ninth, Xbox 360, is the 360 Guide's own light skin (its colours are the console's, not the canvas'). Xbox is the default. The picked
+// theme is the player's own (kept on their profile); their gamercard's title bar shows it to others.
 #pragma once
 
 #include <string>
@@ -9,8 +10,9 @@
 #include "imgui.h"
 
 struct ThemeDef {
-    const char* key;   // "xbox", "fh2mp", "red", ... (a plastic one is key + "-plastic")
-    const char* name;  // "Xbox", "FH2MP", "Red", ...
+    const char* key;   // "xbox", "xbox360", "fh2mp", "red", ... (a plastic one is key + "-plastic")
+    const char* name;  // "Xbox", "Xbox 360", "FH2MP", "Red", ...
+
     ImU32 accent, bright, dark, ink;
     bool plastic_too;  // the colours have a plastic version, Xbox and FH2MP do not
 };

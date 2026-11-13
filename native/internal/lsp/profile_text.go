@@ -22,9 +22,11 @@ type profileField struct {
 
 var profileFields = []profileField{{"motto", "motto", 21}, {"name", "real_name", 40}, {"location", "location", 40}, {"bio", "bio", 500}}
 
-// GuideThemes are the Guide's themes (the design canvas's Themes boards): "" is the default (Xbox green); a colour with "-plastic" tints
-// every surface in its hue. The theme rides on the player's card, so other players' Guides show this player's gamercard in it.
-var GuideThemes = map[string]bool{"": true, "xbox": true, "fh2mp": true}
+// GuideThemes are the Guide's themes (the design canvas's Themes boards, and Xbox 360, the 360 Guide's own light skin): "" is the default
+// (Xbox green); a colour with "-plastic" tints every surface in its hue. The theme rides on the player's card, so other players' Guides
+// show this player's gamercard in it (a Guide that does not know a theme shows the card in Xbox's).
+var GuideThemes = map[string]bool{"": true, "xbox": true, "xbox360": true, "fh2mp": true}
+
 
 func init() {
 	for _, c := range []string{"red", "orange", "yellow", "green", "blue", "pink"} {

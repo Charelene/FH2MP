@@ -59,14 +59,15 @@ func TestProfileTextRefusesBlockedFragmentsAndWords(t *testing.T) {
 	}
 }
 
-// The Guide's themes: the default, Xbox, FH2MP, six colours and their plastic versions; nothing else.
+// The Guide's themes: the default, Xbox, Xbox 360, FH2MP, six colours and their plastic versions; nothing else.
 func TestGuideThemesAreTheCanvasOnes(t *testing.T) {
-	for _, ok := range []string{"", "xbox", "fh2mp", "red", "orange", "yellow", "green", "blue", "pink", "pink-plastic", "blue-plastic"} {
+	for _, ok := range []string{"", "xbox", "xbox360", "fh2mp", "red", "orange", "yellow", "green", "blue", "pink", "pink-plastic", "blue-plastic"} {
 		if !GuideThemes[ok] {
 			t.Errorf("theme %q refused", ok)
 		}
 	}
-	for _, bad := range []string{"xbox-plastic", "fh2mp-plastic", "purple", "Red", " red", "red-plastic-plastic"} {
+	for _, bad := range []string{"xbox-plastic", "xbox360-plastic", "xbox 360", "fh2mp-plastic", "purple", "Red", " red", "red-plastic-plastic"} {
+
 		if GuideThemes[bad] {
 			t.Errorf("theme %q taken", bad)
 		}

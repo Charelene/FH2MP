@@ -15,28 +15,31 @@
 
 namespace ui {
 
-// The theme's colours (theme.cpp sets them; these are Xbox's, the 360 Guide's own skin): the accent, a bright and a dark of it, the ink for
-// text on the accent, and the surfaces. TEXT is the text on a panel, SPINE_TEXT the open blade's name, PANEL_HI and PANEL_LO the panel's
-// gradient top and bottom, TOAST the toasts' surface (they stay dark in every theme). SIDE_HI and SIDE_LO are the gradient of a page's
-// right-hand pane (the 360's description pane), SIDE_TEXT and SIDE_MUTED the text on it, CARD a gamer card's body, EMBOSS the light copy
-// under a row's text (no alpha: none). White, black and the offline colour stay.
-inline ImU32 ACCENT = IM_COL32(0x00, 0x8a, 0x00, 255), DARK = IM_COL32(0x0a, 0x4f, 0x0a, 255), BRIGHT = IM_COL32(0x10, 0x7c, 0x10, 255),
-             INK = IM_COL32(235, 235, 235, 255), PANEL = IM_COL32(216, 221, 222, 255), PANE = IM_COL32(201, 207, 209, 255),
-             LINE = IM_COL32(194, 196, 200, 255), TAB = IM_COL32(91, 104, 117, 255), RAISED = IM_COL32(195, 199, 203, 255),
-             MUTED = IM_COL32(101, 109, 114, 255), MUTED2 = IM_COL32(101, 109, 114, 255), TAB_TEXT = IM_COL32(235, 235, 235, 255),
-             MUTED3 = IM_COL32(0xc9, 0xcc, 0xd2, 255), DISABLED = IM_COL32(185, 189, 194, 255), KEY = IM_COL32(0x2f, 0x30, 0x34, 255),
-             KEY_LINE = IM_COL32(0x48, 0x49, 0x4e, 255), TEXT = IM_COL32(51, 58, 64, 255), SPINE_TEXT = IM_COL32(88, 96, 102, 255),
-             PANEL_HI = IM_COL32(232, 235, 236, 255), PANEL_LO = IM_COL32(201, 207, 209, 255), TOAST = IM_COL32(0x2a, 0x2b, 0x2e, 255),
-             ONLINE = IM_COL32(51, 58, 64, 255), SIDE_HI = IM_COL32(151, 157, 161, 255), SIDE_LO = IM_COL32(105, 110, 115, 255),
-             SIDE_TEXT = IM_COL32(235, 235, 235, 255), SIDE_MUTED = IM_COL32(196, 200, 204, 255), CARD = IM_COL32(227, 227, 227, 255),
-             EMBOSS = IM_COL32(235, 235, 235, 255);
+// The theme's colours (theme.cpp sets them; these are Xbox's, the dark one): the accent, a bright and a dark of it, the ink for text on
+// the accent, and the surfaces. The rest are what the Xbox 360 theme (the 360 Guide's own light skin) needs of its own, and equal the
+// others in a dark theme: TEXT is the text on a panel, SPINE_TEXT the open blade's name, PANEL_HI and PANEL_LO the panel's gradient top
+// and bottom, TOAST the toasts' surface (they stay dark in every theme), SIDE_HI and SIDE_LO the gradient of a page's right-hand pane
+// (the 360's description pane), SIDE_TEXT and SIDE_MUTED the text on it, CARD a gamer card's body, EMBOSS the light copy under a row's
+// text (no alpha: none). White, black and the offline colour stay.
+inline ImU32 ACCENT = IM_COL32(0x10, 0x8a, 0x10, 255), DARK = IM_COL32(0x0a, 0x4f, 0x0a, 255), BRIGHT = IM_COL32(0x8e, 0xd6, 0x1e, 255),
+             INK = IM_COL32(255, 255, 255, 255), PANEL = IM_COL32(0x2a, 0x2b, 0x2e, 255), PANE = IM_COL32(0x1e, 0x1f, 0x22, 255),
+             LINE = IM_COL32(0x3a, 0x3b, 0x3f, 255), TAB = IM_COL32(0x45, 0x47, 0x4c, 255), RAISED = IM_COL32(0x34, 0x36, 0x3a, 255),
+             MUTED = IM_COL32(0xb4, 0xb6, 0xbb, 255), MUTED2 = IM_COL32(0x9c, 0x9f, 0xa5, 255), TAB_TEXT = IM_COL32(0xd4, 0xd6, 0xda, 255),
+             MUTED3 = IM_COL32(0xc9, 0xcc, 0xd2, 255), DISABLED = IM_COL32(0x6e, 0x70, 0x76, 255), KEY = IM_COL32(0x2f, 0x30, 0x34, 255),
+             KEY_LINE = IM_COL32(0x48, 0x49, 0x4e, 255), TEXT = IM_COL32(255, 255, 255, 255), SPINE_TEXT = IM_COL32(255, 255, 255, 255),
+             PANEL_HI = IM_COL32(0x2a, 0x2b, 0x2e, 255), PANEL_LO = IM_COL32(0x2a, 0x2b, 0x2e, 255), TOAST = IM_COL32(0x2a, 0x2b, 0x2e, 255),
+             ONLINE = IM_COL32(0xe8, 0xe9, 0xeb, 255), SIDE_HI = IM_COL32(0x1e, 0x1f, 0x22, 255), SIDE_LO = IM_COL32(0x1e, 0x1f, 0x22, 255),
+             SIDE_TEXT = IM_COL32(255, 255, 255, 255), SIDE_MUTED = IM_COL32(0xb4, 0xb6, 0xbb, 255), CARD = IM_COL32(0x34, 0x36, 0x3a, 255),
+             EMBOSS = 0;
 const ImU32 WHITE = IM_COL32(255, 255, 255, 255), BLACK = IM_COL32(0, 0, 0, 255), OFFLINE = IM_COL32(0xe0, 0x55, 0x2f, 255);
 const ImU32 PIC_COLORS[] = {IM_COL32(0xc9, 0x66, 0x2f, 255), IM_COL32(0x3f, 0x6f, 0xc4, 255), IM_COL32(0xc4, 0x9a, 0x2b, 255),
                             IM_COL32(0x3e, 0x9a, 0x5a, 255), IM_COL32(0x2f, 0x8f, 0xa8, 255), IM_COL32(0x9a, 0x4f, 0xb8, 255),
                             IM_COL32(0xa8, 0x3a, 0x3a, 255)};
-// The legend's discs, as the 360 colours them.
-const ImU32 RING_A = IM_COL32(91, 169, 41, 255), RING_B = IM_COL32(183, 51, 51, 255), RING_X = IM_COL32(35, 105, 160, 255),
-            RING_Y = IM_COL32(227, 148, 2, 255);
+// The pad's A, B, X and Y keys: their colours, and whether a key is a filled disc with a light letter (the 360's legend, in the Xbox 360
+// theme, with the 360's colours) or a black disc ringed and lettered in its colour (every other theme). theme.cpp sets them.
+inline ImU32 RING_A = IM_COL32(0x5f, 0xd1, 0x1c, 255), RING_B = IM_COL32(0xff, 0x4a, 0x4f, 255), RING_X = IM_COL32(0x3c, 0x8c, 0xff, 255),
+             RING_Y = IM_COL32(0xff, 0xb4, 0x1f, 255);
+inline bool KEY_DISCS = false;
 
 // The Guide's size against the canvas and the centre it is drawn around (canvas units): at the canvas' size, 4.5 higher, which puts a
 // page's first row (canvas y 96) on the 360's (its y 61). A page: its left edge and width (the 360's 138 to 712), its rows' top, its foot
@@ -213,15 +216,15 @@ inline void vertical_text(ImDrawList* dl, ImFont* f, const FontMetrics& m, float
     }
 }
 
-// A pad key's badge: a disc (A, B, X, Y: 20 units) or a rounded box (LB, RB, LT, RT, L: w x 22) with a 2-unit ring inside its edge,
-// centred on cy, its letters centred by their capital height. s: pixels per unit. Returns its width in pixels. The disc is the 360
-// legend's: its picture is 18 units square with the disc 16.4 across in the button's colour, the letter 10.7 high in 245 over a faint
-// black copy two thirds of a unit down and right.
+// A pad key's badge: a circle (A, B, X, Y: 20 units) or a rounded box (LB, RB, LT, RT, L: w x 22) with a 2-unit ring inside its edge,
+// centred on cy, its letters centred by their capital height. s: pixels per unit. Returns its width in pixels. With KEY_DISCS a circle is
+// the 360 legend's disc instead: its picture is 18 units square with the disc 16.4 across in the button's colour, the letter 10.7 high
+// in 245 over a faint black copy two thirds of a unit down and right.
 inline float badge(ImDrawList* dl, const GuideAssets& a, const char* key, ImU32 ring, float x, float cy, float s, float op, float w = 0, float r = -1) {
     bool wide = strlen(key) > 1;
     float kw = (w > 0 ? w : wide ? 34 : 20) * s, kh = (wide || w > 0 ? 22 : 20) * s, rr = (r >= 0 ? std::min(r, 11.0f) : wide ? 6 : 10) * s;
     ImVec2 k0(x, cy - kh / 2), k1(x + kw, cy + kh / 2);
-    if (!wide && w <= 0) {
+    if (!wide && w <= 0 && KEY_DISCS) {
         float u = kw / 18, size = 10.667f * u;
         dl->AddCircleFilled(ImVec2(x + kw / 2, cy), 8.2f * u, alpha(ring, op), 32);
         ImVec2 at(x + (kw - a.text->CalcTextSizeA(size, FLT_MAX, 0, key).x) * 0.5f, caps_top(a.text_m, size, cy));
@@ -232,7 +235,7 @@ inline float badge(ImDrawList* dl, const GuideAssets& a, const char* key, ImU32 
     dl->AddRectFilled(k0, k1, alpha(BLACK, op), rr);
     dl->AddRect(ImVec2(k0.x + s, k0.y + s), ImVec2(k1.x - s, k1.y - s), alpha(ring, op), std::max(0.0f, rr - s), 0, 2 * s);
     ImFont* kf = a.text_bold ? a.text_bold : a.text;
-    float size = 11 * s;
+    float size = (wide || w > 0 ? 11 : 12) * s;
     float tw = kf->CalcTextSizeA(size, FLT_MAX, 0, key).x;
     dl->AddText(kf, size, ImVec2(x + (kw - tw) * 0.5f, caps_top(a.bold_m, size, cy)), alpha(ring, op), key);
     return kw;
@@ -257,13 +260,17 @@ struct Hint {
 
 // The legend, as the 360's frame lays it out (in its units): each disc's picture 18 square, its word 6.4 after it, 13.3 high, in 235, and
 // the next disc 87.6 after this one (a word longer than its 64-unit slot pushes the rest along). A key that is not a disc (LB, RB) is as
-// high as a disc; one without a word sits 4 from the next. x: the first key's left edge; cy: the line the keys and words centre on.
+// high as a disc; one without a word sits 4 from the next. A ringed circle (the themes without KEY_DISCS) is as large as the 360's disc,
+// in the middle of the same 18 units. x: the first key's left edge; cy: the line the keys and words centre on.
 inline void hint_bar(ImDrawList* dl, const GuideAssets& a, const View& v, float x, float cy, const Hint* hints, int n, float op) {
     const float size = uu(13.333f);
     for (int i = 0; i < n; i++) {
         bool disc = strlen(hints[i].key) == 1;
         ImVec2 p = v.pt(x, cy);
-        float kw = badge(dl, a, hints[i].key, hints[i].ring, p.x, p.y, v.sz(uu(disc ? 18 : 16.4f) / (disc ? 20 : 22)), op) / v.sz(1);
+        float kw;
+        if (disc && !KEY_DISCS) badge(dl, a, hints[i].key, hints[i].ring, p.x + v.sz(uu(0.8f)), p.y, v.sz(uu(16.4f) / 20), op), kw = uu(18);
+        else kw = badge(dl, a, hints[i].key, hints[i].ring, p.x, p.y, v.sz(uu(disc ? 18 : 16.4f) / (disc ? 20 : 22)), op) / v.sz(1);
+
         if (!hints[i].label) {
             x += kw + uu(4);
             continue;

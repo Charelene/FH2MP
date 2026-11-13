@@ -1,4 +1,4 @@
-// Settings > Theme: the canvas' themes in two tabs (Themes: its eight; Plastic: the six colours tinted all over), the player's own card
+// Settings > Theme: the canvas' themes in two tabs (Themes: its eight and Xbox 360; Plastic: the six colours tinted all over), the player's own card
 // beside them. The focused theme is shown at once on the whole Guide; A keeps it (the player's profile, so others see the card in it),
 // B goes back to the one kept.
 #include <algorithm>

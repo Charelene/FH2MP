@@ -12,7 +12,8 @@ namespace {
 ImU32 hex(unsigned v) { return IM_COL32((v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff, 255); }
 
 const std::vector<ThemeDef> g_presets = {
-    {"xbox", "Xbox", hex(0x008A00), hex(0x107C10), hex(0x0A4F0A), hex(0xEBEBEB), false},
+    {"xbox", "Xbox", hex(0x108A10), hex(0x8ED61E), hex(0x0A4F0A), hex(0xFFFFFF), false},
+    {"xbox360", "Xbox 360", hex(0x008A00), hex(0x107C10), hex(0x0A4F0A), hex(0xEBEBEB), false},
     {"fh2mp", "FH2MP", hex(0xC9A0F7), hex(0xFF9F6E), hex(0x2E2A48), hex(0x1A1630), false},
     {"red", "Red", hex(0xC4262E), hex(0xFF6B6B), hex(0x5C0F13), hex(0xFFFFFF), true},
     {"orange", "Orange", hex(0xC2500A), hex(0xFFA347), hex(0x5E2604), hex(0xFFFFFF), true},
@@ -25,17 +26,18 @@ const std::vector<ThemeDef> g_presets = {
 // The surfaces: panel, pane, line, tab, raised, muted, muted2, muted3, tab text, disabled, key, key line; then the text on a panel, the open
 // blade's name, the panel's gradient (0: flat), the toasts' surface (0: the panel) and the online mark; then a page's right-hand pane (its
 // gradient, 0: the pane's colour; its text and secondary text, 0: the panel's), a gamer card's body (0: raised) and the light copy under a
-// row's text (0: none). The dark themes leave all of those.
+// row's text (0: none). The dark themes leave all of those; Xbox 360 sets them.
 struct Neutrals {
     ImU32 panel, pane, line, tab, raised, muted, muted2, muted3, tab_text, disabled, key, key_line;
     ImU32 text = IM_COL32(255, 255, 255, 255), spine_text = IM_COL32(255, 255, 255, 255), panel_hi = 0, panel_lo = 0, toast = 0,
           online = IM_COL32(0xe8, 0xe9, 0xeb, 255), side_hi = 0, side_lo = 0, side_text = 0, side_muted = 0, card = 0, emboss = 0;
 };
-// Xbox: the 360 Guide's own skin (huduiskin.xex): the blade's gradient 232,235,236 -> 201,207,209, the row hairlines 194,196,200, the side
-// blades 91,104,117 with 235 text, XuiButtonGuide's Normal text 51,58,64, its NormalDisable 185,189,194 and the 101,109,114 secondary
-// text, the open blade's spine 205,208,211 -> 185,189,194 with its name in 88,96,102. The keyboard and the toasts stay dark. A page's
-// right-hand pane is the Options pages' description pane (151,157,161 -> 105,110,115, its text 235), a card's body gamercard.xur's 227, and
-// a row's text lies on XuiButtonGuide's 235 copy.
+// Xbox 360: the 360 Guide's own skin (huduiskin.xex): the blade's gradient 232,235,236 -> 201,207,209, the row hairlines 194,196,200, the
+// side blades 91,104,117 with 235 text, XuiButtonGuide's Normal text 51,58,64 and Focus bar 0,138,0 with 235 text, its NormalDisable
+// 185,189,194 and the 101,109,114 secondary text, the open blade's spine 205,208,211 -> 185,189,194 with its name in 88,96,102. The
+// keyboard and the toasts stay dark. A page's right-hand pane is the Options pages' description pane (151,157,161 -> 105,110,115, its
+// text 235), a card's body gamercard.xur's 227, and a row's text lies on XuiButtonGuide's 235 copy. Its bright green is dark enough to
+// read on the light panels. Xbox is the dark theme it always was.
 const Neutrals XBOX360 = {hex(0xd8ddde), hex(0xc9cfd1), hex(0xc2c4c8), hex(0x5b6875), hex(0xc3c7cb), hex(0x656d72),
                           hex(0x656d72), hex(0xc9ccd2), hex(0xebebeb), hex(0xb9bdc2), hex(0x2f3034), hex(0x48494e),
                           hex(0x333a40), hex(0x586066), hex(0xe8ebec), hex(0xc9cfd1), hex(0x2a2b2e), hex(0x333a40),
@@ -100,7 +102,8 @@ std::string theme_name(const std::string& key) {
 void theme_apply(const std::string& key) {
     const ThemeDef& t = theme_preset(key);
     bool plastic = theme_plastic(key) && t.plastic_too;
-    Neutrals n = plastic ? plastic_of(t.accent) : std::string(t.key) == "fh2mp" ? FH2MP : std::string(t.key) == "xbox" ? XBOX360 : BASE;
+    bool x360 = std::string(t.key) == "xbox360";
+    Neutrals n = plastic ? plastic_of(t.accent) : std::string(t.key) == "fh2mp" ? FH2MP : x360 ? XBOX360 : BASE;
     using namespace ui;
     ACCENT = t.accent, BRIGHT = t.bright, DARK = t.dark, INK = t.ink;
     PANEL = n.panel, PANE = n.pane, LINE = n.line, TAB = n.tab, RAISED = n.raised, MUTED = n.muted, MUTED2 = n.muted2, MUTED3 = n.muted3;
@@ -109,6 +112,11 @@ void theme_apply(const std::string& key) {
     TOAST = n.toast ? n.toast : n.panel, ONLINE = n.online;
     SIDE_HI = n.side_hi ? n.side_hi : n.pane, SIDE_LO = n.side_lo ? n.side_lo : n.pane, SIDE_TEXT = n.side_text ? n.side_text : n.text;
     SIDE_MUTED = n.side_muted ? n.side_muted : n.muted, CARD = n.card ? n.card : n.raised, EMBOSS = n.emboss;
+    // the pad's keys: the 360 legend's discs and colours in its own theme, the ringed circles everywhere else
+    KEY_DISCS = x360;
+    RING_A = x360 ? IM_COL32(91, 169, 41, 255) : IM_COL32(0x5f, 0xd1, 0x1c, 255), RING_B = x360 ? IM_COL32(183, 51, 51, 255) : IM_COL32(0xff, 0x4a, 0x4f, 255);
+    RING_X = x360 ? IM_COL32(35, 105, 160, 255) : IM_COL32(0x3c, 0x8c, 0xff, 255), RING_Y = x360 ? IM_COL32(227, 148, 2, 255) : IM_COL32(0xff, 0xb4, 0x1f, 255);
+
 
 
     g_current = plastic ? std::string(t.key) + "-plastic" : t.key;
