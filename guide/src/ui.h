@@ -33,6 +33,10 @@ const ImU32 RING_A = IM_COL32(0x5f, 0xd1, 0x1c, 255), RING_B = IM_COL32(0xff, 0x
 // The Guide's size against the canvas and the centre it is drawn around (canvas units); a page's left edge and width.
 const float GUIDE_K = 0.84f, GUIDE_CY = 330, PAGE_L = 205, PAGE_W = 862;
 
+// Dear ImGui rounds a font size to whole pixels and asserts on 0 (ImFontAtlasBakedGetOrAdd, imgui_draw.cpp:5453), which stops the game
+// with an assert box; text or an icon under a pixel draws nothing instead (a toast's icon zooming out passes 0.36-0.5 px).
+inline bool font_px_ok(float size) { return size >= 1.0f; }
+
 // Material Icons (filled).
 enum : uint32_t {
     I_PERSON = 0xe7fd, I_GROUPS = 0xf233, I_MAIL = 0xe158, I_DRAFTS = 0xe151, I_SENSORS = 0xe51e, I_CHAT = 0xe0ca, I_GROUP_ADD = 0xe7f0,
@@ -89,12 +93,14 @@ inline float caps_top(const FontMetrics& m, float size, float cy) { return cy + 
 
 // Text in a line box centred on cy (CSS align-items: center), starting at x or, with right, ending there.
 inline void text_mid(ImDrawList* dl, ImFont* f, const FontMetrics& m, float size, float x, float cy, ImU32 col, const char* text, bool right = false) {
+    if (!font_px_ok(size)) return;
     float w = f->CalcTextSizeA(size, FLT_MAX, 0.0f, text).x;
     dl->AddText(f, size, ImVec2(right ? x - w : x, css_top(m, size, cy)), col, text);
 }
 
 // The same, cut with an ellipsis to fit max_w (CSS text-overflow: ellipsis).
 inline void text_fit(ImDrawList* dl, ImFont* f, const FontMetrics& m, float size, float x, float cy, float max_w, ImU32 col, const std::string& text) {
+    if (!font_px_ok(size)) return;
     if (f->CalcTextSizeA(size, FLT_MAX, 0.0f, text.c_str()).x <= max_w) return text_mid(dl, f, m, size, x, cy, col, text.c_str());
     std::string t = text;
     while (!t.empty() && f->CalcTextSizeA(size, FLT_MAX, 0.0f, (t + "...").c_str()).x > max_w) {
@@ -105,7 +111,7 @@ inline void text_fit(ImDrawList* dl, ImFont* f, const FontMetrics& m, float size
 }
 
 inline void icon_mid(ImDrawList* dl, const GuideAssets& a, float size, float cx, float cy, ImU32 col, uint32_t icon) {
-    if (!a.icons || !icon) return;
+    if (!a.icons || !icon || !font_px_ok(size)) return;
     char ic[5];
     utf8(icon, ic);
     float w = a.icons->CalcTextSizeA(size, FLT_MAX, 0, ic).x;
@@ -115,6 +121,7 @@ inline void icon_mid(ImDrawList* dl, const GuideAssets& a, float size, float cx,
 // CSS writing-mode: vertical-rl: the text runs down from top, turned a quarter clockwise, its column centred on cx. Laid out without a
 // clip rect (ImGui drops glyphs outside the clip rect before they are turned, which cut the blade names short).
 inline void vertical_text(ImDrawList* dl, ImFont* f, const FontMetrics& m, float size, float cx, float top, ImU32 col, const char* text) {
+    if (!font_px_ok(size)) return;
     float baseline_x = cx - size * (m.asc - m.desc) * 0.5f;  // the ascent side faces right
     ImVec2 at(baseline_x + size * m.asc / (m.asc + m.desc), top);
     int from = dl->VtxBuffer.Size;

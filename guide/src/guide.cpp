@@ -721,6 +721,8 @@ void Guide::page_motion(double now, float op, float* slide, float* pop, float* t
 
 bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double now) {
     float s = std::min(w / 1280.0f, h / 720.0f);
+    // under 320 x 180 the smallest text (11 units) would round to 0 px, which Dear ImGui asserts on (font_px_ok in ui.h)
+    if (s < 0.25f) return busy(now);
     ImVec2 origin(w * 0.5f - 640 * s, h * 0.5f - 360 * s);
     if (open) {
         float k = ease_guide(std::clamp(float((now - opened_) / 0.26), 0.0f, 1.0f));
