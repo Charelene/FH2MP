@@ -27,7 +27,6 @@ var profileFields = []profileField{{"motto", "motto", 21}, {"name", "real_name",
 // show this player's gamercard in it (a Guide that does not know a theme shows the card in Xbox's).
 var GuideThemes = map[string]bool{"": true, "xbox": true, "xbox360": true, "fh2mp": true}
 
-
 func init() {
 	for _, c := range []string{"red", "orange", "yellow", "green", "blue", "pink"} {
 		GuideThemes[c], GuideThemes[c+"-plastic"] = true, true
