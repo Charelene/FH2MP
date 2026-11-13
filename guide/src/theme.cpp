@@ -23,18 +23,23 @@ const std::vector<ThemeDef> g_presets = {
 };
 
 // The surfaces: panel, pane, line, tab, raised, muted, muted2, muted3, tab text, disabled, key, key line; then the text on a panel, the open
-// blade's name, the panel's gradient (0: flat), the toasts' surface (0: the panel) and the online mark. The dark themes leave the last ones.
+// blade's name, the panel's gradient (0: flat), the toasts' surface (0: the panel) and the online mark; then a page's right-hand pane (its
+// gradient, 0: the pane's colour; its text and secondary text, 0: the panel's), a gamer card's body (0: raised) and the light copy under a
+// row's text (0: none). The dark themes leave all of those.
 struct Neutrals {
     ImU32 panel, pane, line, tab, raised, muted, muted2, muted3, tab_text, disabled, key, key_line;
     ImU32 text = IM_COL32(255, 255, 255, 255), spine_text = IM_COL32(255, 255, 255, 255), panel_hi = 0, panel_lo = 0, toast = 0,
-          online = IM_COL32(0xe8, 0xe9, 0xeb, 255);
+          online = IM_COL32(0xe8, 0xe9, 0xeb, 255), side_hi = 0, side_lo = 0, side_text = 0, side_muted = 0, card = 0, emboss = 0;
 };
 // Xbox: the 360 Guide's own skin (huduiskin.xex): the blade's gradient 232,235,236 -> 201,207,209, the row hairlines 194,196,200, the side
 // blades 91,104,117 with 235 text, XuiButtonGuide's Normal text 51,58,64, its NormalDisable 185,189,194 and the 101,109,114 secondary
-// text, the open blade's spine 205,208,211 -> 185,189,194 with its name in 88,96,102. The keyboard and the toasts stay dark.
+// text, the open blade's spine 205,208,211 -> 185,189,194 with its name in 88,96,102. The keyboard and the toasts stay dark. A page's
+// right-hand pane is the Options pages' description pane (151,157,161 -> 105,110,115, its text 235), a card's body gamercard.xur's 227, and
+// a row's text lies on XuiButtonGuide's 235 copy.
 const Neutrals XBOX360 = {hex(0xd8ddde), hex(0xc9cfd1), hex(0xc2c4c8), hex(0x5b6875), hex(0xc3c7cb), hex(0x656d72),
                           hex(0x656d72), hex(0xc9ccd2), hex(0xebebeb), hex(0xb9bdc2), hex(0x2f3034), hex(0x48494e),
-                          hex(0x333a40), hex(0x586066), hex(0xe8ebec), hex(0xc9cfd1), hex(0x2a2b2e), hex(0x333a40)};
+                          hex(0x333a40), hex(0x586066), hex(0xe8ebec), hex(0xc9cfd1), hex(0x2a2b2e), hex(0x333a40),
+                          hex(0x979da1), hex(0x696e73), hex(0xebebeb), hex(0xc4c8cc), hex(0xe3e3e3), hex(0xebebeb)};
 const Neutrals BASE = {hex(0x2a2b2e), hex(0x1e1f22), hex(0x3a3b3f), hex(0x45474c), hex(0x34363a), hex(0xb4b6bb),
                        hex(0x9c9fa5), hex(0xc9ccd2), hex(0xd4d6da), hex(0x6e7076), hex(0x2f3034), hex(0x48494e)};
 const Neutrals FH2MP = {hex(0x242740), hex(0x1f2134), hex(0x31344e), hex(0x363a54), hex(0x2a2e4a), hex(0xb5bad8),
@@ -102,6 +107,9 @@ void theme_apply(const std::string& key) {
     TAB_TEXT = n.tab_text, DISABLED = n.disabled, KEY = n.key, KEY_LINE = n.key_line;
     TEXT = n.text, SPINE_TEXT = n.spine_text, PANEL_HI = n.panel_hi ? n.panel_hi : n.panel, PANEL_LO = n.panel_lo ? n.panel_lo : n.panel;
     TOAST = n.toast ? n.toast : n.panel, ONLINE = n.online;
+    SIDE_HI = n.side_hi ? n.side_hi : n.pane, SIDE_LO = n.side_lo ? n.side_lo : n.pane, SIDE_TEXT = n.side_text ? n.side_text : n.text;
+    SIDE_MUTED = n.side_muted ? n.side_muted : n.muted, CARD = n.card ? n.card : n.raised, EMBOSS = n.emboss;
+
 
     g_current = plastic ? std::string(t.key) + "-plastic" : t.key;
 }

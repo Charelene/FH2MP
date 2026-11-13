@@ -181,7 +181,7 @@ void Guide::draw_achievements(ImDrawList* dl, const GuideAssets& a, ImVec2 origi
     const float L = PAGE_L, W = PAGE_W;
     float slide, pop, title_op;
     page_motion(now, op, &slide, &pop, &title_op);
-    draw_header(dl, a, origin, s, zoom, op, L, W, "Achievements", title_op);
+    draw_header(dl, a, origin, s, zoom, op, "Achievements", title_op);
     float x = L + slide;
     int n = int(DEFS.size());
 
@@ -212,7 +212,7 @@ void Guide::draw_achievements(ImDrawList* dl, const GuideAssets& a, ImVec2 origi
     icon_mid(dl, a, v.sz(28), down.x, down.y, alpha(ach_top_ + ROWS < rows ? MUTED : DISABLED, pop), I_EXPAND_MORE);
 
     // the focused achievement: its tile, name, date (when unlocked), points and description
-    dl->AddRectFilled(v.pt(x, 386), v.pt(x + W, 607), alpha(PANE, pop));
+    dl->AddRectFilled(v.pt(x, 386), v.pt(x + W, PAGE_B), alpha(PANE, pop));
     if (ach_focus_ >= 0 && ach_focus_ < n) {
         const AchDef& d = DEFS[ach_focus_];
         bool got = ach_.has(d.id);
@@ -238,7 +238,7 @@ void Guide::draw_achievements(ImDrawList* dl, const GuideAssets& a, ImVec2 origi
         wrapped(dl, a, v, 21, 1.35f, ix, y0 + 76, right - ix, alpha(MUTED, pop), d.desc);
     }
     const Hint hints[] = {{"B", "Back", RING_B}};
-    hint_bar(dl, a, v, L + 27, 617, hints, 1, op);
+    hint_bar(dl, a, v, HINT_X, HINT_Y, hints, 1, op);
 }
 
 // ---- Compare Games (a player's options): this player and the other, achievement by achievement. The 360's gp\826-7_GameAchievStatsYou.xur:
@@ -278,7 +278,7 @@ void Guide::draw_compare(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
     const float L = PAGE_L, W = PAGE_W;
     float slide, pop, title_op;
     page_motion(now, op, &slide, &pop, &title_op);
-    draw_header(dl, a, origin, s, zoom, op, L, W, "Compare Games", title_op);
+    draw_header(dl, a, origin, s, zoom, op, "Compare Games", title_op);
     float x = L + slide;
     int n = int(DEFS.size());
     auto it = social_.ach_of.find(cmp_.xuid);
@@ -332,17 +332,17 @@ void Guide::draw_compare(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, fl
         if (theirs) mark(col_them, got_them);
     }
     dl->PopClipRect();
-    ImVec2 f0 = v.pt(x, top + CMP_ROWS * RH), f1 = v.pt(x + W, 607);
+    ImVec2 f0 = v.pt(x, top + CMP_ROWS * RH), f1 = v.pt(x + W, PAGE_B);
     panel_fill(dl, f0, f1, pop);
     dl->AddLine(ImVec2(f0.x, f0.y + v.sz(0.5f)), ImVec2(f1.x, f0.y + v.sz(0.5f)), alpha(LINE, pop), v.sz(1));
-    ImVec2 fr = v.pt(x + W - 30, (top + CMP_ROWS * RH + 607) / 2);
+    ImVec2 fr = v.pt(x + W - 30, (top + CMP_ROWS * RH + PAGE_B) / 2);
     icon_mid(dl, a, v.sz(24), fr.x - v.sz(12), fr.y, alpha(cmp_list_.top + CMP_ROWS < n ? MUTED : DISABLED, pop), I_EXPAND_MORE);
     icon_mid(dl, a, v.sz(24), fr.x - v.sz(36), fr.y, alpha(cmp_list_.top > 0 ? MUTED : DISABLED, pop), I_EXPAND_LESS);
     char count[32];
     snprintf(count, sizeof count, "%d of %d", cmp_list_.row + 1, n);
     text_mid(dl, a.text, a.text_m, v.sz(18), fr.x - v.sz(56), fr.y, alpha(MUTED, pop), count, true);
     const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}};
-    hint_bar(dl, a, v, L + 27, 617, hints, 2, op);
+    hint_bar(dl, a, v, HINT_X, HINT_Y, hints, 2, op);
 }
 
 void Guide::handle_ach_detail(PadEvent e, double now) {
@@ -355,9 +355,9 @@ void Guide::draw_ach_detail(ImDrawList* dl, const GuideAssets& a, ImVec2 origin,
     const float L = PAGE_L, W = PAGE_W;
     float slide, pop, title_op;
     page_motion(now, op, &slide, &pop, &title_op);
-    draw_header(dl, a, origin, s, zoom, op, L, W, "Compare Games", title_op);
+    draw_header(dl, a, origin, s, zoom, op, "Compare Games", title_op);
     float x = L + slide;
-    panel_fill(dl, v.pt(x, 96), v.pt(x + W, 607), pop);
+    panel_fill(dl, v.pt(x, 96), v.pt(x + W, PAGE_B), pop);
     if (ach_detail_ >= 0 && ach_detail_ < int(DEFS.size())) {
         const AchDef& d = DEFS[ach_detail_];
         auto it = social_.ach_of.find(cmp_.xuid);
@@ -376,7 +376,7 @@ void Guide::draw_ach_detail(ImDrawList* dl, const GuideAssets& a, ImVec2 origin,
         wrapped(dl, a, v, 22, 1.4f, tx, y0 + side + 60, W - 54, alpha(TEXT, pop), d.desc);
     }
     const Hint hints[] = {{"B", "Back", RING_B}};
-    hint_bar(dl, a, v, L + 27, 617, hints, 1, op);
+    hint_bar(dl, a, v, HINT_X, HINT_Y, hints, 1, op);
 }
 
 // ---- the achievement toast

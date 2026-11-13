@@ -443,8 +443,8 @@ private:
     void draw_compare(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
     void draw_ach_detail(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
     void draw_box(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float w, float h, double now);
-    void draw_header(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, float left, float width, const char* title,
-                     float title_op, float cy = 72, float size = 22);
+    void draw_header(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, const char* title, float title_op,
+                     bool half = false, float slide = 0);
 
     // One player's row of a list (artboard 4): picture, name, state and what they are doing. check: -1 none, 0 an empty box, 1 ticked.
     void player_row(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float x, float y, const Friend& f, Relation rel,

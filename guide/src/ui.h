@@ -1,6 +1,7 @@
 // Drawing helpers shared by the Guide's screens (guide.cpp, community.cpp, messages.cpp): the canvas' colours and icons, CSS-like text
-// placement, the hint bar, option lists. Everything is laid out in the canvas' 1280x720 units, scaled to the game's frame and centred;
-// the Guide is drawn at 0.84 of the canvas and a little higher, so a toast at the canvas' place (y 600) shows under it.
+// placement, the hint bar, option lists. Everything is laid out in the canvas' 1280x720 units, scaled to the game's frame and centred.
+// The canvas is the 360's own 853x480 layout at 1.5, so the Guide is drawn at the canvas' size: a page is as large on the screen as the
+// 360's (a toast at the canvas' y 600 shows over a page's foot, as a notification did there).
 #pragma once
 
 #include <algorithm>
@@ -16,7 +17,9 @@ namespace ui {
 
 // The theme's colours (theme.cpp sets them; these are Xbox's, the 360 Guide's own skin): the accent, a bright and a dark of it, the ink for
 // text on the accent, and the surfaces. TEXT is the text on a panel, SPINE_TEXT the open blade's name, PANEL_HI and PANEL_LO the panel's
-// gradient top and bottom, TOAST the toasts' surface (they stay dark in every theme). White, black and the offline colour stay.
+// gradient top and bottom, TOAST the toasts' surface (they stay dark in every theme). SIDE_HI and SIDE_LO are the gradient of a page's
+// right-hand pane (the 360's description pane), SIDE_TEXT and SIDE_MUTED the text on it, CARD a gamer card's body, EMBOSS the light copy
+// under a row's text (no alpha: none). White, black and the offline colour stay.
 inline ImU32 ACCENT = IM_COL32(0x00, 0x8a, 0x00, 255), DARK = IM_COL32(0x0a, 0x4f, 0x0a, 255), BRIGHT = IM_COL32(0x10, 0x7c, 0x10, 255),
              INK = IM_COL32(235, 235, 235, 255), PANEL = IM_COL32(216, 221, 222, 255), PANE = IM_COL32(201, 207, 209, 255),
              LINE = IM_COL32(194, 196, 200, 255), TAB = IM_COL32(91, 104, 117, 255), RAISED = IM_COL32(195, 199, 203, 255),
@@ -24,16 +27,26 @@ inline ImU32 ACCENT = IM_COL32(0x00, 0x8a, 0x00, 255), DARK = IM_COL32(0x0a, 0x4
              MUTED3 = IM_COL32(0xc9, 0xcc, 0xd2, 255), DISABLED = IM_COL32(185, 189, 194, 255), KEY = IM_COL32(0x2f, 0x30, 0x34, 255),
              KEY_LINE = IM_COL32(0x48, 0x49, 0x4e, 255), TEXT = IM_COL32(51, 58, 64, 255), SPINE_TEXT = IM_COL32(88, 96, 102, 255),
              PANEL_HI = IM_COL32(232, 235, 236, 255), PANEL_LO = IM_COL32(201, 207, 209, 255), TOAST = IM_COL32(0x2a, 0x2b, 0x2e, 255),
-             ONLINE = IM_COL32(51, 58, 64, 255);
+             ONLINE = IM_COL32(51, 58, 64, 255), SIDE_HI = IM_COL32(151, 157, 161, 255), SIDE_LO = IM_COL32(105, 110, 115, 255),
+             SIDE_TEXT = IM_COL32(235, 235, 235, 255), SIDE_MUTED = IM_COL32(196, 200, 204, 255), CARD = IM_COL32(227, 227, 227, 255),
+             EMBOSS = IM_COL32(235, 235, 235, 255);
 const ImU32 WHITE = IM_COL32(255, 255, 255, 255), BLACK = IM_COL32(0, 0, 0, 255), OFFLINE = IM_COL32(0xe0, 0x55, 0x2f, 255);
 const ImU32 PIC_COLORS[] = {IM_COL32(0xc9, 0x66, 0x2f, 255), IM_COL32(0x3f, 0x6f, 0xc4, 255), IM_COL32(0xc4, 0x9a, 0x2b, 255),
                             IM_COL32(0x3e, 0x9a, 0x5a, 255), IM_COL32(0x2f, 0x8f, 0xa8, 255), IM_COL32(0x9a, 0x4f, 0xb8, 255),
                             IM_COL32(0xa8, 0x3a, 0x3a, 255)};
-const ImU32 RING_A = IM_COL32(0x5f, 0xd1, 0x1c, 255), RING_B = IM_COL32(0xff, 0x4a, 0x4f, 255), RING_X = IM_COL32(0x3c, 0x8c, 0xff, 255),
-            RING_Y = IM_COL32(0xff, 0xb4, 0x1f, 255);
+// The legend's discs, as the 360 colours them.
+const ImU32 RING_A = IM_COL32(91, 169, 41, 255), RING_B = IM_COL32(183, 51, 51, 255), RING_X = IM_COL32(35, 105, 160, 255),
+            RING_Y = IM_COL32(227, 148, 2, 255);
 
-// The Guide's size against the canvas and the centre it is drawn around (canvas units); a page's left edge and width.
-const float GUIDE_K = 0.84f, GUIDE_CY = 330, PAGE_L = 205, PAGE_W = 862;
+// The Guide's size against the canvas and the centre it is drawn around (canvas units): at the canvas' size, 4.5 higher, which puts a
+// page's first row (canvas y 96) on the 360's (its y 61). A page: its left edge and width (the 360's 138 to 712), its rows' top, its foot
+// (the 360's 411), and where its legend starts (the first disc's left edge and the legend's centre line: the 360's 154.6 and 425).
+const float GUIDE_K = 1.0f, GUIDE_CY = 355.5f, PAGE_L = 206, PAGE_W = 862, PAGE_T = 96, PAGE_B = 621, HINT_X = 231.9f, HINT_Y = 642;
+
+// The 360's 853x480 units as canvas units (View turns those into pixels).
+inline float ux(float x) { return 640 + (x * 1.5f - 640) / GUIDE_K; }
+inline float uy(float y) { return 360 + (y * 1.5f - GUIDE_CY) / GUIDE_K; }
+inline float uu(float n) { return n * 1.5f / GUIDE_K; }
 
 // Material Icons (filled).
 enum : uint32_t {
@@ -80,11 +93,63 @@ inline ImU32 alpha(ImU32 c, float a) {
     return (c & ~IM_COL32_A_MASK) | (ImU32(al * a + 0.5f) << IM_COL32_A_SHIFT);
 }
 
-// A panel: the theme's gradient from PANEL_HI at the top to PANEL_LO at the bottom (one colour in the dark themes).
+inline ImU32 blend(ImU32 a, ImU32 b, float t) {
+    t = std::clamp(t, 0.0f, 1.0f);
+    auto ch = [&](int sh) { return ImU32(((a >> sh) & 0xff) + (float((b >> sh) & 0xff) - float((a >> sh) & 0xff)) * t + 0.5f) << sh; };
+    return ch(IM_COL32_R_SHIFT) | ch(IM_COL32_G_SHIFT) | ch(IM_COL32_B_SHIFT) | ch(IM_COL32_A_SHIFT);
+}
+
+// The blade a panel belongs to (pixels, top and foot): its gradient runs over the whole blade, so a panel drawn in pieces is one surface.
+inline float g_span[2] = {0, 0};
+inline void panel_span(float y0, float y1) { g_span[0] = y0, g_span[1] = y1; }
+
+// A panel: the theme's gradient from PANEL_HI at the blade's top to PANEL_LO at its foot (one colour in the dark themes).
 inline void panel_fill(ImDrawList* dl, ImVec2 p0, ImVec2 p1, float op) {
-    ImU32 hi = alpha(PANEL_HI, op), lo = alpha(PANEL_LO, op);
+    bool span = g_span[1] > g_span[0];
+    ImU32 hi = alpha(span ? blend(PANEL_HI, PANEL_LO, (p0.y - g_span[0]) / (g_span[1] - g_span[0])) : PANEL_HI, op);
+    ImU32 lo = alpha(span ? blend(PANEL_HI, PANEL_LO, (p1.y - g_span[0]) / (g_span[1] - g_span[0])) : PANEL_LO, op);
     dl->AddRectFilledMultiColor(p0, p1, hi, hi, lo, lo);
 }
+
+// A raised surface (the open blade's spine, the band under a gamer card): RAISED, 10 lighter at its top and 10 darker at its foot (the
+// 360's 205,208,211 -> 185,189,194).
+inline void raised_fill(ImDrawList* dl, ImVec2 p0, ImVec2 p1, float op) {
+    auto shade = [&](int d) {
+        auto ch = [&](int shift) { return std::clamp(int((RAISED >> shift) & 0xff) + d, 0, 255); };
+        return alpha(IM_COL32(ch(IM_COL32_R_SHIFT), ch(IM_COL32_G_SHIFT), ch(IM_COL32_B_SHIFT), 255), op);
+    };
+    dl->AddRectFilledMultiColor(p0, p1, shade(10), shade(10), shade(-10), shade(-10));
+}
+
+// A page's right-hand pane (the 360's description pane): SIDE_HI at its top to SIDE_LO at its foot.
+inline void side_fill(ImDrawList* dl, ImVec2 p0, ImVec2 p1, float op) {
+    ImU32 hi = alpha(SIDE_HI, op), lo = alpha(SIDE_LO, op);
+    dl->AddRectFilledMultiColor(p0, p1, hi, hi, lo, lo);
+}
+
+// A blade's shadow, as the 360's blade pictures carry it: the blade's own rectangle in black, 4 units lower, soft over about 6 units each
+// way (27 of 255 along a side and gone 5 out; 56 under the foot and gone 9 down). Only what shows around the blade is drawn. u: pixels
+// per 360 unit.
+inline void blade_shadow(ImDrawList* dl, ImVec2 p0, ImVec2 p1, float u, float op) {
+    // across an edge, by the units inside it: -5.5 -3.5 -1.5 0 2.5 4.5 6.5; down the top edge the same, 4 lower; under the foot its own
+    const float SX[7] = {-5.5f, -3.5f, -1.5f, 0, 2.5f, 4.5f, 6.5f}, SA[7] = {0, 0.14f, 0.36f, 0.525f, 0.79f, 0.93f, 1};
+    const float FY[8] = {0.5f, 1.5f, 2.5f, 3.5f, 4.5f, 6.5f, 8.5f, 9.5f}, FA[8] = {1, 0.91f, 0.79f, 0.64f, 0.48f, 0.23f, 0.07f, 0};
+    float xs[14], ax[14], ys[16], ay[16];
+    for (int i = 0; i < 7; i++) {
+        xs[i] = p0.x + SX[i] * u, ax[i] = SA[i], xs[13 - i] = p1.x - SX[i] * u, ax[13 - i] = SA[i];
+        ys[i] = p0.y + (SX[i] + 4) * u, ay[i] = SA[i];
+    }
+    ys[7] = p1.y, ay[7] = 1;
+    for (int i = 0; i < 8; i++) ys[8 + i] = p1.y + FY[i] * u, ay[8 + i] = FA[i];
+    if (ys[6] >= ys[7] || xs[6] >= xs[7]) return;  // a blade too small for its shadow
+    auto col = [&](int i, int j) { return IM_COL32(0, 0, 0, int(56 * ax[i] * ay[j] * op + 0.5f)); };
+    for (int j = 0; j < 15; j++)
+        for (int i = 0; i < 13; i++) {
+            if (i >= 3 && i <= 9 && j <= 6) continue;  // under the blade
+            dl->AddRectFilledMultiColor(ImVec2(xs[i], ys[j]), ImVec2(xs[i + 1], ys[j + 1]), col(i, j), col(i + 1, j), col(i + 1, j + 1), col(i, j + 1));
+        }
+}
+
 
 inline float ease_guide(float t) { return css_bezier(0.1f, 0.9f, 0.2f, 1.0f, t); }
 
@@ -112,6 +177,18 @@ inline void text_fit(ImDrawList* dl, ImFont* f, const FontMetrics& m, float size
     text_mid(dl, f, m, size, x, cy, col, (t + "...").c_str());
 }
 
+// A row's text as the 360's rows draw it on the light panel: a light copy (EMBOSS) two thirds of a unit down and right, the text over it.
+// u: pixels per 360 unit; strength: the copy's share (1 on a page's rows, 0.6 on the blades'); a theme without EMBOSS draws the text alone.
+inline void row_text(ImDrawList* dl, ImFont* f, const FontMetrics& m, float size, float x, float cy, float max_w, ImU32 col, const std::string& text,
+                     float u, float op, float strength = 1) {
+    if ((EMBOSS >> IM_COL32_A_SHIFT) & 0xff) {
+        int from = dl->VtxBuffer.Size;
+        text_fit(dl, f, m, size, x, cy, max_w, alpha(EMBOSS, op * strength), text);
+        for (int i = from; i < dl->VtxBuffer.Size; i++) dl->VtxBuffer[i].pos.x += 0.667f * u, dl->VtxBuffer[i].pos.y += 0.667f * u;
+    }
+    text_fit(dl, f, m, size, x, cy, max_w, col, text);
+}
+
 inline void icon_mid(ImDrawList* dl, const GuideAssets& a, float size, float cx, float cy, ImU32 col, uint32_t icon) {
     if (!a.icons || !icon) return;
     char ic[5];
@@ -136,19 +213,28 @@ inline void vertical_text(ImDrawList* dl, ImFont* f, const FontMetrics& m, float
     }
 }
 
-// A pad key's badge: a circle (A, B, X, Y: 20 units) or a rounded box (LB, RB, LT, RT, L: w x 22) with a 2-unit ring inside its edge,
-// centred on cy, its letters centred by their capital height. s: pixels per unit. Returns its width in pixels.
+// A pad key's badge: a disc (A, B, X, Y: 20 units) or a rounded box (LB, RB, LT, RT, L: w x 22) with a 2-unit ring inside its edge,
+// centred on cy, its letters centred by their capital height. s: pixels per unit. Returns its width in pixels. The disc is the 360
+// legend's: its picture is 18 units square with the disc 16.4 across in the button's colour, the letter 10.7 high in 245 over a faint
+// black copy two thirds of a unit down and right.
 inline float badge(ImDrawList* dl, const GuideAssets& a, const char* key, ImU32 ring, float x, float cy, float s, float op, float w = 0, float r = -1) {
     bool wide = strlen(key) > 1;
     float kw = (w > 0 ? w : wide ? 34 : 20) * s, kh = (wide || w > 0 ? 22 : 20) * s, rr = (r >= 0 ? std::min(r, 11.0f) : wide ? 6 : 10) * s;
     ImVec2 k0(x, cy - kh / 2), k1(x + kw, cy + kh / 2);
-    bool disc = !wide && w <= 0;  // A, B, X, Y: the 360's legend draws a disc filled with the button's colour and a light letter
-    dl->AddRectFilled(k0, k1, alpha(disc ? ring : BLACK, op), rr);
-    if (!disc) dl->AddRect(ImVec2(k0.x + s, k0.y + s), ImVec2(k1.x - s, k1.y - s), alpha(ring, op), std::max(0.0f, rr - s), 0, 2 * s);
+    if (!wide && w <= 0) {
+        float u = kw / 18, size = 10.667f * u;
+        dl->AddCircleFilled(ImVec2(x + kw / 2, cy), 8.2f * u, alpha(ring, op), 32);
+        ImVec2 at(x + (kw - a.text->CalcTextSizeA(size, FLT_MAX, 0, key).x) * 0.5f, caps_top(a.text_m, size, cy));
+        dl->AddText(a.text, size, ImVec2(at.x + 0.667f * u, at.y + 0.667f * u), IM_COL32(0, 0, 0, int(30 * op)), key);
+        dl->AddText(a.text, size, at, alpha(IM_COL32(245, 245, 245, 255), op), key);
+        return kw;
+    }
+    dl->AddRectFilled(k0, k1, alpha(BLACK, op), rr);
+    dl->AddRect(ImVec2(k0.x + s, k0.y + s), ImVec2(k1.x - s, k1.y - s), alpha(ring, op), std::max(0.0f, rr - s), 0, 2 * s);
     ImFont* kf = a.text_bold ? a.text_bold : a.text;
-    float size = (wide || w > 0 ? 11 : 12) * s;
+    float size = 11 * s;
     float tw = kf->CalcTextSizeA(size, FLT_MAX, 0, key).x;
-    dl->AddText(kf, size, ImVec2(x + (kw - tw) * 0.5f, caps_top(a.bold_m, size, cy)), alpha(disc ? IM_COL32(245, 245, 245, 255) : ring, op), key);
+    dl->AddText(kf, size, ImVec2(x + (kw - tw) * 0.5f, caps_top(a.bold_m, size, cy)), alpha(ring, op), key);
     return kw;
 }
 
@@ -169,21 +255,23 @@ struct Hint {
     ImU32 ring;
 };
 
-// The hint bar: a flex row 10 units under the panel, 27 in, 19-unit text, gaps 22 between hints and 7 inside one, a hint without a label
-// sits 8 from the next (LB RB). The keys and the words share one centre line (the words by their capitals).
-inline void hint_bar(ImDrawList* dl, const GuideAssets& a, const View& v, float x, float top, const Hint* hints, int n, float op) {
-    float cy = top + 12.5f;
+// The legend, as the 360's frame lays it out (in its units): each disc's picture 18 square, its word 6.4 after it, 13.3 high, in 235, and
+// the next disc 87.6 after this one (a word longer than its 64-unit slot pushes the rest along). A key that is not a disc (LB, RB) is as
+// high as a disc; one without a word sits 4 from the next. x: the first key's left edge; cy: the line the keys and words centre on.
+inline void hint_bar(ImDrawList* dl, const GuideAssets& a, const View& v, float x, float cy, const Hint* hints, int n, float op) {
+    const float size = uu(13.333f);
     for (int i = 0; i < n; i++) {
+        bool disc = strlen(hints[i].key) == 1;
         ImVec2 p = v.pt(x, cy);
-        x += badge(dl, a, hints[i].key, hints[i].ring, p.x, p.y, v.sz(1), op) / v.sz(1);
-        if (hints[i].label) {
-            x += 7;
-            ImVec2 q = v.pt(x, cy);
-            dl->AddText(a.text, v.sz(19), ImVec2(q.x, caps_top(a.text_m, v.sz(19), q.y)), alpha(WHITE, op), hints[i].label);
-            x += a.text->CalcTextSizeA(19, FLT_MAX, 0, hints[i].label).x + 22;
-        } else {
-            x += 8;
+        float kw = badge(dl, a, hints[i].key, hints[i].ring, p.x, p.y, v.sz(uu(disc ? 18 : 16.4f) / (disc ? 20 : 22)), op) / v.sz(1);
+        if (!hints[i].label) {
+            x += kw + uu(4);
+            continue;
         }
+        float lw = a.text->CalcTextSizeA(size, FLT_MAX, 0, hints[i].label).x;
+        ImVec2 q = v.pt(x + kw + uu(6.4f), cy);
+        dl->AddText(a.text, v.sz(size), ImVec2(q.x, caps_top(a.text_m, v.sz(size), q.y)), alpha(IM_COL32(235, 235, 235, 255), op), hints[i].label);
+        x += std::max(uu(87.6f), kw + uu(6.4f) + lw + uu(12));
     }
 }
 
@@ -221,16 +309,30 @@ inline int step_focus(const std::vector<Opt>& o, int cur, int dir) {
     return cur >= 0 && cur < int(o.size()) && o[cur].enabled ? cur : first_enabled(o);
 }
 
+// The shadow a tab casts on the tab beside it (the 360's tab strip: 17 of its units, 15,15,15 at 96 of 255 over the first 0.48 of them,
+// gone by 0.91). From canvas x, to the right (dir 1) or to the left (-1), between y0 and y1.
+inline void tab_shadow(ImDrawList* dl, const View& v, float x, float y0, float y1, int dir, float op) {
+    ImU32 c = IM_COL32(15, 15, 15, int(96 * op)), z = IM_COL32(15, 15, 15, 0);
+    float m = x + dir * uu(17 * 0.48f), e = x + dir * uu(17 * 0.91f);
+    if (dir > 0) {
+        dl->AddRectFilled(v.pt(x, y0), v.pt(m, y1), c);
+        dl->AddRectFilledMultiColor(v.pt(m, y0), v.pt(e, y1), c, z, z, c);
+    } else {
+        dl->AddRectFilled(v.pt(m, y0), v.pt(x, y1), c);
+        dl->AddRectFilledMultiColor(v.pt(e, y0), v.pt(m, y1), z, c, c, z);
+    }
+}
+
 // An option list as the canvas draws them: rows row_h high from (x, top), w wide, the accent bar on the focused row (bar: its row,
-// gliding), a line under every other row, greyed entries in the disabled colour. icon_size > 0 puts each row's icon in a column icon_w
-// wide before its label (Create New, compose).
+// gliding), a line under every other row, greyed entries in the disabled colour, the others' text as the 360's rows draw it (row_text).
+// icon_size > 0 puts each row's icon in a column icon_w wide before its label (Create New, compose).
+
 inline void option_list(ImDrawList* dl, const GuideAssets& a, const View& v, float x, float top, float w, float row_h, float text_size, float pad,
                         const std::vector<Opt>& opts, int focus, float bar, float op, float icon_size = 0, float icon_w = 0, float gap = 0) {
     if (focus >= 0 && focus < int(opts.size()) && opts[focus].enabled) {
         float by = top + bar * row_h;
         ImVec2 b0 = v.pt(x, by), b1 = v.pt(x + w, by + row_h);
         dl->AddRectFilled(b0, b1, alpha(ACCENT, op));
-        dl->AddLine(ImVec2(b0.x, b1.y - v.sz(0.5f)), ImVec2(b1.x, b1.y - v.sz(0.5f)), alpha(DARK, op), v.sz(1));
     }
     for (size_t i = 0; i < opts.size(); i++) {
         float y = top + i * row_h, cy = y + row_h * 0.5f;
@@ -244,9 +346,11 @@ inline void option_list(ImDrawList* dl, const GuideAssets& a, const View& v, flo
             tx += icon_w + gap;
         }
         ImVec2 p = v.pt(tx, cy);
-        text_fit(dl, a.text, a.text_m, v.sz(text_size), p.x, p.y, v.sz(x + w - pad - tx), fg, opts[i].label);
+        if (opts[i].enabled && int(i) != focus) row_text(dl, a.text, a.text_m, v.sz(text_size), p.x, p.y, v.sz(x + w - pad - tx), fg, opts[i].label, v.sz(uu(1)), op);
+        else text_fit(dl, a.text, a.text_m, v.sz(text_size), p.x, p.y, v.sz(x + w - pad - tx), fg, opts[i].label);
     }
 }
+
 
 // Text wrapped to max_w (canvas units) from (x, y), line-height lh; returns the height it took.
 inline float wrapped(ImDrawList* dl, const GuideAssets& a, const View& v, float size, float lh, float x, float y, float max_w, ImU32 col, const std::string& text) {

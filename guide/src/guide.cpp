@@ -26,10 +26,9 @@ const char* BLADE[3] = {"Games", nullptr, "Settings"};
 // *TabSignedIn.xur rows, huduiskin.xex's blade pictures), in its 853x480 units. The open blade always sits at the same place, 366 wide
 // and 211 high from (242, 134); every other blade is a 30-wide strip stacked out to its side, as high as the open one. The open blade's
 // spine is 42 wide (243..285, a gradient 205,208,211 -> 185,189,194, its name from y 145); the rows are 28 high from y 135, 323 wide,
-// their text 10 in and 16 high, a hairline above and below each. The title sits in a box at (243, 103) 23 high, the legend's discs
-// (18 across) and words (13.3) centre on y 360, its slots at x 240.6 (A), 328.2 (B) and 505.4 (the third, Y on the 360).
-const float BLADE_W = 366, STRIP_W = 30, BLADE_X = 242, BLADE_Y = 134, BLADE_H = 211, SPINE_W = 43, ROW_X = 285, ROW_Y = 135, ROW_H = 28,
-            ROW_W = 323, ROW_TEXT = 16, NAME_Y = 145, TITLE_CY = 114.5f, HINT_CY = 360, HINT_DISC = 18, HINT_TEXT = 13.333f;
+// their text 10 in and 16 high, a hairline above and below each. The legend centres on y 360.
+const float BLADE_W = 366, STRIP_W = 30, BLADE_X = 242, BLADE_Y = 134, BLADE_H = 211, SPINE_W = 43, ROW_Y = 135, ROW_H = 28, ROW_TEXT = 16,
+            NAME_Y = 145, HINT_CY = 360;
 
 
 // Toasts take the theme's accent; only a warning is red.
@@ -736,6 +735,18 @@ bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double 
         float k = ease_guide(std::clamp(float((now - opened_) / 0.26), 0.0f, 1.0f));
         float zoom = 0.92f + 0.08f * k, op = k;
         dl->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), IM_COL32(0, 0, 0, int(178 * op)));
+        // a message box takes the frame over, as the 360's does: what the Guide was showing fades out under it
+        if (box_.on) op *= 1 - ease_guide(std::clamp(float((now - box_.at) / 0.2), 0.0f, 1.0f));
+        if (page() != Page::Home) {
+            // a page's blade: the 360's full frame (137 to 712, 60 to 411), which the page then draws its panes on
+            float slide, pop, title_op;
+            page_motion(now, op, &slide, &pop, &title_op);
+            View v{origin, s, zoom};
+            ImVec2 p0 = v.pt(ux(137) + slide, uy(60)), p1 = v.pt(ux(712) + slide, uy(411));
+            blade_shadow(dl, p0, p1, v.sz(uu(1)), pop);
+            panel_span(p0.y, p1.y);
+            panel_fill(dl, p0, p1, pop);
+        }
         switch (page()) {
         case Page::Home: draw_home(dl, a, origin, s, zoom, op, now); break;
         case Page::Community: draw_community(dl, a, origin, s, zoom, op, now); break;
@@ -759,23 +770,23 @@ bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double 
     return busy(now);
 }
 
-// The header above a panel (canvas: the title at (27, 20), 22 units, line-height 1, so centred on y 72; the player's picture 48x48 in the
-// middle at the top; the clock 30 in from the right). The blades put it at their own height and size (cy, size); the picture scales with it.
-void Guide::draw_header(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, float left, float width, const char* title,
-                        float title_op, float cy, float size) {
+// The header above the panel, where the 360's frame puts it (its units): the title 16 high from y 36 in a page's first column (x 156),
+// the player's picture 32 square at (410, 24), the clock 14.7 high in 217, ending at x 693 on the line y 48. Over the blades (half) the
+// frame is smaller: the title over the open blade's spine at (243, 103), the picture at (410, 98), the clock ending at x 609 on y 123.5.
+void Guide::draw_header(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, const char* title, float title_op, bool half,
+                        float slide) {
     View v{origin, s, zoom};
-    float k = size / 22;
-    ImVec2 t = v.pt(left + 27, cy);
-    text_fit(dl, a.text, a.text_m, v.sz(size), t.x, t.y, v.sz(width / 2 - 24 * k - 27 - 14), alpha(WHITE, op * title_op), title);  // up to the picture
-    ImVec2 pic0 = v.pt(left + width / 2 - 24 * k, cy - 31 * k), pic1 = v.pt(left + width / 2 + 24 * k, cy + 17 * k);
-    player_pic(dl, a, a.gamerpic, social_.me.xuid, pic0, pic1, op);
+    float tx = half ? 243 : 156, ty = half ? 103 : 36, py = half ? 98 : 24, cx = half ? 609 : 693, cy = half ? 123.5f : 48;
+    ImVec2 t = v.pt(ux(tx) + slide, uy(ty + 10.5f));
+    text_fit(dl, a.text, a.text_m, v.sz(uu(16)), t.x, t.y, v.sz(uu(410 - 8 - tx)), alpha(WHITE, op * title_op * 235 / 255), title);  // up to the picture
+    player_pic(dl, a, a.gamerpic, social_.me.xuid, v.pt(ux(410), uy(py)), v.pt(ux(442), uy(py + 32)), op);
     SYSTEMTIME st;
     GetLocalTime(&st);
     char clock[32];
     int h12 = st.wHour % 12 == 0 ? 12 : st.wHour % 12;
     snprintf(clock, sizeof clock, "%d:%02d  %s", h12, st.wMinute, st.wHour < 12 ? "AM" : "PM");
-    ImVec2 c = v.pt(left + width - 30, cy);
-    text_mid(dl, a.text, a.text_m, v.sz(size), c.x, c.y, alpha(WHITE, op), clock, true);
+    ImVec2 c = v.pt(ux(cx), uy(cy));
+    text_mid(dl, a.text, a.text_m, v.sz(uu(14.667f)), c.x, c.y, alpha(IM_COL32(217, 217, 217, 255), op), clock, true);
 }
 
 void Guide::draw_home(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now) {
@@ -783,16 +794,12 @@ void Guide::draw_home(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float
     ImFont* tf = a.text;
     float pslide, pop, title_op;
     page_motion(now, op, &pslide, &pop, &title_op);  // coming back from a page: the blades slide in like a page does
-    // the 360's 853x480 units to the canvas: x1.5 to the frame, then undo the Guide's own size (View puts it back)
-    auto X = [&](float x) { return 640 + (x * 1.5f - 640) / GUIDE_K + pslide; };
-    auto Y = [](float y) { return 360 + (y * 1.5f - GUIDE_CY) / GUIDE_K; };
-    auto U = [](float n) { return n * 1.5f / GUIDE_K; };
+    auto X = [&](float x) { return ux(x) + pslide; };
+    auto Y = [](float y) { return uy(y); };
+    auto U = [](float n) { return uu(n); };
+    float unit = v.sz(uu(1));
     const char* title = blade_ == 1 ? gamertag.c_str() : BLADE[blade_];
-    float right_edge = BLADE_X + BLADE_W;
-    for (int bi = blade_ + 1; bi < 3; bi++) right_edge += width_[bi].value(now);
-    // the title over the open blade's spine, the clock at the blades' right end
-    float hl = X(BLADE_X + 1) - 27;
-    draw_header(dl, a, origin, s, zoom, op, hl, X(right_edge) + 30 - hl, title, title_op, Y(TITLE_CY), U(ROW_TEXT));
+    draw_header(dl, a, origin, s, zoom, op, title, title_op, true, pslide);
 
     int online = 0, waiting = 0;
     for (const Friend& f : social_.friends) online += f.state != Friend::Offline;
@@ -804,116 +811,107 @@ void Guide::draw_home(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float
     if (ach_.known) snprintf(ach_meta, sizeof ach_meta, "%d of %d", ach_.count(), int(ach_defs().size()));
 
     // the open blade's left edge stays put while the others' widths move
-    float x = BLADE_X;
+    float left[3], x = BLADE_X;
     for (int bi = 0; bi < blade_; bi++) x -= width_[bi].value(now);
-    // the blades' soft shadow (their pictures' edges: about 27 of 255 at the sides, more below, gone 6 units out)
-    for (int k = 6; k >= 1; k--)
-        dl->AddRectFilled(v.pt(X(x - k), Y(BLADE_Y - k + 3)), v.pt(X(right_edge + k), Y(BLADE_Y + BLADE_H + k + 2)), IM_COL32(0, 0, 0, int(5 * pop)));
+    for (int bi = 0; bi < 3; bi++) left[bi] = x, x += width_[bi].value(now);
     float since = float(now - switched_);
-    for (int bi = 0; bi < 3; bi++) {
-        float bw = width_[bi].value(now);
+    // as the 360 stacks them: the strips from the outside in, each with its shadow on the one before, then the open blade over them all
+    int order[3], n = 0;
+    for (int bi = 0; bi < blade_; bi++) order[n++] = bi;
+    for (int bi = 2; bi > blade_; bi--) order[n++] = bi;
+    order[n++] = blade_;
+    for (int oi = 0; oi < 3; oi++) {
+        int bi = order[oi];
+        float bw = width_[bi].value(now), bx = left[bi];
         bool on = bi == blade_;
         const char* name = bi == 1 ? gamertag.c_str() : BLADE[bi];
-        ImVec2 b0 = v.pt(X(x), Y(BLADE_Y)), b1 = v.pt(X(x + bw), Y(BLADE_Y + BLADE_H));
+        ImVec2 b0 = v.pt(X(bx), Y(BLADE_Y)), b1 = v.pt(X(bx + bw), Y(BLADE_Y + BLADE_H));
         if (bw < STRIP_W + 1) {
-            // a strip: the blade's colour, its name down the middle from y 146, 11 high
+            // a strip: the blade's colour, its name down the middle from y 146, 14.7 high. Its picture reaches under the open blade
+            // (the 360's are 48 to 54 wide), so its shadow falls on its outer side only
+            ImVec2 s0 = bi < blade_ ? b0 : ImVec2(b0.x - 20 * unit, b0.y), s1 = bi < blade_ ? ImVec2(b1.x + 20 * unit, b1.y) : b1;
+            blade_shadow(dl, s0, s1, unit, pop);
             dl->AddRectFilled(b0, b1, alpha(TAB, pop));
-            vertical_text(dl, tf, a.text_m, v.sz(U(ROW_TEXT * 11 / 12)), (b0.x + b1.x) * 0.5f, v.pt(0, Y(NAME_Y + 1)).y, alpha(TAB_TEXT, pop), name);
-        } else {
-            panel_fill(dl, b0, b1, pop);
-            // the spine: RAISED with the 360's +-10 gradient (205 -> 185 on the Xbox theme), the name in SPINE_TEXT
-            ImVec2 s0 = v.pt(X(x + 1), Y(ROW_Y)), s1 = v.pt(X(x + SPINE_W), Y(BLADE_Y + BLADE_H - 1));
-            auto shade = [&](int d) {
-                auto ch = [&](int shift) { return std::clamp(int((RAISED >> shift) & 0xff) + d, 0, 255); };
-                return alpha(IM_COL32(ch(IM_COL32_R_SHIFT), ch(IM_COL32_G_SHIFT), ch(IM_COL32_B_SHIFT), 255), pop);
-            };
-            dl->AddRectFilledMultiColor(s0, s1, shade(10), shade(10), shade(-10), shade(-10));
-            vertical_text(dl, tf, a.text_m, v.sz(U(ROW_TEXT)), v.pt(X(x + 17), 0).x, v.pt(0, Y(NAME_Y)).y, alpha(on ? SPINE_TEXT : TAB_TEXT, pop), name);
-            std::vector<Opt> rows = home_rows(bi);
-            float rx = x + SPINE_W, rw = bw - SPINE_W - 1;  // the rows: right of the spine to the blade's edge
-            dl->PushClipRect(v.pt(X(rx), Y(BLADE_Y)), b1, true);
-            bool barred = on && focus_[bi] >= 0;
-            if (barred) {
-                float by = ROW_Y + bar_[bi].value(now) * ROW_H;
-                dl->AddRectFilled(v.pt(X(rx), Y(by)), v.pt(X(rx + rw), Y(by + ROW_H + 1)), alpha(ACCENT, pop));
-            }
-            for (int i = 0; i < int(rows.size()); i++) {
-                const Opt& r = rows[i];
-                float slide = 0, rop = 1;
-                if (on && since < 0.7f) {
-                    float d = std::clamp((since - 0.04f - 0.028f * i) / 0.32f, 0.0f, 1.0f);
-                    float e = ease_guide(d);
-                    slide = (1 - e) * 150 * switch_dir_, rop = e;
-                }
-                float y = ROW_Y + i * ROW_H;
-                bool hi = barred && i == focus_[bi];
-                ImVec2 r0 = v.pt(X(rx) + slide, Y(y)), r1 = v.pt(X(rx + rw) + slide, Y(y + ROW_H));
-                // a hairline above and below each row (the focus bar covers its own)
-                if (!hi) {
-                    ImU32 lc = alpha(LINE, pop * rop);
-                    float half = v.sz(U(0.5f));
-                    if (i == 0) dl->AddLine(ImVec2(r0.x, r0.y + half), ImVec2(r1.x, r0.y + half), lc, v.sz(U(1)));
-                    dl->AddLine(ImVec2(r0.x, r1.y + half), ImVec2(r1.x, r1.y + half), lc, v.sz(U(1)));
-                }
-                float cy = (r0.y + r1.y) * 0.5f;
-                ImU32 fg = alpha(!r.enabled ? DISABLED : hi ? INK : TEXT, pop * rop);
-                text_mid(dl, tf, a.text_m, v.sz(U(ROW_TEXT)), r0.x + v.sz(U(10)), cy, fg, r.label.c_str());
-                float right = r1.x - v.sz(U(8));
-                if (r.icon) icon_mid(dl, a, v.sz(U(15)), right - v.sz(U(7.5f)), cy, fg, r.icon);
-                right -= v.sz(U(15 + 7));
-                const char* meta = r.cmd == HomeFriends ? friends_meta : r.cmd == HomeMessages ? messages_meta : r.cmd == HomeResume ? "Now playing"
-                                   : r.cmd == HomeAchievements ? ach_meta : "";
-                if (*meta) text_mid(dl, tf, a.text_m, v.sz(U(ROW_TEXT * 0.8f)), right, cy, alpha(hi ? INK : MUTED, pop * rop), meta, true);
-            }
-            dl->PopClipRect();
+            vertical_text(dl, tf, a.text_m, v.sz(U(14.667f)), (b0.x + b1.x) * 0.5f, v.pt(0, Y(NAME_Y + 1)).y, alpha(TAB_TEXT, pop), name);
+            continue;
         }
-        x += bw;
+        // the frame and the blades each draw the open blade's picture, so its shadow is there twice
+        if (on) blade_shadow(dl, b0, b1, unit, pop);
+        blade_shadow(dl, b0, b1, unit, pop);
+        panel_span(b0.y, b1.y);
+        panel_fill(dl, b0, b1, pop);
+        // the spine: RAISED with the 360's +-10 gradient (205 -> 185 on the Xbox theme), the name in SPINE_TEXT
+        ImVec2 s0 = v.pt(X(bx + 1), Y(ROW_Y)), s1 = v.pt(X(bx + SPINE_W), Y(BLADE_Y + BLADE_H - 1));
+        raised_fill(dl, s0, s1, pop);
+        vertical_text(dl, tf, a.text_m, v.sz(U(ROW_TEXT)), v.pt(X(bx + 17), 0).x, v.pt(0, Y(NAME_Y)).y, alpha(on ? SPINE_TEXT : TAB_TEXT, pop), name);
+        std::vector<Opt> rows = home_rows(bi);
+        float rx = bx + SPINE_W, rw = bw - SPINE_W;  // the rows: right of the spine to the blade's edge
+        dl->PushClipRect(v.pt(X(rx), Y(BLADE_Y)), b1, true);
+        bool barred = on && focus_[bi] >= 0;
+        if (barred) {
+            float by = ROW_Y + bar_[bi].value(now) * ROW_H;
+            dl->AddRectFilled(v.pt(X(rx), Y(by)), v.pt(X(rx + rw), Y(by + ROW_H + 1)), alpha(ACCENT, pop));
+        }
+        for (int i = 0; i < int(rows.size()); i++) {
+            const Opt& r = rows[i];
+            float slide = 0, rop = 1;
+            if (on && since < 0.7f) {
+                float d = std::clamp((since - 0.04f - 0.028f * i) / 0.32f, 0.0f, 1.0f);
+                float e = ease_guide(d);
+                slide = (1 - e) * 150 * switch_dir_, rop = e;
+            }
+            float y = ROW_Y + i * ROW_H;
+            bool hi = barred && i == focus_[bi];
+            ImVec2 r0 = v.pt(X(rx) + slide, Y(y)), r1 = v.pt(X(rx + rw) + slide, Y(y + ROW_H));
+            // a hairline above and below each row (the focus bar covers its own)
+            if (!hi) {
+                ImU32 lc = alpha(LINE, pop * rop);
+                float half = v.sz(U(0.5f));
+                if (i == 0) dl->AddLine(ImVec2(r0.x, r0.y + half), ImVec2(r1.x, r0.y + half), lc, v.sz(U(1)));
+                dl->AddLine(ImVec2(r0.x, r1.y + half), ImVec2(r1.x, r1.y + half), lc, v.sz(U(1)));
+            }
+            float cy = (r0.y + r1.y) * 0.5f;
+            ImU32 fg = alpha(!r.enabled ? DISABLED : hi ? INK : TEXT, pop * rop);
+            // the 360's rows: the text 10 in, a 20-unit picture ending 6 from the edge
+            if (r.enabled && !hi) row_text(dl, tf, a.text_m, v.sz(U(ROW_TEXT)), r0.x + v.sz(U(10)), cy, FLT_MAX, fg, r.label, unit, pop * rop, 0.6f);
+            else text_mid(dl, tf, a.text_m, v.sz(U(ROW_TEXT)), r0.x + v.sz(U(10)), cy, fg, r.label.c_str());
+            float right = r1.x - v.sz(U(6));
+            if (r.icon) icon_mid(dl, a, v.sz(U(19)), right - v.sz(U(10)), cy, fg, r.icon);
+            right -= v.sz(U(20 + 6));
+            const char* meta = r.cmd == HomeFriends ? friends_meta : r.cmd == HomeMessages ? messages_meta : r.cmd == HomeResume ? "Now playing"
+                               : r.cmd == HomeAchievements ? ach_meta : "";
+            if (*meta) text_mid(dl, tf, a.text_m, v.sz(U(ROW_TEXT * 0.8f)), right, cy, alpha(hi ? INK : MUTED, pop * rop), meta, true);
+        }
+        dl->PopClipRect();
     }
-    // the legend in the 360's three slots: A Select, B Back, then LB RB Switch where the 360 has Y
-    float hs = v.sz(U(HINT_DISC)) / 20;  // badge() draws a 20-unit disc
-    float text_size = v.sz(U(HINT_TEXT)), gap = v.sz(U(6.4f));
-    auto words = [&](float px, float py, const char* label) {
-        dl->AddText(a.text, text_size, ImVec2(px, caps_top(a.text_m, text_size, py)), alpha(WHITE, op), label);
-    };
-    ImVec2 pa = v.pt(X(240.6f), Y(HINT_CY)), pb = v.pt(X(328.2f), Y(HINT_CY)), pl = v.pt(X(505.4f), Y(HINT_CY));
-    words(pa.x + badge(dl, a, "A", RING_A, pa.x, pa.y, hs, op) + gap, pa.y, "Select");
-    words(pb.x + badge(dl, a, "B", RING_B, pb.x, pb.y, hs, op) + gap, pb.y, "Back");
-    float lb = badge(dl, a, "LB", MUTED3, pl.x, pl.y, hs, op);
-    float rb = badge(dl, a, "RB", MUTED3, pl.x + lb + gap * 0.6f, pl.y, hs, op);
-    words(pl.x + lb + gap * 0.6f + rb + gap, pl.y, "Switch");
+    // the legend in the 360's slots: A Select and B Back from x 240.6, then LB RB Switch where the 360 has Y (505.4)
+    const Hint first[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}}, last[] = {{"LB", nullptr, MUTED3}, {"RB", "Switch", MUTED3}};
+    hint_bar(dl, a, v, X(240.6f), Y(HINT_CY), first, 2, op);
+    hint_bar(dl, a, v, X(505.4f), Y(HINT_CY), last, 2, op);
 }
 
-// The 360's message box over the page: a heading, the text, the buttons one under another (56-unit rows as the canvas' option lists).
+// The 360's message box: the frame grows tall around it (its blade 366 wide from y 60 to 411 under a title band from y 30, the
+// description pane's gradient), the text from (261, 74) in the secondary colour, the buttons 28-unit rows that end at the blade's foot,
+// and the box's own legend under it. What the Guide was showing is not drawn while it is up (draw fades it out).
 void Guide::draw_box(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float w, float h, double now) {
+    (void)w, (void)h;
     float k = ease_guide(std::clamp(float((now - box_.at) / 0.2), 0.0f, 1.0f));
     View v{origin, s, 0.96f + 0.04f * k};
-    dl->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), IM_COL32(0, 0, 0, int(140 * k)));
-    const float W = 560, X = 640 - W / 2, PAD = 27;
-    float text_h = 0;
-    {
-        const char* p = box_.body.c_str();
-        const char* end = p + box_.body.size();
-        while (p < end) {
-            const char* brk = a.text->CalcWordWrapPosition(22, p, end, W - 2 * PAD);
-            if (brk == p) brk = p + 1;
-            for (const char* q = p; q < brk; q++)
-                if (*q == '\n') { brk = q + 1; break; }
-            text_h += 22 * 1.35f, p = brk;
-            while (p < end && *p == ' ') p++;
-        }
-    }
-    float head = 62, body_h = text_h + 2 * 22, rows = 56.0f * box_.buttons.size();
-    float H = head + body_h + rows, Y = 360 - H / 2;
-    dl->AddRectFilled(v.pt(X, Y), v.pt(X + W, Y + head), alpha(RAISED, k));
-    ImVec2 t = v.pt(X + PAD, Y + head / 2);
-    text_mid(dl, a.text, a.text_m, v.sz(24), t.x, t.y, alpha(TEXT, k), box_.title.c_str());
-    dl->AddRectFilled(v.pt(X, Y + head), v.pt(X + W, Y + head + body_h), alpha(PANE, k));
-    wrapped(dl, a, v, 22, 1.35f, X + PAD, Y + head + 22, W - 2 * PAD, alpha(TEXT, k), box_.body);
-    float by = Y + head + body_h;
-    panel_fill(dl, v.pt(X, by), v.pt(X + W, by + rows), k);
+    side_fill(dl, v.pt(ux(243), uy(30)), v.pt(ux(608), uy(60)), k);
+    ImVec2 t = v.pt(ux(270), uy(45.5f));
+    text_fit(dl, a.text, a.text_m, v.sz(uu(16)), t.x, t.y, v.sz(uu(330)), alpha(SIDE_TEXT, k), box_.title);
+    ImVec2 b0 = v.pt(ux(242), uy(60)), b1 = v.pt(ux(608), uy(411));
+    blade_shadow(dl, b0, b1, v.sz(uu(1)), k);
+    panel_span(b0.y, b1.y);
+    panel_fill(dl, b0, b1, k);
+    wrapped(dl, a, v, uu(16), 19.75f / 16, ux(261), uy(74), uu(330), alpha(MUTED, k), box_.body);
     std::vector<Opt> opts;
     for (const std::string& b : box_.buttons) opts.push_back({b, 0, true, 0});
-    option_list(dl, a, v, X, by, W, 56, 24, PAD, opts, box_.focus, box_.bar.value(now), k);
+    float top = uy(410 - 28.0f * opts.size());
+    dl->AddLine(v.pt(ux(243), top - 0.5f), v.pt(ux(608), top - 0.5f), alpha(LINE, k), v.sz(1));
+    option_list(dl, a, v, ux(243), top, uu(365), uu(28), uu(16), uu(18), opts, box_.focus, box_.bar.value(now), k);
+    const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}};
+    hint_bar(dl, a, v, ux(240), uy(424), hints, 2, k);
 }
 
 void Guide::draw_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 origin, double now) {
@@ -947,7 +945,7 @@ void Guide::draw_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 ori
     float unfold = t < 5.4f ? seg(0.6f, 1.05f, 0.7f, 0.0f, 0.25f, 1.0f) : 1 - seg(5.4f, 5.85f, 0.7f, 0.0f, 0.25f, 1.0f);
     float shift = half * (1 - unfold);
     auto at = [&](float x, float y) { return ImVec2(origin.x + x * s, origin.y + y * s); };
-    float bx = 640 - (64 + pw) * 0.5f, by = 600;  // canvas: y 600 (the Guide is drawn small enough to end above it)
+    float bx = 640 - (64 + pw) * 0.5f, by = 600;  // canvas: y 600 (over a page's foot, as a notification was on the 360; under the blades)
     ImU32 kc = toast_color(toast_.kind);
     if (unfold > 0.001f) {
         ImVec2 p0 = at(bx + 64 + shift, by), p1 = at(bx + 64 + pw - shift, by + 64);
