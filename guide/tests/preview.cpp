@@ -1,6 +1,7 @@
 // guide-preview.exe: draws the Guide off screen with the same code the overlay uses (guide.cpp, assets.cpp, Dear ImGui's DX12 backend) and
 // writes a PNG, so the look can be checked against the design canvas without a game.
 //   guide-preview.exe <out.png> <scene> [seconds] [gamerpic.png] [background.png]
+// GUIDE_THEME in the environment is the theme the scene is drawn in (a theme's key: xbox360, fh2mp, blue-plastic; Xbox without it).
 // Scenes: home (the Guide, the player's blade), games, settings, down; friends, friends-nogame, party, players, messages; message,
 // message-invite, message-request; profile, profile-nogame, profile-personal, profile-request, profile-sent, profile-here; create,
 // exit-session; create-nogame; pick, pick-many, compose, compose-invite, discard, keyboard, keyboard-caps, add-friend; box-accept, box-gone;
@@ -161,6 +162,7 @@ int main(int argc, char** argv) {
     }
     ImTextureID bg = argc > 5 ? picture(q, argv[5]) : 0;
 
+    if (const char* theme = getenv("GUIDE_THEME")) theme_apply(theme);
     Guide g;
     g.gamertag = "DebugFox";
     const double t0 = 100.0;
@@ -242,13 +244,15 @@ int main(int argc, char** argv) {
     NetResult nr;
     if (scene == "friends" || scene == "friends-nogame") {
         g.open_community(TabFriends, t0 - 5), press({D, D});
-    } else if (scene == "theme" || scene == "theme-plastic" || scene == "theme-fh2mp") {
-        // Settings > Theme with the focus moved: Orange on the first tab, Blue Plastic on the second, FH2MP
+    } else if (scene == "theme" || scene == "theme-plastic" || scene == "theme-fh2mp" || scene == "theme-360") {
+        // Settings > Theme with the focus moved: Orange on the first tab, Blue Plastic on the second, FH2MP, Xbox 360
         // Settings > Theme as the player gets there: the Guide, RB to Settings, down to Theme, A
         g.toggle(t0 - 10), g.handle(RB, t0 - 9), g.handle(D, t0 - 8), g.handle(A, t0 - 7);
-        if (scene == "theme") press({D, D, D});
+        if (scene == "theme") press({D, D, D, D});
         if (scene == "theme-plastic") g.handle(RB, t0 - 6), press({D, D, D, D});
-        if (scene == "theme-fh2mp") press({D});
+        if (scene == "theme-fh2mp") press({D, D});
+        if (scene == "theme-360") press({D});
+
     } else if (scene == "voice") {
         // Settings > Voice with the microphone muted and the focus on Volume
         g.set_voice(false, true, 3);

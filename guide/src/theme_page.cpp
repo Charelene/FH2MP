@@ -1,4 +1,4 @@
-// Settings > Theme: the canvas' themes in two tabs (Themes: its eight; Plastic: the six colours tinted all over), the player's own card
+// Settings > Theme: the canvas' themes in two tabs (Themes: its eight and Xbox 360; Plastic: the six colours tinted all over), the player's own card
 // beside them. The focused theme is shown at once on the whole Guide; A keeps it (the player's profile, so others see the card in it),
 // B goes back to the one kept.
 #include <algorithm>
@@ -81,20 +81,22 @@ void Guide::draw_theme(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, floa
     const float L = PAGE_L, W = PAGE_W;
     float slide, pop, title_op;
     page_motion(now, op, &slide, &pop, &title_op);
-    draw_header(dl, a, origin, s, zoom, op, L, W, "Theme", title_op);
+    draw_header(dl, a, origin, s, zoom, op, "Theme", title_op);
     float x = L + slide;
 
     const char* names[2] = {"Themes", "Plastic"};
     for (int t = 0; t < 2; t++) {
         bool on = t == theme_tab_;
         float tx = x + t * 431;
-        dl->AddRectFilled(v.pt(tx, 96), v.pt(tx + 431, 152), alpha(on ? PANEL : TAB, pop));
+        if (on) panel_fill(dl, v.pt(tx, 96), v.pt(tx + 431, 138), pop);
+        else dl->AddRectFilled(v.pt(tx, 96), v.pt(tx + 431, 138), alpha(TAB, pop));
+        if (!on) tab_shadow(dl, v, t ? tx : tx + 431, 96, 138, t ? 1 : -1, pop);
         float lw = a.text->CalcTextSizeA(24, FLT_MAX, 0, names[t]).x;
-        ImVec2 lp = v.pt(on ? tx + 30 : tx + (431 - lw) / 2, 124);
-        text_mid(dl, a.text, a.text_m, v.sz(24), lp.x, lp.y, alpha(on ? WHITE : TAB_TEXT, pop), names[t]);
+        ImVec2 lp = v.pt(on ? tx + 27 : tx + (431 - lw) / 2, 117);
+        text_mid(dl, a.text, a.text_m, v.sz(24), lp.x, lp.y, alpha(on ? TEXT : TAB_TEXT, pop), names[t]);
     }
-    ImVec2 p0 = v.pt(x, 152), p1 = v.pt(x + W, 607);
-    dl->AddRectFilled(p0, p1, alpha(PANEL, pop));
+    ImVec2 p0 = v.pt(x, 138), p1 = v.pt(x + W, PAGE_B);
+    panel_fill(dl, p0, p1, pop);
     dl->PushClipRect(p0, p1, true);
 
     // the themes (they slide in when the tab changes), each with its saturated, bright and dark squares at the row's end
@@ -103,12 +105,12 @@ void Guide::draw_theme(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, floa
     std::vector<std::string> keys = theme_keys(theme_tab_);
     std::vector<Opt> opts;
     for (const std::string& k : keys) opts.push_back({theme_name(k), 0, true, 0});
-    const float RH = 50, TOP = 156;
-    dl->PushClipRect(v.pt(x, 152), v.pt(x + 431, 607), true);
-    option_list(dl, a, v, ox, TOP, 431, RH, 23, 30, opts, theme_row_[theme_tab_], theme_bar_.value(now), oop);
+    const float RH = 42, TOP = 138;  // the 360's tab strip and rows, as on a profile
+    dl->PushClipRect(v.pt(x, 138), v.pt(x + 431, PAGE_B), true);
+    option_list(dl, a, v, ox, TOP, 431, RH, 24, 27, opts, theme_row_[theme_tab_], theme_bar_.value(now), oop);
     for (size_t i = 0; i < keys.size(); i++) {
         const ThemeDef& t = theme_preset(keys[i]);
-        float cy = TOP + i * RH + RH * 0.5f, sx = ox + 431 - 30 - 3 * 22 - 2 * 6;
+        float cy = TOP + i * RH + RH * 0.5f, sx = ox + 431 - 27 - 3 * 22 - 2 * 6;
         ImU32 sw[3] = {t.accent, t.bright, t.dark};
         for (int k = 0; k < 3; k++) {
             ImVec2 q0 = v.pt(sx + k * 28, cy - 11), q1 = v.pt(sx + k * 28 + 22, cy + 11);
@@ -121,8 +123,9 @@ void Guide::draw_theme(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, floa
     // the player's own card, in the theme in focus
     Friend me = social_.me;
     if (me.tag.empty()) me.tag = gamertag;
-    profile_side(dl, a, origin, s, zoom, x, 152, me, false, pop, pop);
+    profile_side(dl, a, origin, s, zoom, x, 138, me, false, pop, pop);
+
     dl->PopClipRect();
     const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}, {"LB", nullptr, MUTED3}, {"RB", "Switch", MUTED3}};
-    hint_bar(dl, a, v, L + 27, 617, hints, 4, op);
+    hint_bar(dl, a, v, HINT_X, HINT_Y, hints, 4, op);
 }
