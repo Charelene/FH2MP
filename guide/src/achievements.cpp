@@ -802,7 +802,7 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
 //
 // The 360 had one popup. The rare and the mythic ones are made for it here in its own language: the rare one in ice blue with a diamond
 // and a sheen that crosses the pill; the mythic one in gold, its four quadrants lighting in turn as the console's ring does, a second
-// burst, and one more turn of the hold.
+// burst, and two more turns of the hold, so that it stays for the whole of its sound (nine seconds).
 namespace {
 
 struct NK {
@@ -840,8 +840,9 @@ const NK LOGO_A[] = {{0, 'n', 0},   {5, 'e', 0.5f}, {37, 'l', 1},  {43, 'n', 1},
 const NK ICON_A[] = {{0, 'n', 0}, {65, 'l', 0}, {70, 'n', 1}, {120, 'l', 1}, {125, 'n', 0}, {186, 'l', 1}, {192, 'n', 0}};
 const NK TEXT_A[] = {{0, 'n', 0}, {38, 'l', 0}, {44, 'n', 1}, {217, 'l', 1}, {223, 'n', 0}};
 
-// The hold is the timeline's loop (frames 65 to 185), gone round once more (twice for the mythic one) before the way out from 186.
-int loops360(int tier) { return tier == 2 ? 2 : 1; }
+// The hold is the timeline's loop (frames 65 to 185), gone round once more (three times more for the mythic one: ten seconds in
+// all, a second longer than its sound) before the way out from 186.
+int loops360(int tier) { return tier == 2 ? 3 : 1; }
 float frames360(int tier) { return 185 + 120.0f * loops360(tier) + 54; }
 
 ImU32 rgb(int r, int g, int b, float op) { return IM_COL32(r, g, b, int(255 * std::clamp(op, 0.0f, 1.0f) + 0.5f)); }
