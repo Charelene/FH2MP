@@ -45,8 +45,13 @@ const (
 // FieldKeys are the report fields in their order, with the labels the issue shows.
 var FieldKeys = []string{"date", "system", "gpu", "driver", "launcher", "azimuth", "extraOptions", "name"}
 
+// OptionalFieldKeys are fields newer launchers send; kept and shown only when not empty, so reports of older launchers read as before.
+// memory (launcher 1.4.1): what the memory watch saw of the crashed game, e.g. "game peak 12.3 GB of 15.6 GB RAM, system commit peak 99%
+// of 24.0 GB, free RAM low 0.1 GB" (crash family memory-growth-oom: Windows' commit limit, #91 / #468 / #477).
+var OptionalFieldKeys = []string{"memory"}
+
 var fieldLabels = map[string]string{"date": "Date", "system": "System", "gpu": "GPU", "driver": "Driver's version", "launcher": "Launcher version",
-	"azimuth": "Azimuth version", "extraOptions": "FH2 Extra Options version", "name": "Your FH2MP name"}
+	"azimuth": "Azimuth version", "extraOptions": "FH2 Extra Options version", "name": "Your FH2MP name", "memory": "Memory"}
 
 // IssueLabels: not "bug": that label is for what players report themselves, so the two kinds can be told apart.
 var IssueLabels = []string{"crash-report"}
@@ -305,6 +310,13 @@ func Validate(d any) (*Report, error) {
 		}
 		r.Fields = append(r.Fields, pyjson.Pair{K: k, V: CleanLine(v, 200)})
 	}
+	for _, k := range OptionalFieldKeys {
+		if v, has := f.Get(k); has {
+			if s := CleanLine(v, 200); s != "" {
+				r.Fields = append(r.Fields, pyjson.Pair{K: k, V: s})
+			}
+		}
+	}
 	rf, _ := obj.Get("files")
 	ra, _ := obj.Get("attachments")
 	var rawFiles, rawAtt pyjson.Obj
@@ -492,6 +504,11 @@ func SummaryTable(rid string, r *Report, line string) string {
 	for _, k := range FieldKeys {
 		rows = append(rows, row{fieldLabels[k], Redact(r.field(k))})
 	}
+	for _, k := range OptionalFieldKeys {
+		if v := r.field(k); v != "" {
+			rows = append(rows, row{fieldLabels[k], Redact(v)})
+		}
+	}
 	rows = append(rows, row{"Report id", rid})
 	var b strings.Builder
 	b.WriteString("| | |\n|-|-|\n")
@@ -568,6 +585,11 @@ func CommentBody(rid string, r *Report, linkBase string) string {
 			v = code(Redact(f))
 		}
 		b.WriteString("| " + fieldLabels[k] + " | " + v + " |\n")
+	}
+	for _, k := range OptionalFieldKeys {
+		if f := r.field(k); f != "" {
+			b.WriteString("| " + fieldLabels[k] + " | " + code(Redact(f)) + " |\n")
+		}
 	}
 	b.WriteString("| Report id | `" + rid + "` |\n\n" + FileLinks(rid, r, linkBase))
 	return b.String()

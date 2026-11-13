@@ -560,3 +560,35 @@ func norm(v any) any {
 	}
 	return v
 }
+
+// Launcher 1.4.1 sends the memory watch's summary as the optional field memory; an older launcher does not, and its issue reads as before.
+func TestOptionalMemoryField(t *testing.T) {
+	base := `{"v": 1, "fields": {"date": "2026-11-13 17:21 UTC", "gpu": "NVIDIA GeForce RTX 2050"%s}, "files": {"azimuth.log": "x"}}`
+	mem := "game peak 11.9 GB of 15.7 GB RAM, system commit peak 99% of 23.7 GB, free RAM low 0.1 GB"
+	with, err := parseReport(t, fmt.Sprintf(base, `, "memory": "`+mem+`"`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	without, err := parseReport(t, fmt.Sprintf(base, `, "memory": ""`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := parseReport(t, fmt.Sprintf(base, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if with.field("memory") != mem || without.field("memory") != "" || len(without.Fields) != len(old.Fields) {
+		t.Fatalf("fields: with %v, empty %v, old %v", with.Fields, without.Fields, old.Fields)
+	}
+	const rid = "0123456789abcdef"
+	row := "| Memory | `" + mem + "` |"
+	if c := CommentBody(rid, with, LinkBase); !strings.Contains(c, row) || strings.Index(c, row) > strings.Index(c, "| Report id |") {
+		t.Fatalf("comment has no memory row before the id:\n%s", c)
+	}
+	if s := SummaryTable(rid, with, "STOPPED out of memory"); !strings.Contains(s, "| Memory |") {
+		t.Fatalf("summary has no memory row:\n%s", s)
+	}
+	if CommentBody(rid, old, LinkBase) != CommentBody(rid, without, LinkBase) || strings.Contains(CommentBody(rid, old, LinkBase), "Memory") {
+		t.Fatal("a report without memory must read as before")
+	}
+}

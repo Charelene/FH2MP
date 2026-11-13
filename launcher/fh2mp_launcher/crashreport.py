@@ -79,6 +79,7 @@ class Crash:
     def __init__(self, folder, line, dump, when, seen=None, mod_crash=None, game=""):
         self.folder, self.line, self.dump, self.when = folder, line, dump, when
         self.game = game                    # the game folder the crashed session started (Azimuth's settings line), '' when not logged
+        self.memory = None                  # the memory watch's summary of the game that crashed (game_memory), set by build()
         self.mod_crash = mod_crash          # the FH2 Mod Platform's own crash report (fh2-mods/crashes/crash-*.txt: call stack, hooks), or None
         self.seen = seen or when            # newest file time of the evidence: once handled, nothing older is offered again
 
@@ -339,6 +340,41 @@ KNOWN_CAUSES = (
 )
 
 
+# Out of memory: Azimuth's stop, the D3D12 arena's 0x8007000e, and the AV the game makes in the same second when an allocation failed
+# (game+0x125d9e8, writing 0x1; catalog family memory-growth-oom, #91 / #468 / #477).
+_OOM_RE = re.compile(r"out of memory|0x8007000e|game\+0x125d9e8", re.I)
+COMMIT_FULL_PCT = 95                       # the system's commit charge share the watch saw (1 s samples): its limit was reached
+
+
+def game_memory(settings, crash):
+    """The memory watch's summary of the game that crashed (settings last_game_memory), or None when the last watched game ended more than
+    2 min before or 30 min after the crash (another game, or a report sent later)."""
+    mem = settings["last_game_memory"] if "last_game_memory" in settings.data else None
+    if not isinstance(mem, dict) or not mem.get("ended"):
+        return None
+    return mem if -120 <= mem["ended"] - crash.when <= 1800 else None
+
+
+def memory_text(mem):
+    """The report's Memory field."""
+    if not mem:
+        return "not measured"
+    gb = lambda mb: f"{mb / 1024:.1f} GB" if mb is not None else "?"          # noqa: E731
+    out = f"game peak {gb(mem.get('peak_mb'))} of {gb(mem.get('ram_mb'))} RAM"
+    if mem.get("sys_commit_pct") is not None:
+        out += f", system commit peak {mem['sys_commit_pct']}% of {gb(mem.get('commit_limit_mb'))}"
+    if mem.get("min_free_mb") is not None:
+        out += f", free RAM low {gb(mem['min_free_mb'])}"
+    return out
+
+
+def commit_full(crash):
+    """True when the crash is an out-of-memory one and the watch saw the system's commit charge at its limit."""
+    mem = crash.memory or {}
+    pct = mem.get("sys_commit_pct")
+    return pct is not None and pct >= COMMIT_FULL_PCT and bool(_OOM_RE.search(crash.line or ""))
+
+
 def _frames(mod_text):
     i = mod_text.find("call stack:")
     return [] if i < 0 else _STACK_FRAME.findall(mod_text[i:])
@@ -346,6 +382,12 @@ def _frames(mod_text):
 
 def known_cause(crash):
     """What to tell the player when the crash names a known cause outside FH2MP, else ''."""
+    if commit_full(crash):
+        limit = (crash.memory or {}).get("commit_limit_mb")
+        size = f" ({limit / 1024:.0f} GB: RAM plus the page file)" if limit else ""
+        return (f"Windows ran out of memory for programs{size}. Close other programs while you play, and make the page file larger: "
+                "Windows Settings > System > About > Advanced system settings > Performance Settings > Advanced > Virtual memory: "
+                "System managed size, on a drive with at least 20 GB free.")
     mod_text = _read_tail(crash.mod_crash, 64_000) if crash.mod_crash else ""
     texts = {"crash": "\n".join((crash.line or "", mod_text)), "stack": "\n".join(_frames(mod_text))}
     for where, patterns, advice in KNOWN_CAUSES:
@@ -394,7 +436,7 @@ class Report:
 
     def payload(self):
         names = {"Date": "date", "System": "system", "GPU": "gpu", "Driver's version": "driver", "Launcher version": "launcher",
-                 "Azimuth version": "azimuth", "FH2 Extra Options version": "extraOptions", "Your FH2MP name": "name"}
+                 "Azimuth version": "azimuth", "FH2 Extra Options version": "extraOptions", "Your FH2MP name": "name", "Memory": "memory"}
         body = {"v": 1, "fields": {names[k]: v for k, v in self.fields}, "files": {n: t for n, _p, t in self.files if t}}
         if self.dump is not None:
             body["dump"] = base64.b64encode(self.dump).decode()
@@ -441,6 +483,7 @@ def build(lc, crash):
     folder = crash.folder
     az_path = os.path.join(logs_dir(folder), "azimuth.log")
     full = scrub(_read_tail(az_path, 4_000_000))                     # the session line is far from the end in a long session
+    crash.memory = game_memory(lc.settings, crash)
     system, gpu, driver = _session_info(full)
     if not gpu:                 # Azimuth stopped before it named the adapter (#467: the binding tier check): ask the system
         gpu, sys_driver = system_gpu()
@@ -455,6 +498,7 @@ def build(lc, crash):
         ("System", system or f"{platform.system()} {platform.release()}"),
         ("GPU", gpu or "unknown"),
         ("Driver's version", driver or "unknown"),
+        ("Memory", memory_text(crash.memory)),
         ("Launcher version", launcher),
         ("Azimuth version", info.version or "unknown"),
         ("FH2 Extra Options version", (eo_version or "unknown") if eo_installed else "not installed"),

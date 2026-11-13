@@ -975,6 +975,8 @@ class Launcher:
             acct, notes = self.prepare_play(require_game=not azimuth_window)
             if self.check_disk():
                 notes.append(self.disk_warning)
+            if self.check_memory():
+                notes.append(self.memory_warning)
             try:
                 self.process = launch.start(self.settings, self.settings["azimuth_dir"], skip_launcher=not azimuth_window,
                                             extra_env=getattr(self, "game_env", None))
@@ -1002,6 +1004,8 @@ class Launcher:
             seen = guard.summary()
             if seen:
                 logs.info("game", "game.memory_peak", **seen)
+                self.settings["last_game_memory"] = dict(seen, ended=time.time())     # crashreport puts it in the report of this game
+                self.settings.save()
         return stopped
 
     def play_offline(self, azimuth_window=False):
@@ -1043,6 +1047,7 @@ class Launcher:
         self._offline_disabled = shim.disable(d) if not use_identity else False
         self.offline_run = True
         self.check_disk()
+        self.check_memory()
         try:
             self.process = launch.start(s, d, skip_launcher=not azimuth_window, extra_env=self.game_env)
         except Exception:
@@ -1053,6 +1058,25 @@ class Launcher:
             if self._offline_enabled:
                 shim.disable(d)
             raise
+
+    def check_memory(self):
+        """Windows: whether the system can still commit what a game takes to load (memguard.BOOT_NEED). -> what to show the player when it
+        cannot, else ''. #477 (2026-11-13): two boots in a row stopped "out of memory" 20-35 s in on a laptop whose earlier games ran. Never
+        blocks playing."""
+        room = memguard.commit_room()
+        self.memory_warning = ""
+        if room is None:
+            return ""
+        low = room["room_mb"] < memguard.BOOT_NEED // memguard.MB
+        logs.event("WARN" if low else "INFO", "play", "game.commit_room", **room, need_mb=memguard.BOOT_NEED // memguard.MB)
+        if low:
+            self.memory_warning = (f"Windows can give the game only {room['room_mb'] / 1024:.1f} GB more memory and it needs about "
+                                   f"{memguard.BOOT_NEED / memguard.GB:.0f} GB to load. Close other programs, or make the page file larger.")
+        return self.memory_warning
+
+    def start_warnings(self):
+        """The warnings of the last Play (disk, memory), joined for the status line."""
+        return " ".join(filter(None, (getattr(self, "disk_warning", ""), getattr(self, "memory_warning", ""))))
 
     def check_disk(self):
         """Looks at the free space of the drives with Azimuth (its saves and caches) and the game. -> what to show the player when one is

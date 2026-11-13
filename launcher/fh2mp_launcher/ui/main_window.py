@@ -731,7 +731,7 @@ class MainWindow(QMainWindow):
         def ok(_r):
             import time
             self._launched_at = time.time()
-            self.set_busy(False, " ".join(filter(None, ("Game started offline. Nothing is sent to the server.", getattr(lc, "disk_warning", "")))))
+            self.set_busy(False, " ".join(filter(None, ("Game started offline. Nothing is sent to the server.", lc.start_warnings()))))
             self.render()
 
         def fail(e):
@@ -769,7 +769,7 @@ class MainWindow(QMainWindow):
             import time
             _acct, notes = res
             self._launched_at = time.time()
-            self.set_busy(False, f"Game started. {lc.disk_warning}" if getattr(lc, "disk_warning", "") else "Game started. Have fun!")
+            self.set_busy(False, f"Game started. {lc.start_warnings()}" if lc.start_warnings() else "Game started. Have fun!")
             self.render()
 
         def fail(e):
