@@ -88,11 +88,7 @@ static DWORD g_init_tick;     /* GetTickCount() when fh2mod_init started */
 #define FH2MP_WSTR(x) FH2MP_WSTR2(x)
 /* The launcher finds out which shim is installed by reading this marker out of the DLL (it cannot run it). */
 const char fh2mp_shim_marker[] __attribute__((used)) = "FH2MP-SHIM-VERSION:" FH2MP_SHIM_VERSION ":END";
-/*
- * Import slots Azimuth fills at run time (patch_game_winsock, xhr2.inc) are still written directly, and their pages are left writable:
- * restoring the old protection raced with Azimuth, which binds the game's imports on other threads (0xc0000005 inside memcpy).
- */
-#define patch_done(addr, len, old) ((void)(addr), (void)(len), (void)(old))
+#include "slot_put.inc"
 
 /*
  * Code changes go through the FH2 Mod Platform. It refuses a change that overlaps another mod's hook or game code someone already
@@ -1008,7 +1004,7 @@ static void patch_game_winsock(unsigned char *img)
                            ? GetProcAddress(ws2, g_ws2_slots[i].name)
                            : GetProcAddress(ws2, (LPCSTR)(ULONG_PTR)g_ws2_slots[i].ordinal);
         char oldmod[40];
-        DWORD oldprot;
+        DWORD err;
         void *want = (void *)real;
 
         if (!real) {
@@ -1036,7 +1032,7 @@ static void patch_game_winsock(unsigned char *img)
         if (*slot == want) {
             continue; /* already the real function (or its tracer) */
         }
-        if (!VirtualProtect(slot, 8, PAGE_READWRITE, &oldprot)) {
+        if (!slot_put(slot, want, &err)) {
             static volatile LONG refused;
             if (InterlockedIncrement(&refused) <= 3) {
                 log_begin();
@@ -1044,11 +1040,11 @@ static void patch_game_winsock(unsigned char *img)
                 log_dec(i);
                 log_raw(" (game+0x");
                 log_hex(FH2_WS2_IAT_RVA + i * 8u, 8);
-                log_raw(") could not be made writable, error ");
-                log_dec(GetLastError());
+                log_raw(") could not be written, error ");
+                log_dec(err);
                 log_raw(": it keeps ");
                 log_raw(oldmod);
-                log_raw("\n");
+                log_raw(" until the next check\n");
             }
             continue;
         }
@@ -1064,8 +1060,6 @@ static void patch_game_winsock(unsigned char *img)
         log_raw(": ");
         log_raw(oldmod);
         log_raw(" -> ws2_32\n");
-        *slot = want;
-        patch_done(slot, 8, oldprot);
         changed++;
     }
     g_ws2_patched = 1;
