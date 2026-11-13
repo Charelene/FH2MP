@@ -388,7 +388,7 @@ bool make_buffers() {
 
 // The achievement toast's pictures and sounds, which the launcher puts into data/bin/achievement-toast (constants.ACH_TOAST): the
 // pictures become textures by their names (ach_art_set), the sounds stay in memory for PlaySound. What is missing is drawn without.
-std::vector<unsigned char> g_ach_wav[3];
+std::vector<unsigned char> g_ach_wav[3], g_ach_wav_360[3];  // by tier: the Xbox app's sounds, the Xbox 360 style's own
 
 std::vector<unsigned char> read_file(const std::wstring& path) {
     std::vector<unsigned char> out;
@@ -430,6 +430,9 @@ void load_ach_art() {
     static const wchar_t* sounds[3] = {L"ach-sound-normal.wav", L"ach-sound-rare.wav", L"ach-sound-mythic.wav"};
     int wavs = 0;
     for (int i = 0; i < 3; i++) wavs += !(g_ach_wav[i] = read_file(dir + sounds[i])).empty();
+    // the Xbox 360 style's own sounds, when the folder has them (without one, that tier keeps the sound above)
+    static const wchar_t* sounds_360[3] = {L"ach-sound-360-normal.wav", L"ach-sound-360-rare.wav", L"ach-sound-360-mythic.wav"};
+    for (int i = 0; i < 3; i++) wavs += !(g_ach_wav_360[i] = read_file(dir + sounds_360[i])).empty();
     logf("guide: achievement toast: %d pictures and %d sounds loaded from data\\bin\\achievement-toast (%d pictures missing: drawn without)", pictures, wavs, missing);
 }
 
@@ -442,7 +445,8 @@ void play_ach_sound(AchTier tier) {
         HMODULE m = n ? LoadLibraryW((std::wstring(sys, n) + L"\\winmm.dll").c_str()) : nullptr;
         return m ? (PlaySoundWFn)(void*)GetProcAddress(m, "PlaySoundW") : nullptr;
     }();
-    const std::vector<unsigned char>& wav = g_ach_wav[int(tier)];
+    const std::vector<unsigned char>& own = g_ach_wav_360[int(tier)];
+    const std::vector<unsigned char>& wav = g_guide.ach_style() == 1 && !own.empty() ? own : g_ach_wav[int(tier)];
     if (play && !wav.empty()) play((LPCWSTR)wav.data(), nullptr, 0x0004 /* SND_MEMORY */ | 0x0001 /* SND_ASYNC */ | 0x0002 /* SND_NODEFAULT */);
 }
 
@@ -479,6 +483,23 @@ std::wstring voice_file() { return std::wstring(g_api->azimuth_dir) + L"\\data\\
 void apply_voice(bool mic, bool chat, int volume) {
     voice_settings(mic, chat, volume);
     g_guide.set_voice(mic, chat, volume);
+}
+
+// How an achievement is shown: data\bin\fh2mp-guide-notify.txt, one number (0 the Xbox app's toast, 1 the Xbox 360's notification).
+// Without the file: 0.
+std::wstring notify_file() { return std::wstring(g_api->azimuth_dir) + L"\\data\\bin\\fh2mp-guide-notify.txt"; }
+
+void load_notify() {
+    std::vector<unsigned char> b = read_file(notify_file());
+    g_guide.set_notify(!b.empty() && b[0] == '1' ? 1 : 0);
+}
+
+void save_notify(int style) {
+    HANDLE f = CreateFileW(notify_file().c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD wrote = 0;
+    WriteFile(f, style == 1 ? "1\n" : "0\n", 2, &wrote, nullptr);
+    CloseHandle(f);
 }
 
 void load_voice() {
@@ -587,6 +608,7 @@ bool setup(IDXGISwapChain3* sc) {
     load_ach_art();
     load_theme();
     load_voice();
+    load_notify();
     g_guide.gamertag = read_gamertag();
     g_hwnd = desc.OutputWindow;
     if (g_hwnd && !g_old_proc) g_old_proc = (WNDPROC)SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC, (LONG_PTR)guide_wndproc);
@@ -708,6 +730,10 @@ void ask(const GuideRequest& r) {
         save_voice(mic, chat, volume);
         break;
     }
+    case GuideAction::SetNotify:
+        save_notify(int(r.id));
+        logf("guide: achievements are shown as %s: kept in data\\bin\\fh2mp-guide-notify.txt", r.id == 1 ? "the Xbox 360's notification" : "the Xbox app's toast");
+        break;
     case GuideAction::SetTheme:
         save_theme(r.name);
         net_set_profile("theme", r.name);

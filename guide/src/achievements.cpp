@@ -543,8 +543,6 @@ const char* const* ach_art_files(int where) {
     return where == 0 ? notifications : game_bar;
 }
 
-float ach_toast_seconds(AchTier tier) { return hide_at(int(tier)) + 1.633f + 0.05f; }
-
 void Guide::ach_toast(AchTier tier, int gamerscore, const std::string& name, const std::string& desc, float percent, int index, double now) {
     AchToast n;
     n.tier = tier, n.g = gamerscore, n.name = name, n.desc = desc, n.percent = percent, n.index = index;
@@ -558,15 +556,18 @@ bool Guide::take_ach_sound(AchTier* tier) {
     return true;
 }
 
-bool Guide::ach_toast_showing(double now) const { return now - ach_at_ >= 0 && now - ach_at_ < ach_toast_seconds(ach_now_.tier); }
+bool Guide::ach_toast_showing(double now) const { return now - ach_at_ >= 0 && now - ach_at_ < ach_toast_seconds(ach_now_.tier, ach_style_); }
 
 void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 origin, double now) {
     float t = float(now - ach_at_);
-    if ((t < 0 || t > ach_toast_seconds(ach_now_.tier)) && !ach_toasts_.empty()) {
+    if ((t < 0 || t > ach_toast_seconds(ach_now_.tier, ach_style_)) && !ach_toasts_.empty()) {
         ach_now_ = ach_toasts_.front(), ach_toasts_.pop_front(), ach_at_ = now, t = 0;
         ach_sound_ = int(ach_now_.tier) + 1;
     }
-    if (t < 0 || t > ach_toast_seconds(ach_now_.tier)) return;
+    if (t < 0 || t > ach_toast_seconds(ach_now_.tier, ach_style_)) return;
+    float lift = now - toast_at_ >= 0 && now - toast_at_ < 6.3 ? 74.0f : 0.0f;  // an ordinary toast showing: this one stands above it
+    ach_lift_ += (lift - ach_lift_) * 0.2f;
+    if (ach_style_ == 1) return draw_ach_toast_360(dl, a, s, origin, t);
     const AchToast& n = ach_now_;
     const int tier = int(n.tier);
     const bool rare = tier == 1, mythic = tier == 2;
@@ -592,8 +593,6 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
     float words = std::max({bf->CalcTextSizeA(TSZ, FLT_MAX, 0, title.c_str()).x, a.text->CalcTextSizeA(TSZ, FLT_MAX, 0, second.c_str()).x + gmark,
                             std::min(380.0f, a.text->CalcTextSizeA(TSZ, FLT_MAX, 0, n.desc.c_str()).x), wa + gap + ed + gap + wb});
     const float pw = std::clamp(std::ceil(words) + 22 + 12, 220.0f, 440.0f), half = pw * 0.5f, area = pw - 22 - 12;
-    float lift = now - toast_at_ >= 0 && now - toast_at_ < 6.3 ? 74.0f : 0.0f;  // an ordinary toast showing: this one stands above it
-    ach_lift_ += (lift - ach_lift_) * 0.2f;
     const float bx = 640 - (Q + pw) * 0.5f, by = 600 - ach_lift_;
 
     const ImU32 sq_col = ACCENT, light_col = mix(ACCENT, WHITE, 0.5f), medium_col = mix(ACCENT, WHITE, 0.25f), dark_col = mix(ACCENT, BLACK, 0.3f);
@@ -789,5 +788,175 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
             turned(dl, art.glow_b, ic, 270 * k * s * gsc * (1.08f - 0.16f * back_and_forth(g, 2.0f)), -g / 7 * 2 * PI,
                    alpha(WHITE, layer * (1 - 0.45f * back_and_forth(g, 2.3f))));
         }
+    }
+}
+
+// ---- the Xbox 360's notification (Settings > Notifications > Xbox 360)
+//
+// The 360's own popup, from its layout and timeline (xam's notify.xur, the scr_Notification visual: 241 frames at 60 a second, in its
+// 853x480 units): a ring of four quadrants pops out of nothing over a dark disc while a green burst spreads from it, a pill unrolls to
+// the right of it and overshoots, the player's quadrant lights, and two lines of text fade in; while it holds, what is in the ring takes
+// turns; then it all goes the way it came. The pill, the ring and the burst are drawn here from the measured figures (the pill 60,60,60
+// with a darker rim and a light halo, 44.7 high, a half circle at its left and 12-unit corners at its right; the ring 35.7 across and
+// 4.2 thick with 5.3-unit gaps). Where the 360 shows its logo, the Guide shows its own emblem.
+//
+// The 360 had one popup. The rare and the mythic ones are made for it here in its own language: the rare one in ice blue with a diamond
+// and a sheen that crosses the pill; the mythic one in gold, its four quadrants lighting in turn as the console's ring does, a second
+// burst, and one more turn of the hold.
+namespace {
+
+struct NK {
+    float f;   // the frame the key is on
+    char how;  // to the next key: 'n' held, 'l' linear, 'e' the timeline's ease (out)
+    float v;
+};
+
+// The timeline's ease with its parameters 0, 100, 50: full speed for the first half of the time, then slowing to a stop.
+float ease360(float t) { return t <= 0.5f ? t / 0.75f : (0.75f - (1 - t) * (1 - t)) / 0.75f; }
+
+template <size_t N>
+float key(const NK (&k)[N], float f) {
+    size_t i = 0;
+    while (i + 1 < N && k[i + 1].f <= f) i++;
+    if (k[i].how == 'n' || i + 1 == N || f <= k[i].f) return k[i].v;
+    float t = (f - k[i].f) / (k[i + 1].f - k[i].f);
+    return k[i].v + (k[i + 1].v - k[i].v) * (k[i].how == 'e' ? ease360(t) : t);
+}
+
+// notify.xur's tracks: the pill (bgCurve1: its width and where its right end is moved to, its opacity, which its left cap shares), the
+// dark disc (logoback), the ring (bg), the burst (explosion), the logo's place (xenonLogo1), the icon (Image) and the text.
+const NK PILL_SX[] = {{0, 'n', 0.1f}, {23, 'l', 0.1f}, {27, 'l', 0.1f}, {44, 'l', 1.194f}, {51, 'n', 1}, {228, 'l', 1}, {240, 'n', 0.076f}};
+const NK PILL_DX[] = {{0, 'n', 29.064f}, {23, 'l', 29.064f}, {27, 'l', 29.074f}, {44, 'l', -5.928f}, {51, 'n', 0.262f}, {228, 'l', 0.287f}, {240, 'n', 29.852f}};
+const NK PILL_A[] = {{0, 'n', 0}, {23, 'l', 0}, {27, 'n', 0.95f}, {228, 'l', 0.95f}, {240, 'n', 0}};
+const NK BACK_S[] = {{0, 'e', 0.1f}, {28, 'l', 1.45f}, {39, 'n', 1}, {196, 'l', 1}, {210, 'n', 1.4f}, {215, 'l', 1.4f}, {233, 'n', 0.2f}};
+const NK BACK_A[] = {{0, 'e', 0}, {28, 'l', 1}, {39, 'n', 1}, {196, 'l', 1}, {210, 'n', 0.682f}, {215, 'l', 0.682f}, {233, 'n', 0}};
+const NK QUAD_S[] = {{0, 'e', 0.154f}, {28, 'l', 1.6f}, {39, 'n', 1}, {196, 'l', 1}, {210, 'n', 1.45f}, {215, 'l', 1.45f}, {233, 'n', 0.2f}};
+const NK QUAD_A[] = {{0, 'e', 0}, {28, 'n', 1}, {233, 'n', 0}};
+const NK BURST_S[] = {{0, 'n', 0.09f}, {5, 'e', 0.09f}, {37, 'l', 1.12f}, {43, 'l', 0.9f}, {48, 'n', 0.718f}};
+const NK BURST_A[] = {{0, 'n', 0}, {5, 'e', 0.5f}, {37, 'l', 1}, {43, 'l', 0.3f}, {48, 'n', 0}, {186, 'l', 0}, {205, 'l', 0.5f}, {210, 'n', 0}};
+const NK LOGO_S[] = {{0, 'n', 0.1f}, {5, 'e', 0.1f}, {37, 'l', 1.5f}, {43, 'n', 0.95f}, {222, 'l', 0.95f}, {233, 'n', 0.2f}};
+const NK LOGO_A[] = {{0, 'n', 0},   {5, 'e', 0.5f}, {37, 'l', 1},  {43, 'n', 1},  {60, 'l', 1},  {65, 'n', 0}, {125, 'l', 0},
+                     {130, 'n', 1}, {180, 'l', 1},  {185, 'n', 0}, {195, 'l', 0}, {210, 'n', 1}, {233, 'n', 0}};
+const NK ICON_A[] = {{0, 'n', 0}, {65, 'l', 0}, {70, 'n', 1}, {120, 'l', 1}, {125, 'n', 0}, {186, 'l', 1}, {192, 'n', 0}};
+const NK TEXT_A[] = {{0, 'n', 0}, {38, 'l', 0}, {44, 'n', 1}, {217, 'l', 1}, {223, 'n', 0}};
+
+// The hold is the timeline's loop (frames 65 to 185), gone round once more (twice for the mythic one) before the way out from 186.
+int loops360(int tier) { return tier == 2 ? 2 : 1; }
+float frames360(int tier) { return 185 + 120.0f * loops360(tier) + 54; }
+
+ImU32 rgb(int r, int g, int b, float op) { return IM_COL32(r, g, b, int(255 * std::clamp(op, 0.0f, 1.0f) + 0.5f)); }
+
+}  // namespace
+
+float ach_toast_seconds(AchTier tier, int style) { return style == 1 ? frames360(int(tier)) / 60 + 0.05f : hide_at(int(tier)) + 1.633f + 0.05f; }
+
+void Guide::draw_ach_toast_360(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 origin, float t) {
+    const AchToast& n = ach_now_;
+    const int tier = int(n.tier);
+    const bool rare = tier == 1, mythic = tier == 2;
+    // where the timeline stands
+    const float F = t * 60, out_from = 185 + 120.0f * loops360(tier);
+    const float f = F <= 185 ? F : F < out_from ? 65 + fmodf(F - 185, 120) : std::min(186 + (F - out_from), 240.0f);
+    const bool leaving = F >= out_from;
+
+    // the tier's colours: the lit quadrant, the burst's inner and outer glow, the pill's halo, the first line, the emblem's ink
+    struct Tint { int lit[3], in[3], out[3], halo[3], title[3], ink[3]; };
+    static const Tint TINT[3] = {{{165, 232, 55}, {15, 235, 15}, {130, 235, 15}, {235, 235, 235}, {235, 235, 235}, {40, 130, 20}},
+                                 {{120, 215, 255}, {20, 150, 255}, {110, 210, 255}, {150, 215, 255}, {170, 225, 255}, {20, 105, 170}},
+                                 {{255, 210, 80}, {255, 160, 10}, {255, 215, 90}, {255, 205, 90}, {255, 222, 130}, {150, 95, 0}}};
+    const Tint& c = TINT[tier];
+    auto col = [&](const int v[3], float op) { return rgb(v[0], v[1], v[2], op); };
+
+    // the 360's units to pixels: its popup is centred on the screen, and stands where the Guide's toasts do (canvas y 600 to 664)
+    const float lift = ach_lift_;
+    const float CX = 229.7f, CY = 374.8f, U = 1.5f * s;
+    auto P = [&](float x, float y) { return ImVec2(origin.x + x * 1.5f * s, origin.y + (632 - lift + (y - CY) * 1.5f) * s); };
+    const ImVec2 oc = P(CX, CY);
+
+    // the pill: a half circle round the ring at its left, 12-unit corners at its right end, which the timeline moves
+    const float pa = key(PILL_A, f), HALF = 22.35f;
+    const float xr = 196.667f + (645.7f - 196.667f) * key(PILL_SX, f) + key(PILL_DX, f);
+    auto pill = [&](float d) {
+        float r = HALF - d, rc = std::max(1.0f, std::min(12.0f, (xr - CX) * 0.5f) - d);
+        dl->PathArcTo(oc, r * U, PI * 0.5f, PI * 1.5f, 24);
+        dl->PathArcTo(P(xr - d - rc, CY - r + rc), rc * U, -PI * 0.5f, 0, 8);
+        dl->PathArcTo(P(xr - d - rc, CY + r - rc), rc * U, 0, PI * 0.5f, 8);
+    };
+    if (pa > 0.004f && xr > CX + 4) {
+        // the halo: the figure's light edge (about 120 of 255 on the edge itself, 50 just outside it, gone 4.5 units out)
+        const float halo[2][2] = {{9, 20}, {5, 30}};  // a stroke's width and its share of 255
+        for (auto& h : halo) pill(0), dl->PathStroke(col(c.halo, pa * h[1] / 255), ImDrawFlags_Closed, h[0] * U);
+        pill(0), dl->PathFillConvex(rgb(44, 44, 44, pa));
+        pill(1.2f), dl->PathFillConvex(rgb(52, 52, 52, pa));
+        pill(2.6f), dl->PathFillConvex(rgb(60, 60, 60, pa));
+        pill(-0.4f), dl->PathStroke(col(c.halo, pa * 0.47f), ImDrawFlags_Closed, 1.1f * U);
+        // the rare and the mythic ones: a sheen crosses the pill early in each turn of the hold
+        float g = (f - 72) / 40;
+        if (tier > 0 && g > 0 && g < 1 && !leaving) {
+            float x0 = CX + HALF + 4, x1 = xr - 12, sx = x0 + (x1 - x0 + 60) * g - 30, peak = 0.16f * sinf(g * PI) * pa;
+            ImU32 on = col(c.title, peak), off = col(c.title, 0);
+            dl->PushClipRect(P(x0, CY - HALF + 2.6f), P(x1, CY + HALF - 2.6f), true);
+            dl->AddRectFilledMultiColor(P(sx - 30, CY - HALF), P(sx, CY + HALF), off, on, on, off);
+            dl->AddRectFilledMultiColor(P(sx, CY - HALF), P(sx + 30, CY + HALF), on, off, off, on);
+            dl->PopClipRect();
+        }
+    }
+
+    // the dark disc under the ring: 15,15,15 out to 18.4 units, gone by 21
+    const float bs = key(BACK_S, f), ba = key(BACK_A, f);
+    if (ba > 0.004f) {
+        dl->AddCircleFilled(oc, 18.4f * bs * U, rgb(15, 15, 15, ba), 48);
+        dl->AddCircle(oc, 19.3f * bs * U, rgb(15, 15, 15, ba * 0.6f), 48, 1.8f * bs * U);
+        dl->AddCircle(oc, 20.5f * bs * U, rgb(15, 15, 15, ba * 0.25f), 48, 1.4f * bs * U);
+    }
+
+    // the ring: four quadrants, lighter at the top left than at the bottom right; the lit ones in the tier's colour. The player's is the
+    // top left one (from frame 44 to 192); the mythic one lights all four in turn, a quarter of a second each
+    const float rs = key(QUAD_S, f), ra = key(QUAD_A, f);
+    if (ra > 0.004f) {
+        static const int grey[4] = {134, 114, 96, 114};  // top left, top right, bottom right, bottom left
+        const float gap = 0.169f;                        // half a 5.3-unit gap at the ring's middle, as an angle
+        int lit = f >= 44 && f < 192 ? (mythic ? int((f - 44) / 15) % 4 : 0) : -1;
+        for (int q = 0; q < 4; q++) {
+            float a0 = PI + q * PI * 0.5f + gap, a1 = PI + (q + 1) * PI * 0.5f - gap;
+            dl->PathArcTo(oc, 15.7f * rs * U, a0, a1, 12);
+            dl->PathStroke(q == lit ? col(c.lit, ra) : rgb(grey[q], grey[q], grey[q], ra), 0, 4.2f * rs * U);
+        }
+    }
+
+    // the burst: a dark middle inside a glow that spreads and thins (the tier's colours where the 360 has 15,235,15 and 130,235,15).
+    // The mythic one has a second, at the start of its last turn of the hold
+    auto burst = [&](float g) {
+        float sc = key(BURST_S, g), op = key(BURST_A, g);
+        if (op <= 0.004f) return;
+        dl->AddCircleFilled(oc, 14.0f * sc * U, rgb(15, 15, 15, op), 48);
+        dl->AddCircle(oc, 16.6f * sc * U, col(c.in, op * 150 / 255), 48, 2.6f * sc * U);
+        dl->AddCircle(oc, 18.7f * sc * U, col(c.out, op * 100 / 255), 48, 2.4f * sc * U);
+        dl->AddCircle(oc, 20.4f * sc * U, col(c.in, op * 45 / 255), 48, 1.8f * sc * U);
+    };
+    burst(f);
+    if (mythic && F >= out_from - 120 && !leaving) burst(F - (out_from - 120) + 5);
+
+    // in the ring, in turns: the Guide's emblem (a light disc with the tier's mark cut out of it: the trophy, a diamond, a star burst),
+    // where the 360 has its logo; then the trophy alone, where the 360 has the achievement's picture
+    const uint32_t mark = mythic ? 0xe65fu : rare ? 0xead5u : uint32_t(I_TROPHY);
+    const float ls = key(LOGO_S, f), la = key(LOGO_A, f), ia = key(ICON_A, f);
+    if (la > 0.004f) emblem(dl, a, oc, 28.5f * ls * U, col(c.ink, 1), 0, la, mark);
+    if (ia > 0.004f) icon_mid(dl, a, 22.0f * U, oc.x, oc.y, rgb(235, 235, 235, ia), I_TROPHY);
+
+    // the words: the 360's two lines, 14.7 high in 235 from x 255.7 ("Achievement unlocked" and "%sG - %s" are its own); the first line
+    // takes the tier's colour, and a rare one says how few players have it
+    const float ta = key(TEXT_A, f);
+    if (ta > 0.004f) {
+        std::string title = mythic ? "Mythic achievement unlocked" : rare ? "Rare achievement unlocked" : "Achievement unlocked";
+        if (rare && n.percent >= 0) {
+            char pc[24];
+            snprintf(pc, sizeof pc, " - %.2f%%", n.percent);
+            title += pc;
+        }
+        std::string second = n.g >= 0 ? std::to_string(n.g) + "G - " + n.name : n.desc.empty() ? n.name : n.name + " - " + n.desc;
+        ImVec2 l1 = P(255.667f, 366.1f), l2 = P(255.667f, 383.9f);
+        text_fit(dl, a.text, a.text_m, 14.667f * U, l1.x, l1.y, 373 * U, col(c.title, ta), title);
+        text_fit(dl, a.text, a.text_m, 14.667f * U, l2.x, l2.y, 373 * U, rgb(235, 235, 235, ta), second);
     }
 }

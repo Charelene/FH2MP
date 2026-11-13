@@ -66,7 +66,7 @@ struct AchToastArt {
 void ach_art_set(AchToastArt* art, const char* file, ImTextureID tex);
 const char* const* ach_art_files(int where);
 // How long an achievement toast of a tier is on screen.
-float ach_toast_seconds(AchTier tier);
+float ach_toast_seconds(AchTier tier, int style = 0);  // style: 0 the Xbox app's toast, 1 the Xbox 360's
 
 // Fonts and textures the Guide draws with (made by the overlay once Direct3D is ready).
 struct GuideAssets {
@@ -92,7 +92,7 @@ enum class ToastKind { Invite, Info, Saving, Warning };
 
 enum class GuideAction {
     None, Resume, Invite, AcceptInvite, DeclineInvite, FriendRequest, AcceptFriend, DeclineFriend, RemoveFriend, SendText, ReadChat,
-    HideText, Join, SetProfile, JoinGame, Lookup, Achievements, SetTheme, SetVoice
+    HideText, Join, SetProfile, JoinGame, Lookup, Achievements, SetTheme, SetVoice, SetNotify
 };
 
 // What the overlay must ask of the server after an event.
@@ -128,7 +128,7 @@ struct Opt {
     uint32_t icon = 0;
 };
 
-enum class Page { Home, Community, Profile, EditProfile, Message, CreateNew, Recipients, Compose, Keyboard, Achievements, Compare, AchDetail, Theme, Voice };
+enum class Page { Home, Community, Profile, EditProfile, Message, CreateNew, Recipients, Compose, Keyboard, Achievements, Compare, AchDetail, Theme, Voice, Notifications };
 enum CommunityTab { TabParty = 0, TabFriends = 1, TabMessages = 2, TabPlayers = 3 };
 // What a message box was shown for: just to tell (OK), or the question before a written message is dropped.
 // BoxThenClose: told from a closed Guide (the game's own Invite Friends), so OK closes it again.
@@ -174,6 +174,11 @@ public:
     // (id: bit 0 mic, bit 1 chat, the volume from bit 2).
     void set_voice(bool mic, bool chat, int volume) { voice_mic_ = mic, voice_chat_ = chat, voice_volume_ = volume; }
     void open_voice(double now);
+    // Settings > Notifications as the overlay keeps it (notify_page.cpp): how an achievement is shown, 0 the Xbox app's toast, 1 the
+    // Xbox 360's notification. A change comes back as SetNotify (id: the style).
+    void set_notify(int style) { ach_style_ = style == 1 ? 1 : 0; }
+    int ach_style() const { return ach_style_; }
+    void open_notify(double now);
     // Settings > Theme, opened on the theme in use (theme_page.cpp).
     void open_theme(double now);
     // Who is talking right now (the voice engine's list: xuids, 0 for this player): the Players tab marks them.
@@ -291,9 +296,13 @@ private:
     bool voice_mic_ = true, voice_chat_ = true;
     int voice_volume_ = 2, voice_row_ = 0;
     Tween voice_bar_;
+    int ach_style_ = 0, notify_row_ = 0;
+    Tween notify_bar_;
     ListFocus party_;
     void handle_voice(PadEvent e, std::vector<GuideRequest>& out, double now);
     void draw_voice(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
+    void handle_notify(PadEvent e, std::vector<GuideRequest>& out, double now);
+    void draw_notify(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
     std::vector<const Friend*> party_rows() const;     // the Party tab: this player's private game, this player first; empty when in none
     void handle_theme(PadEvent e, std::vector<GuideRequest>& out, double now);
     void draw_theme(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now);
@@ -451,6 +460,7 @@ private:
                     bool focused, bool greyed, int check, float op) const;
     void draw_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 origin, double now);
     void draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 origin, double now);
+    void draw_ach_toast_360(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 origin, float t);
     // The slide and fade of the page that just came in: x offset (canvas units) and opacity; title_op for the header's title.
     void page_motion(double now, float op, float* slide, float* pop, float* title_op) const;
 };

@@ -2,6 +2,7 @@
 // writes a PNG, so the look can be checked against the design canvas without a game.
 //   guide-preview.exe <out.png> <scene> [seconds] [gamerpic.png] [background.png]
 // GUIDE_THEME in the environment is the theme the scene is drawn in (a theme's key: xbox360, fh2mp, blue-plastic; Xbox without it).
+// GUIDE_ACH_STYLE=1 draws the achtoast scenes as the Xbox 360's notification; notifications is Settings > Notifications.
 // Scenes: home (the Guide, the player's blade), games, settings, down; friends, friends-nogame, party, players, messages; message,
 // message-invite, message-request; profile, profile-nogame, profile-personal, profile-request, profile-sent, profile-here; create,
 // exit-session; create-nogame; pick, pick-many, compose, compose-invite, discard, keyboard, keyboard-caps, add-friend; box-accept, box-gone;
@@ -253,6 +254,10 @@ int main(int argc, char** argv) {
         if (scene == "theme-fh2mp") press({D, D});
         if (scene == "theme-360") press({D});
 
+    } else if (scene == "notifications" || scene == "notifications-360") {
+        // Settings > Notifications, the focus on Xbox or moved down to Xbox 360
+        g.toggle(t0 - 10), g.handle(RB, t0 - 9), press({D, D, D}, t0 - 8), g.handle(A, t0 - 7);
+        if (scene == "notifications-360") press({D});
     } else if (scene == "voice") {
         // Settings > Voice with the microphone muted and the focus on Volume
         g.set_voice(false, true, 3);
@@ -334,6 +339,7 @@ int main(int argc, char** argv) {
         if (scene == "achievements-locked") press({PadEvent::Right, PadEvent::Right, PadEvent::Right, D});
         if (scene == "achievements-end") press({D, D, D, D, D, D, D, D});
     } else if (scene.rfind("achtoast", 0) == 0) {
+        if (const char* style = getenv("GUIDE_ACH_STYLE")) g.set_notify(atoi(style));
         if (scene.find("mythic") != std::string::npos) g.ach_toast(AchTier::Mythic, -1, "Forza Horizon 2", "50 of 50 Achievements", -1, -1, t0);
         else if (scene.find("rare") != std::string::npos)
             g.ach_toast(AchTier::Rare, 50, "All Your Race Are Belong To Us 2.0", "Complete all 168 Championships.", 3.12f, 18, t0);
