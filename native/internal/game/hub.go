@@ -597,6 +597,11 @@ func (h *Hub) mapStatus() pyjson.Obj {
 		}
 		if row := rows[[2]string{kind, name}]; row != nil {
 			cars := []any{}
+			if world.Island {
+				// the website's live map is the mainland's: Storm Island positions would land on it in the wrong place
+				row.Set("cars", cars)
+				continue
+			}
 			for _, p := range world.Peers.Values() {
 				if p.Connected && p.Xuid != 0 && p.Pos != nil {
 					var car any
