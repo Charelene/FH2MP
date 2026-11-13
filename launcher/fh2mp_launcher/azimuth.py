@@ -21,6 +21,7 @@ class AzimuthInfo:
     supported_version: str = ""
     game_folder: str = ""
     game_ok: bool = False
+    game_other: str = ""              # the game the folder holds when it is not FH2 1.0.0.64 (other_game_name), else ''
     notes: list = field(default_factory=list)
     runtime_bad: list = field(default_factory=list)   # Azimuth's own DLLs that are not the supported build's (relative paths)
 
@@ -119,6 +120,11 @@ def inspect(folder, builds=None):
         info.game_ok = _game_folder_exists(info.game_folder)
         if not info.game_ok:
             info.notes.append("the game folder set in Azimuth was not found from here")
+        else:
+            info.game_other = other_game_name(info.game_folder)
+            if info.game_other:
+                info.game_ok = False
+                info.notes.append(f"the game folder set for Forza Horizon 2 in Azimuth holds {info.game_other}")
     else:
         info.notes.append("Azimuth has no game folder set yet: run Azimuth's own launcher once and point it at Forza Horizon 2")
     return info
@@ -279,10 +285,36 @@ def _steam_roots():
             if os.path.isdir(r)]
 
 
+# The Xbox One packages' AppxManifest <Identity Name=...>. FH3 1.0.125.0 ("Opus") ships the same Mount\forza_durango_release_final.exe as
+# FH2 1.0.0.64 ("Anthem"), so the exe name alone took a FH3 folder for FH2 (#470: FH3 sessions started from FH2MP, their crashes reported).
+FH2_PACKAGE = "Anthem"
+PACKAGE_GAMES = {"Opus": "Forza Horizon 3"}
+_IDENTITY_RE = re.compile(rb"<Identity[^>]*?\sName=\"([^\"]+)\"[^>]*?\sVersion=\"([^\"]+)\"", re.S)
+
+
+def package_identity(game_dir):
+    """-> (Name, Version) of the package in `game_dir` (Mount/AppxManifest.xml), ("", "") when there is no readable manifest."""
+    try:
+        with open(os.path.join(game_dir, "Mount", "AppxManifest.xml"), "rb") as f:
+            m = _IDENTITY_RE.search(f.read(64 * 1024))
+    except OSError:
+        return "", ""
+    return (m.group(1).decode("utf-8", "replace"), m.group(2).decode("utf-8", "replace")) if m else ("", "")
+
+
+def other_game_name(game_dir):
+    """The game `game_dir` holds when its manifest names another package than FH2's, e.g. "Forza Horizon 3 (Opus 1.0.125.0)"; '' for FH2,
+    for a folder without a readable manifest (nothing to go by: the exe check decides) and for a path that is not on this computer."""
+    name, version = package_identity(game_dir)
+    if not name or name == FH2_PACKAGE:
+        return ""
+    return f"{PACKAGE_GAMES.get(name, 'another game')} ({name} {version})".replace(" )", ")")
+
+
 def is_game_dir(p):
-    """The extracted Xbox One package: a Mount folder with the game exe, or at least Mount + EmbeddedXvd."""
-    return os.path.isfile(os.path.join(p, "Mount", "forza_durango_release_final.exe")) or (
-        os.path.isdir(os.path.join(p, "Mount")) and os.path.isdir(os.path.join(p, "EmbeddedXvd")))
+    """The extracted FH2 Xbox One package: a Mount folder with the game exe, or at least Mount + EmbeddedXvd; not another game's package."""
+    return (os.path.isfile(os.path.join(p, "Mount", "forza_durango_release_final.exe")) or (
+        os.path.isdir(os.path.join(p, "Mount")) and os.path.isdir(os.path.join(p, "EmbeddedXvd")))) and not other_game_name(p)
 
 
 def _subdirs(d):
@@ -363,8 +395,10 @@ def fh2_title(ini):
 
 
 def has_game_configured(folder):
+    """Azimuth starts FH2, from a folder that holds FH2 (or one that cannot be checked from here)."""
     ini = read_ini(folder)
-    return ini.get("launcher", {}).get("game", "").lower() == GAME_ID and bool(fh2_title(ini).get("folder"))
+    game = fh2_title(ini).get("folder", "")
+    return ini.get("launcher", {}).get("game", "").lower() == GAME_ID and bool(game) and not other_game_name(game)
 
 
 def steam_shortcut_folders():

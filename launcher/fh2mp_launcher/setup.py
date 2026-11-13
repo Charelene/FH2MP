@@ -19,6 +19,9 @@ def game_folder(folder):
     folder = os.path.abspath(os.path.expanduser(folder))
     if not os.path.isfile(os.path.join(folder, 'Mount', 'forza_durango_release_final.exe')):
         raise ValueError('Select your Forza Horizon 2 folder containing Mount/forza_durango_release_final.exe.')
+    other = azimuth.other_game_name(folder)
+    if other:
+        raise ValueError(f'That folder holds {other}. Select your Forza Horizon 2 folder.')
     return folder
 
 

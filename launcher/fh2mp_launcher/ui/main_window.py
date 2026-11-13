@@ -296,6 +296,8 @@ class MainWindow(QMainWindow):
             return "warn", f"This launcher requires Azimuth {AZIMUTH_VERSION} and its supplied mod versions.", "Run setup", self.run_wizard
         if not info.game_folder:
             return "warn", "Azimuth can't find the game files.", "Azimuth setup", self._azimuth_clicked
+        if info.game_other:
+            return "warn", f"The game folder set for Forza Horizon 2 holds {info.game_other}.", "Azimuth setup", self._azimuth_clicked
         if s["offline_mode"]:
             return None
         if not (lc.has_identity() and s["gamertag"]):
@@ -778,6 +780,9 @@ class MainWindow(QMainWindow):
             if isinstance(e, PlayBlocked):
                 if e.code == "no_game":
                     self.say("Couldn't find your Forza Horizon 2 files. Open Azimuth setup and pick the folder.", theme.BAD)
+                    return self.render()
+                if e.code == "other_game":
+                    self.say(str(e), theme.BAD)
                     return self.render()
                 if e.code == "azimuth_unsupported":
                     return self.say(str(e), theme.BAD)

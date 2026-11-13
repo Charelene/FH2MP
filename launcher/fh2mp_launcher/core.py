@@ -29,6 +29,16 @@ class PlayBlocked(Exception):
         self.code = code
 
 
+def no_game_blocked(folder):
+    """The PlayBlocked for an Azimuth that has no FH2 folder to start: the folder set for FH2 holds another game (#470), or none is set."""
+    own = azimuth.fh2_title(azimuth.read_ini(folder)).get("folder", "") if folder else ""
+    other = azimuth.other_game_name(own) if own else ""
+    if other:
+        return PlayBlocked(f"The game folder set for Forza Horizon 2 holds {other}. Pick your Forza Horizon 2 folder in Azimuth setup.",
+                           "other_game")
+    return PlayBlocked("Couldn't find your Forza Horizon 2 files.", "no_game")
+
+
 FRIENDLY = {
     "unreachable": "Can't reach the server.",
     "banned": "This account is banned.",
@@ -720,7 +730,7 @@ class Launcher:
         logs.step("mods")
         self.ensure_game()
         if require_game and not azimuth.has_game_configured(s["azimuth_dir"]):
-            raise PlayBlocked("Couldn't find your Forza Horizon 2 files.", "no_game")
+            raise no_game_blocked(s["azimuth_dir"])
         if (self.server or {}).get("maintenance"):
             raise PlayBlocked(self.server["maintenance"], "maintenance")
         logs.info("auth", "auth.sign_in_needed", why="play")
@@ -1012,7 +1022,7 @@ class Launcher:
             raise PlayBlocked(str(e), "tls_helper") from None
         self.ensure_game()
         if not azimuth_window and not azimuth.has_game_configured(d):
-            raise PlayBlocked("Couldn't find your Forza Horizon 2 files.", "no_game")
+            raise no_game_blocked(d)
         xuid = s["xuid"]
         use_identity = bool(xuid or os.path.isfile(os.path.join(shim.bin_dir(d), "fh2mp-identity.txt")))
         if use_identity and (self.shim_state()[0] != "ours" or not shim.supports_offline(d)):
@@ -1061,15 +1071,21 @@ class Launcher:
         if not d or not os.path.isdir(d) or azimuth.has_game_configured(d):
             return ""
         # A different title may be selected in a shared Azimuth installation.
-        # Reuse FH2's own configured folder before searching for another copy.
+        # Reuse FH2's own configured folder before searching for another copy, unless that folder holds another game (FH3's package has
+        # the same exe name, #470): then an FH2 install found on this computer replaces it.
         own = azimuth.fh2_title(azimuth.read_ini(d)).get("folder", "")
-        if own:
+        other = azimuth.other_game_name(own) if own else ""
+        if own and not other:
             azimuth.configure_game(d, own, preserve_content=True)
             return own
         found = azimuth.find_game_installs()
         if not found:
+            if other:
+                logs.warn("play", "game.folder_other_game", folder=own, game=other, then="no FH2 install found to put in its place")
             return ""
         host, win = found[0]
+        if other:
+            logs.warn("play", "game.folder_other_game", folder=own, game=other, then=f"replaced by {win}")
         azimuth.configure_game(d, win)
         return host
 
