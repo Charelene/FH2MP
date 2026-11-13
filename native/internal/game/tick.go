@@ -320,7 +320,7 @@ func (w *World) Tick() {
 	}
 	carMeetHere := w.Carmeet
 	for _, q := range w.Peers.Values() {
-		carMeetHere = carMeetHere || q.LobbyType == LobbyTypeCarMeet
+		carMeetHere = carMeetHere || isCarMeetType(q.LobbyType)
 	}
 	if carMeetHere {
 		w.CmTick(w.NowMs())

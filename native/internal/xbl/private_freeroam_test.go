@@ -65,7 +65,7 @@ func TestOnlyAnInviteLeasesASeatInAPrivateFreeRoam(t *testing.T) {
 	if _, err := r.s.Reserve("2009", meet, ""); err == nil {
 		t.Fatal("the launcher's Join leased a seat in a private Free Roam")
 	}
-	h, err := r.s.ReserveInvited("2009", meet)
+	h, err := r.s.ReserveInvited("2009", meet, "")
 	if err != nil {
 		t.Fatalf("an accepted invite could not lease a seat: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestOnlyAnInviteLeasesASeatInAPrivateFreeRoam(t *testing.T) {
 		t.Fatalf("the invitee's Car Meet ticket went to %s, want the inviter's %s", got, meet)
 	}
 	// a Free Roam ticket does not use a Car Meet lease
-	if _, err := r.s.ReserveInvited("2010", meet); err != nil {
+	if _, err := r.s.ReserveInvited("2010", meet, ""); err != nil {
 		t.Fatal(err)
 	}
 	if got := r.match("2010", false); got == meet {

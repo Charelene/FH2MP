@@ -9,10 +9,11 @@ import (
 
 // Limits.
 const (
-	ClientLimit  = 12
-	FreeRoamMax  = 75
-	FreeRoamType = 2 // Nerd::NetworkLobbyType: 1 RoadTrip, 2 FreeRoam, 3 CarMeet
-	Env          = "FH2MP_WORLD_CAPACITY"
+	ClientLimit        = 12
+	FreeRoamMax        = 75
+	FreeRoamType       = 2 // Nerd::NetworkLobbyType: 1 RoadTrip, 2 FreeRoam, 3 CarMeet, 4 IslandRoadTrip, 5 IslandFreeRoam, 6 IslandCarMeet
+	IslandFreeRoamType = 5
+	Env                = "FH2MP_WORLD_CAPACITY"
 )
 
 // FreeRoam is the players in one Free Roam world: FH2MP_WORLD_CAPACITY from 12 to 75, 12 when it is unset or not a number.
@@ -32,7 +33,7 @@ func FreeRoam() int {
 
 // ForType is by Nerd::NetworkLobbyType.
 func ForType(lobbyType int) int {
-	if lobbyType == FreeRoamType {
+	if lobbyType == FreeRoamType || lobbyType == IslandFreeRoamType {
 		return FreeRoam()
 	}
 	return ClientLimit
@@ -40,7 +41,7 @@ func ForType(lobbyType int) int {
 
 // ForKind is by "freeroam" or "roadtrip".
 func ForKind(kind string) int {
-	if kind == "freeroam" {
+	if kind == "freeroam" || kind == "islandfreeroam" {
 		return FreeRoam()
 	}
 	return ClientLimit
@@ -48,7 +49,7 @@ func ForKind(kind string) int {
 
 // ForHopper is by matchmaking hopper name.
 func ForHopper(hopper string) int {
-	if strings.HasPrefix(strings.ToLower(hopper), "freeroam") {
+	if h := strings.ToLower(hopper); strings.HasPrefix(h, "freeroam") || strings.HasPrefix(h, "islandfreeroam") {
 		return FreeRoam()
 	}
 	return ClientLimit

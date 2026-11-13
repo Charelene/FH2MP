@@ -406,7 +406,7 @@ func (l *Launcher) snapshot(me int64) (any, error) {
 	var counts any
 	if result != nil {
 		cnt := pyjson.Obj{}
-		for _, kind := range []string{"freeroam", "roadtrip"} {
+		for _, kind := range []string{"freeroam", "roadtrip", "islandfreeroam", "islandroadtrip"} {
 			n := int64(0)
 			for _, lv := range lobbies {
 				lo, _ := lv.(pyjson.Obj)

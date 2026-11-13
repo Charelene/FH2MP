@@ -268,17 +268,27 @@ loop:
 			peer.ClientCounter = counter
 			peer.Xuid = playerID
 			switch {
-			case (a == 1 || a == 2 || a == 3) && w.HubKey != nil && w.HubKey.Type >= 1 && w.HubKey.Type <= 3 && w.HubKey.Type != int(a):
+			case lobbyTypeKnown(int(a)) && w.HubKey != nil && lobbyTypeKnown(w.HubKey.Type) && w.HubKey.Type != int(a) && sameSide(w.HubKey.Type, int(a)):
 				// the hub sent a private game's member here although its game asked for another lobby type (followType): this world's
 				// type is what the handshake tells it
 				peer.LobbyType, peer.ClaimedLobbyType = w.HubKey.Type, int(a)
 				w.Logf("%d OpenConnection asks for lobby type %d; this world is lobby type %d, which the handshake tells the game", addr.Port, a, w.HubKey.Type)
-			case a == 1 || a == 2 || a == 3:
+			case lobbyTypeKnown(int(a)):
+				if w.HubKey != nil && lobbyTypeKnown(w.HubKey.Type) && !sameSide(w.HubKey.Type, int(a)) {
+					// followType never crosses sides; a game on the other side keeps its own type so that it does not load the wrong map
+					w.Warnf("%d OpenConnection of %#x asks for lobby type %d in this lobby type %d world (one is Storm Island, the other the mainland): its own type is kept", addr.Port, playerID, a, w.HubKey.Type)
+				}
 				peer.LobbyType = int(a)
+			case w.Carmeet && w.Island:
+				peer.LobbyType = LobbyTypeIslandCarMeet
 			case w.Carmeet:
 				peer.LobbyType = LobbyTypeCarMeet
+			case w.Roadtrip && w.Island:
+				peer.LobbyType = LobbyTypeIslandRoadTrip
 			case w.Roadtrip:
 				peer.LobbyType = LobbyTypeRoadTrip
+			case w.Island:
+				peer.LobbyType = LobbyTypeIslandFreeRoam
 			default:
 				peer.LobbyType = 2
 			}
@@ -335,13 +345,13 @@ loop:
 				replies = append(replies, netv2.TimeSync(0, uint64(w.NowMs())), netv2.ConnectionSyncDone(w.ServerCounter))
 				replies = append(replies, netv2.SessionHostCreate(1, w.sessionHostCreateVars(peer)))
 				replies = append(replies, netv2.WeatherCreate(uint64(peer.WxSeq), w.Wx))
-				if !w.Roadtrip && peer.LobbyType != LobbyTypeCarMeet {
+				if !w.Roadtrip && !isCarMeetType(peer.LobbyType) {
 					peer.BlSlotSeq = 1
 					replies = append(replies, netv2.ObjectMessage(netv2.MsgObjectCreate, bucketlist.Router, 0, bucketlist.TypeSlotArray, uint64(peer.BlSlotSeq),
 						bucketlist.IDBits, bucketlist.TypeBits, w.Coop.Slots.Writer(w.Coop.Slots.Used())))
 				}
 				peer.WxReady = true
-				if peer.LobbyType == LobbyTypeCarMeet {
+				if isCarMeetType(peer.LobbyType) {
 					replies = append(replies, netv2.CarMeetCreate(1, nil))
 				}
 				w.Debugf("handshake", "%d -> TimeSync, ConnectionSyncDone, SessionHost + Weather create", addr.Port)

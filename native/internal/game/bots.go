@@ -254,7 +254,7 @@ func (h *Hub) botsCommand(parts []string) string {
 	var worlds []kw
 	for _, key := range h.Worlds.Keys() {
 		w, _ := h.Worlds.Get(key)
-		if key.Type == 2 && (lobby == "" || key.Name == lobby) {
+		if isFreeRoamType(key.Type) && (lobby == "" || key.Name == lobby) {
 			worlds = append(worlds, kw{key, w})
 		}
 	}
@@ -303,7 +303,7 @@ func (h *Hub) botsCommand(parts []string) string {
 			return len(withPlayers[i].w.botRealPeers()) > len(withPlayers[j].w.botRealPeers())
 		})
 		best := withPlayers[0]
-		added, why := best.w.BotAdd(n, capacity.ForType(2))
+		added, why := best.w.BotAdd(n, capacity.ForType(best.key.Type))
 		s := fmt.Sprintf("added %d of %d in %s", added, n, nameOf(best.key))
 		if why != "" {
 			s += " (" + why + ")"

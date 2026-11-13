@@ -20,7 +20,35 @@ import (
 const HoldSeconds = 300
 
 // hopperKinds: real FreeRoam_qos, RoadTrip_qos and CarMeet_qos tickets all use GSI ...0102. GSI identifies the image set, not the requested mode.
-var hopperKinds = map[string]string{"freeroam_qos": "freeroam", "roadtrip_qos": "roadtrip"}
+// Storm Island asks for IslandFreeRoam_qos and IslandRoadTrip_qos (the game registers the six hopper names at game+0x8c5750).
+var hopperKinds = map[string]string{"freeroam_qos": "freeroam", "roadtrip_qos": "roadtrip", "islandfreeroam_qos": "islandfreeroam",
+	"islandroadtrip_qos": "islandroadtrip"}
+
+// reserveKinds are the kinds a launcher may ask a new lobby of.
+var reserveKinds = map[string]bool{"freeroam": true, "roadtrip": true, "islandfreeroam": true, "islandroadtrip": true}
+
+// IslandCarMeetLocation is the Location of Storm Island's Car Meet tickets. Both sides share the CarMeet_qos hopper; the ticket's Location
+// is the meet's CarMeetId (EntityModel car_meets.xml 1..6 on the mainland, car_meets_island.xml 7) [I: Location = CarMeetId, from the
+// mainland tickets' 1..6].
+const IslandCarMeetLocation = "7"
+
+// IsIslandKey: the lobbies of this key are on Storm Island.
+func IsIslandKey(key LobbyKey) bool {
+	h := strings.ToLower(key.Hopper)
+	if strings.HasPrefix(h, "island") {
+		return true
+	}
+	return strings.HasPrefix(h, "carmeet") && key.Location == IslandCarMeetLocation
+}
+
+// IsIslandKind: a lobby kind of Storm Island.
+func IsIslandKind(kind string) bool { return strings.HasPrefix(kind, "island") }
+
+// isCarMeetKind: a Car Meet lease on either side.
+func isCarMeetKind(kind string) bool { return kind == "carmeet" || kind == "islandcarmeet" }
+
+// isFreeRoamKind: Free Roam on either side.
+func isFreeRoamKind(kind string) bool { return kind == "freeroam" || kind == "islandfreeroam" }
 
 func randomUUID() string {
 	var b [16]byte
@@ -30,26 +58,30 @@ func randomUUID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-// LobbyKind is the kind ("freeroam", "roadtrip") of a lobby key's hopper, "" for any other.
+// LobbyKind is the kind ("freeroam", "roadtrip", "islandfreeroam", "islandroadtrip") of a lobby key's hopper, "" for any other.
 func LobbyKind(key LobbyKey) string { return hopperKinds[strings.ToLower(key.Hopper)] }
 
-// holdKind is the kind of a seat lease in a lobby of this key: LobbyKind, or "carmeet" for a Car Meet lobby. Only an accepted game invite
+// holdKind is the kind of a seat lease in a lobby of this key: LobbyKind, or "carmeet" ("islandcarmeet" on Storm Island) for a Car Meet lobby. Only an accepted game invite
 // leases a Car Meet seat: the game's private Free Roam grows out of a Car Meet, so that is the way into someone's private Free Roam.
 func holdKind(key LobbyKey) string {
 	if k := LobbyKind(key); k != "" {
 		return k
 	}
 	if strings.HasPrefix(strings.ToLower(key.Hopper), "carmeet") {
+		if IsIslandKey(key) {
+			return "islandcarmeet"
+		}
 		return "carmeet"
 	}
 	return ""
 }
 
-// sameHoldKey: a ticket may use a lease of this key. A Car Meet lease ignores the location: the invitee's game asks for its own Car Meet
-// place, and the seat is in the inviter's.
+// sameHoldKey: a ticket may use a lease of this key. A Car Meet lease ignores the location within one side: the invitee's game asks for
+// its own Car Meet place, and the seat is in the inviter's. It never crosses between the mainland and Storm Island: the game loads the
+// meet it asked for.
 func sameHoldKey(held, ticket LobbyKey) bool {
-	if holdKind(held) == "carmeet" {
-		return held.Scid == ticket.Scid && strings.EqualFold(held.Hopper, ticket.Hopper) && held.Gsi == ticket.Gsi
+	if isCarMeetKind(holdKind(held)) {
+		return held.Scid == ticket.Scid && strings.EqualFold(held.Hopper, ticket.Hopper) && held.Gsi == ticket.Gsi && IsIslandKey(held) == IsIslandKey(ticket)
 	}
 	return held == ticket
 }
@@ -57,7 +89,7 @@ func sameHoldKey(held, ticket LobbyKey) bool {
 // carMeetLobbyLocked: the name is a lobby the matchmaker made for a Car Meet hopper. The caller holds the lock.
 func (s *Server) carMeetLobbyLocked(name string) bool {
 	for _, k := range s.lobbyKeys {
-		if holdKind(k) != "carmeet" {
+		if !isCarMeetKind(holdKind(k)) {
 			continue
 		}
 		for _, n := range s.lobbies[k] {
@@ -147,19 +179,23 @@ func authErr(status int, code, message, xuid, detail string) *auth.Error {
 	return e
 }
 
-// Reserve leases a seat in a lobby (by name) or in a new one of a kind ("freeroam", "roadtrip").
+// Reserve leases a seat in a lobby (by name) or in a new one of a kind ("freeroam", "roadtrip", "islandfreeroam", "islandroadtrip").
 func (s *Server) Reserve(xuid, lobby, kind string) (*Hold, error) {
 	return s.reserve(xuid, lobby, kind, false)
 }
 
 // ReserveInvited leases a seat for a player who accepted a game invite into the named lobby: like Reserve, and a Car Meet lobby (the
-// inviter's private Free Roam) is allowed.
-func (s *Server) ReserveInvited(xuid, lobby string) (*Hold, error) {
-	return s.reserve(xuid, lobby, "", true)
+// inviter's private Free Roam) is allowed. kind is the lobby kind the invite was sent from ("islandfreeroam" for a private game on Storm
+// Island, "" when not known).
+func (s *Server) ReserveInvited(xuid, lobby, kind string) (*Hold, error) {
+	if kind != "islandfreeroam" {
+		kind = ""
+	}
+	return s.reserve(xuid, lobby, kind, true)
 }
 
 func (s *Server) reserve(xuid, lobby, kind string, invited bool) (*Hold, error) {
-	if kind != "" && kind != "freeroam" && kind != "roadtrip" {
+	if kind != "" && !reserveKinds[kind] {
 		return nil, authErr(400, "bad_mode", "Choose Free Roam or Road Trip.", xuid, "kind "+pyRepr(trunc(kind, 20)))
 	}
 	pops, havePops := s.Populations()
@@ -192,7 +228,9 @@ func (s *Server) reserve(xuid, lobby, kind string, invited bool) (*Hold, error) 
 			}
 			if key == nil && invited && s.privateGameLocked(lobby) != nil {
 				// the inviter's private game (a world of its own, not in the lobby index): a seat while it has room
-				kind = "freeroam"
+				if kind != "islandfreeroam" {
+					kind = "freeroam"
+				}
 				present := []string{}
 				already := s.seatsLocked(lobby, nil, s.Now())[xuid]
 				for _, x := range pops[lobby] {
@@ -213,7 +251,7 @@ func (s *Server) reserve(xuid, lobby, kind string, invited bool) (*Hold, error) 
 				s.holds[xuid] = hold
 				return
 			}
-			if key == nil || (LobbyKind(*key) == "" && !(invited && holdKind(*key) == "carmeet")) {
+			if key == nil || (LobbyKind(*key) == "" && !(invited && isCarMeetKind(holdKind(*key)))) {
 				why := "is not in the lobby index"
 				if key != nil {
 					why = fmt.Sprintf("is of hopper %s, which is neither FreeRoam nor RoadTrip", pyRepr(key.Hopper))
@@ -376,7 +414,7 @@ func (s *Server) LauncherRows(me int64, lobbies []any, pops map[string][]string,
 		if !s.poolFits(id, pops, flags, flags[me]) {
 			continue
 		}
-		if kind, _ := row.Get("kind"); kind == "freeroam" && (s.carMeetLobbyLocked(id) || s.privateGameLocked(id) != nil) {
+		if kind, _ := row.Get("kind"); isFreeRoamKind(fmt.Sprint(kind)) && (s.carMeetLobbyLocked(id) || s.privateGameLocked(id) != nil) {
 			continue // a private Free Roam: invite only, not listed
 		}
 		var ids []any

@@ -28,7 +28,7 @@ func i64v(v int64) *int64 { return &v }
 func (w *World) cmMembers() []*Peer {
 	var out []*Peer
 	for _, q := range w.Peers.Values() {
-		if q.Connected && q.Entered && q.LobbyType == LobbyTypeCarMeet {
+		if q.Connected && q.Entered && isCarMeetType(q.LobbyType) {
 			out = append(out, q)
 		}
 	}

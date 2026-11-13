@@ -215,10 +215,7 @@ func (h *Hub) WorldFor(lobbyType int, name string) *World {
 	if w, ok := h.Worlds.Get(key); ok {
 		return w
 	}
-	kind := map[int]string{1: "roadtrip", 2: "freeroam", 3: "carmeet"}[lobbyType]
-	if kind == "" {
-		kind = fmt.Sprint(lobbyType)
-	}
+	kind := lobbyKind(lobbyType)
 	short := name
 	if len(short) > 8 {
 		short = short[:8]
@@ -227,10 +224,11 @@ func (h *Hub) WorldFor(lobbyType int, name string) *World {
 		short = "default"
 	}
 	tag := fmt.Sprintf("[%s:%s] ", kind, short)
-	w, err := NewWorld(tag, h.Out, h.Clk, h.Rng, h.Sock, h.Events, h.Sinks, h.Catalog, lobbyType == LobbyTypeRoadTrip, lobbyType == LobbyTypeCarMeet, 0)
+	w, err := NewWorld(tag, h.Out, h.Clk, h.Rng, h.Sock, h.Events, h.Sinks, h.Catalog, isRoadTripType(lobbyType), isCarMeetType(lobbyType), 0)
 	if err != nil {
 		panic(err)
 	}
+	w.Island = isIslandType(lobbyType)
 	k := key
 	w.HubKey = &k
 	w.Hub = h
@@ -511,7 +509,7 @@ func (h *Hub) lobbyStatus() pyjson.Obj {
 	var out []row
 	for _, key := range h.Worlds.Keys() {
 		world, _ := h.Worlds.Get(key)
-		if key.Type != 2 && key.Type != LobbyTypeRoadTrip {
+		if !isFreeRoamType(key.Type) && !isRoadTripType(key.Type) {
 			continue
 		}
 		var peers []*Peer
@@ -527,10 +525,7 @@ func (h *Hub) lobbyStatus() pyjson.Obj {
 		if id == "" {
 			id = "default"
 		}
-		kind := "freeroam"
-		if key.Type == LobbyTypeRoadTrip {
-			kind = "roadtrip"
-		}
+		kind := lobbyKind(key.Type)
 		members := []any{}
 		for _, p := range peers {
 			if p.Xuid != 0 {
@@ -538,7 +533,7 @@ func (h *Hub) lobbyStatus() pyjson.Obj {
 			}
 		}
 		obj := pyjson.Obj{{K: "id", V: id}, {K: "kind", V: kind}, {K: "players", V: len(peers)}, {K: "capacity", V: capacity.ForType(key.Type)}, {K: "memberXuids", V: members}}
-		if key.Type == LobbyTypeRoadTrip {
+		if isRoadTripType(key.Type) {
 			st, ok := stages[world.RtState]
 			if !ok {
 				st = "Getting ready"
@@ -587,10 +582,7 @@ func (h *Hub) mapStatus() pyjson.Obj {
 	}
 	for _, key := range h.Worlds.Keys() {
 		world, _ := h.Worlds.Get(key)
-		kind := "freeroam"
-		if key.Type == LobbyTypeRoadTrip {
-			kind = "roadtrip"
-		}
+		kind := lobbyKind(key.Type)
 		name := key.Name
 		if name == "" {
 			name = "default"
@@ -666,11 +658,11 @@ func (h *Hub) populationsText() string {
 	return b.String()
 }
 
-// freeRoamLobbies are the lobby names that have a Free Roam world (type 2) with a connected player, in world order.
+// freeRoamLobbies are the lobby names that have a Free Roam world (type 2, or 5 on Storm Island) with a connected player, in world order.
 func (h *Hub) freeRoamLobbies() []string {
 	var out []string
 	for _, key := range h.Worlds.Keys() {
-		if key.Type != LobbyTypeFreeRoam || key.Name == "" {
+		if !isFreeRoamType(key.Type) || key.Name == "" {
 			continue
 		}
 		world, _ := h.Worlds.Get(key)
@@ -966,7 +958,7 @@ func (h *Hub) OpenConnectionFields(data []byte) (uint64, int, bool) {
 	if err != nil {
 		return 0, 0, false
 	}
-	if a == 1 || a == 2 || a == 3 {
+	if lobbyTypeKnown(int(a)) {
 		return pid, int(a), true
 	}
 	return pid, h.DefaultType, true
@@ -1197,8 +1189,9 @@ func (h *Hub) ownerRoom(w *World, addr *Addr) bool {
 }
 
 // followType is the lobby type of the world a player assigned to `name` goes to: the one its game asks for, except for a private game's
-// member (Follow) when that world has nobody else and another world of that name has players: then that one's (the host's private Free Roam
-// or Road Trip). The world tells the game its lobby type at the handshake.
+// member (Follow) when that world has nobody else and another world of that name on the same side has players: then that one's (the host's
+// private Free Roam or Road Trip). The world tells the game its lobby type at the handshake. It never crosses between the mainland and
+// Storm Island: the game loads the map of the type it asked for.
 func (h *Hub) followType(player uint64, ltype int, name string, addr Addr) int {
 	if !h.Follow[player] {
 		return ltype
@@ -1207,7 +1200,7 @@ func (h *Hub) followType(player uint64, ltype int, name string, addr Addr) int {
 		return ltype
 	}
 	for _, k := range h.Worlds.Keys() {
-		if k.Name == name && k.Type != ltype {
+		if k.Name == name && k.Type != ltype && sameSide(k.Type, ltype) {
 			if w, _ := h.Worlds.Get(k); w != nil && h.worldLoad(w, &addr) > 0 {
 				h.Log(fmt.Sprintf("%#x asks for lobby type %d in %.8s, where only the lobby type %d world has players (a private game): it goes there", player, ltype, name, k.Type))
 				return k.Type

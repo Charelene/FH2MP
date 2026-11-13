@@ -270,6 +270,7 @@ type World struct {
 	IsIdle         bool
 	Carmeet        bool
 	Roadtrip       bool
+	Island         bool // a Storm Island world (session type 4..6): only island sessions join it, and it tells its players their island type
 
 	VisibilityChecked               float64
 	RtState                         int

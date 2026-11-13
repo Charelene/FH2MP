@@ -100,7 +100,7 @@ func (l *Launcher) acceptInvite(me, id int64) (any, error) {
 	if !ok {
 		return nil, auth.NewError(404, "invite_gone", "That invite has expired.").WithXuid(me)
 	}
-	h, err := l.C.Xbl.ReserveInvited(fmt.Sprint(me), iv.Lobby)
+	h, err := l.C.Xbl.ReserveInvited(fmt.Sprint(me), iv.Lobby, iv.Kind)
 	if err != nil {
 		if ae, ok := err.(*auth.Error); ok && ae.Code == "lobby_gone" {
 			cs.invites.Take(me, id) // the lobby will not come back: the invite leaves the player's Messages

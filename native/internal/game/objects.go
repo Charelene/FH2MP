@@ -509,7 +509,7 @@ func (w *World) ReplayFrom(newcomer, q *Peer, routers, skip map[int]bool) {
 
 // EarlyIntroduction returns point when FH2MP_INTRODUCE_AT asks for it here and this connected client is in Free Roam, else "".
 func (w *World) EarlyIntroduction(peer *Peer, point string) string {
-	freeRoam := !w.Roadtrip && peer.LobbyType != LobbyTypeCarMeet
+	freeRoam := !w.Roadtrip && !isCarMeetType(peer.LobbyType)
 	if point == w.IntroduceAt && peer.Connected && freeRoam {
 		return point
 	}
@@ -543,7 +543,7 @@ func (w *World) Introduce(peer *Peer, point string) {
 // SetSessionHostBool sets a SessionHost bool for every connected Free Roam / Road Trip client.
 func (w *World) SetSessionHostBool(varID, value int, why string) {
 	for _, q := range w.Peers.Values() {
-		if !q.Connected || q.LobbyType == LobbyTypeCarMeet {
+		if !q.Connected || isCarMeetType(q.LobbyType) {
 			continue
 		}
 		vid, v := varID, value
@@ -583,7 +583,7 @@ type shVar struct {
 // SendSessionHostVars sends one SessionHost update of (var id, width, value) triples to every connected Free Roam / Road Trip client.
 func (w *World) SendSessionHostVars(values []shVar) {
 	for _, q := range w.Peers.Values() {
-		if !q.Connected || q.LobbyType == LobbyTypeCarMeet {
+		if !q.Connected || isCarMeetType(q.LobbyType) {
 			continue
 		}
 		w.Send(q, false, netv2.SessionHostUpdate(uint64(q.HostSeq), func(b *bits.Writer) {
@@ -718,18 +718,21 @@ func pyBool(b bool) string {
 }
 
 // sessionHostCreateVars is SessionHostSynced as this player's game gets it at the handshake (nil = every default): LobbyType where it is
-// not the default (Free Roam) or the game came in as another type (an accepted invite enters through a Car Meet), PrivacyMode for a private
-// game.
+// not the default (mainland Free Roam: SyncedEnum<NetworkLobbyType,2,3,0> starts at 2, game+0x180ff70), so every Storm Island type, or the
+// game came in as another type (an accepted invite enters through a Car Meet), PrivacyMode for a private game.
 func (w *World) sessionHostCreateVars(peer *Peer) netv2.VarsWriter {
 	lobby := -1
-	if w.Roadtrip {
+	switch {
+	case w.Roadtrip && w.Island:
+		lobby = LobbyTypeIslandRoadTrip
+	case w.Roadtrip:
 		lobby = LobbyTypeRoadTrip
-	} else if peer.LobbyType == LobbyTypeCarMeet {
-		lobby = LobbyTypeCarMeet
-	} else if peer.ClaimedLobbyType != 0 && peer.ClaimedLobbyType != peer.LobbyType {
+	case isCarMeetType(peer.LobbyType), isIslandType(peer.LobbyType):
+		lobby = peer.LobbyType
+	case peer.ClaimedLobbyType != 0 && peer.ClaimedLobbyType != peer.LobbyType:
 		lobby = peer.LobbyType
 	}
-	inviteOnly := w.Private && !w.Roadtrip && peer.LobbyType != LobbyTypeCarMeet
+	inviteOnly := w.Private && !w.Roadtrip && !isCarMeetType(peer.LobbyType)
 	if lobby < 0 && !inviteOnly {
 		return nil
 	}
@@ -752,7 +755,7 @@ func (w *World) KeepPrivateLeader(why string) {
 	}
 	var first *Peer
 	for _, q := range w.Peers.Values() {
-		if q.Connected && q.Entered && q.LobbyType != LobbyTypeCarMeet && (first == nil || q.ConnectedAt < first.ConnectedAt) {
+		if q.Connected && q.Entered && !isCarMeetType(q.LobbyType) && (first == nil || q.ConnectedAt < first.ConnectedAt) {
 			first = q
 		}
 	}

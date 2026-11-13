@@ -101,9 +101,14 @@ const (
 	TagGridAssignDelay = 1.5
 	TagResyncS         = 3.0
 
-	LobbyTypeRoadTrip = 1
-	LobbyTypeFreeRoam = 2
-	LobbyTypeCarMeet  = 3
+	// Nerd::NetworkLobbyType, the session types of the game's matchmaking-group table (game+0x80e7d0): 1..3 the mainland, 4..6 Storm Island
+	// (hoppers IslandRoadTrip_qos, IslandFreeRoam_qos and CarMeet_qos, game+0x8c5750)
+	LobbyTypeRoadTrip       = 1
+	LobbyTypeFreeRoam       = 2
+	LobbyTypeCarMeet        = 3
+	LobbyTypeIslandRoadTrip = 4
+	LobbyTypeIslandFreeRoam = 5
+	LobbyTypeIslandCarMeet  = 6
 
 	ResultOK, ResultVersionMismatch, ResultGameMismatch, ResultBanned = 0, 1, 2, 3
 	ResponseAck                                                       = 6
@@ -252,3 +257,25 @@ var TagModes = map[int]*TagMode{
 
 // TagAssignRepeats: seconds after the first send.
 var TagAssignRepeats = []float64{0.0, 0.4, 1.2, 3.0}
+
+// lobbyTypeKnown: one of the game's six session types.
+func lobbyTypeKnown(t int) bool { return t >= LobbyTypeRoadTrip && t <= LobbyTypeIslandCarMeet }
+
+// isIslandType: a Storm Island session type.
+func isIslandType(t int) bool { return t >= LobbyTypeIslandRoadTrip && t <= LobbyTypeIslandCarMeet }
+
+// isRoadTripType / isCarMeetType / isFreeRoamType: the mode of a session type, on either side.
+func isRoadTripType(t int) bool { return t == LobbyTypeRoadTrip || t == LobbyTypeIslandRoadTrip }
+func isCarMeetType(t int) bool  { return t == LobbyTypeCarMeet || t == LobbyTypeIslandCarMeet }
+func isFreeRoamType(t int) bool { return t == LobbyTypeFreeRoam || t == LobbyTypeIslandFreeRoam }
+
+// sameSide: both session types are on the mainland or both on Storm Island.
+func sameSide(a, b int) bool { return isIslandType(a) == isIslandType(b) }
+
+// lobbyKind is the world kind of a session type ("freeroam", "islandroadtrip", ...), the number for an unknown one.
+func lobbyKind(t int) string {
+	if k, ok := map[int]string{1: "roadtrip", 2: "freeroam", 3: "carmeet", 4: "islandroadtrip", 5: "islandfreeroam", 6: "islandcarmeet"}[t]; ok {
+		return k
+	}
+	return fmt.Sprint(t)
+}

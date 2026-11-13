@@ -56,7 +56,7 @@ func TestPrivateGameFromPublicFreeRoamIsAWorldOfItsOwn(t *testing.T) {
 	// a friend's accepted invite: a seat in it, and writing itself into the session puts the friend in the same world
 	r.disconnect("2001")
 	r.hub.pops[priv] = []string{hexOf("2001")}
-	h, err := r.s.ReserveInvited("2002", priv)
+	h, err := r.s.ReserveInvited("2002", priv, "")
 	if err != nil {
 		t.Fatalf("an accepted invite could not lease a seat in the private game: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestAPrivateGamesSeatIsNotAMatchmakingHold(t *testing.T) {
 	r.putQos(priv, joinBody, "2001")
 	r.s.AllocateServer(r.qosPath(priv))
 	r.hub.pops[priv] = []string{hexOf("2001")}
-	h, err := r.s.ReserveInvited("2002", priv)
+	h, err := r.s.ReserveInvited("2002", priv, "")
 	if err != nil || !h.Private {
 		t.Fatalf("lease %+v, error %v", h, err)
 	}
