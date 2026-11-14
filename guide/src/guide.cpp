@@ -19,7 +19,7 @@ using namespace ui;
 
 namespace {
 
-enum HomeCmd { HomeNone, HomeResume, HomeFriends, HomeParty, HomeMessages, HomeProfile, HomeAchievements, HomeTheme, HomeVoice };
+enum HomeCmd { HomeNone, HomeResume, HomeFriends, HomeParty, HomeMessages, HomeProfile, HomeAchievements, HomeTheme, HomeVoice, HomeNotify };
 const char* BLADE[3] = {"Games", nullptr, "Settings"};
 
 // The blades' geometry, from the 360 Guide's own layouts (hud.xex: GuideMain.xur's tab timeline at the end of each switch, the
@@ -511,6 +511,7 @@ std::vector<GuideRequest> Guide::handle(PadEvent e, double now) {
     case Page::AchDetail: handle_ach_detail(e, now); break;
     case Page::Theme: handle_theme(e, out, now); break;
     case Page::Voice: handle_voice(e, out, now); break;
+    case Page::Notifications: handle_notify(e, out, now); break;
     }
     return out;
 }
@@ -524,7 +525,7 @@ std::vector<Opt> Guide::home_rows(int blade) const {
                 {"Messages", HomeMessages, true, I_MAIL},    {"Beacons & Activity", HomeNone, false, I_SENSORS},
                 {"Chat", HomeNone, false, I_CHAT},           {"Lobbies", HomeNone, false, I_FLAG}};
     return {{"Profile", HomeProfile, social_.loaded, I_PERSON}, {"Theme", HomeTheme, true, I_PALETTE},  {"Voice", HomeVoice, true, I_MIC},
-            {"Notifications", HomeNone, false, I_BELL},   {"Network", HomeNone, false, I_WIFI},   {"Controller", HomeNone, false, I_GAMES},
+            {"Notifications", HomeNotify, true, I_BELL},   {"Network", HomeNone, false, I_WIFI},   {"Controller", HomeNone, false, I_GAMES},
             {"System", HomeNone, false, I_SETTINGS}};
 }
 
@@ -557,6 +558,8 @@ void Guide::handle_home(PadEvent e, std::vector<GuideRequest>& out, double now) 
             open_theme(now);
         } else if (cmd == HomeVoice) {
             open_voice(now);
+        } else if (cmd == HomeNotify) {
+            open_notify(now);
         } else if (cmd == HomeProfile) {
             prof_ = social_.me;
             if (prof_.tag.empty()) prof_.tag = gamertag;
@@ -762,6 +765,7 @@ bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double 
         case Page::AchDetail: draw_ach_detail(dl, a, origin, s, zoom, op, now); break;
         case Page::Theme: draw_theme(dl, a, origin, s, zoom, op, now); break;
         case Page::Voice: draw_voice(dl, a, origin, s, zoom, op, now); break;
+        case Page::Notifications: draw_notify(dl, a, origin, s, zoom, op, now); break;
         }
         if (box_.on) draw_box(dl, a, origin, s, w, h, now);
     }

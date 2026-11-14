@@ -190,7 +190,8 @@ UPSTREAM = {
 }
 # The Guide's achievement toast: the Xbox app's and Game Bar's sounds and pictures for it (Microsoft's files, mirrored on the FH2MP website
 # at the user's decision 2026-11-11), put into the Azimuth folder's data/bin/achievement-toast by name -> (SHA-256, size). The sounds are
-# wav (Windows plays those from memory); the pictures keep the app's names, which the Guide looks for.
+# wav (Windows plays those from memory); the pictures keep the app's names, which the Guide looks for. The three ach-sound-360 files
+# are not Microsoft's: custom sounds for the Guide's Xbox 360 style of achievement (Settings > Notifications), one for each tier.
 ACH_TOAST = {
     "base": MIRROR_BASE + "achievement-toast/",
     "dir": "data/bin/achievement-toast",
@@ -217,6 +218,9 @@ ACH_TOAST = {
     "ach-sound-mythic.wav": ("a38be51bfd0ded8b5c6fc45ee852fca796f9735e4ac8b559df2e586edfb4e395", 2647360),
     "ach-sound-normal.wav": ("4995fa48d56e62773d2b465f630f8754714e4382863d37c43228d3eb5ab93a97", 96388),
     "ach-sound-rare.wav": ("a751d4c56801951fb47b98a4d0c6ccc2b9ec9b8adbe1bbe54acd4a56c259ee7e", 2294656),
+    "ach-sound-360-mythic.wav": ("1d2a850e9c0b3ba2e51916db31073e253d74792043ad0b3749ba89ed98a39e63", 1804844),
+    "ach-sound-360-normal.wav": ("23e8ec6f5156347616dfccdb74d236edb59dbd32629d8879dc70c86029b0b601", 64556),
+    "ach-sound-360-rare.wav": ("7996f97ddb64250627c23bed25e4dc00cd2b7497ff91a2031c13f3ede54446e1", 441644),
     },
 }
 

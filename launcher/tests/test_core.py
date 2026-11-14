@@ -2217,6 +2217,9 @@ class AchToastTests(unittest.TestCase):
         from fh2mp_launcher.constants import ACH_TOAST, MIRROR_BASE
         self.assertTrue(ACH_TOAST["base"].startswith(MIRROR_BASE))
         self.assertIn("ach-sound-rare.wav", ACH_TOAST["files"])
+        self.assertIn("ach-sound-360-normal.wav", ACH_TOAST["files"])
+        self.assertIn("ach-sound-360-rare.wav", ACH_TOAST["files"])
+        self.assertIn("ach-sound-360-mythic.wav", ACH_TOAST["files"])
         self.assertIn("TrophyIntro.png", ACH_TOAST["files"])
         for name, (sha, size) in ACH_TOAST["files"].items():
             self.assertRegex(sha, r"^[0-9a-f]{64}$", name)

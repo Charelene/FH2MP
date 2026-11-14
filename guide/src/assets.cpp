@@ -1,9 +1,11 @@
-// The Guide's fonts: Segoe UI (regular and bold) from Windows, Material Icons (filled) embedded in the DLL. Sized like CSS: a font size of
+// The Guide's fonts: Segoe UI (regular and bold) from Windows, the Xbox One toast's font from Game Bar or Windows, Material Icons (filled) embedded in the DLL. Sized like CSS: a font size of
 // N gives N-pixel em glyphs (ImFontConfig::ExtraSizeScale = (ascender - descender) / em), so the canvas' pixel sizes can be used as they are.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <appmodel.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -60,6 +62,23 @@ ImFont* load_ttf(const std::string& path, FontMetrics* m) {
     return ImGui::GetIO().Fonts->AddFontFromMemoryTTF(copy, int(data.size()), 26.0f, &cfg);
 }
 
+// Game Bar's folder of pictures and fonts on this PC, with its trailing backslash; "" where Game Bar is not installed.
+std::string gamebar_assets() {
+    const wchar_t* family = L"Microsoft.XboxGamingOverlay_8wekyb3d8bbwe";
+    UINT32 count = 0, len = 0, path_len = MAX_PATH;
+    GetPackagesByPackageFamily(family, &count, nullptr, &len, nullptr);  // the first call only says how much room is needed
+    if (!count || !len) return "";
+    std::vector<PWSTR> names(count);
+    std::vector<wchar_t> buf(len);
+    wchar_t path[MAX_PATH];
+    if (GetPackagesByPackageFamily(family, &count, names.data(), &len, buf.data()) != ERROR_SUCCESS || !count ||
+        GetPackagePathByFullName(names[0], &path_len, path) != ERROR_SUCCESS)
+        return "";
+    char ansi[MAX_PATH * 2];
+    int n = WideCharToMultiByte(CP_ACP, 0, path, -1, ansi, sizeof ansi, nullptr, nullptr);
+    return n > 1 ? std::string(ansi) + "\\Assets\\" : "";
+}
+
 }  // namespace
 
 void load_fonts(GuideAssets& a) {
@@ -70,6 +89,14 @@ void load_fonts(GuideAssets& a) {
     if (!a.text) a.text = ImGui::GetIO().Fonts->AddFontDefault(), a.text_m = FontMetrics{};
     a.text_bold = load_ttf(fonts + "segoeuib.ttf", &a.bold_m);
     if (!a.text_bold) a.text_bold = a.text, a.bold_m = a.text_m;
+    // The Xbox One toast's words: Game Bar draws its toasts in its own Segoe Sans Text, which is read from Game Bar's folder where
+    // Game Bar is installed (it is never copied); Segoe UI Semibold is the nearest Windows itself has. GUIDE_GAMEBAR_ASSETS names the
+    // folder for guide-preview.exe, as it does for the toast's pictures.
+    const char* named = getenv("GUIDE_GAMEBAR_ASSETS");
+    std::string bar = named ? std::string(named) + "\\" : gamebar_assets();
+    if (!bar.empty()) a.text_one = load_ttf(bar + "Segoe-Sans-Text.ttf", &a.one_m);
+    if (!a.text_one) a.text_one = load_ttf(fonts + "seguisb.ttf", &a.one_m);
+    if (!a.text_one) a.text_one = a.text, a.one_m = a.text_m;
     const unsigned char* icons = _binary_MaterialIcons_Regular_ttf_start;
     size_t n = size_t(_binary_MaterialIcons_Regular_ttf_end - _binary_MaterialIcons_Regular_ttf_start);
     ImFontConfig icfg;
