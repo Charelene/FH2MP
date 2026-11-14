@@ -20,8 +20,14 @@ using namespace ui;
 
 namespace {
 
-enum HomeCmd { HomeNone, HomeResume, HomeFriends, HomeParty, HomeMessages, HomeProfile, HomeAchievements, HomeTheme, HomeVoice, HomeNotify, HomeSystem };
-const char* BLADE[3] = {"Games", nullptr, "Settings"};
+enum HomeCmd {
+    HomeNone, HomeResume, HomeFriends, HomeParty, HomePlayers, HomeMessages, HomeCreate, HomeProfile, HomeAchievements, HomeTheme, HomeVoice, HomeNotify,
+    HomeSystem
+};
+// The blades: Games, the player's own (named by their gamertag: the people), Messages and Settings. The 360 has the people and the
+// messages on one blade; they are apart here as the Xbox One's guide has them, so both layouts have the same four.
+const int BLADES = 4;
+const char* BLADE[BLADES] = {"Games", nullptr, "Messages", "Settings"};
 
 // The blades' geometry, from the 360 Guide's own layouts (hud.xex: GuideMain.xur's tab timeline at the end of each switch, the
 // *TabSignedIn.xur rows, huduiskin.xex's blade pictures), in its 853x480 units. The open blade always sits at the same place, 366 wide
@@ -149,14 +155,19 @@ void Guide::toggle(double now) {
     open = !open;
     if (open) {
         opened_ = now, stack_ = {Page::Home}, page_at_ = -10, flow_base_ = -1;
+        if (guide_style_ == 1 && (blade_ == 1 || blade_ == 2)) {
+            // the Xbox One layout's two tabs in the middle are Community itself: the Guide opens on the tab it was closed on
+            if ((comm_tab_ == TabMessages) != (blade_ == 2)) comm_tab_ = blade_ == 2 ? TabMessages : TabFriends;
+            comm_at_ = -10, stack_.push_back(Page::Community);
+            entered(Page::Community, now);
+        }
         if (box_waiting_.on) box_ = box_waiting_, box_.at = now, box_waiting_.on = false;
         else open_on_toast(now);
     } else {
         closed_ = now, sent_.clear(), box_.on = false, draft_ = Draft(), waiting_xuid_ = 0, held_ = 0;
     }
-    if (guide_style_ == 1 && blade_ == 1) blade_ = 0;  // the Xbox One layout has no tab for the player's own blade
     if (!widths_set_) {
-        for (int i = 0; i < 3; i++) width_[i].set(i == blade_ ? BLADE_W : STRIP_W);
+        for (int i = 0; i < BLADES; i++) width_[i].set(i == blade_ ? BLADE_W : STRIP_W);
         bar_[1].set(1);  // canvas: the player's blade opens on Friends
         widths_set_ = true;
     }
@@ -236,6 +247,12 @@ void Guide::pop_to(size_t depth, double now) {
 void Guide::entered(Page p, double now) {
     (void)now;
     if (p == Page::Community) {
+        // the blade (or tab) it is behind, for when it was opened some other way (a toast, the game)
+        const int b = comm_tab_ == TabMessages ? 2 : 1;
+        if (blade_ != b) {
+            blade_ = b;
+            for (int i = 0; i < BLADES; i++) width_[i].set(i == b ? BLADE_W : STRIP_W);
+        }
         friends_.clamp(1 + int(friend_rows().size()), 6);
         messages_.clamp(1 + int(messages().size()), msg_rows());
         players_.clamp(int(social_.players.size()), 6);
@@ -518,14 +535,16 @@ std::vector<GuideRequest> Guide::handle(PadEvent e, double now) {
     return out;
 }
 
-// The blades' rows as the canvas has them (artboard 1). A row with no screen behind it yet is greyed.
+// The blades' rows, as the canvas has them (artboard 1) but for the player's blade, whose messages have a blade of their own. A row
+// with no screen behind it yet is greyed.
 std::vector<Opt> Guide::home_rows(int blade) const {
     if (blade == 0)
         return {{"Forza Horizon 2", HomeResume, true, I_GAMES}, {"Achievements", HomeAchievements, ach_.known, I_TROPHY}, {"Game Library", HomeNone, false, I_APPS}};
     if (blade == 1)
         return {{"Leave Game", HomeNone, false, 0},          {"Friends", HomeFriends, true, I_PERSON},  {"Party", HomeParty, true, I_GROUPS},
-                {"Messages", HomeMessages, true, I_MAIL},    {"Beacons & Activity", HomeNone, false, I_SENSORS},
-                {"Chat", HomeNone, false, I_CHAT},           {"Lobbies", HomeNone, false, I_FLAG}};
+                {"Players", HomePlayers, true, I_GAMES},     {"Beacons & Activity", HomeNone, false, I_SENSORS},
+                {"Lobbies", HomeNone, false, I_FLAG}};
+    if (blade == 2) return {{"Messages", HomeMessages, true, I_MAIL}, {"Create New", HomeCreate, true, I_EDIT}, {"Chat", HomeNone, false, I_CHAT}};
     return {{"Profile", HomeProfile, social_.loaded, I_PERSON}, {"Theme", HomeTheme, true, I_PALETTE},  {"Voice", HomeVoice, true, I_MIC},
             {"Notifications", HomeNotify, true, I_BELL},   {"Network", HomeNone, false, I_WIFI},   {"Controller", HomeNone, false, I_GAMES},
             {"System", HomeSystem, true, I_SETTINGS}};
@@ -575,8 +594,12 @@ void Guide::handle_home(PadEvent e, std::vector<GuideRequest>& out, double now) 
             if (prof_.tag.empty()) prof_.tag = gamertag;
             prof_tab_ = 0, prof_at_ = -10, prof_row_[0] = prof_row_[1] = -1;
             push(Page::Profile, now);
+        } else if (cmd == HomeCreate) {
+            flow_base_ = int(stack_.size());
+            new_row_ = -1;
+            push(Page::CreateNew, now);
         } else {
-            comm_tab_ = cmd == HomeParty ? TabParty : cmd == HomeMessages ? TabMessages : TabFriends, comm_at_ = -10;
+            comm_tab_ = cmd == HomeParty ? TabParty : cmd == HomeMessages ? TabMessages : cmd == HomePlayers ? TabPlayers : TabFriends, comm_at_ = -10;
             push(Page::Community, now);
         }
         break;
@@ -587,7 +610,7 @@ void Guide::handle_home(PadEvent e, std::vector<GuideRequest>& out, double now) 
 
 // Each blade's focus rests on a row that can be chosen (a row becomes usable when the server answers), or on none.
 void Guide::fix_home_focus() {
-    for (int b = 0; b < 3; b++) {
+    for (int b = 0; b < BLADES; b++) {
         std::vector<Opt> rows = home_rows(b);
         int& f = focus_[b];
         if (f >= 0 && f < int(rows.size()) && rows[f].enabled) continue;
@@ -596,34 +619,34 @@ void Guide::fix_home_focus() {
     }
 }
 
-// The Xbox One layout's tabs, split as the console's guide splits them: Games (the Games blade), Social (Community's Party, Friends
-// and Players), Messages (Community's Messages) and Settings (the Settings blade). The player's own blade has no tab there: its
-// rows only led to the two in the middle.
+// The Xbox One layout's tabs are the four blades. Its two in the middle show what is behind them straight away, as the console's
+// guide does: Social (the player's blade) is Community with Party, Friends and Players, and Messages is Community's Messages. So
+// the tab on top is told from the screens, and the blade is kept with it.
 int Guide::one_tab() const {
     if (stack_.size() > 1 && stack_[1] == Page::Community) return comm_tab_ == TabMessages ? 2 : 1;
-    return blade_ == 0 ? 0 : 3;
+    return blade_;
 }
 
 void Guide::one_tab_to(int t, double now) {
     const int from = one_tab();
     if (t < 0 || t > 3 || t == from) return;
     const int d = t > from ? 1 : -1;
+    switch_to(t, now);
     if (t == 1 || t == 2) {
         comm_tab_ = t == 2 ? TabMessages : TabFriends, comm_dir_ = d, comm_at_ = now;
         stack_ = {Page::Home, Page::Community}, page_at_ = -10;
         entered(Page::Community, now);
     } else {
         stack_ = {Page::Home}, page_at_ = -10;
-        switch_to(t == 0 ? 0 : 2, now);
         switch_dir_ = d, switched_ = now;  // (also when the blade was that one already: the rows come in again)
     }
 }
 
 void Guide::switch_to(int b, double now) {
-    if (b == blade_ || b < 0 || b > 2) return;
+    if (b == blade_ || b < 0 || b >= BLADES) return;
     switch_dir_ = b > blade_ ? 1 : -1;
     blade_ = b, switched_ = now;
-    for (int i = 0; i < 3; i++) width_[i].go(i == b ? BLADE_W : STRIP_W, now, 0.3f);
+    for (int i = 0; i < BLADES; i++) width_[i].go(i == b ? BLADE_W : STRIP_W, now, 0.3f);
 }
 
 // ---- what the server's answers turn into: the 360's toasts (things that happened) and message boxes (things that could not)
@@ -874,16 +897,16 @@ void Guide::draw_home(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float
     if (ach_.known) snprintf(ach_meta, sizeof ach_meta, "%d of %d", ach_.count(), int(ach_defs().size()));
 
     // the open blade's left edge stays put while the others' widths move
-    float left[3], x = BLADE_X;
+    float left[BLADES], x = BLADE_X;
     for (int bi = 0; bi < blade_; bi++) x -= width_[bi].value(now);
-    for (int bi = 0; bi < 3; bi++) left[bi] = x, x += width_[bi].value(now);
+    for (int bi = 0; bi < BLADES; bi++) left[bi] = x, x += width_[bi].value(now);
     float since = float(now - switched_);
     // as the 360 stacks them: the strips from the outside in, each with its shadow on the one before, then the open blade over them all
-    int order[3], n = 0;
+    int order[BLADES], n = 0;
     for (int bi = 0; bi < blade_; bi++) order[n++] = bi;
-    for (int bi = 2; bi > blade_; bi--) order[n++] = bi;
+    for (int bi = BLADES - 1; bi > blade_; bi--) order[n++] = bi;
     order[n++] = blade_;
-    for (int oi = 0; oi < 3; oi++) {
+    for (int oi = 0; oi < BLADES; oi++) {
         int bi = order[oi];
         float bw = width_[bi].value(now), bx = left[bi];
         bool on = bi == blade_;

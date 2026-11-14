@@ -279,10 +279,10 @@ private:
 
     // home
     int blade_ = 1;
-    int focus_[3] = {0, 1, -1};
+    int focus_[4] = {0, 1, 0, -1};
     double opened_ = -10, closed_ = -10, switched_ = -10;
     int switch_dir_ = 1;
-    Tween bar_[3], width_[3];
+    Tween bar_[4], width_[4];
     bool widths_set_ = false;
     // pages
     std::vector<Page> stack_ = {Page::Home};

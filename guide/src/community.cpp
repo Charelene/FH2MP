@@ -139,26 +139,17 @@ void Guide::delete_message(const MessageItem& m, std::vector<GuideRequest>& out,
 }
 
 void Guide::handle_community(PadEvent e, std::vector<GuideRequest>& out, double now) {
-    if (guide_style_ == 1) {
-        // the Xbox One layout: Social and Messages are tabs of the guide. LB and RB go from tab to tab; left and right go through
-        // Social's lists (Party, Friends, Players) and on to the next tab at their ends; B closes the guide, as on any tab
+    if (e == PadEvent::Left || e == PadEvent::Lb || e == PadEvent::Right || e == PadEvent::Rb) {
+        // Party, Friends and Players are the page's lists; Messages (the Guide's Messages blade) has the page to itself
         static const int ORDER[3] = {TabParty, TabFriends, TabPlayers};
         const int d = (e == PadEvent::Left || e == PadEvent::Lb) ? -1 : 1, i = comm_tab_ == TabParty ? 0 : comm_tab_ == TabFriends ? 1 : 2;
-        if (e == PadEvent::Lb || e == PadEvent::Rb) return one_tab_to(one_tab() + d, now);
-        if (e == PadEvent::Left || e == PadEvent::Right) {
-            if (comm_tab_ == TabMessages || i + d < 0 || i + d > 2) return one_tab_to(one_tab() + d, now);
-            comm_dir_ = d, comm_tab_ = ORDER[i + d], comm_at_ = now;
-            return;
-        }
-        if (e == PadEvent::B) return toggle(now);
-    }
-    if (e == PadEvent::Left || e == PadEvent::Lb || e == PadEvent::Right || e == PadEvent::Rb) {
-        int d = (e == PadEvent::Left || e == PadEvent::Lb) ? -1 : 1;
-        int t = std::clamp(comm_tab_ + d, 0, 3);
-        if (t != comm_tab_) comm_dir_ = d, comm_tab_ = t, comm_at_ = now;
+        const bool end = comm_tab_ == TabMessages || i + d < 0 || i + d > 2;
+        // the Xbox One layout: the page is a tab of the guide. LB and RB go from tab to tab, and so do left and right at the lists' ends
+        if (guide_style_ == 1 && (end || e == PadEvent::Lb || e == PadEvent::Rb)) return one_tab_to(one_tab() + d, now);
+        if (!end) comm_dir_ = d, comm_tab_ = ORDER[i + d], comm_at_ = now;
         return;
     }
-    if (e == PadEvent::B) return pop(now);
+    if (e == PadEvent::B) return guide_style_ == 1 ? toggle(now) : pop(now);  // B closes the Xbox One's guide on any tab
     int dy = e == PadEvent::Up ? -1 : e == PadEvent::Down ? 1 : 0;
     if (comm_tab_ == TabFriends) {
         std::vector<FriendRow> rows = friend_rows();
@@ -264,7 +255,8 @@ void Guide::draw_community(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, 
     const float L = PAGE_L, W = PAGE_W;
     float slide, pop, title_op;
     page_motion(now, op, &slide, &pop, &title_op);
-    draw_header(dl, a, origin, s, zoom, op, "Community", title_op);
+    const bool social = comm_tab_ != TabMessages;
+    draw_header(dl, a, origin, s, zoom, op, social ? "Community" : "Messages", title_op);
     float x = L + slide;
 
     std::vector<FriendRow> friends = friend_rows();
@@ -275,10 +267,13 @@ void Guide::draw_community(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, 
     std::vector<const Friend*> players = player_rows();
     std::vector<const Friend*> party = party_rows();
     int counts[4] = {int(party.size()), online, int(msgs.size()), int(players.size())};
+    // Party, Friends and Players share the page as its tabs (the open one 388 wide, the two others the rest between them);
+    // Messages, behind a blade of its own, has the page to itself
     float tx = x;
     for (int t = 0; t < 4; t++) {
+        if ((t == TabMessages) == social) continue;
         bool on = t == comm_tab_;
-        float tw = on ? 388 : 158;
+        float tw = !social ? W : on ? 388 : (W - 388) / 2;
         if (on) panel_fill(dl, v.pt(tx, 96), v.pt(tx + tw, 138), pop);
         else dl->AddRectFilled(v.pt(tx, 96), v.pt(tx + tw, 138), alpha(TAB, pop));
         if (t > comm_tab_) tab_shadow(dl, v, tx, 96, 138, 1, pop);

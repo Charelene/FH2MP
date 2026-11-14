@@ -244,8 +244,8 @@ int main(int argc, char** argv) {
         for (PadEvent e : evs) g.handle(e, at);
     };
     const PadEvent D = PadEvent::Down, A = PadEvent::A, RB = PadEvent::Rb;
-    // to the Settings tab from where the Guide opens: one to the right in the 360's layout, three in the Xbox One's
-    const int to_settings = getenv("GUIDE_STYLE") && atoi(getenv("GUIDE_STYLE")) == 1 ? 3 : 1;
+    // to Settings from where the Guide opens (the player's blade): past Messages
+    const int to_settings = 2;
     auto settings = [&](double at) {
         for (int i = 0; i < to_settings; i++) g.handle(RB, at);
     };
@@ -368,6 +368,7 @@ int main(int argc, char** argv) {
         g.toggle(t0 - 10);
         if (scene == "games") g.handle(PadEvent::Lb, t0 - 5);
         if (scene == "settings") settings(t0 - 5);
+        if (scene == "messages-blade") g.handle(PadEvent::Rb, t0 - 5);
         if (scene == "down") g.handle(PadEvent::Down, t0 - 5);
         g.toggle(t0 - 1), g.toggle(t0);  // closed and opened again: the open animation starts at t0
     }
