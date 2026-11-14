@@ -153,6 +153,101 @@ static void run_request_text(char *out, const char *run, unsigned long seq)
     out[i] = 0;
 }
 
+/* Heap census (memory-growth-oom, #91/#468/#477/#480, 2026-11-14). In the runaways the game's commit climbs about 1 GB every 3-5 s from the first seconds of a
+ * boot to 51-61 GB (16 GB PCs, AMD and NVIDIA, launchers 1.3.3 and 1.4.0) while GPU memory stays flat. The dumps (7d03d5bf1d83e9d3, f0aec613ae84fa07) show where:
+ * 2860-3290 private allocations of 15.9-16.2 MB, each a segment of one NT heap (signature 0xffeeffee at +0x10, the heap at +0x28), 46-51 GB in all, against
+ * about 85 such segments in a healthy session. The few heap bytes a minidump keeps point mostly at Azimuth's own objects: std::shared_ptr control blocks of
+ * azimuth::gfx::BufferArena::Block (vtable azimuth+0x6f40f8, 167 and 221 hits), then its ordinary_block, Slice and title_storage blocks [C: RTTI of Azimuth
+ * 1.0.4; that these fill the heap is inferred, the sample is what the threads' stacks pointed at]. A dump cannot say what keeps them, so the watcher counts
+ * it on the player's PC: when the game's commit passes 1.25 x RAM (healthy play stays under RAM: 11-16 GB on 32 GB PCs, 12 GB on 16 GB, Notion 2026-11-09)
+ * and again at 2.5 x RAM, it reads pages spread over the largest heap's segments and logs the pointers into loaded modules found there most often, with the
+ * class names Azimuth's and the game's RTTI give them. It reads only (no heap lock: the game never waits for it) and changes nothing. */
+#define HEALTH_CENSUS_SEGMENTS 64u      /* segments sampled */
+#define HEALTH_CENSUS_PAGES 4u          /* pages read in each */
+#define HEALTH_CENSUS_TOP 10u           /* pointers logged */
+#define HEALTH_TALLY_SLOTS 2048u
+
+/* -> 1 when a census is due at this commit (stage 0: commit >= 1.25 x RAM, stage 1: >= 2.5 x RAM); *stage moves on. total 0 = RAM unknown: never. */
+static int health_census_due(unsigned long long commit, unsigned long long total, int *stage)
+{
+    if (!total) {
+        return 0;
+    }
+    if (*stage == 0 && commit / 5 >= total / 4) {
+        *stage = 1;
+        return 1;
+    }
+    if (*stage == 1 && commit / 5 >= total / 2) {
+        *stage = 2;
+        return 1;
+    }
+    return 0;
+}
+
+/* The first 0x40 bytes of a private allocation at base: an NT heap segment (_HEAP_SEGMENT: SegmentSignature 0xffeeffee at +0x10, Heap at +0x28, BaseAddress
+ * at +0x30). -> its heap, or 0. */
+static unsigned long long health_heap_segment(const unsigned char *hdr, unsigned long long base)
+{
+    unsigned sig, i;
+    unsigned long long heap = 0, self = 0;
+
+    sig = (unsigned)hdr[0x10] | (unsigned)hdr[0x11] << 8 | (unsigned)hdr[0x12] << 16 | (unsigned)hdr[0x13] << 24;
+    for (i = 0; i < 8; i++) {
+        heap |= (unsigned long long)hdr[0x28 + i] << (8 * i);
+        self |= (unsigned long long)hdr[0x30 + i] << (8 * i);
+    }
+    return sig == 0xffeeffeeu && self == base && heap ? heap : 0;
+}
+
+/* Counts of 64-bit values (open addressing, HEALTH_TALLY_SLOTS; a full table drops new values and counts them in dropped). */
+typedef struct {
+    unsigned long long key[HEALTH_TALLY_SLOTS];
+    unsigned count[HEALTH_TALLY_SLOTS];
+    unsigned long dropped;
+} health_tally;
+
+static void health_tally_add(health_tally *t, unsigned long long v)
+{
+    unsigned i = (unsigned)((v * 0x9e3779b97f4a7c15ull) >> 53) & (HEALTH_TALLY_SLOTS - 1), n;
+
+    for (n = 0; n < HEALTH_TALLY_SLOTS; n++, i = (i + 1) & (HEALTH_TALLY_SLOTS - 1)) {
+        if (t->count[i] && t->key[i] == v) {
+            t->count[i]++;
+            return;
+        }
+        if (!t->count[i]) {
+            t->key[i] = v;
+            t->count[i] = 1;
+            return;
+        }
+    }
+    t->dropped++;
+}
+
+/* The n most counted values, most first, into out (their slots); -> how many. Ties keep the lower slot first. */
+static unsigned health_tally_top(const health_tally *t, unsigned n, unsigned *out)
+{
+    unsigned got = 0, i, k;
+
+    for (i = 0; i < HEALTH_TALLY_SLOTS; i++) {
+        if (!t->count[i]) {
+            continue;
+        }
+        for (k = got; k > 0 && t->count[out[k - 1]] < t->count[i]; k--) {
+            if (k < n) {
+                out[k] = out[k - 1];
+            }
+        }
+        if (k < n) {
+            out[k] = i;
+            if (got < n) {
+                got++;
+            }
+        }
+    }
+    return got;
+}
+
 #ifndef HEALTH_LOGIC_ONLY
 #include <psapi.h>
 
@@ -281,6 +376,234 @@ static void health_mem_levels(const health_mem_now *s)
     log_raw(" texture fallbacks");
 }
 
+/* ---- the heap census (see health_census_due) */
+typedef struct { unsigned long long base, size; char name[40]; } health_module;
+static health_module g_census_mods[384];
+static unsigned g_census_nmods;
+static health_tally g_census_tally;
+static unsigned char g_census_page[4096];
+
+static void health_hex(unsigned long long v)        /* as few digits as v needs */
+{
+    int digits = 1;
+    while (digits < 16 && (v >> (4 * digits))) {
+        digits++;
+    }
+    log_hex(v, digits);
+}
+
+static int health_read(unsigned long long at, void *out, SIZE_T n)
+{
+    SIZE_T got = 0;
+    return ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(ULONG_PTR)at, out, n, &got) && got == n;
+}
+
+static void health_census_modules(void)
+{
+    HMODULE mods[384];
+    DWORD need = 0;
+    unsigned i, n;
+
+    g_census_nmods = 0;
+    if (!K32EnumProcessModules(GetCurrentProcess(), mods, sizeof mods, &need)) {
+        return;
+    }
+    n = need / sizeof mods[0];
+    for (i = 0; i < n && i < 384; i++) {
+        MODULEINFO mi;
+        health_module *m = &g_census_mods[g_census_nmods];
+        if (!K32GetModuleInformation(GetCurrentProcess(), mods[i], &mi, sizeof mi)) {
+            continue;
+        }
+        m->base = (unsigned long long)(ULONG_PTR)mi.lpBaseOfDll;
+        m->size = mi.SizeOfImage;
+        if (!K32GetModuleBaseNameA(GetCurrentProcess(), mods[i], m->name, sizeof m->name)) {
+            m->name[0] = 0;
+        }
+        g_census_nmods++;
+    }
+}
+
+static const health_module *health_module_of(unsigned long long v)
+{
+    unsigned i;
+    for (i = 0; i < g_census_nmods; i++) {
+        if (v >= g_census_mods[i].base && v < g_census_mods[i].base + g_census_mods[i].size) {
+            return &g_census_mods[i];
+        }
+    }
+    return NULL;
+}
+
+/* An MSVC vtable's class: the Complete Object Locator before it (signature 1, image-relative type descriptor at +12), the decorated name 16 bytes into the type
+ * descriptor (".?AV..."). Written without ".?AV"/".?AU", up to 90 characters. -> 0 when v is not a vtable with RTTI. */
+static int health_log_class(const health_module *m, unsigned long long v)
+{
+    unsigned long long col = 0;
+    unsigned sig = 0, td = 0;
+    char name[96];
+    unsigned i;
+
+    if (!health_read(v - 8, &col, 8) || col < m->base || col >= m->base + m->size || !health_read(col, &sig, 4) || sig != 1 ||
+        !health_read(col + 12, &td, 4) || td >= m->size || !health_read(m->base + td + 16, name, sizeof name - 1)) {
+        return 0;
+    }
+    name[sizeof name - 1] = 0;
+    if (name[0] != '.' || name[1] != '?' || name[2] != 'A') {
+        return 0;
+    }
+    for (i = 4; name[i] && i < 94; i++) {
+        if ((unsigned char)name[i] < 0x20 || (unsigned char)name[i] > 0x7e) {
+            break;
+        }
+    }
+    name[i] = 0;
+    log_raw(" (");
+    log_raw(name + 4);
+    log_raw(")");
+    return 1;
+}
+
+static void health_census(const health_mem_now *s)
+{
+    static unsigned long long seg_base[8192], seg_size[8192];
+    struct { unsigned long long heap, bytes; unsigned segs; } heaps[16];
+    unsigned nheaps = 0, nseg = 0, i, k, pages = 0, top[HEALTH_CENSUS_TOP], ntop, biggest = 0;
+    unsigned long long at = 0x10000, other = 0;
+    MEMORY_BASIC_INFORMATION mbi;
+    unsigned long long process_heap = (unsigned long long)(ULONG_PTR)GetProcessHeap();
+
+    health_census_modules();
+    memset(&g_census_tally, 0, sizeof g_census_tally);
+    /* every private allocation that starts with a heap segment header, grouped by its heap */
+    while (VirtualQuery((LPCVOID)(ULONG_PTR)at, &mbi, sizeof mbi) == sizeof mbi) {
+        unsigned long long base = (unsigned long long)(ULONG_PTR)mbi.BaseAddress, size = mbi.RegionSize;
+        unsigned char hdr[0x40];
+        if (mbi.State == MEM_COMMIT && mbi.Type == MEM_PRIVATE && mbi.BaseAddress == mbi.AllocationBase && size >= 0x10000 &&
+            !(mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) && health_read(base, hdr, sizeof hdr)) {
+            unsigned long long heap = health_heap_segment(hdr, base);
+            if (heap) {
+                unsigned long long total = 0;
+                MEMORY_BASIC_INFORMATION r;
+                unsigned long long p = base;
+                /* the segment's committed bytes: its regions up to the next allocation */
+                while (VirtualQuery((LPCVOID)(ULONG_PTR)p, &r, sizeof r) == sizeof r && r.AllocationBase == mbi.AllocationBase) {
+                    if (r.State == MEM_COMMIT) {
+                        total += r.RegionSize;
+                    }
+                    p = (unsigned long long)(ULONG_PTR)r.BaseAddress + r.RegionSize;
+                }
+                for (k = 0; k < nheaps && heaps[k].heap != heap; k++) {
+                }
+                if (k == nheaps && nheaps < 16) {
+                    heaps[nheaps].heap = heap, heaps[nheaps].bytes = 0, heaps[nheaps].segs = 0;
+                    nheaps++;
+                }
+                if (k < nheaps) {
+                    heaps[k].bytes += total;
+                    heaps[k].segs++;
+                }
+                if (k < nheaps && nseg < 8192) {
+                    seg_base[nseg] = base | (k & 15);     /* the heap's index in the low bits (bases are 64 KB aligned) */
+                    seg_size[nseg] = total;
+                    nseg++;
+                }
+                size = p > base ? p - base : size;
+            }
+        }
+        if (base + size <= at) {
+            break;
+        }
+        at = base + size;
+    }
+    for (k = 1; k < nheaps; k++) {
+        if (heaps[k].bytes > heaps[biggest].bytes) {
+            biggest = k;
+        }
+    }
+    for (k = 0; k < nheaps; k++) {
+        if (k != biggest) {
+            other += heaps[k].bytes;
+        }
+    }
+    log_begin();
+    log_raw("health: heap census at commit ");
+    health_mb(s->commit);
+    log_raw(" (over ");
+    log_raw(s->commit / 5 >= s->total / 2 ? "2.5" : "1.25");
+    log_raw(" x RAM): ");
+    if (!nheaps) {
+        log_raw("no NT heap segment found (another heap kind), nothing sampled\n");
+        return;
+    }
+    log_raw("heap 0x");
+    health_hex(heaps[biggest].heap);
+    log_raw(heaps[biggest].heap == process_heap ? " (the process heap) has " : " (not the process heap) has ");
+    log_dec(heaps[biggest].segs);
+    log_raw(" segments, ");
+    health_mb(heaps[biggest].bytes);
+    log_raw("; ");
+    log_dec(nheaps - 1);
+    log_raw(" other heaps ");
+    health_mb(other);
+    log_raw("\n");
+    /* HEALTH_CENSUS_PAGES pages at even offsets in HEALTH_CENSUS_SEGMENTS segments of that heap spread over all of them */
+    {
+        unsigned mine = 0, want, step_n, picked = 0, idx = 0;
+        for (i = 0; i < nseg; i++) {
+            mine += (seg_base[i] & 15) == biggest;
+        }
+        want = mine < HEALTH_CENSUS_SEGMENTS ? mine : HEALTH_CENSUS_SEGMENTS;
+        step_n = want ? mine / want : 1;
+        for (i = 0; i < nseg && picked < want; i++) {
+            unsigned long long b = seg_base[i] & ~15ull;
+            if ((seg_base[i] & 15) != biggest) {
+                continue;
+            }
+            if (idx++ % step_n) {
+                continue;
+            }
+            picked++;
+            for (k = 0; k < HEALTH_CENSUS_PAGES; k++) {
+                unsigned long long off = (seg_size[i] / HEALTH_CENSUS_PAGES * k + 0x1000) & ~0xfffull, q;
+                if (off + sizeof g_census_page > seg_size[i] || !health_read(b + off, g_census_page, sizeof g_census_page)) {
+                    continue;
+                }
+                pages++;
+                for (q = 0; q < sizeof g_census_page; q += 8) {
+                    unsigned long long v;
+                    memcpy(&v, g_census_page + q, 8);
+                    if (v >= 0x10000 && health_module_of(v)) {
+                        health_tally_add(&g_census_tally, v);
+                    }
+                }
+            }
+        }
+    }
+    ntop = health_tally_top(&g_census_tally, HEALTH_CENSUS_TOP, top);
+    log_begin();
+    log_raw("health: heap census: in ");
+    log_dec(pages);
+    log_raw(" pages of that heap the pointers into modules found most:");
+    if (!ntop) {
+        log_raw(" none");
+    }
+    for (i = 0; i < ntop; i++) {
+        unsigned long long v = g_census_tally.key[top[i]];
+        const health_module *m = health_module_of(v);
+        log_raw(i ? "; " : " ");
+        log_dec(g_census_tally.count[top[i]]);
+        log_raw(" x ");
+        log_raw(m && m->name[0] ? m->name : "?");
+        log_raw("+0x");
+        health_hex(m ? v - m->base : v);
+        if (m) {
+            health_log_class(m, v);
+        }
+    }
+    log_raw("\n");
+}
+
 static void health_counts(const char *label, int cls)
 {
     LONG ok = InterlockedExchange(&g_xhr_ok[cls], 0), bad = InterlockedExchange(&g_xhr_bad[cls], 0);
@@ -305,6 +628,7 @@ static DWORD WINAPI health_thread(LPVOID unused)
     health_state h = {0, 0, 0, 0};
     static health_mem mem;
     unsigned ticks = 0, lines = 0, secs = 0;
+    int census_stage = 0;
     unsigned long long mem_last_commit = 0, mem_last_gpu = HEALTH_MEM_UNKNOWN;
 
     (void)unused;
@@ -318,6 +642,9 @@ static DWORD WINAPI health_thread(LPVOID unused)
             health_gpu_open();
         }
         if (health_mem_read(&s)) {
+            if (health_census_due(s.commit, s.total, &census_stage)) {
+                health_census(&s);
+            }
             jump = health_memory_step(&mem, s.commit, s.avail, s.gpu_shared, d, &write);
             if (jump && write) {
                 log_begin();
