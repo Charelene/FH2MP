@@ -261,6 +261,9 @@ int main(int argc, char** argv) {
         g.toggle(t0 - 10), g.handle(RB, t0 - 9), press({D, D, D}, t0 - 8), g.handle(A, t0 - 7);
         if (scene == "notifications-one") press({D});
         if (scene == "notifications-360") press({D, D});
+    } else if (scene == "system") {
+        // Settings > System: the Guide's layout
+        g.toggle(t0 - 10), g.handle(RB, t0 - 9), press({D, D, D, D, D, D}, t0 - 8), g.handle(A, t0 - 7);
     } else if (scene == "voice") {
         // Settings > Voice with the microphone muted and the focus on Volume
         g.set_voice(false, true, 3);

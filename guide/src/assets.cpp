@@ -96,6 +96,7 @@ void load_fonts(GuideAssets& a) {
     std::string bar = named ? std::string(named) + "\\" : gamebar_assets();
     if (!bar.empty()) a.text_one = load_ttf(bar + "Segoe-Sans-Text.ttf", &a.one_m);
     if (!bar.empty()) a.text_one_bold = load_ttf(bar + "Segoe-Sans-Text-Bold.ttf", &a.one_bold_m);
+    if (!bar.empty()) a.icons_one = load_ttf(bar + "XboxFluentGB2.ttf", &a.icons_one_m);
     if (!a.text_one_bold) a.text_one_bold = a.text_bold, a.one_bold_m = a.bold_m;
     if (!a.text_one) a.text_one = load_ttf(fonts + "seguisb.ttf", &a.one_m);
     if (!a.text_one) a.text_one = a.text, a.one_m = a.text_m;

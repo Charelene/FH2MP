@@ -8,6 +8,7 @@
 #include <ctime>
 
 #include "guide.h"
+#include "one.h"
 #include "ui.h"
 
 using namespace ui;
@@ -242,6 +243,7 @@ void Guide::player_row(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, floa
 // rows down to the page's foot. The tabs are the 360's tab strip: the chosen one the panel itself, the others the blades' colour, each
 // under the shadow of its neighbour on the chosen tab's side.
 void Guide::draw_community(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now) {
+    if (guide_style_ == 1) return draw_community_one(dl, a, origin, s, op, now);
     View v{origin, s, zoom};
     const float L = PAGE_L, W = PAGE_W;
     float slide, pop, title_op;
@@ -734,4 +736,151 @@ void Guide::draw_edit(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float
     dl->PopClipRect();
     const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}};
     hint_bar(dl, a, v, HINT_X, HINT_Y, hints, 2, op);
+}
+
+// ---- Community in the Xbox One layout (one.h)
+
+// A player's entry, two lines: their picture (a dot on it when they are online), their gamertag, and under it what they are doing and
+// what waits between them and this player.
+void Guide::one_player(const one::Panel& p, float y, const Friend& f, Relation rel, bool greyed) const {
+    using namespace one;
+    bool here = same_game(f, social_.me), off = f.state == Friend::Offline, sent = sent_.count(f.xuid) > 0;
+    ImVec2 c = p.L(PX + 60, y + TWO_H / 2);
+    p.avatar(p.a.pic(f.xuid), f.xuid, c, 34, p.lcol(WHITE, greyed ? 0.45f : 1));
+    if (!off && !greyed) {
+        ImVec2 d(c.x + 24 * p.U, c.y + 24 * p.U);
+        p.dl->AddCircleFilled(d, 11 * p.U, p.lcol(PANEL1), 24);
+        p.dl->AddCircleFilled(d, 8 * p.U, p.lcol(IM_COL32(0x10, 0x7c, 0x10, 255)), 24);
+    }
+    std::string waiting = waiting_words(f, rel);
+    std::string detail = !waiting.empty() ? waiting : sent ? "Invite sent" : here ? "In Your Game" : f.state == Friend::Playing ? lobby_words(f) : "";
+    std::string second = status_words(f) + (detail.empty() ? "" : "  -  " + detail);
+    bool lit = !greyed && (!waiting.empty() || sent);
+    p.two(y, PX + 112, f.tag, second, !greyed && !off, 380, lit ? blend(ACCENT, WHITE, 0.4f) : GREY1);
+    if (off && !greyed) p.text(p.L(PX + 112, y + 33), 26, p.lcol(GREY1), f.tag, false, -1, 380);
+}
+
+// The chosen tab's name with its count, the four tabs' names under it, then the tab's list: players two lines high, messages a little
+// lower (eight fit), the focus gliding over them.
+void Guide::draw_community_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now) {
+    using namespace one;
+    std::vector<FriendRow> friends = friend_rows();
+    std::vector<MessageItem> msgs = messages();
+    std::vector<const Friend*> players = player_rows(), party = party_rows();
+    int online = 0, unread = 0;
+    for (const Friend& f : social_.friends) online += f.state != Friend::Offline;
+    for (const MessageItem& m : msgs) unread += m.unread;
+    char title[48];
+    if (comm_tab_ == TabParty) snprintf(title, sizeof title, "Party  -  %d", int(party.size()));
+    else if (comm_tab_ == TabFriends) snprintf(title, sizeof title, "Friends  -  %d online", online);
+    else if (comm_tab_ == TabMessages) snprintf(title, sizeof title, "Messages  -  %d new", unread);
+    else snprintf(title, sizeof title, "Players  -  %d", int(players.size()));
+    Panel p = one_frame(dl, a, origin, s, op, now, title);
+    static const char* const NAMES[4] = {"Party", "Friends", "Messages", "Players"};
+    p.segments(NAMES, 4, comm_tab_);
+    float ce = ease_guide(std::clamp(float((now - comm_at_) / 0.26), 0.0f, 1.0f));
+    p.cop *= ce, p.cdx += (1 - ce) * 40 * comm_dir_;
+    const float top = PY + LIST + SEG_H, MSG_H = 88;
+    auto empty = [&](const char* why) { p.text(p.L(PX + 32, top + 40), 23, p.lcol(GREY1), why); };
+    dl->PushClipRect(p.P(PX, top - 6), p.P(PX + PW, PY + PH - 6), true);
+    switch (comm_tab_) {
+    case TabFriends: {
+        if (!social_.session) { empty("Not signed in"); break; }
+        if (!social_.loaded && !social_.error.empty()) { empty("Server unavailable"); break; }
+        int n = 1 + int(friends.size());
+        p.focus(top + friends_.bar.value(now) * TWO_H, TWO_H);
+        for (int i = friends_.top; i < std::min(n, friends_.top + FRIEND_ROWS); i++) {
+            float y = top + (i - friends_.top) * TWO_H;
+            if (i == 0) {
+                // Add Friend, the list's first entry
+                ImVec2 c = p.L(PX + 60, y + TWO_H / 2);
+                dl->AddCircleFilled(c, 34 * p.U, p.lcol(CARD1), 48);
+                icon_mid(dl, a, 36 * p.U, c.x, c.y, p.lcol(WHITE), I_PERSON_ADD);
+                p.text(p.L(PX + 112, y + TWO_H / 2), 26, p.lcol(WHITE), "Add friend");
+                continue;
+            }
+            one_player(p, y, *friends[i - 1].f, friends[i - 1].rel, false);
+        }
+        p.more(friends_.top > 0, friends_.top + FRIEND_ROWS < n);
+        break;
+    }
+    case TabMessages: {
+        int n = 1 + int(msgs.size());
+        p.focus(top + messages_.bar.value(now) * MSG_H, MSG_H);
+        for (int i = messages_.top; i < std::min(n, messages_.top + MSG_ROWS); i++) {
+            float y = top + (i - messages_.top) * MSG_H;
+            ImVec2 c = p.L(PX + 56, y + MSG_H / 2);
+            dl->AddCircleFilled(c, 27 * p.U, p.lcol(CARD1), 48);
+            if (i == 0) {
+                icon_mid(dl, a, 30 * p.U, c.x, c.y, p.lcol(WHITE), I_EDIT);
+                p.text(p.L(PX + 104, y + MSG_H / 2), 26, p.lcol(WHITE), "Create new");
+                continue;
+            }
+            const MessageItem& m = msgs[i - 1];
+            // an unread one is marked at its left edge in the accent, as the console's notifications are
+            if (m.unread) dl->AddRectFilled(p.L(PX + 13, y + 6), p.L(PX + 19, y + MSG_H - 6), p.lcol(ACCENT), 3 * p.U);
+            p.icon(kind_icon(m), c, 30, p.lcol(m.unread ? WHITE : GREY1));
+            p.text(p.L(PX + 104, y + 28), 26, p.lcol(m.unread ? WHITE : GREY1), m.from.tag, false, -1, 390);
+            p.text(p.L(PX + 104, y + 60), 23, p.lcol(GREY1), summary(m), false, -1, 390);
+        }
+        p.more(messages_.top > 0, messages_.top + MSG_ROWS < n);
+        break;
+    }
+    case TabParty: {
+        int n = int(party.size());
+        if (!n) {
+            // not in a party: the console's one entry (a party is started by inviting friends to a private game, so it is greyed here)
+            p.line(top, I_GROUPS, "Start a party", "", false);
+            break;
+        }
+        p.focus(top + party_.bar.value(now) * TWO_H, TWO_H);
+        for (int i = party_.top; i < std::min(n, party_.top + FRIEND_ROWS); i++) {
+            float y = top + (i - party_.top) * TWO_H;
+            Friend f = *party[i];
+            if (f.tag.empty()) f.tag = gamertag;
+            bool mine = f.xuid == social_.me.xuid;
+            one_player(p, y, f, mine ? Relation::Friend : relation(f.xuid), false);
+            float ex = PX + 490;
+            if (std::find(talking_.begin(), talking_.end(), mine ? 0 : f.xuid) != talking_.end()) {
+                ImVec2 mp = p.L(ex, y + TWO_H / 2);
+                icon_mid(dl, a, 30 * p.U, mp.x, mp.y, p.lcol(WHITE), I_MIC);
+                ex -= 40;
+            }
+            if (social_.me.lobby_leader && f.xuid == social_.me.lobby_leader) {
+                ImVec2 sp = p.L(ex, y + TWO_H / 2);
+                icon_mid(dl, a, 30 * p.U, sp.x, sp.y, p.lcol(WHITE), I_STAR);  // the party's leader
+            }
+        }
+        p.more(party_.top > 0, party_.top + FRIEND_ROWS < n);
+        break;
+    }
+    default: {
+        int n = int(players.size());
+        if (!n) { empty("No recent players"); break; }
+        p.focus(top + players_.bar.value(now) * TWO_H, TWO_H);
+        for (int i = players_.top; i < std::min(n, players_.top + FRIEND_ROWS); i++) {
+            float y = top + (i - players_.top) * TWO_H;
+            const Friend& f = *players[i];
+            one_player(p, y, f, relation(f.xuid), false);
+            if (std::find(talking_.begin(), talking_.end(), f.xuid) != talking_.end()) {
+                ImVec2 mp = p.L(PX + 490, y + TWO_H / 2);
+                icon_mid(dl, a, 30 * p.U, mp.x, mp.y, p.lcol(WHITE), I_MIC);  // heard right now
+            }
+        }
+        p.more(players_.top > 0, players_.top + FRIEND_ROWS < n);
+        break;
+    }
+    }
+    dl->PopClipRect();
+    const Hint lb = {"LB", nullptr, MUTED3}, rb = {"RB", "Switch", MUTED3};
+    if (comm_tab_ == TabMessages) {
+        const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}, {"X", "Delete", RING_X}, {"Y", "Create new", RING_Y}, lb, rb};
+        p.hints(hints, 6);
+    } else if (comm_tab_ == TabFriends || (comm_tab_ == TabPlayers && !social_.players.empty()) || (comm_tab_ == TabParty && !party.empty())) {
+        const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}, lb, rb};
+        p.hints(hints, 4);
+    } else {
+        const Hint hints[] = {{"B", "Back", RING_B}, lb, rb};
+        p.hints(hints, 3);
+    }
 }

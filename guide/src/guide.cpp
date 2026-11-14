@@ -13,13 +13,14 @@
 #include <cstdio>
 #include <cstring>
 
+#include "one.h"
 #include "ui.h"
 
 using namespace ui;
 
 namespace {
 
-enum HomeCmd { HomeNone, HomeResume, HomeFriends, HomeParty, HomeMessages, HomeProfile, HomeAchievements, HomeTheme, HomeVoice, HomeNotify };
+enum HomeCmd { HomeNone, HomeResume, HomeFriends, HomeParty, HomeMessages, HomeProfile, HomeAchievements, HomeTheme, HomeVoice, HomeNotify, HomeSystem };
 const char* BLADE[3] = {"Games", nullptr, "Settings"};
 
 // The blades' geometry, from the 360 Guide's own layouts (hud.xex: GuideMain.xur's tab timeline at the end of each switch, the
@@ -526,7 +527,7 @@ std::vector<Opt> Guide::home_rows(int blade) const {
                 {"Chat", HomeNone, false, I_CHAT},           {"Lobbies", HomeNone, false, I_FLAG}};
     return {{"Profile", HomeProfile, social_.loaded, I_PERSON}, {"Theme", HomeTheme, true, I_PALETTE},  {"Voice", HomeVoice, true, I_MIC},
             {"Notifications", HomeNotify, true, I_BELL},   {"Network", HomeNone, false, I_WIFI},   {"Controller", HomeNone, false, I_GAMES},
-            {"System", HomeNone, false, I_SETTINGS}};
+            {"System", HomeSystem, true, I_SETTINGS}};
 }
 
 void Guide::handle_home(PadEvent e, std::vector<GuideRequest>& out, double now) {
@@ -559,7 +560,9 @@ void Guide::handle_home(PadEvent e, std::vector<GuideRequest>& out, double now) 
         } else if (cmd == HomeVoice) {
             open_voice(now);
         } else if (cmd == HomeNotify) {
-            open_notify(now);
+            open_choices(0, now);
+        } else if (cmd == HomeSystem) {
+            open_choices(1, now);
         } else if (cmd == HomeProfile) {
             prof_ = social_.me;
             if (prof_.tag.empty()) prof_.tag = gamertag;
@@ -737,11 +740,13 @@ bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double 
     if (open) {
         float k = ease_guide(std::clamp(float((now - opened_) / 0.26), 0.0f, 1.0f));
         float zoom = 0.92f + 0.08f * k, op = k;
-        const bool one = guide_style_ == 1 && page() == Page::Home;  // the Xbox One guide's dim is lighter (0.45)
+        // the Xbox One guide: its dim is lighter (0.45), and its own screens stand in its panel, not in the 360's frame
+        const bool one = guide_style_ == 1, one_screen = one && (page() == Page::Home || page() == Page::Notifications || page() == Page::Community ||
+                                                       page() == Page::Theme || page() == Page::Voice);
         dl->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), IM_COL32(0, 0, 0, int((one ? 115 : 178) * op)));
         // a message box takes the frame over, as the 360's does: what the Guide was showing fades out under it
         if (box_.on) op *= 1 - ease_guide(std::clamp(float((now - box_.at) / 0.2), 0.0f, 1.0f));
-        if (page() != Page::Home) {
+        if (!one_screen && page() != Page::Home) {
             // a page's blade: the 360's full frame (137 to 712, 60 to 411), which the page then draws its panes on
             float slide, pop, title_op;
             page_motion(now, op, &slide, &pop, &title_op);
@@ -985,118 +990,50 @@ void Guide::draw_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 ori
     }
 }
 
-// ---- the Xbox One's guide (a first look: the blades' rows in its panel)
-//
-// The newer Xbox guide: a panel down the left of the screen with a row of tabs at its top, the open tab's name and its list under them,
-// the clock and status in the screen's top right corner and the hints beside the panel. The layout and colours are measured from
-// screenshots of the real guide, in 1080ths of the screen's height: the panel 540 x 1016 at (78, 32) in 1E1E1E with 13-unit corners;
-// the tabs 84 apart from 63 in, an accent bar (0B71D3) 83 x 5 under the open one; the name 35 high, bold, 32 in; one-line entries 74
-// high from 170 down, their icon 50 in and their words 90 in at 26; the focus a lighter fill (333333) with a 3-unit outline (3E8BD8)
-// and an accent glow, gliding from entry to entry. The Guide's three blades are its tabs, and the blade's rows its entries.
+// ---- the Xbox One's guide (one.h): what every screen of it shares, and the blades as its tabs
+
+// The screen's frame in the Xbox One layout: the status corner, the panel, the tabs (the accent bar glides to the open blade's tab with
+// the blades' widths) and the screen's name. The list after it comes in as a 360 page does (a slide and a fade), or, on the blades,
+// as a tab's rows do.
+one::Panel Guide::one_frame(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now, const std::string& title, bool home) const {
+    one::Panel p(dl, a, origin, s, op, ease_guide(std::clamp(float((now - opened_) / 0.25), 0.0f, 1.0f)));
+    p.corner(ach_.known ? ach_.gamerscore() : -1, voice_mic_);
+    p.panel();
+    float at = 0;
+    for (int i = 0; i < 3; i++) at += i * width_[i].value(now);
+    p.tabs((at - 3 * STRIP_W) / (BLADE_W - STRIP_W), a.gamerpic, social_.me.xuid);
+    if (home) {
+        float e = ease_guide(std::clamp(float((now - switched_) / 0.25), 0.0f, 1.0f));
+        p.cop = e, p.cdx = (1 - e) * 40 * switch_dir_;
+    } else {
+        float slide, pop, title_op;
+        page_motion(now, 1, &slide, &pop, &title_op);
+        p.cop = pop, p.cdx = slide * 0.4f;
+    }
+    p.title(title);
+    return p;
+}
+
+// The blades: the open one's rows as the tab's entries, with what the 360's rows say at their right end.
 void Guide::draw_home_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now) {
-    const float U = s * 720 / 1080, PX = 78, PY = 32, PW = 540, PH = 1016;
-    const ImU32 ACCENT1 = IM_COL32(0x0b, 0x71, 0xd3, 255), GREY = IM_COL32(0x9e, 0x9e, 0x9e, 255), OFF = IM_COL32(0x5c, 0x5c, 0x5c, 255);
-    // the screen's own corner, not the canvas': the panel hugs the left edge on any shape of screen
-    const ImVec2 screen0(origin.x + 640 * s - ImGui::GetIO().DisplaySize.x * 0.5f, origin.y), size = ImGui::GetIO().DisplaySize;
-    const float in = ease_guide(std::clamp(float((now - opened_) / 0.25), 0.0f, 1.0f)), dx = -70 * (1 - in);
-    auto P = [&](float x, float y) { return ImVec2(screen0.x + (x + dx) * U, screen0.y + y * U); };
-    auto col = [&](ImU32 c, float k = 1) { return alpha(c, op * k); };
-    ImFont* tf = a.text_one ? a.text_one : a.text;
-    const FontMetrics& tm = a.text_one ? a.one_m : a.text_m;
-    ImFont* bf = a.text_one_bold ? a.text_one_bold : a.text_bold ? a.text_bold : a.text;
-    const FontMetrics& bm = a.text_one_bold ? a.one_bold_m : a.bold_m;
-    auto words = [&](ImFont* f, const FontMetrics& m, float sz, float x, float cy, ImU32 c, const char* t, bool right = false) {
-        ImVec2 p = P(x, cy);
-        text_mid(dl, f, m, sz * U, p.x, p.y, c, t, right);
-    };
-
-    // the status corner: Gamerscore, the microphone, the clock (50 high, bold, ending 131 from the screen's right edge)
-    {
-        const float right = screen0.x + size.x - 131 * U;
-        SYSTEMTIME st;
-        GetLocalTime(&st);
-        char clock[32];
-        snprintf(clock, sizeof clock, "%d:%02d %s", st.wHour % 12 ? st.wHour % 12 : 12, st.wMinute, st.wHour < 12 ? "AM" : "PM");
-        text_mid(dl, bf, bm, 50 * U, right, screen0.y + 148 * U, col(WHITE), clock, true);
-        icon_mid(dl, a, 30 * U, right - 18 * U, screen0.y + 86 * U, col(WHITE, voice_mic_ ? 1 : 0.45f), I_MIC);
-        if (ach_.known) {
-            char g[16];
-            snprintf(g, sizeof g, "%d", ach_.gamerscore());
-            float gw = bf->CalcTextSizeA(20 * U, FLT_MAX, 0, g).x, gx = right - 60 * U - gw;
-            text_mid(dl, bf, bm, 20 * U, gx, screen0.y + 86 * U, col(WHITE), g);
-            dl->AddCircleFilled(ImVec2(gx - 20 * U, screen0.y + 86 * U), 12 * U, col(WHITE), 32);
-            float gs = 16 * U, cw = bf->CalcTextSizeA(gs, FLT_MAX, 0, "G").x;
-            dl->AddText(bf, gs, ImVec2(gx - 20 * U - cw / 2, caps_top(bm, gs, screen0.y + 86 * U)), col(IM_COL32(16, 16, 16, 255)), "G");
-        }
-    }
-
-    // the panel over a soft shadow
-    for (int i = 5; i >= 1; i--)
-        dl->AddRectFilled(P(PX - i * 3, PY - i * 3 + 6), P(PX + PW + i * 3, PY + PH + i * 3 + 6), IM_COL32(0, 0, 0, int(13 * op)), (13 + i * 3) * U);
-    dl->AddRectFilled(P(PX, PY), P(PX + PW, PY + PH), col(IM_COL32(0x1e, 0x1e, 0x1e, 247)), 13 * U);
-
-    // the tabs: the Games blade, the player's (their picture, as the console's last tab is), Settings
-    static const uint32_t TAB_ICON[3] = {I_GAMES, 0, I_SETTINGS};
-    for (int i = 0; i < 3; i++) {
-        float x = PX + 63 + 84 * i, y = PY + 56;
-        ImVec2 c = P(x, y);
-        if (TAB_ICON[i]) {
-            icon_mid(dl, a, 38 * U, c.x, c.y, col(WHITE), TAB_ICON[i]);
-        } else {
-            // a round picture
-            ImVec2 p0(c.x - 27 * U, c.y - 27 * U), p1(c.x + 27 * U, c.y + 27 * U);
-            if (a.gamerpic) dl->AddImageRounded(a.gamerpic, p0, p1, ImVec2(0, 0), ImVec2(1, 1), col(WHITE), 27 * U);
-            else dl->AddCircleFilled(c, 27 * U, col(PIC_COLORS[social_.me.xuid % 7]), 48), icon_mid(dl, a, 34 * U, c.x, c.y, col(WHITE), I_PERSON);
-        }
-    }
-    {
-        // the accent bar glides to the open tab with the blades' widths
-        float at = 0, sum = 0;
-        for (int i = 0; i < 3; i++) at += i * width_[i].value(now), sum += width_[i].value(now);
-        float x = PX + 63 + 84 * (sum > 0 ? (at - (0 + 1 + 2) * 30.0f) / (366 - 30) : float(blade_));
-        dl->AddRectFilled(P(x - 41.5f, PY + 101), P(x + 41.5f, PY + 106), col(ACCENT1), 2.5f * U);
-    }
-
-    // the open tab's name and entries
-    const char* title = blade_ == 1 ? gamertag.c_str() : BLADE[blade_];
-    words(bf, bm, 35, PX + 32, PY + 133, col(WHITE), title);
+    using namespace one;
+    Panel p = one_frame(dl, a, origin, s, op, now, blade_ == 1 ? gamertag : BLADE[blade_], true);
     int online = 0, waiting = 0;
     for (const Friend& f : social_.friends) online += f.state != Friend::Offline;
     for (const MessageItem& m : messages()) waiting += m.unread;
-    char friends_meta[16] = "", messages_meta[16] = "", ach_meta[32] = "";
+    char friends_meta[24] = "", messages_meta[24] = "", ach_meta[32] = "";
     if (social_.loaded) snprintf(friends_meta, sizeof friends_meta, "%d online", online);
     if (waiting) snprintf(messages_meta, sizeof messages_meta, "%d new", waiting);
     if (ach_.known) snprintf(ach_meta, sizeof ach_meta, "%d of %d", ach_.count(), int(ach_defs().size()));
     std::vector<Opt> rows = home_rows(blade_);
-    const float top = PY + 170, EH = 74;
-    if (focus_[blade_] >= 0) {
-        float fy = top + bar_[blade_].value(now) * EH;
-        ImVec2 f0 = P(PX + 13, fy), f1 = P(PX + 13 + 515, fy + EH);
-        dl->AddRectFilled(f0, f1, col(IM_COL32(0x33, 0x33, 0x33, 255)), 6 * U);
-        for (int i = 4; i >= 1; i--) dl->AddRect(f0, f1, col(ACCENT1, 0.13f), 6 * U, 0, (3 + i * 3.5f) * U);
-        dl->AddRect(f0, f1, col(IM_COL32(0x3e, 0x8b, 0xd8, 255)), 6 * U, 0, 3 * U);
-    }
-    float since = float(now - switched_);
+    const float top = PY + LIST;
+    if (focus_[blade_] >= 0) p.focus(top + bar_[blade_].value(now) * LINE_H, LINE_H);
     for (int i = 0; i < int(rows.size()); i++) {
         const Opt& r = rows[i];
-        float rop = since < 0.4f ? std::clamp((since - 0.02f * i) / 0.2f, 0.0f, 1.0f) : 1;  // a new tab's entries fade in
-        float cy = top + i * EH + EH / 2;
-        ImU32 fg = col(r.enabled ? WHITE : OFF, rop);
-        ImVec2 ic = P(PX + 50, cy);
-        if (r.icon) icon_mid(dl, a, 34 * U, ic.x, ic.y, fg, r.icon);
-        words(tf, tm, 26, PX + (r.icon ? 90 : 32), cy, fg, r.label.c_str());
         const char* meta = r.cmd == HomeFriends ? friends_meta : r.cmd == HomeMessages ? messages_meta : r.cmd == HomeResume ? "Now playing"
                            : r.cmd == HomeAchievements ? ach_meta : "";
-        if (*meta) words(tf, tm, 23, PX + 509, cy, col(r.enabled ? GREY : OFF, rop), meta, true);
+        p.line(top + i * LINE_H, r.icon, r.label, meta, r.enabled);
     }
-
-    // the hints beside the panel
     const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}, {"LB", nullptr, MUTED3}, {"RB", "Switch", MUTED3}};
-    float hx = PX + PW + 62, hy = 174;
-    for (int i = 0; i < 4; i++) {
-        ImVec2 p = P(hx, hy);
-        float w = badge(dl, a, hints[i].key, hints[i].ring, p.x, p.y, 1.3f * U, op) / U;
-        if (hints[i].label) words(tf, tm, 26, hx + w + 12, hy, col(WHITE), hints[i].label), hx = PX + PW + 62, hy += 48;
-        else hx += w + 8;
-    }
+    p.hints(hints, 4);
 }

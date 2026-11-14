@@ -52,6 +52,9 @@ struct SpriteSheet {
 };
 
 enum class AchTier { Normal, Rare, Mythic };
+namespace one {
+struct Panel;  // one.h
+}
 
 // The Xbox app's art for achievement toasts, read from the player's own install of that app when there is one (achievements.cpp,
 // ach_art_set; a texture of 0 is not there and the toast is drawn without it). By tier: the trophy, the rare diamond, the mythic star.
@@ -75,7 +78,8 @@ struct GuideAssets {
     ImFont* text_one = nullptr;   // the Xbox One toast's words: Game Bar's Segoe Sans Text where it is installed, else Segoe UI Semibold
     ImFont* text_one_bold = nullptr;  // its bold, for the Xbox One guide's names: Game Bar's, else Segoe UI Bold
     ImFont* icons = nullptr;      // Material Icons (filled)
-    FontMetrics text_m, bold_m, one_m, one_bold_m, icons_m;
+    ImFont* icons_one = nullptr;  // the Xbox One guide's icons: Game Bar's Xbox Fluent font where it is installed, else none (the Material ones)
+    FontMetrics text_m, bold_m, one_m, one_bold_m, icons_m, icons_one_m;
     ImTextureID gamerpic = 0;     // the player's picture (Azimuth's data/player.png), 0 when there is none
     std::unordered_map<uint64_t, ImTextureID> pics;  // other players' pictures by xuid, as they arrive from the server
     AchToastArt ach;              // the achievement toast's art, when the player has the Xbox app
@@ -94,7 +98,7 @@ enum class ToastKind { Invite, Info, Saving, Warning };
 
 enum class GuideAction {
     None, Resume, Invite, AcceptInvite, DeclineInvite, FriendRequest, AcceptFriend, DeclineFriend, RemoveFriend, SendText, ReadChat,
-    HideText, Join, SetProfile, JoinGame, Lookup, Achievements, SetTheme, SetVoice, SetNotify
+    HideText, Join, SetProfile, JoinGame, Lookup, Achievements, SetTheme, SetVoice, SetNotify, SetLayout
 };
 
 // What the overlay must ask of the server after an event.
@@ -180,9 +184,10 @@ public:
     // Xbox 360's notification, 2 the Xbox One's toast. A change comes back as SetNotify (id: the style).
     void set_notify(int style) { ach_style_ = style == 1 || style == 2 ? style : 0; }
     int ach_style() const { return ach_style_; }
-    // How the Guide itself is laid out: 0 the Xbox 360's blades, 1 the Xbox One's panel (a first look: the blades only).
-    void set_guide_style(int style) { guide_style_ = style == 1 ? 1 : 0; }
-    void open_notify(double now);
+    // How the Guide itself is laid out (Settings > System): 0 the Xbox 360's blades, 1 the Xbox One's panel (one.h). The theme's
+    // surfaces follow it. A change comes back as SetLayout (id: the layout).
+    void set_guide_style(int style) { guide_style_ = style == 1 ? 1 : 0, theme_layout(guide_style_); }
+    void open_choices(int which, double now);  // 0 Settings > Notifications, 1 Settings > System
     // Settings > Theme, opened on the theme in use (theme_page.cpp).
     void open_theme(double now);
     // Who is talking right now (the voice engine's list: xuids, 0 for this player): the Players tab marks them.
@@ -300,7 +305,7 @@ private:
     bool voice_mic_ = true, voice_chat_ = true;
     int voice_volume_ = 2, voice_row_ = 0;
     Tween voice_bar_;
-    int ach_style_ = 0, notify_row_ = 0, guide_style_ = 0;
+    int ach_style_ = 0, notify_row_ = 0, guide_style_ = 0, choice_page_ = 0;
     Tween notify_bar_;
     ListFocus party_;
     void handle_voice(PadEvent e, std::vector<GuideRequest>& out, double now);
@@ -467,6 +472,12 @@ private:
     void draw_ach_toast_360(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 origin, float t);
     void draw_ach_toast_one(ImDrawList* dl, const GuideAssets& g, float s, ImVec2 origin, float a);
     void draw_home_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now);
+    void draw_community_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now);
+    void one_player(const one::Panel& p, float y, const Friend& f, Relation rel, bool greyed) const;
+    void draw_theme_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now);
+    void draw_voice_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now);
+    one::Panel one_frame(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now, const std::string& title,
+                         bool home = false) const;
     // The slide and fade of the page that just came in: x offset (canvas units) and opacity; title_op for the header's title.
     void page_motion(double now, float op, float* slide, float* pop, float* title_op) const;
 };
