@@ -72,8 +72,9 @@ float ach_toast_seconds(AchTier tier, int style = 0);  // style: 0 the Guide's t
 struct GuideAssets {
     ImFont* text = nullptr;       // Segoe UI, or ImGui's own font when Windows has none
     ImFont* text_bold = nullptr;  // Segoe UI Bold (toast titles), or the same as text
+    ImFont* text_one = nullptr;   // the Xbox One toast's words: Game Bar's Segoe Sans Text where it is installed, else Segoe UI Semibold
     ImFont* icons = nullptr;      // Material Icons (filled)
-    FontMetrics text_m, bold_m, icons_m;
+    FontMetrics text_m, bold_m, one_m, icons_m;
     ImTextureID gamerpic = 0;     // the player's picture (Azimuth's data/player.png), 0 when there is none
     std::unordered_map<uint64_t, ImTextureID> pics;  // other players' pictures by xuid, as they arrive from the server
     AchToastArt ach;              // the achievement toast's art, when the player has the Xbox app
@@ -461,6 +462,7 @@ private:
     void draw_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 origin, double now);
     void draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 origin, double now);
     void draw_ach_toast_360(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 origin, float t);
+    void draw_ach_toast_one(ImDrawList* dl, const GuideAssets& g, float s, ImVec2 origin, float a);
     // The slide and fade of the page that just came in: x offset (canvas units) and opacity; title_op for the header's title.
     void page_motion(double now, float op, float* slide, float* pop, float* title_op) const;
 };

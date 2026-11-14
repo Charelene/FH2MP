@@ -642,13 +642,10 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
     float lift = now - toast_at_ >= 0 && now - toast_at_ < 6.3 ? 74.0f : 0.0f;  // an ordinary toast showing: this one stands above it
     ach_lift_ += (lift - ach_lift_) * 0.2f;
     if (ach_style_ == 1) return draw_ach_toast_360(dl, a, s, origin, t);
+    if (ach_style_ == 2) return draw_ach_toast_one(dl, a, s, origin, t);
     const AchToast& n = ach_now_;
     const int tier = int(n.tier);
     const bool rare = tier == 1, mythic = tier == 2;
-    // Settings > Notifications > Xbox One: the same toast as the Xbox app and the console draw it, a capsule 100 of Game Bar's pixels
-    // high (66.7 units here) with a round icon at its left end, in the console's colours by tier, with laurels round a rare or a
-    // mythic one's icon. The times, the art and the words are the Guide's toast's; what differs is marked cap below.
-    const bool cap = ach_style_ == 2;
     const AchToastArt& art = a.ach;
     const float TR = 4.0f, TS = mythic ? 8.0f : 7.133f, TH = hide_at(tier), TE = 2.433f;
     const float h = t - TH;  // into Hide
@@ -656,11 +653,8 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
     auto at = [&](float x, float y) { return ImVec2(origin.x + x * s, origin.y + y * s); };
 
     // the Guide's toast: a 64-unit square and a panel as wide as its words (here the widest of its three turns), centred, at y 600
-    const float Q = cap ? 66.667f : 64, k = Q / 100, TSZ = cap ? 26 * k : 17;  // k: Game Bar pixels (its circle is 100 px) to canvas units
+    const float Q = 64, k = Q / 100, TSZ = 17;  // k: Game Bar pixels (its circle is 100 px) to canvas units
     ImFont* bf = a.text_bold ? a.text_bold : a.text;
-    // the capsule's two lines share one weight (Game Bar's Segoe Sans Text at 26); the Guide's title is bold
-    ImFont* tfont = cap ? a.text : bf;
-    const FontMetrics& tfont_m = cap ? a.text_m : a.bold_m;
     std::string title = mythic ? "Mythic Achievement unlocked" : rare ? "Rare Achievement unlocked" : "Achievement unlocked";
     if (rare && n.percent >= 0) {
         char pc[24];
@@ -671,20 +665,12 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
     const float gmark = n.g >= 0 ? TSZ * 0.82f + 6 : 0;
     const float ed = 18, gap = 6;  // the hint's emblem
     float wa = a.text->CalcTextSizeA(TSZ, FLT_MAX, 0, "Hold").x, wb = a.text->CalcTextSizeA(TSZ, FLT_MAX, 0, "to open").x;
-    float words = std::max({tfont->CalcTextSizeA(TSZ, FLT_MAX, 0, title.c_str()).x, a.text->CalcTextSizeA(TSZ, FLT_MAX, 0, second.c_str()).x + gmark,
-                            std::min(cap ? 460 * k : 380.0f, a.text->CalcTextSizeA(TSZ, FLT_MAX, 0, n.desc.c_str()).x), wa + gap + ed + gap + wb});
-    // the capsule fits its widest words: 18 of Game Bar's pixels after the icon, up to 460 of text, 50 to its right end
-    const float padl = cap ? 18 * k : 22, padr = cap ? 50 * k : 12;
-    const float pw = cap ? std::min(std::ceil(words), 460 * k) + padl + padr : std::clamp(std::ceil(words) + padl + padr, 220.0f, 440.0f);
-    const float half = pw * 0.5f, area = pw - padl - padr;
+    float words = std::max({bf->CalcTextSizeA(TSZ, FLT_MAX, 0, title.c_str()).x, a.text->CalcTextSizeA(TSZ, FLT_MAX, 0, second.c_str()).x + gmark,
+                            std::min(380.0f, a.text->CalcTextSizeA(TSZ, FLT_MAX, 0, n.desc.c_str()).x), wa + gap + ed + gap + wb});
+    const float pw = std::clamp(std::ceil(words) + 22 + 12, 220.0f, 440.0f), half = pw * 0.5f, area = pw - 22 - 12;
     const float bx = 640 - (Q + pw) * 0.5f, by = 600 - ach_lift_;
 
-    // the capsule's colours are the console's by tier (sampled from captures; the mythic one's is a pick), with Game Bar's lighter
-    // shades of each for the icon's disc and the rings
-    static const ImU32 CAP[3] = {IM_COL32(0x1e, 0x9e, 0x3e, 255), IM_COL32(0x8b, 0x1a, 0x5c, 255), IM_COL32(0x0e, 0x8f, 0x7e, 255)};
-    const ImU32 sq_col = cap ? mix(CAP[tier], WHITE, 0.18f) : ACCENT, light_col = cap ? mix(CAP[tier], WHITE, 0.4f) : mix(ACCENT, WHITE, 0.5f);
-    const ImU32 medium_col = cap ? sq_col : mix(ACCENT, WHITE, 0.25f), dark_col = cap ? CAP[tier] : mix(ACCENT, BLACK, 0.3f);
-    const ImU32 panel_col = cap ? CAP[tier] : TOAST, title_col = cap ? WHITE : ACCENT;
+    const ImU32 sq_col = ACCENT, light_col = mix(ACCENT, WHITE, 0.5f), medium_col = mix(ACCENT, WHITE, 0.25f), dark_col = mix(ACCENT, BLACK, 0.3f);
     const ImU32 ring_col[4] = {light_col, medium_col, dark_col, medium_col};
 
     float unfold = !hiding ? track({kf(1.433f, 0), kfeo(2.433f, 1)}, t) : h < 0.667f ? track({kf(0, 1), kfei(0.667f, 0)}, h) : 0;
@@ -693,9 +679,7 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
     float bg_scale = !hiding ? track({kf(0.667f, 0), kfs(1.433f, 1, .36f, .12f, .5f, 1)}, t) : 1;
     float bg_op = !hiding ? track({kf(0, 0), kf(0.167f, 1)}, t) : h < 0.8f ? track({kf(0, 1), kfei(0.8f, 0)}, h) : 0;
     auto square = [&](ImVec2 c, float side, ImU32 col) {
-        if (side <= 0.5f) return;
-        if (cap) dl->AddCircleFilled(c, side / 2, col, 48);
-        else dl->AddRectFilled(ImVec2(c.x - side / 2, c.y - side / 2), ImVec2(c.x + side / 2, c.y + side / 2), col);
+        if (side > 0.5f) dl->AddRectFilled(ImVec2(c.x - side / 2, c.y - side / 2), ImVec2(c.x + side / 2, c.y + side / 2), col);
     };
 
     // the mythic's aurora haze, behind everything: Game Bar's 260 x 120 cells have a 146 x 30 cut-out with the haze brightest at its edge;
@@ -729,18 +713,8 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
     // the panel, and what runs over it
     ImVec2 p0 = at(bx + Q + shift, by), p1 = at(bx + Q + pw - shift, by + Q);
     if (unfold > 0.002f) {
-        if (cap) {
-            // the capsule runs from the icon's left edge, over a soft shadow that opens with it
-            ImVec2 c0 = at(bx + shift, by);
-            for (int i = 3; i >= 1; i--) {
-                float d = i * 1.7f * s;
-                dl->AddRectFilled(ImVec2(c0.x - d, c0.y - d + 2 * s), ImVec2(p1.x + d, p1.y + d + 2 * s), IM_COL32(0, 0, 0, int(22 * unfold)), Q / 2 * s + d);
-            }
-            dl->AddRectFilled(c0, p1, panel_col, Q / 2 * s);
-        } else {
-            dl->AddRectFilled(p0, p1, TOAST);
-        }
-        dl->PushClipRect(p0, ImVec2(p1.x - (cap ? 40 * k * s : 0), p1.y), true);
+        dl->AddRectFilled(p0, p1, TOAST);
+        dl->PushClipRect(p0, p1, true);
         float tg = mythic ? TE + 2.631f : TE, len = mythic ? 3.95f : 3.0f, tau = (t - tg) * 1.3f;  // twice, 1.3 times as fast
         if ((rare || mythic) && tau >= 0 && tau < 2 * len) {
             float u = fmodf(tau, len), pc = bx + Q + half, ps = pw / 630;  // Game Bar's pill is 630 px: its places scale to the panel
@@ -759,28 +733,26 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
                     float sx = track({kf(q[2], 0.3f), kfei(q[3], q[5]), kf(q[4], 0.3f)}, u), sy = track({kf(q[2], 0.3f), kfei(q[3], q[6]), kf(q[4], 0.3f)}, u);
                     picture(dl, art.sparkle, at(pc + q[0] * ps, by + q[1] * Q), 14 * k * s * sx, 24 * k * s * sy, alpha(WHITE, op));
                 }
-                dl->PushClipRect(p0, ImVec2(p1.x - (cap ? 40 * k * s : 0), p1.y), true);
+                dl->PushClipRect(p0, p1, true);
             }
         }
 
         // the words: the title in the accent over the Gamerscore and name; from 4 s the description; from 7.133 s (8 s) the hint
-        const float x = bx + Q + padl - 0.6f * half * (1 - unfold);
-        // the lines' centres: the capsule's are 14.1 above and 14.7 below its middle in Game Bar's pixels
-        const float line1 = cap ? Q / 2 - 14.1f * k : 21, line2 = cap ? Q / 2 + 14.7f * k : 43;
+        const float x = bx + Q + 22 - 0.6f * half * (1 - unfold);
         float text_op = !hiding && t < TS ? track({kf(1.733f, 0), kf(2.333f, 1)}, t) : 0;
         if (text_op > 0.004f) {
             float dx = track({kf(1.333f, 60), kfeo(2.333f, 0)}, t), rt = t - TR;
             float front = rt < 0 ? 0 : track({kf(0, 0), kfei(0.267f, -Q)}, rt), back = rt < 0 ? Q : track({kf(0, Q), kf(0.233f, Q), kfeo(0.833f, 0)}, rt);
             ImU32 col = alpha(WHITE, text_op);
             if (front > -Q + 1) {
-                text_fit(dl, tfont, tfont_m, TSZ * s, at(x + dx, 0).x, at(0, by + line1 + front).y, area * s, alpha(title_col, text_op), title);
-                float y2 = at(0, by + line2 + front).y, x2 = at(x + dx, 0).x;
+                text_fit(dl, bf, a.bold_m, TSZ * s, at(x + dx, 0).x, at(0, by + 21 + front).y, area * s, alpha(ACCENT, text_op), title);
+                float y2 = at(0, by + 43 + front).y, x2 = at(x + dx, 0).x;
                 if (n.g >= 0) {
                     // the Gamerscore mark: a white disc with the G cut out
                     float gd = TSZ * 0.82f * s;
                     dl->AddCircleFilled(ImVec2(x2 + gd / 2, y2), gd / 2, col, 32);
                     float gsz = gd * 0.66f, gw = bf->CalcTextSizeA(gsz, FLT_MAX, 0, "G").x;
-                    dl->AddText(bf, gsz, ImVec2(x2 + gd / 2 - gw / 2, caps_top(a.bold_m, gsz, y2)), alpha(panel_col, text_op), "G");
+                    dl->AddText(bf, gsz, ImVec2(x2 + gd / 2 - gw / 2, caps_top(a.bold_m, gsz, y2)), alpha(TOAST, text_op), "G");
                     x2 += gd + 6 * s;
                 }
                 text_fit(dl, a.text, a.text_m, TSZ * s, x2, y2, (area - gmark) * s, col, second);
@@ -793,8 +765,8 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
                 if (br == b) br = e;
                 std::string first(b, br), rest(br < e && *br == ' ' ? br + 1 : br, e);
                 float xs = at(x + dx, 0).x;
-                text_mid(dl, a.text, a.text_m, TSZ * s, xs, at(0, by + (rest.empty() ? Q / 2 : line1) + back).y, col, first.c_str());
-                if (!rest.empty()) text_fit(dl, a.text, a.text_m, TSZ * s, xs, at(0, by + line2 + back).y, area * s, col, rest);
+                text_mid(dl, a.text, a.text_m, TSZ * s, xs, at(0, by + (rest.empty() ? 32 : 21) + back).y, col, first.c_str());
+                if (!rest.empty()) text_fit(dl, a.text, a.text_m, TSZ * s, xs, at(0, by + 43 + back).y, area * s, col, rest);
             }
         }
         float hint_op = 0, hint_dx = 0;
@@ -805,7 +777,7 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
             float w = wa + gap + ed + gap + wb, hx = bx + Q + half - w / 2 + hint_dx;
             float cy = at(0, by + Q / 2).y;
             text_mid(dl, a.text, a.text_m, TSZ * s, at(hx, 0).x, cy, alpha(WHITE, hint_op), "Hold");
-            emblem(dl, a, ImVec2(at(hx + wa + gap + ed / 2, 0).x, cy), ed * s, panel_col, 0, hint_op, I_GAMES);  // the button: a gamepad (user 2026-11-11)
+            emblem(dl, a, ImVec2(at(hx + wa + gap + ed / 2, 0).x, cy), ed * s, TOAST, 0, hint_op, I_GAMES);  // the button: a gamepad (user 2026-11-11)
             text_mid(dl, a.text, a.text_m, TSZ * s, at(hx + wa + gap + ed + gap, 0).x, cy, alpha(WHITE, hint_op), "to open");
         }
         dl->PopClipRect();
@@ -824,8 +796,7 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
         }
 
     // the icon: its intro (the emblem's frames replaced), its loop, and from Hide its exit
-    // the mythic's ring (105 of 160 px) inside the square; the capsule's round icon takes it at Game Bar's own size
-    const float cellq = mythic ? (cap ? 160 * k : Q * 0.86f * 160 / 105) : (rare ? 84.0f : 68.0f) * k;
+    const float cellq = mythic ? Q * 0.86f * 160 / 105 : (rare ? 84.0f : 68.0f) * k;  // the mythic's ring (105 of 160 px) inside the square
     const int x_end = rare ? 11 : 12, x_start = rare ? 21 : 20;                      // the console's emblem: intro before x_end, exit from x_start
     const float held = 38 / 30.0f;                                                   // frame 1 held for 36 more frames (plain, rare)
     const float disc = 60 * k;                                                       // the sheets' disc
@@ -875,8 +846,6 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
             icon_mid(dl, a, disc * s * iscale * g, ic.x, ic.y, alpha(WHITE, g), glyph);
         }
     }
-
-    if (cap && tier > 0) laurels(dl, ic, k * s, tier, t, hiding ? h : -1, light_col);
 
     // over the mythic's icon: the ripple (from 4.433 s) and the two glows (from 2.433 s, turning and breathing; on Hide they shrink and go)
     if (mythic) {
@@ -954,8 +923,6 @@ float frames360(int tier) { return 185 + 120.0f * loops360(tier) + 54; }
 ImU32 rgb(int r, int g, int b, float op) { return IM_COL32(r, g, b, int(255 * std::clamp(op, 0.0f, 1.0f) + 0.5f)); }
 
 }  // namespace
-
-float ach_toast_seconds(AchTier tier, int style) { return style == 1 ? frames360(int(tier)) / 60 + 0.05f : hide_at(int(tier)) + 1.633f + 0.05f; }
 
 void Guide::draw_ach_toast_360(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 origin, float t) {
     const AchToast& n = ach_now_;
@@ -1065,5 +1032,255 @@ void Guide::draw_ach_toast_360(ImDrawList* dl, const GuideAssets& a, float s, Im
         ImVec2 l1 = P(255.667f, 366.1f), l2 = P(255.667f, 383.9f);
         text_fit(dl, a.text, a.text_m, 14.667f * U, l1.x, l1.y, 373 * U, col(c.title, ta), title);
         text_fit(dl, a.text, a.text_m, 14.667f * U, l2.x, l2.y, 373 * U, rgb(235, 235, 235, ta), second);
+    }
+}
+
+// ---- the Xbox One's toast (Settings > Notifications > Xbox One)
+//
+// The console's achievement toast, as the Xbox app and Game Bar draw it: four rings ripple out at the centre and the icon pops in, then
+// a capsule opens sideways while the icon rides to its left end and the words slide in from the right; part-way through the words turn
+// over to the achievement's description, and near the end a hint takes their place; then the capsule closes and the rings shrink away.
+// A rare one has laurels and a gleam; the mythic one adds an aurora, a glow, pulses and sparkles to that.
+//
+// Everything is in Game Bar's pixels (1080 = the screen's height; the capsule is 100 high and at most 630 wide). The geometry, the key
+// times and the easings are those of Game Bar's toast panels; the times it sets from code (when the words turn over, when the hint
+// shows, when a rare one's gleam starts, when the toast leaves) and the lines' places were measured from 60 frames a second captures of
+// the real toasts, and the colours by tier are sampled from console captures (the mythic one's is a pick: there was no capture). The
+// icons and the effects are the Xbox app's own files, the ones the Guide's toast has; without them a mark stands in for the icon and the
+// effects are left out. The words are in Game Bar's own Segoe Sans Text where Game Bar is installed (assets.cpp), and in Segoe UI
+// Semibold, the nearest Windows has to it, where it is not.
+namespace {
+
+const float ONE_ROTATE = 3.89f, ONE_HINT = 7.0f, ONE_OPEN = 2.433f, ONE_HIDE = 1.633f, ONE_GLEAM_SPEED = 1.3f;
+float one_gleam_cycle(int tier) { return tier == 2 ? 3.95f : 3; }       // the mythic panel's cycle also carries the sparkles
+float one_gleam_start(int tier) { return tier == 2 ? 2.631f : 3.64f; }   // the mythic panel's BeginTime; the rare one's is measured
+// When Hide starts: a rare one just after its second gleam (8.33 s, measured), the mythic one at 10 s, a plain one as the rare.
+float one_hide_at(int tier) { return tier == 2 ? 10.0f : tier ? one_gleam_start(1) + 2 * one_gleam_cycle(1) / ONE_GLEAM_SPEED + 0.08f : 8.33f; }
+
+float seg(float t, float a, float b) { return std::clamp((t - a) / (b - a), 0.0f, 1.0f); }  // how far t is through a..b
+float exp_out(float x) { return (1 - expf(-7 * x)) / (1 - expf(-7.0f)); }                    // ExponentialEase, exponent 7
+float exp_in(float x) { return 1 - exp_out(1 - x); }
+float back_in(float x) { return x * x * x - x * 0.5f * sinf(x * PI); }                       // BackEase in, amplitude 0.5
+struct Spline {
+    float x1, y1, x2, y2;
+};
+float bez(float p, Spline s) { return css_bezier(s.x1, s.y1, s.x2, s.y2, p); }
+// Scale 0 -> peak -> 1 after delay d: the pop the rings and the icon share, each leg on its own spline.
+float one_pop(float t, float d, float up, float settle, float peak, Spline rise, Spline fall) {
+    return t < d + up ? peak * bez(seg(t, d, d + up), rise) : peak + (1 - peak) * bez(seg(t, d + up, d + up + settle), fall);
+}
+// A pulse's opacity: 0 -> 0.9 at 0.1 s -> 0.7 at 0.667 s -> 0 at 1.2 s.
+float pulse_alpha(float p) {
+    return p < 0.1f ? 0.9f * seg(p, 0, 0.1f) : p < 0.667f ? 0.9f - 0.2f * seg(p, 0.1f, 0.667f) : 0.7f * (1 - seg(p, 0.667f, 1.2f));
+}
+// A flip book's frame for a tick: 0 to n - 1 once, pausing on frame hold_at for hold_for more ticks.
+int held(int tick, int n, int hold_at, int hold_for) {
+    if (hold_at >= 0 && tick > hold_at) tick = std::max(hold_at, tick - hold_for);
+    return std::clamp(tick, 0, n - 1);
+}
+// A flip book played forwards then backwards, for ever.
+int boomerang(int tick, int n) {
+    int p = tick % (2 * n - 2);
+    return p < n ? p : 2 * n - 2 - p;
+}
+
+// The flip books by tier: the cell's size, the frame the intro pauses on and for how long (30 ticks a second), and when the intro
+// hands over to the idle loop (Game Bar's FlipBook settings).
+const struct {
+    float cell;
+    int hold_at, hold_for;
+    float idle_at;
+} ONE_SPRITES[3] = {{68, 1, 36, 2.6f}, {84, 1, 36, 2.6f}, {160, -1, 0, 4.0f}};
+
+}  // namespace
+
+float ach_toast_seconds(AchTier tier, int style) {
+    if (style == 1) return frames360(int(tier)) / 60 + 0.05f;
+    if (style == 2) return one_hide_at(int(tier)) + ONE_HIDE + 0.05f;
+    return hide_at(int(tier)) + 1.633f + 0.05f;
+}
+
+void Guide::draw_ach_toast_one(ImDrawList* dl, const GuideAssets& g, float s, ImVec2 origin, float a) {
+    const AchToast& n = ach_now_;
+    const int tier = int(n.tier);
+    const AchToastArt& art = g.ach;
+    static const ImU32 FILL[3] = {IM_COL32(0x1e, 0x9e, 0x3e, 255), IM_COL32(0x8b, 0x1a, 0x5c, 255), IM_COL32(0x0e, 0x8f, 0x7e, 255)};
+    // Game Bar's brushes: the capsule and the dark ring; the icon's disc and the medium rings; the light ring
+    const ImU32 dark = FILL[tier], mid = mix(dark, WHITE, 0.18f), light = mix(dark, WHITE, 0.4f);
+    auto white = [](float op) { return IM_COL32(255, 255, 255, int(255 * std::clamp(op, 0.0f, 1.0f) + 0.5f)); };
+
+    // Game Bar's pixels to the screen's: the toast is centred, its middle 120 above the screen's foot (canvas y 640)
+    const float R = 50, U = s * 720 / 1080;
+    const ImVec2 C(origin.x + 640 * s, origin.y + (640 - ach_lift_) * s);
+    auto P = [&](float x, float y) { return ImVec2(C.x + x * U, C.y + y * U); };
+    ImFont* tf = g.text_one ? g.text_one : g.text;
+    const FontMetrics& tm = g.text_one ? g.one_m : g.text_m;
+    const float TS = 26;  // every line is size 26 in the panel, in a box 34 high with its baseline 27 below the top
+    auto width = [&](const std::string& t) { return tf->CalcTextSizeA(TS, FLT_MAX, 0, t.c_str()).x; };
+    // a line of text with its baseline at y
+    auto line = [&](float x, float y, ImU32 col, const char* b, const char* e = nullptr) {
+        ImVec2 p = P(x, y);
+        dl->AddText(tf, TS * U, ImVec2(p.x, p.y - TS * U * tm.asc / (tm.asc + tm.desc)), col, b, e);
+    };
+
+    // the words: the title over "(G) 20  -  name"; then the description, up to two lines 460 wide; then the hint
+    std::string title = tier == 2 ? "Mythic achievement unlocked" : tier ? "Rare achievement unlocked" : "Achievement unlocked";
+    if (tier == 1 && n.percent >= 0) {
+        char pc[24];
+        snprintf(pc, sizeof pc, " - %.2f%%", n.percent);
+        title += pc;
+    }
+    const bool score = n.g >= 0;
+    const std::string body = score ? std::to_string(n.g) + "  -  " + n.name : n.name;
+    const float mark = score ? 36.5f : 0;  // the Gamerscore mark: a 26-pixel disc with the G cut out, 36.5 ahead of the score
+    const char* db = n.desc.c_str();
+    const char* de = db + n.desc.size();
+    const char* dbr = tf->CalcWordWrapPosition(TS, db, de, 460);
+    if (dbr == db) dbr = de;
+    const std::string back1(db, dbr), back2(dbr < de && *dbr == ' ' ? dbr + 1 : dbr, de);
+    const float hw_a = width("Hold"), hw_b = width("to open"), hgap = 8, hed = 27;  // the hint: "Hold (a gamepad on a disc) to open"
+    const float hint_w = hw_a + hgap + hed + hgap + hw_b;
+    // the capsule fits its widest words and keeps that width: the icon 100, a gap of 18, up to 460 of words, 50 to its right end
+    const float words = std::max({width(title), width(body) + mark, width(back1), width(back2), hint_w + 2});
+    const float full = (118 + std::min(words, 460.0f) + 50) / 2;  // half the open capsule
+
+    const float h = a - one_hide_at(tier);  // seconds into Hide (negative while it shows)
+    const float openk = exp_out(seg(a, 1.433f, ONE_OPEN)) * (1 - exp_in(seg(h, 0, 0.667f)));
+    const float half = full * openk, ix = -(full - R) * openk;  // half the capsule now; the icon's centre
+    const ImVec2 ic = P(ix, 0);
+
+    // the mythic's aurora: a flip book of 260 x 120 cells at 8 a second, forwards then backwards, 624 x 336 behind the toast. It fades
+    // in over the second after the capsule opens, and leaves fading and shrinking to 30% over 0.75 s
+    if (tier == 2 && a > ONE_OPEN && h < 0.75f) {
+        float k = 1 - 0.7f * seg(h, 0, 0.75f);
+        cell(dl, art.aurora, boomerang(int(a * 8), 60), C, 624 * k * U, 336 * k * U, white(exp_out(seg(a, ONE_OPEN, 3.433f)) * (1 - exp_in(seg(h, 0, 0.75f)))));
+    }
+
+    if (half > 1) {
+        // the shadow: Game Bar's is a capsule 5 larger all round in 15,15,15 at 38 of 255, soft over its last 4. It is squeezed
+        // sideways with the capsule and fades from 0.3 s to 0.667 s into Hide
+        float sa = h < 0 ? 1 : 1 - exp_in(seg(h, 0.3f, 0.667f));
+        static const float SH[3][2] = {{5, 16}, {3.5f, 11}, {2, 11}};  // how far out, and its share of 255
+        for (auto& l : SH)
+            dl->AddRectFilled(P(-(full + l[0]) * openk, -R - l[0]), P((full + l[0]) * openk, R + l[0]), IM_COL32(15, 15, 15, int(l[1] * sa + 0.5f)), (R + l[0]) * U);
+        dl->AddRectFilled(P(-half, -R), P(half, R), dark, std::min(R, half) * U);
+
+        // the gleam: its picture fills the words' place less 100 at each end and slides 200 to the right while it fades 0 -> 0.8 -> 0.
+        // The cycle runs 1.3 times as fast, twice, the gleam from 1 s to 3 s of it
+        float len = one_gleam_cycle(tier), gt = (a - one_gleam_start(tier)) * ONE_GLEAM_SPEED, c = fmodf(gt, len);
+        if (tier && h < 0 && gt > 0 && gt < 2 * len) {
+            if (art.gleam && c > 1 && c < 3) {
+                float gx = -100 + 200 * seg(c, 1, 3), gw = 2 * full - 300;
+                dl->AddImage(art.gleam, P(gx - gw / 2, -R), P(gx + gw / 2, R), ImVec2(0, 0), ImVec2(1, 1), white(0.8f * (1 - std::fabs(c - 2))));
+            }
+            // the mythic's sparkles: six 14 x 24 pictures on the capsule's top and bottom edges, lit left to right behind the gleam
+            // (x from the centre, or from the right end of the words' place for the last two)
+            const float right = full - R;
+            const float SP[6][7] = {{-122.5f, -R, 1, 1.85f, 2.75f, 2, 1.6f},      {-89, R, 1.3f, 2.1f, 2.9f, 1.6f, 2.4f},           {-15, -R, 1.4f, 2.35f, 3.3f, 3, 3},
+                                    {23, R, 1.75f, 2.55f, 3.4f, 2.2f, 1.6f},     {right - 112, -R, 1.95f, 2.85f, 3.75f, 2.4f, 1.8f}, {right - 87, R, 2.2f, 3.05f, 3.95f, 2.7f, 3}};
+            for (int i = 0; tier == 2 && art.sparkle && i < 6; i++) {
+                float k = c < SP[i][3] ? seg(c, SP[i][2], SP[i][3]) : 1 - seg(c, SP[i][3], SP[i][4]);  // 0 -> 1 -> 0
+                picture(dl, art.sparkle, P(SP[i][0], SP[i][1]), 14 * (0.3f + (SP[i][5] - 0.3f) * k) * U, 24 * (0.3f + (SP[i][6] - 0.3f) * k) * U, white(k));
+            }
+        }
+    }
+
+    // the rings at the centre, back to front: light, medium, dark, medium
+    const Spline RISE{0.54f, 0, 0.81f, 1}, FALL{0.36f, 0.12f, 0.5f, 1};
+    const struct {
+        float delay, gone;
+        ImU32 col;
+    } rings[4] = {{0, 0.967f, light}, {0.1f, 1.067f, mid}, {0.2f, 1.167f, dark}, {0.3f, 1.433f, mid}};
+    auto disc = [&](ImVec2 c, float r, ImU32 col) {
+        if (r * U > 0.25f) dl->AddCircleFilled(c, r * U, col, 64);
+    };
+    for (auto& rg : rings)
+        if (a < rg.gone) disc(C, R * one_pop(a, rg.delay, 0.533f, 0.334f, 1.12f, RISE, FALL), rg.col);
+    // on the way out they come back full size under the icon and shrink in turn: dark first, light last
+    if (h >= 0.933f) disc(C, R * 0.97f * (1 - back_in(seg(h, 0.933f, 1.633f))), light);
+    if (h >= 0.9f && h < 1.5f) disc(C, R * 0.97f * (1 - back_in(seg(h, 0.9f, 1.5f))), mid);
+    if (h >= 0.267f && h < 1.366f) disc(C, R * (1 - exp_in(seg(h, 0.866f, 1.366f))), dark);
+    // the icon's disc: grows from 0.667 s to 1.433 s; fades over the first 0.8 s of Hide
+    disc(ic, R * bez(seg(a, 0.667f, 1.433f), FALL), alpha(mid, 1 - exp_in(seg(h, 0, 0.8f))));
+
+    const float gl = a - 0.7f;  // seconds since the icon started to pop in
+    // the mythic's pulses: the 130-pixel star outline grows from 60% to 135% in 0.667 s while it fades; a second follows 0.35 s later
+    for (float delay : {0.0f, 0.35f})
+        if (tier == 2 && art.pulse && gl > delay) {
+            float size = 130 * (0.6f + 0.75f * seg(gl - delay, 0, 0.667f)) * U;
+            picture(dl, art.pulse, ic, size, size, white(pulse_alpha(gl - delay)));
+        }
+
+    // the icon: nothing until 0.7 s, 120% at 1.067 s, 100% at 1.333 s; on the way out it holds until 0.767 s and is gone by 1.367 s.
+    // Its flip books run at 30 a second: the intro from the start (fading in over 0.667 s), the idle loop from idle_at, the outro
+    // from Hide; the mythic one has a layer of highlights over each
+    const float is = one_pop(a, 0.7f, 0.367f, 0.266f, 1.2f, {0.52f, 0, 0.59f, 1}, {0.34f, 0.05f, 0.69f, 1}) * (1 - exp_in(seg(h, 0.767f, 1.367f)));
+    if (is > 0.01f) {
+        const SpriteSheet &in = art.intro[tier], &loop = art.idle[tier], &out = art.outro[tier];
+        const auto& sp = ONE_SPRITES[tier];
+        const float side = sp.cell * is * U;
+        if (in.tex && loop.tex && out.tex) {
+            int which = h >= 0 ? 2 : a < sp.idle_at ? 0 : 1;
+            const SpriteSheet& sh = which == 2 ? out : which == 0 ? in : loop;
+            const SpriteSheet& hi = which == 2 ? art.outro_hi : which == 0 ? art.intro_hi : art.idle_hi;
+            int i = which == 2 ? held(int(h * 30), sh.frames, -1, 0)
+                    : which == 0 ? held(int(a * 30), sh.frames, sp.hold_at, sp.hold_for) : int((a - sp.idle_at) * 30) % std::max(1, sh.frames);
+            ImU32 col = white(which == 0 ? exp_in(seg(a, 0, 0.667f)) : 1);
+            cell(dl, sh, i, ic, side, side, col);
+            if (tier == 2) cell(dl, hi, i, ic, side, side, col);
+        } else {
+            icon_mid(dl, g, 56 * is * U, ic.x, ic.y, white(0.95f), tier == 2 ? 0xe65fu : tier ? 0xead5u : uint32_t(I_TROPHY));
+        }
+    }
+
+    if (tier == 2 && gl > 0 && h < 0.733f) {
+        // the ripple: 2 s in, the 200-pixel ring grows to 120% over 1.5 s and is gone by 1.4 s
+        if (art.ripple && a > 2) picture(dl, art.ripple, ic, 240 * seg(a - 2, 0, 1.5f) * U, 240 * seg(a - 2, 0, 1.5f) * U, white(1 - seg(a - 2, 0, 1.4f)));
+        // the glow: two 270-pixel pictures of rays over the icon. A turns once in 9 s, B the other way in 7 s; each breathes between
+        // 92% and 108% of its size and 55% and 85% of its opacity. The layer fades in over 0.9 s, eases to 80% by 4.5 s, and leaves
+        // fading and shrinking to 75% over 0.733 s
+        float out = seg(h, 0, 0.733f), ga = seg(gl, 0, 0.9f) * (1 - 0.2f * seg(gl, 3.3f, 4.5f)) * (1 - exp_in(out));
+        float size_a = 270 * (0.92f + 0.16f * back_and_forth(gl, 2.5f)) * (1 - 0.25f * out), size_b = 270 * (1.08f - 0.16f * back_and_forth(gl, 2)) * (1 - 0.25f * out);
+        turned(dl, art.glow_a, ic, size_a * U, gl * 40 * PI / 180, white(ga * (0.55f + 0.3f * back_and_forth(gl, 3.3f))));
+        turned(dl, art.glow_b, ic, size_b * U, -gl * 2 * PI / 7, white(ga * (0.85f - 0.3f * back_and_forth(gl, 2.3f))));
+    }
+
+    if (tier) laurels(dl, ic, U, tier, a, h, light);
+
+    // the words fade in from 1.733 s to 2.333 s while they slide in from 900 to the right. At ONE_ROTATE they leave upwards and the
+    // description comes from below. At ONE_HINT they are cut and the hint fades in, in the middle of the place right of the icon and
+    // 3 lower; it fades and slides left as the toast hides. Baselines: the two lines 4.1 above and 24.7 below the middle; a
+    // description 11.2 below, or 5.7 above and 28.3 below for two lines; the hint 9.7 below
+    const bool hinting = a >= ONE_HINT;
+    const float top = hinting || h >= 0 ? 0 : seg(a, 1.733f, 2.333f);
+    if (half > R) {
+        dl->PushClipRect(P(ix + R, -R), P(half - 40, R), true);
+        if (top > 0) {
+            const float tx = ix + R + 18 + 900 * (1 - exp_out(seg(a, 1.333f, 2.333f)));
+            const bool rot = !n.desc.empty();
+            const float fy = rot ? -100 * exp_in(seg(a, ONE_ROTATE, ONE_ROTATE + 0.267f)) : 0;       // the two lines leave upwards
+            const float by = 100 * (1 - exp_out(seg(a, ONE_ROTATE + 0.233f, ONE_ROTATE + 0.833f)));  // the description arrives from below
+            line(tx, -4.1f + fy, white(top), title.c_str());
+            if (score) {
+                ImVec2 gc = P(tx + 13, 16 + fy);
+                dl->AddCircleFilled(gc, 13 * U, white(top), 32);
+                ImFont* gf = g.text_bold ? g.text_bold : g.text;
+                float gs = 17 * U, gw = gf->CalcTextSizeA(gs, FLT_MAX, 0, "G").x;
+                dl->AddText(gf, gs, ImVec2(gc.x - gw / 2, caps_top(g.bold_m, gs, gc.y)), alpha(dark, top), "G");
+            }
+            line(tx + mark, 24.7f + fy, white(top), body.c_str());
+            if (rot) {
+                line(tx, (back2.empty() ? 11.2f : -5.7f) + by, white(top), back1.c_str());
+                if (!back2.empty()) line(tx, 28.3f + by, white(top), back2.c_str());
+            }
+        }
+        if (hinting) {
+            float fade = seg(a, ONE_HINT + 0.066f, ONE_HINT + 0.267f) * (1 - exp_in(seg(h, 0, 0.5f)));
+            float hx = 35 - 100 * exp_in(seg(h, 0, 0.6f)) - hint_w / 2;
+            line(hx, 9.7f, white(fade), "Hold");
+            emblem(dl, g, P(hx + hw_a + hgap + hed / 2, 0.5f), hed * U, dark, 0, fade, I_GAMES);
+            line(hx + hw_a + hgap + hed + hgap, 9.7f, white(fade), "to open");
+        }
+        dl->PopClipRect();
     }
 }
