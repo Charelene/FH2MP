@@ -2,6 +2,7 @@
 // heard and nothing is sent) and how loud the others are. Each change applies at once; the overlay keeps it for the next start.
 #include <algorithm>
 
+#include "one.h"
 #include "ui.h"
 
 using namespace ui;
@@ -49,6 +50,7 @@ void Guide::handle_voice(PadEvent e, std::vector<GuideRequest>& out, double now)
 // the fill takes the accent while the slider has the focus), and on the description pane what the row in focus does (17.3 high, 18 in,
 // from 12 down, 247 wide).
 void Guide::draw_voice(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now) {
+    if (guide_style_ == 1) return draw_voice_one(dl, a, origin, s, op, now);
     View v{origin, s, zoom};
     const float L = PAGE_L, W = PAGE_W;
     float slide, pop, title_op;
@@ -97,4 +99,38 @@ void Guide::draw_voice(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, floa
     wrapped(dl, a, v, ts, lh, x + 431 + uu(18), y, uu(247), alpha(SIDE_TEXT, pop), words[std::clamp(voice_row_, 0, 2)]);
     const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}};
     hint_bar(dl, a, v, HINT_X, HINT_Y, hints, 2, op);
+}
+
+// The Xbox One layout: the two switches one line each with a toggle at the right end (filled in the accent when on), the volume two
+// lines high with its level and a track under its name, and what the entry in focus does under the list.
+void Guide::draw_voice_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now) {
+    using namespace one;
+    Panel p = one_frame(dl, a, origin, s, op, now, "Voice");
+    const float top = PY + LIST, bar = std::clamp(voice_bar_.value(now), 0.0f, 2.0f);
+    // the focus grows as it glides from a switch down to the taller volume entry
+    p.focus(top + bar * LINE_H, LINE_H + std::max(0.0f, bar - 1) * (TWO_H - LINE_H));
+    static const char* const NAMES[2] = {"Microphone", "Voice chat"};
+    for (int i = 0; i < 2; i++) {
+        bool on = i == 0 ? voice_mic_ : voice_chat_;
+        float y = top + i * LINE_H, cy = y + LINE_H / 2;
+        p.line(y, i == 0 ? I_MIC : I_CHAT, NAMES[i], "", true);
+        ImVec2 t0 = p.L(PX + 449, cy - 14), t1 = p.L(PX + 505, cy + 14);
+        if (on) dl->AddRectFilled(t0, t1, p.lcol(ACCENT), 14 * p.U);
+        else dl->AddRect(t0, t1, p.lcol(GREY1), 14 * p.U, 0, 2 * p.U);
+        dl->AddCircleFilled(p.L(on ? PX + 491 : PX + 463, cy), 9 * p.U, p.lcol(on ? WHITE : GREY1), 24);
+    }
+    float y = top + 2 * LINE_H, frac = (voice_volume_ + 1) / 5.0f;
+    p.icon(I_VOLUME, p.L(PX + 50, y + 33), 34, p.lcol(WHITE));
+    p.text(p.L(PX + 90, y + 33), 26, p.lcol(WHITE), "Volume");
+    p.text(p.L(PX + 509, y + 33), 23, p.lcol(GREY1), std::to_string(voice_volume_ + 1), false, 1);
+    dl->AddRectFilled(p.L(PX + 32, y + 68), p.L(PX + 509, y + 76), p.lcol(IM_COL32(0x45, 0x45, 0x45, 255)), 4 * p.U);
+    dl->AddRectFilled(p.L(PX + 32, y + 68), p.L(PX + 32 + 477 * frac, y + 76), p.lcol(voice_row_ == 2 ? ACCENT : WHITE), 4 * p.U);
+    static const char* const WORDS[3] = {"Microphone turns your microphone on or off. When it is off, other players can't hear you.",
+                                         "Voice chat turns all voice on or off. When it is off, you hear no one and no one hears you.",
+                                         "Volume sets how loud other players sound."};
+    y += TWO_H + 16;
+    p.divider(y);
+    p.para(PX + 32, y + 24, 23, p.lcol(GREY1), WORDS[std::clamp(voice_row_, 0, 2)], PW - 64);
+    const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}};
+    p.hints(hints, 2);
 }

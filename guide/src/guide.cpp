@@ -13,14 +13,21 @@
 #include <cstdio>
 #include <cstring>
 
+#include "one.h"
 #include "ui.h"
 
 using namespace ui;
 
 namespace {
 
-enum HomeCmd { HomeNone, HomeResume, HomeFriends, HomeParty, HomeMessages, HomeProfile, HomeAchievements, HomeTheme, HomeVoice, HomeNotify };
-const char* BLADE[3] = {"Games", nullptr, "Settings"};
+enum HomeCmd {
+    HomeNone, HomeResume, HomeFriends, HomeParty, HomePlayers, HomeMessages, HomeCreate, HomeProfile, HomeAchievements, HomeTheme, HomeVoice, HomeNotify,
+    HomeSystem
+};
+// The blades: Games, the player's own (named by their gamertag: the people), Messages and Settings. The 360 has the people and the
+// messages on one blade; they are apart here as the Xbox One's guide has them, so both layouts have the same four.
+const int BLADES = 4;
+const char* BLADE[BLADES] = {"Games", nullptr, "Messages", "Settings"};
 
 // The blades' geometry, from the 360 Guide's own layouts (hud.xex: GuideMain.xur's tab timeline at the end of each switch, the
 // *TabSignedIn.xur rows, huduiskin.xex's blade pictures), in its 853x480 units. The open blade always sits at the same place, 366 wide
@@ -148,13 +155,19 @@ void Guide::toggle(double now) {
     open = !open;
     if (open) {
         opened_ = now, stack_ = {Page::Home}, page_at_ = -10, flow_base_ = -1;
+        if (guide_style_ == 1 && (blade_ == 1 || blade_ == 2)) {
+            // the Xbox One layout's two tabs in the middle are Community itself: the Guide opens on the tab it was closed on
+            if ((comm_tab_ == TabMessages) != (blade_ == 2)) comm_tab_ = blade_ == 2 ? TabMessages : TabFriends;
+            comm_at_ = -10, stack_.push_back(Page::Community);
+            entered(Page::Community, now);
+        }
         if (box_waiting_.on) box_ = box_waiting_, box_.at = now, box_waiting_.on = false;
         else open_on_toast(now);
     } else {
         closed_ = now, sent_.clear(), box_.on = false, draft_ = Draft(), waiting_xuid_ = 0, held_ = 0;
     }
     if (!widths_set_) {
-        for (int i = 0; i < 3; i++) width_[i].set(i == blade_ ? BLADE_W : STRIP_W);
+        for (int i = 0; i < BLADES; i++) width_[i].set(i == blade_ ? BLADE_W : STRIP_W);
         bar_[1].set(1);  // canvas: the player's blade opens on Friends
         widths_set_ = true;
     }
@@ -234,8 +247,14 @@ void Guide::pop_to(size_t depth, double now) {
 void Guide::entered(Page p, double now) {
     (void)now;
     if (p == Page::Community) {
+        // the blade (or tab) it is behind, for when it was opened some other way (a toast, the game)
+        const int b = comm_tab_ == TabMessages ? 2 : 1;
+        if (blade_ != b) {
+            blade_ = b;
+            for (int i = 0; i < BLADES; i++) width_[i].set(i == b ? BLADE_W : STRIP_W);
+        }
         friends_.clamp(1 + int(friend_rows().size()), 6);
-        messages_.clamp(1 + int(messages().size()), 8);
+        messages_.clamp(1 + int(messages().size()), msg_rows());
         players_.clamp(int(social_.players.size()), 6);
         party_.clamp(int(party_rows().size()), 6);
     } else if (p == Page::Profile) {
@@ -368,7 +387,7 @@ void Guide::set_social(const Social& s) {
     Page p = page();
     if (p == Page::Community || p == Page::Recipients || p == Page::Profile || p == Page::Compose) {
         friends_.clamp(1 + int(friend_rows().size()), 6);
-        messages_.clamp(1 + int(messages().size()), 8);
+        messages_.clamp(1 + int(messages().size()), msg_rows());
         players_.clamp(int(social_.players.size()), 6);
         party_.clamp(int(party_rows().size()), 6);
         pick_.clamp(int(pick_rows().size()), 6);
@@ -516,17 +535,19 @@ std::vector<GuideRequest> Guide::handle(PadEvent e, double now) {
     return out;
 }
 
-// The blades' rows as the canvas has them (artboard 1). A row with no screen behind it yet is greyed.
+// The blades' rows, as the canvas has them (artboard 1) but for the player's blade, whose messages have a blade of their own. A row
+// with no screen behind it yet is greyed.
 std::vector<Opt> Guide::home_rows(int blade) const {
     if (blade == 0)
         return {{"Forza Horizon 2", HomeResume, true, I_GAMES}, {"Achievements", HomeAchievements, ach_.known, I_TROPHY}, {"Game Library", HomeNone, false, I_APPS}};
     if (blade == 1)
         return {{"Leave Game", HomeNone, false, 0},          {"Friends", HomeFriends, true, I_PERSON},  {"Party", HomeParty, true, I_GROUPS},
-                {"Messages", HomeMessages, true, I_MAIL},    {"Beacons & Activity", HomeNone, false, I_SENSORS},
-                {"Chat", HomeNone, false, I_CHAT},           {"Lobbies", HomeNone, false, I_FLAG}};
+                {"Players", HomePlayers, true, I_GAMES},     {"Beacons & Activity", HomeNone, false, I_SENSORS},
+                {"Lobbies", HomeNone, false, I_FLAG}};
+    if (blade == 2) return {{"Messages", HomeMessages, true, I_MAIL}, {"Create New", HomeCreate, true, I_EDIT}, {"Chat", HomeNone, false, I_CHAT}};
     return {{"Profile", HomeProfile, social_.loaded, I_PERSON}, {"Theme", HomeTheme, true, I_PALETTE},  {"Voice", HomeVoice, true, I_MIC},
             {"Notifications", HomeNotify, true, I_BELL},   {"Network", HomeNone, false, I_WIFI},   {"Controller", HomeNone, false, I_GAMES},
-            {"System", HomeNone, false, I_SETTINGS}};
+            {"System", HomeSystem, true, I_SETTINGS}};
 }
 
 void Guide::handle_home(PadEvent e, std::vector<GuideRequest>& out, double now) {
@@ -539,9 +560,15 @@ void Guide::handle_home(PadEvent e, std::vector<GuideRequest>& out, double now) 
         if (f >= 0) bar_[blade_].go(float(f), now, 0.14f);
         break;
     case PadEvent::Left:
-    case PadEvent::Lb: switch_to(blade_ - 1, now); break;
+    case PadEvent::Lb:
+        if (guide_style_ == 1) one_tab_to(one_tab() - 1, now);
+        else switch_to(blade_ - 1, now);
+        break;
     case PadEvent::Right:
-    case PadEvent::Rb: switch_to(blade_ + 1, now); break;
+    case PadEvent::Rb:
+        if (guide_style_ == 1) one_tab_to(one_tab() + 1, now);
+        else switch_to(blade_ + 1, now);
+        break;
     case PadEvent::B: toggle(now); break;
     case PadEvent::A: {
         if (f < 0 || f >= int(rows.size()) || !rows[f].enabled) break;
@@ -559,14 +586,20 @@ void Guide::handle_home(PadEvent e, std::vector<GuideRequest>& out, double now) 
         } else if (cmd == HomeVoice) {
             open_voice(now);
         } else if (cmd == HomeNotify) {
-            open_notify(now);
+            open_choices(0, now);
+        } else if (cmd == HomeSystem) {
+            open_choices(1, now);
         } else if (cmd == HomeProfile) {
             prof_ = social_.me;
             if (prof_.tag.empty()) prof_.tag = gamertag;
             prof_tab_ = 0, prof_at_ = -10, prof_row_[0] = prof_row_[1] = -1;
             push(Page::Profile, now);
+        } else if (cmd == HomeCreate) {
+            flow_base_ = int(stack_.size());
+            new_row_ = -1;
+            push(Page::CreateNew, now);
         } else {
-            comm_tab_ = cmd == HomeParty ? TabParty : cmd == HomeMessages ? TabMessages : TabFriends, comm_at_ = -10;
+            comm_tab_ = cmd == HomeParty ? TabParty : cmd == HomeMessages ? TabMessages : cmd == HomePlayers ? TabPlayers : TabFriends, comm_at_ = -10;
             push(Page::Community, now);
         }
         break;
@@ -577,7 +610,7 @@ void Guide::handle_home(PadEvent e, std::vector<GuideRequest>& out, double now) 
 
 // Each blade's focus rests on a row that can be chosen (a row becomes usable when the server answers), or on none.
 void Guide::fix_home_focus() {
-    for (int b = 0; b < 3; b++) {
+    for (int b = 0; b < BLADES; b++) {
         std::vector<Opt> rows = home_rows(b);
         int& f = focus_[b];
         if (f >= 0 && f < int(rows.size()) && rows[f].enabled) continue;
@@ -586,11 +619,34 @@ void Guide::fix_home_focus() {
     }
 }
 
+// The Xbox One layout's tabs are the four blades. Its two in the middle show what is behind them straight away, as the console's
+// guide does: Social (the player's blade) is Community with Party, Friends and Players, and Messages is Community's Messages. So
+// the tab on top is told from the screens, and the blade is kept with it.
+int Guide::one_tab() const {
+    if (stack_.size() > 1 && stack_[1] == Page::Community) return comm_tab_ == TabMessages ? 2 : 1;
+    return blade_;
+}
+
+void Guide::one_tab_to(int t, double now) {
+    const int from = one_tab();
+    if (t < 0 || t > 3 || t == from) return;
+    const int d = t > from ? 1 : -1;
+    switch_to(t, now);
+    if (t == 1 || t == 2) {
+        comm_tab_ = t == 2 ? TabMessages : TabFriends, comm_dir_ = d, comm_at_ = now;
+        stack_ = {Page::Home, Page::Community}, page_at_ = -10;
+        entered(Page::Community, now);
+    } else {
+        stack_ = {Page::Home}, page_at_ = -10;
+        switch_dir_ = d, switched_ = now;  // (also when the blade was that one already: the rows come in again)
+    }
+}
+
 void Guide::switch_to(int b, double now) {
-    if (b == blade_ || b < 0 || b > 2) return;
+    if (b == blade_ || b < 0 || b >= BLADES) return;
     switch_dir_ = b > blade_ ? 1 : -1;
     blade_ = b, switched_ = now;
-    for (int i = 0; i < 3; i++) width_[i].go(i == b ? BLADE_W : STRIP_W, now, 0.3f);
+    for (int i = 0; i < BLADES; i++) width_[i].go(i == b ? BLADE_W : STRIP_W, now, 0.3f);
 }
 
 // ---- what the server's answers turn into: the 360's toasts (things that happened) and message boxes (things that could not)
@@ -737,21 +793,40 @@ bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double 
     if (open) {
         float k = ease_guide(std::clamp(float((now - opened_) / 0.26), 0.0f, 1.0f));
         float zoom = 0.92f + 0.08f * k, op = k;
-        dl->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), IM_COL32(0, 0, 0, int(178 * op)));
+        // the Xbox One guide: its dim is lighter (0.45), and its own screens stand in its panel, not in the 360's frame
+        const bool one = guide_style_ == 1, one_screen = one && page() != Page::Keyboard && page() != Page::Achievements && page() != Page::Compare &&
+                                               page() != Page::AchDetail;  // those four have no Xbox One layout: they keep the 360's frame
+        dl->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), IM_COL32(0, 0, 0, int((one ? 115 : 178) * op)));
         // a message box takes the frame over, as the 360's does: what the Guide was showing fades out under it
         if (box_.on) op *= 1 - ease_guide(std::clamp(float((now - box_.at) / 0.2), 0.0f, 1.0f));
-        if (page() != Page::Home) {
+        // a page with no Xbox One layout keeps the 360's wide frame there, but as a wider panel: from the panel's left edge (78 of the
+        // screen's 1080ths in), in its colour and corners, under the same status corner
+        const bool wide_one = one && !one_screen;
+        const ImVec2 po = wide_one ? ImVec2((one::PX * 720 / 1080 - ux(137)) * s, origin.y) : origin;
+        if (!one_screen && page() != Page::Home) {
             // a page's blade: the 360's full frame (137 to 712, 60 to 411), which the page then draws its panes on
             float slide, pop, title_op;
             page_motion(now, op, &slide, &pop, &title_op);
-            View v{origin, s, zoom};
+            View v{po, s, zoom};
             ImVec2 p0 = v.pt(ux(137) + slide, uy(60)), p1 = v.pt(ux(712) + slide, uy(411));
-            blade_shadow(dl, p0, p1, v.sz(uu(1)), pop);
             panel_span(p0.y, p1.y);
-            panel_fill(dl, p0, p1, pop);
+            if (wide_one) {
+                const float U = s * 720 / 1080;
+                one::Panel(dl, a, origin, s, op, 1).corner(ach_.known ? ach_.gamerscore() : -1, voice_mic_);
+                for (int i = 5; i >= 1; i--)
+                    dl->AddRectFilled(ImVec2(p0.x - i * 3 * U, p0.y - i * 3 * U + 6 * U), ImVec2(p1.x + i * 3 * U, p1.y + i * 3 * U + 6 * U),
+                                      IM_COL32(0, 0, 0, int(13 * pop)), (13 + i * 3) * U);
+                dl->AddRectFilled(p0, p1, alpha(one::PANEL1, pop), 13 * U);
+            } else {
+                blade_shadow(dl, p0, p1, v.sz(uu(1)), pop);
+                panel_fill(dl, p0, p1, pop);
+            }
         }
         switch (page()) {
-        case Page::Home: draw_home(dl, a, origin, s, zoom, op, now); break;
+        case Page::Home:
+            if (one) draw_home_one(dl, a, origin, s, op, now);
+            else draw_home(dl, a, origin, s, zoom, op, now);
+            break;
         case Page::Community: draw_community(dl, a, origin, s, zoom, op, now); break;
         case Page::Profile: draw_profile(dl, a, origin, s, zoom, op, now); break;
         case Page::EditProfile: draw_edit(dl, a, origin, s, zoom, op, now); break;
@@ -759,10 +834,10 @@ bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double 
         case Page::CreateNew: draw_create(dl, a, origin, s, zoom, op, now); break;
         case Page::Recipients: draw_pick(dl, a, origin, s, zoom, op, now); break;
         case Page::Compose: draw_compose(dl, a, origin, s, zoom, op, now); break;
-        case Page::Keyboard: draw_keyboard(dl, a, origin, s, zoom, op, now); break;
-        case Page::Achievements: draw_achievements(dl, a, origin, s, zoom, op, now); break;
-        case Page::Compare: draw_compare(dl, a, origin, s, zoom, op, now); break;
-        case Page::AchDetail: draw_ach_detail(dl, a, origin, s, zoom, op, now); break;
+        case Page::Keyboard: draw_keyboard(dl, a, po, s, zoom, op, now); break;
+        case Page::Achievements: draw_achievements(dl, a, po, s, zoom, op, now); break;
+        case Page::Compare: draw_compare(dl, a, po, s, zoom, op, now); break;
+        case Page::AchDetail: draw_ach_detail(dl, a, po, s, zoom, op, now); break;
         case Page::Theme: draw_theme(dl, a, origin, s, zoom, op, now); break;
         case Page::Voice: draw_voice(dl, a, origin, s, zoom, op, now); break;
         case Page::Notifications: draw_notify(dl, a, origin, s, zoom, op, now); break;
@@ -782,6 +857,13 @@ void Guide::draw_header(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, flo
     View v{origin, s, zoom};
     float tx = half ? 243 : 156, ty = half ? 103 : 36, py = half ? 98 : 24, cx = half ? 609 : 693, cy = half ? 123.5f : 48;
     ImVec2 t = v.pt(ux(tx) + slide, uy(ty + 10.5f));
+    if (guide_style_ == 1) {
+        // the Xbox One layout (only the pages without a panel of their own come here): the name in the panel's bold face; the picture
+        // and the clock are the status corner's
+        ImFont* bf = a.text_one_bold ? a.text_one_bold : a.text_bold ? a.text_bold : a.text;
+        text_fit(dl, bf, a.text_one_bold ? a.one_bold_m : a.bold_m, v.sz(uu(16)), t.x, t.y, v.sz(uu(712 - 19 - tx)), alpha(WHITE, op * title_op), title);
+        return;
+    }
     text_fit(dl, a.text, a.text_m, v.sz(uu(16)), t.x, t.y, v.sz(uu(410 - 8 - tx)), alpha(WHITE, op * title_op * 235 / 255), title);  // up to the picture
     player_pic(dl, a, a.gamerpic, social_.me.xuid, v.pt(ux(410), uy(py)), v.pt(ux(442), uy(py + 32)), op);
     SYSTEMTIME st;
@@ -815,16 +897,16 @@ void Guide::draw_home(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float
     if (ach_.known) snprintf(ach_meta, sizeof ach_meta, "%d of %d", ach_.count(), int(ach_defs().size()));
 
     // the open blade's left edge stays put while the others' widths move
-    float left[3], x = BLADE_X;
+    float left[BLADES], x = BLADE_X;
     for (int bi = 0; bi < blade_; bi++) x -= width_[bi].value(now);
-    for (int bi = 0; bi < 3; bi++) left[bi] = x, x += width_[bi].value(now);
+    for (int bi = 0; bi < BLADES; bi++) left[bi] = x, x += width_[bi].value(now);
     float since = float(now - switched_);
     // as the 360 stacks them: the strips from the outside in, each with its shadow on the one before, then the open blade over them all
-    int order[3], n = 0;
+    int order[BLADES], n = 0;
     for (int bi = 0; bi < blade_; bi++) order[n++] = bi;
-    for (int bi = 2; bi > blade_; bi--) order[n++] = bi;
+    for (int bi = BLADES - 1; bi > blade_; bi--) order[n++] = bi;
     order[n++] = blade_;
-    for (int oi = 0; oi < 3; oi++) {
+    for (int oi = 0; oi < BLADES; oi++) {
         int bi = order[oi];
         float bw = width_[bi].value(now), bx = left[bi];
         bool on = bi == blade_;
@@ -899,6 +981,7 @@ void Guide::draw_home(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float
 // and the box's own legend under it. What the Guide was showing is not drawn while it is up (draw fades it out).
 void Guide::draw_box(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float w, float h, double now) {
     (void)w, (void)h;
+    if (guide_style_ == 1) return draw_box_one(dl, a, origin, s, now);
     float k = ease_guide(std::clamp(float((now - box_.at) / 0.2), 0.0f, 1.0f));
     View v{origin, s, 0.96f + 0.04f * k};
     side_fill(dl, v.pt(ux(243), uy(30)), v.pt(ux(608), uy(60)), k);
@@ -979,4 +1062,82 @@ void Guide::draw_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 ori
             dl->AddImage(toast_.pic, ImVec2(q0.x, q0.y + side - up), ImVec2(q1.x, q1.y + side - up), ImVec2(0, 0), ImVec2(1, 1), alpha(WHITE, zop));
         dl->PopClipRect();
     }
+}
+
+// ---- the Xbox One's guide (one.h): what every screen of it shares, and the blades as its tabs
+
+// The screen's frame in the Xbox One layout: the status corner, the panel, the tabs (the accent bar glides to the open blade's tab with
+// the blades' widths) and the screen's name. The list after it comes in as a 360 page does (a slide and a fade), or, on the blades,
+// as a tab's rows do.
+one::Panel Guide::one_frame(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now, const std::string& title, bool home) const {
+    one::Panel p(dl, a, origin, s, op, ease_guide(std::clamp(float((now - opened_) / 0.25), 0.0f, 1.0f)));
+    p.corner(ach_.known ? ach_.gamerscore() : -1, voice_mic_);
+    p.panel();
+    const int tab = one_tab();
+    if (one_bar_at_ < 0) one_bar_.set(float(tab));
+    else if (one_bar_at_ != tab) one_bar_.go(float(tab), now, 0.25f);
+    one_bar_at_ = tab;
+    int unread = 0;
+    for (const MessageItem& m : messages()) unread += m.unread;
+    p.tabs(one_bar_.value(now), a.gamerpic, social_.me.xuid, gamertag, unread);
+    if (home) {
+        float e = ease_guide(std::clamp(float((now - switched_) / 0.25), 0.0f, 1.0f));
+        p.cop = e, p.cdx = (1 - e) * 40 * switch_dir_;
+    } else {
+        float slide, pop, title_op;
+        page_motion(now, 1, &slide, &pop, &title_op);
+        p.cop = pop, p.cdx = slide * 0.4f;
+    }
+    p.title(title);
+    return p;
+}
+
+// The blades: the open one's rows as the tab's entries, with what the 360's rows say at their right end.
+void Guide::draw_home_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now) {
+    using namespace one;
+    Panel p = one_frame(dl, a, origin, s, op, now, blade_ == 1 ? gamertag : BLADE[blade_], true);
+    int online = 0, waiting = 0;
+    for (const Friend& f : social_.friends) online += f.state != Friend::Offline;
+    for (const MessageItem& m : messages()) waiting += m.unread;
+    char friends_meta[24] = "", messages_meta[24] = "", ach_meta[32] = "";
+    if (social_.loaded) snprintf(friends_meta, sizeof friends_meta, "%d online", online);
+    if (waiting) snprintf(messages_meta, sizeof messages_meta, "%d new", waiting);
+    if (ach_.known) snprintf(ach_meta, sizeof ach_meta, "%d of %d", ach_.count(), int(ach_defs().size()));
+    std::vector<Opt> rows = home_rows(blade_);
+    const float top = PY + LIST;
+    if (focus_[blade_] >= 0) p.focus(top + bar_[blade_].value(now) * LINE_H, LINE_H);
+    for (int i = 0; i < int(rows.size()); i++) {
+        const Opt& r = rows[i];
+        const char* meta = r.cmd == HomeFriends ? friends_meta : r.cmd == HomeMessages ? messages_meta : r.cmd == HomeResume ? "Now playing"
+                           : r.cmd == HomeAchievements ? ach_meta : "";
+        p.line(top + i * LINE_H, r.icon, r.label, meta, r.enabled);
+    }
+    const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}, {"LB", nullptr, MUTED3}, {"RB", "Switch", MUTED3}};
+    p.hints(hints, 4);
+}
+
+// The message box in the Xbox One layout: a panel in the middle of the screen (640 wide, the guide's corners and colour), its heading
+// bold, the text under it, and the buttons one line each with the guide's focus.
+void Guide::draw_box_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, double now) {
+    using namespace one;
+    float k = ease_guide(std::clamp(float((now - box_.at) / 0.2), 0.0f, 1.0f));
+    Panel p(dl, a, origin, s, k, 1);
+    const float W = 640, x = (p.size.x / p.U - W) / 2, pad = 36;
+    // how high the text is: laid out once without drawing (para draws), by the font's own wrapping
+    float text_h = 0;
+    for (const char *b = box_.body.c_str(), *e = b + box_.body.size(); b < e;) {
+        const char* br = p.tf->CalcWordWrapPosition(26, b, e, W - 2 * pad);
+        if (br == b) br = b + 1;
+        text_h += 26 * 1.3f, b = br;
+        while (b < e && *b == ' ') b++;
+    }
+    const float H = 96 + text_h + 30 + LINE_H * box_.buttons.size() + 20, y = (p.size.y / p.U - H) / 2 - 10 * (1 - k);
+    for (int i = 5; i >= 1; i--)
+        dl->AddRectFilled(p.P(x - i * 3, y - i * 3 + 6), p.P(x + W + i * 3, y + H + i * 3 + 6), IM_COL32(0, 0, 0, int(13 * k)), (13 + i * 3) * p.U);
+    dl->AddRectFilled(p.P(x, y), p.P(x + W, y + H), p.col(IM_COL32(0x1e, 0x1e, 0x1e, 255)), 13 * p.U);
+    p.text(p.P(x + pad, y + 52), 32, p.col(WHITE), box_.title, true, -1, W - 2 * pad);
+    p.para(x + pad, y + 96, 26, p.col(GREY1), box_.body, W - 2 * pad);
+    const float by = y + 96 + text_h + 30;
+    p.focus(by + box_.bar.value(now) * LINE_H, LINE_H, x + 13, W - 26);
+    for (size_t i = 0; i < box_.buttons.size(); i++) p.text(p.P(x + pad, by + i * LINE_H + LINE_H / 2), 26, p.col(WHITE), box_.buttons[i]);
 }

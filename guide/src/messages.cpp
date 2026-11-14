@@ -6,6 +6,7 @@
 #include <cstdio>
 
 #include "guide.h"
+#include "one.h"
 #include "ui.h"
 
 using namespace ui;
@@ -125,6 +126,7 @@ void Guide::accept_invite(const MessageItem& m, std::vector<GuideRequest>& out, 
 // Left: when it came and the options (the 360's rows); right, on the description pane: the sender's card, laid out as the 360's gamer
 // card (see profile_side), and the message text.
 void Guide::draw_message(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now) {
+    if (guide_style_ == 1) return draw_message_one(dl, a, origin, s, op, now);
     View v{origin, s, zoom};
     const float L = PAGE_L;
     const MessageItem& m = open_msg_;
@@ -236,6 +238,7 @@ void Guide::handle_create(PadEvent e, std::vector<GuideRequest>& out, double now
 // Artboard 3: the types on the left (88-unit rows with their icons), what the highlighted one is on the right (the 360's words, set as
 // its description panes set theirs: 17.3 of its units high, 18 in, from 12 down, 247 wide).
 void Guide::draw_create(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now) {
+    if (guide_style_ == 1) return draw_create_one(dl, a, origin, s, op, now);
     View v{origin, s, zoom};
     const float L = PAGE_L, W = PAGE_W;
     float slide, pop, title_op;
@@ -365,6 +368,7 @@ void Guide::handle_pick(PadEvent e, std::vector<GuideRequest>& out, double now) 
 
 // Artboard 4's list: six 69-unit rows, a 55-unit foot with the place in the list. One player (Select Gamertag), or ticks (Edit Recipients).
 void Guide::draw_pick(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now) {
+    if (guide_style_ == 1) return draw_pick_one(dl, a, origin, s, op, now);
     View v{origin, s, zoom};
     const float L = PAGE_L, W = PAGE_W;
     float slide, pop, title_op;
@@ -508,6 +512,7 @@ void Guide::handle_compose(PadEvent e, std::vector<GuideRequest>& out, double no
 
 // Artboard 4's compose: the options on the left (76-unit rows with their icons), who it goes to and what it says on the right.
 void Guide::draw_compose(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now) {
+    if (guide_style_ == 1) return draw_compose_one(dl, a, origin, s, op, now);
     View v{origin, s, zoom};
     const float L = PAGE_L;
     const Draft& d = draft_;
@@ -797,4 +802,122 @@ void Guide::draw_keyboard(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, f
     }
     const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}};
     hint_bar(dl, a, v, HINT_X, HINT_Y, hints, 2, op);
+}
+
+// ---- the message screens in the Xbox One layout (one.h)
+
+// A message: who sent it and when, what it says, then its options one line each.
+void Guide::draw_message_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now) {
+    using namespace one;
+    const MessageItem& m = open_msg_;
+    Panel p = one_frame(dl, a, origin, s, op, now, type_name(m));
+    const float top = PY + LIST;
+    p.card(top, 124);
+    one_note(p, top, m);  // the card the Messages tab lists it on
+    // the console's wording: "%1 invites you to play %2." with what the sender added after it
+    std::string body = m.kind == MessageItem::GameInvite      ? m.from.tag + " invites you to play Forza Horizon 2."
+                       : m.kind == MessageItem::FriendRequest ? m.from.tag + " wants to be your friend."
+                                                              : m.text;
+    float y = top + 150;
+    y += p.para(PX + 32, y, 26, p.lcol(WHITE), body, PW - 64);
+    if (m.kind == MessageItem::GameInvite && !m.text.empty()) y += 8 + p.para(PX + 32, y + 8, 23, p.lcol(GREY1), m.text, PW - 64);
+    if (m.expires_in >= 0) y += 8 + p.para(PX + 32, y + 8, 23, p.lcol(GREY1), expires(m.expires_in), PW - 64);
+    y = std::max(y + 20, top + 270);
+    p.divider(y);
+    y += 14;
+    std::vector<Opt> opts = message_options(m);
+    if (msg_opt_ >= 0 && msg_opt_ < int(opts.size()) && opts[msg_opt_].enabled) p.focus(y + opt_bar_.value(now) * LINE_H, LINE_H);
+    for (size_t i = 0; i < opts.size(); i++) p.line(y + i * LINE_H, 0, opts[i].label, "", opts[i].enabled);
+    const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}};
+    p.hints(hints, 2);
+}
+
+// Create New: the kinds one line each with their icons, and what the one in focus is under the list (the console's words).
+void Guide::draw_create_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now) {
+    using namespace one;
+    Panel p = one_frame(dl, a, origin, s, op, now, "Create new");
+    std::vector<Opt> opts = create_options();
+    const float top = PY + LIST;
+    if (new_row_ >= 0 && new_row_ < int(opts.size()) && opts[new_row_].enabled) p.focus(top + new_bar_.value(now) * LINE_H, LINE_H);
+    for (size_t i = 0; i < opts.size(); i++) p.line(top + i * LINE_H, opts[i].icon, opts[i].label, "", opts[i].enabled);
+    static const char* const WORDS[3] = {"Send a message to one or more people.", "Invite others to play a game.", "Ask another player to join your friends list."};
+    float y = top + opts.size() * LINE_H + 16;
+    p.divider(y);
+    if (new_row_ >= 0 && new_row_ < int(opts.size())) p.para(PX + 32, y + 24, 23, p.lcol(GREY1), WORDS[opts[new_row_].cmd], PW - 64);
+    const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}};
+    p.hints(hints, 2);
+}
+
+// Select Gamertag: the friends two lines each, a box at the right end of each when several can be ticked, how far down the list the
+// focus is at the panel's foot.
+void Guide::draw_pick_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now) {
+    using namespace one;
+    const GamePick& g = game_pick_;
+    bool single = g.max <= 1, full = g.on && !single && g.chosen.size() >= g.max;
+    auto ticked = [&](uint64_t xuid) { return std::find(g.chosen.begin(), g.chosen.end(), xuid) != g.chosen.end(); };
+    auto grey = [&](const Friend& f) { return g.on ? full && !ticked(f.xuid) : draft_.kind == Draft::GameInvite && same_game(f, social_.me); };
+    bool ticks = g.on ? !single : pick_many_;
+    Panel p = one_frame(dl, a, origin, s, op, now, g.on && !g.prompt.empty() ? g.prompt : ticks && !g.on ? "Edit recipients" : "Select gamertag");
+    std::vector<const Friend*> rows = pick_rows();
+    const int n = int(rows.size());
+    const float top = PY + LIST;
+    if (!n) {
+        const char* why = !social_.session ? "Not signed in" : !social_.loaded && !social_.error.empty() ? "Server unavailable" : g.on ? "" : social_.loaded ? "No friends" : "";
+        p.text(p.L(PX + 32, top + 40), 23, p.lcol(GREY1), why);
+    } else {
+        if (!(pick_.row < n && grey(*rows[pick_.row]))) p.focus(top + pick_.bar.value(now) * TWO_H, TWO_H);
+        for (int i = pick_.top; i < std::min(n, pick_.top + PICK_ROWS); i++) {
+            const Friend& f = *rows[i];
+            float y = top + (i - pick_.top) * TWO_H;
+            bool greyed = grey(f);
+            one_player(p, y, f, g.on ? relation(f.xuid) : Relation::Friend, greyed);
+            if (!ticks) continue;
+            bool check = g.on && ticked(f.xuid);
+            for (const Friend& t : draft_.to) check |= t.xuid == f.xuid;
+            ImVec2 c = p.L(PX + 484, y + TWO_H / 2);
+            p.icon(check ? I_CHECK_BOX : I_CHECK_BLANK, c, 34, p.lcol(greyed ? OFF1 : WHITE));
+        }
+    }
+    char count[32];
+    snprintf(count, sizeof count, "%d of %d", n ? pick_.row + 1 : 0, n);
+    p.text(p.P(PX + 32, PY + PH - 26), 20, p.col(GREY1), count);
+    p.more(pick_.top > 0, pick_.top + PICK_ROWS < n);
+    if (g.on && !single && g.chosen.size() >= std::max(1u, g.min)) {
+        const Hint hints[] = {{"A", "Select", RING_A}, {"X", "Done", RING_X}, {"B", "Back", RING_B}};
+        p.hints(hints, 3);
+    } else {
+        const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}};
+        p.hints(hints, 2);
+    }
+}
+
+// Composing: what can be done one line each with its icon, and under the list who it goes to and what it says.
+void Guide::draw_compose_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now) {
+    using namespace one;
+    const Draft& d = draft_;
+    Panel p = one_frame(dl, a, origin, s, op, now, d.kind == Draft::GameInvite ? "Game invite" : d.kind == Draft::FriendRequest ? "Friend request" : "Message");
+    std::vector<Opt> opts = draft_options();
+    const float top = PY + LIST;
+    if (draft_row_ >= 0 && draft_row_ < int(opts.size()) && opts[draft_row_].enabled) p.focus(top + draft_bar_.value(now) * LINE_H, LINE_H);
+    for (size_t i = 0; i < opts.size(); i++) p.line(top + i * LINE_H, opts[i].icon, opts[i].label, "", opts[i].enabled);
+    float y = top + opts.size() * LINE_H + 16;
+    p.divider(y);
+    y += 24;
+    std::string to = d.gamertag;
+    if (d.kind != Draft::FriendRequest) {
+        to.clear();
+        for (size_t i = 0; i < d.to.size(); i++) to += (i ? ", " : "") + d.to[i].tag;
+    }
+    p.text(p.L(PX + 32, y + 10), 20, p.lcol(GREY1), "To");
+    y += 28;
+    y += p.para(PX + 32, y, 26, p.lcol(WHITE), to, PW - 64) + 18;
+    if (d.kind != Draft::FriendRequest) {
+        p.text(p.L(PX + 32, y + 10), 20, p.lcol(GREY1), "Message text");
+        y += 28;
+        // a game invite reads as the console's did, with the player's own words after it
+        if (d.kind == Draft::GameInvite) y += p.para(PX + 32, y, 26, p.lcol(WHITE), gamertag + " invites you to play Forza Horizon 2.", PW - 64) + 8;
+        if (!d.text.empty()) p.para(PX + 32, y, d.kind == Draft::GameInvite ? 23.0f : 26.0f, p.lcol(d.kind == Draft::GameInvite ? GREY1 : WHITE), d.text, PW - 64);
+    }
+    const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}};
+    p.hints(hints, 2);
 }

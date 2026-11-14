@@ -166,6 +166,7 @@ int main(int argc, char** argv) {
 
     if (const char* theme = getenv("GUIDE_THEME")) theme_apply(theme);
     Guide g;
+    if (const char* style = getenv("GUIDE_STYLE")) g.set_guide_style(atoi(style));  // 1: the Xbox One guide's layout
     g.gamertag = "DebugFox";
     const double t0 = 100.0;
     // sample players for the pages (not real ones)
@@ -243,13 +244,18 @@ int main(int argc, char** argv) {
         for (PadEvent e : evs) g.handle(e, at);
     };
     const PadEvent D = PadEvent::Down, A = PadEvent::A, RB = PadEvent::Rb;
+    // to Settings from where the Guide opens (the player's blade): past Messages
+    const int to_settings = 2;
+    auto settings = [&](double at) {
+        for (int i = 0; i < to_settings; i++) g.handle(RB, at);
+    };
     NetResult nr;
     if (scene == "friends" || scene == "friends-nogame") {
         g.open_community(TabFriends, t0 - 5), press({D, D});
     } else if (scene == "theme" || scene == "theme-plastic" || scene == "theme-fh2mp" || scene == "theme-360") {
         // Settings > Theme with the focus moved: Orange on the first tab, Blue Plastic on the second, FH2MP, Xbox 360
         // Settings > Theme as the player gets there: the Guide, RB to Settings, down to Theme, A
-        g.toggle(t0 - 10), g.handle(RB, t0 - 9), g.handle(D, t0 - 8), g.handle(A, t0 - 7);
+        g.toggle(t0 - 10), settings(t0 - 9), g.handle(D, t0 - 8), g.handle(A, t0 - 7);
         if (scene == "theme") press({D, D, D, D});
         if (scene == "theme-plastic") g.handle(RB, t0 - 6), press({D, D, D, D});
         if (scene == "theme-fh2mp") press({D, D});
@@ -257,13 +263,16 @@ int main(int argc, char** argv) {
 
     } else if (scene == "notifications" || scene == "notifications-one" || scene == "notifications-360") {
         // Settings > Notifications, the focus on Guide or moved down to Xbox One or Xbox 360
-        g.toggle(t0 - 10), g.handle(RB, t0 - 9), press({D, D, D}, t0 - 8), g.handle(A, t0 - 7);
+        g.toggle(t0 - 10), settings(t0 - 9), press({D, D, D}, t0 - 8), g.handle(A, t0 - 7);
         if (scene == "notifications-one") press({D});
         if (scene == "notifications-360") press({D, D});
+    } else if (scene == "system") {
+        // Settings > System: the Guide's layout
+        g.toggle(t0 - 10), settings(t0 - 9), press({D, D, D, D, D, D}, t0 - 8), g.handle(A, t0 - 7);
     } else if (scene == "voice") {
         // Settings > Voice with the microphone muted and the focus on Volume
         g.set_voice(false, true, 3);
-        g.toggle(t0 - 10), g.handle(RB, t0 - 9), g.handle(D, t0 - 8), g.handle(D, t0 - 7.5), g.handle(A, t0 - 7), press({D, D});
+        g.toggle(t0 - 10), settings(t0 - 9), g.handle(D, t0 - 8), g.handle(D, t0 - 7.5), g.handle(A, t0 - 7), press({D, D});
     } else if (scene == "party" || scene == "party-private") {
         g.open_community(TabParty, t0 - 5);
     } else if (scene == "players") {
@@ -314,7 +323,7 @@ int main(int argc, char** argv) {
         g.open_community(TabFriends, t0 - 5), g.handle(A, t0);
         for (const char* c = "Charelene"; *c; c++) g.type_char(uint32_t(*c), t0);
     } else if (scene == "own-profile" || scene == "edit-profile" || scene == "edit-motto") {
-        g.toggle(t0 - 9), g.handle(RB, t0 - 8);
+        g.toggle(t0 - 9), settings(t0 - 8);
         g.handle(A, scene == "own-profile" ? t0 : t0 - 5);
         if (scene != "own-profile") g.handle(A, scene == "edit-profile" ? t0 : t0 - 3);
         if (scene == "edit-motto") g.handle(A, t0);
@@ -358,7 +367,8 @@ int main(int argc, char** argv) {
     } else {
         g.toggle(t0 - 10);
         if (scene == "games") g.handle(PadEvent::Lb, t0 - 5);
-        if (scene == "settings") g.handle(PadEvent::Rb, t0 - 5);
+        if (scene == "settings") settings(t0 - 5);
+        if (scene == "messages-blade") g.handle(PadEvent::Rb, t0 - 5);
         if (scene == "down") g.handle(PadEvent::Down, t0 - 5);
         g.toggle(t0 - 1), g.toggle(t0);  // closed and opened again: the open animation starts at t0
     }
