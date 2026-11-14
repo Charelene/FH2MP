@@ -3578,6 +3578,11 @@ static unsigned char *eo_timelock_plugin(const struct eo_wc_layout **layout)
 {
     struct eo_wc_check { unsigned rva; unsigned char code[13]; unsigned n; };
     static const struct { const char *name; const struct eo_wc_layout *at; struct eo_wc_check check[4]; } builds[] = {
+        {"1.1.0 (Extra Options 0.6.1)", &EO_WC_1_1_0_EO061, {
+            {0x30c0, {0x31, 0xc0, 0x83, 0x3d, 0x27, 0x86, 0x00, 0x00, 0x00, 0x0f, 0x95, 0xc0, 0xc3}, 13},  /* enabled */
+            {0x3130, {0x8b, 0x05, 0xbe, 0x85, 0x00, 0x00, 0xc3}, 7},                                       /* generation */
+            {0x3590, {0x8b, 0x05, 0x62, 0x81, 0x00, 0x00, 0xc3}, 7},                                       /* weather */
+            {0x3908, {0x48, 0x39, 0x1d, 0x11, 0x7e, 0x00, 0x00}, 7}}},                                     /* held clock */
         {"1.1.0 (Extra Options 0.6.0)", &EO_WC_1_1_0, {
             {0x30c0, {0x31, 0xc0, 0x83, 0x3d, 0x27, 0x76, 0x00, 0x00, 0x00, 0x0f, 0x95, 0xc0, 0xc3}, 13},  /* enabled */
             {0x3130, {0x8b, 0x05, 0xbe, 0x75, 0x00, 0x00, 0xc3}, 7},                                       /* generation */
@@ -3628,7 +3633,7 @@ static unsigned char *eo_timelock_plugin(const struct eo_wc_layout **layout)
     }
     refused = 1;
     log_begin();
-    log_raw("timelock: unexpected EO_WeatherControl.dll (the builds in Extra Options 0.4.4 and 0.6.0 are known), its time lock is not parked online: at plugin+0x");
+    log_raw("timelock: unexpected EO_WeatherControl.dll (the builds in Extra Options 0.4.4, 0.6.0 and 0.6.1 are known), its time lock is not parked online: at plugin+0x");
     log_hex(first_check->rva, 4);
     if (first_readable) {
         log_raw(" expected ");

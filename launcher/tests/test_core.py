@@ -1140,7 +1140,7 @@ class ExtraOptionsTests(unittest.TestCase):
     def test_only_one_extra_options_pin_is_supplied(self):
         from fh2mp_launcher.constants import UPSTREAM
         self.assertEqual(set(UPSTREAM), {'platform', 'extraOptions', 'honkHonk', 'anna', 'achievements', 'nitroSystem', 'underglow'})
-        self.assertEqual(UPSTREAM['extraOptions']['version'], '0.6.0')
+        self.assertEqual(UPSTREAM['extraOptions']['version'], '0.6.1')
         self.assertEqual(UPSTREAM['extraOptions']['dll'], 'winmm.dll')
         with tempfile.TemporaryDirectory() as az:
             self.write(b'MZ-0.3.0-old', az, 'winmm.dll')
@@ -1215,6 +1215,32 @@ class ExtraOptionsTests(unittest.TestCase):
             self.write(b"MZ-0.4.4", az, "winmm.dll")                              # again (a 1.3.2 launcher put it back): the first copy stays
             shim.install_extra(az, self.release())
             self.assertEqual(self.read(az, "fh2extra", "winmm.dll.0.4.4-2"), b"MZ-0.4.4")
+
+    def test_the_0_6_0_build_is_updated_and_its_packages_refreshed(self):
+        """Launchers 1.3.3 to 1.4.0 installed 0.6.0: its winmm.dll is kept under its version, its plugin DLLs in mods/Forza Horizon 2 are
+        replaced by the release's (the old ones kept where Extra Options does not load them), the player's settings stay."""
+        h = lambda b: hashlib.sha256(b).hexdigest()  # noqa: E731
+        pkg = "mods/Forza Horizon 2/Extra Options - Weather Control"
+        release = dict(self.release(), **{f"{pkg}/mod.json": b"wc-json-1.1", f"{pkg}/plugins/EO_WeatherControl.dll": b"MZ-wc-1.0.9",
+                                          f"{pkg}/plugins/EO_WeatherControl.ini": b"; header\n[TimeLock]\nEnabled=0\n"})
+        with tempfile.TemporaryDirectory() as az, mock.patch.dict(shim.PREVIOUS_EXTRA_OPTIONS, dllSha256=h(b"MZ-0.6.0")):
+            self.write(b"MZ-0.6.0", az, "winmm.dll")
+            self.write(self.INI + b"Mine=1\n", az, "FH2_ExtraOptions.ini")
+            self.write(b"wc-json-1.1", az, *pkg.split("/"), "mod.json")
+            self.write(b"MZ-wc-1.0.8", az, *pkg.split("/"), "plugins", "EO_WeatherControl.dll")
+            self.write(b"[TimeLock]\nEnabled=1\n", az, *pkg.split("/"), "plugins", "EO_WeatherControl.ini")
+            did = shim.install_extra(az, release)
+            self.assertIn("updated FH2 Extra Options 0.6.0 to", did[-1])
+            self.assertNotIn("your mods move", did[-1])
+            self.assertEqual(self.read(az, "fh2extra", "winmm.dll.0.6.0"), b"MZ-0.6.0")
+            self.assertEqual(self.read(az, "winmm.dll"), b"MZ-release")
+            self.assertIn(b"Mine=1", self.read(az, "FH2_ExtraOptions.ini"))
+            plugins = os.path.join(az, *pkg.split("/"), "plugins")
+            self.assertEqual(self.read(plugins, "EO_WeatherControl.dll"), b"MZ-wc-1.0.9")
+            self.assertEqual(self.read(plugins, "EO_WeatherControl.dll.before-fh2mp-setup"), b"MZ-wc-1.0.8")
+            self.assertEqual(self.read(plugins, "EO_WeatherControl.ini"), b"[TimeLock]\nEnabled=1\n")
+            self.assertEqual([n for n in os.listdir(plugins) if n.lower().endswith(".dll")], ["EO_WeatherControl.dll"])
+            self.assertFalse(any("unsupported" in n for n in os.listdir(os.path.join(az, "fh2extra"))))
 
     def test_packages_go_to_the_fh2_folder_and_the_old_bundled_ones_are_retired(self):
         """0.6.0 brings its packages in mods/Forza Horizon 2; the 0.4.4 copies earlier launchers put at the mods root move to

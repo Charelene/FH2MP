@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Parking EO Weather Control's time lock during a session (src/eo_timelock.inc): a pure step, so it runs natively without Wine. Every case runs
-# with each known plugin build's layout (1.0.4 in Extra Options 0.4.4, 1.1.0 in 0.6.0).
+# with each known plugin build's layout (1.0.4 in Extra Options 0.4.4, 1.1.0 in 0.6.0 and in 0.6.1).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 tmp=$(mktemp -d)
@@ -12,7 +12,7 @@ cat > "$tmp/t.c" <<'EOT'
 #include "eo_timelock.inc"
 static int failed;
 #define CHECK(cond) do { if (!(cond)) { printf("FAIL line %d: %s\n", __LINE__, #cond); failed++; } } while (0)
-static _Alignas(8) unsigned char wc[0xb000], clock_a[0x400], clock_b[0x400];
+static _Alignas(8) unsigned char wc[0xc000], clock_a[0x400], clock_b[0x400];
 static const struct eo_wc_layout *at;
 #define ENABLED (*(int *)(wc + at->enabled))
 #define WEATHER (*(int *)(wc + at->weather))
@@ -74,17 +74,18 @@ static void cases(void)
 }
 int main(void)
 {
-    const struct eo_wc_layout *builds[] = {&EO_WC_1_0_4, &EO_WC_1_1_0};
+    const struct eo_wc_layout *builds[] = {&EO_WC_1_0_4, &EO_WC_1_1_0, &EO_WC_1_1_0_EO061};
+    const unsigned n = sizeof builds / sizeof builds[0];
     unsigned i;
 
     /* the four globals of a build never overlap (each is 4 bytes, the held clock 8, 8-aligned) */
-    for (i = 0; i < 2; i++) {
+    for (i = 0; i < n; i++) {
         const struct eo_wc_layout *l = builds[i];
         CHECK(l->held_clock % 8 == 0);
         CHECK(l->enabled != l->weather && l->enabled != l->generation && l->weather != l->generation);
         CHECK(l->held_clock + 8 <= sizeof wc);
     }
-    for (i = 0; i < 2; i++) {
+    for (i = 0; i < n; i++) {
         at = builds[i];
         cases();
     }
