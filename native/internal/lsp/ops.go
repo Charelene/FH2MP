@@ -536,6 +536,15 @@ func (o *Ops) route(r *Req, method, path string, body []byte) (int, any, *Downlo
 	if what == "online" && method == "GET" {
 		return 200, pyjson.Obj{{K: "players", V: o.online()}}, nil
 	}
+	if what == "rivals" && method == "GET" {
+		if len(rest) == 1 && rest[0] == "events" {
+			return 200, o.rivalsEvents(), nil
+		}
+		if len(rest) == 3 && rest[0] == "events" && rest[2] == "runs" && isDigits(rest[1]) {
+			eid, _ := strconv.ParseInt(rest[1], 10, 64)
+			return 200, o.rivalsRuns(eid), nil
+		}
+	}
 	if what == "challenges" && method == "GET" {
 		return 200, o.challenges(int(qInt(q, "top", 3, 0, 25))), nil
 	}
