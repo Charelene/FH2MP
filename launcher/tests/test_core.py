@@ -694,7 +694,7 @@ def platform_dll(version):
     return b"MZ" + u("ProductName\0\0FH2 Mod Platform\0") + u("ProductVersion\0") + b"\x00\x00" + u(version + "\0")
 
 
-def platform_files(version="2.8.0"):
+def platform_files(version="2.9.0"):
     return {"d3dcompiler_47.dll": platform_dll(version), "DWrite.dll": platform_dll(version), "LICENSE-FH2ModPlatform.txt": b"MIT License Trinculo54",
             "LICENSE-MinHook.txt": b"MinHook BSD"}
 
@@ -703,7 +703,7 @@ class ShimTests(unittest.TestCase):
     DLL = b"MZ....FH2MP-SHIM-VERSION:0.1.0:END...."
 
     def setUp(self):
-        patch = mock.patch.object(shim, 'PLATFORM_DLL_SHA256', hashlib.sha256(platform_dll('2.8.0')).hexdigest())
+        patch = mock.patch.object(shim, 'PLATFORM_DLL_SHA256', hashlib.sha256(platform_dll('2.9.0')).hexdigest())
         patch.start()
         self.addCleanup(patch.stop)
 
@@ -722,10 +722,10 @@ class ShimTests(unittest.TestCase):
             did = shim.install(d, self.DLL, platform=platform_files())
             self.assertEqual(shim.installed(d), ("ours", "0.1.0"))
             self.assertEqual(self.read(d, "fh2-mods", "FH2MP.dll"), self.DLL)
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.8.0"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.9.0"))
             for n in ("LICENSE-FH2ModPlatform.txt", "LICENSE-MinHook.txt"):
                 self.assertTrue(os.path.isfile(os.path.join(d, n)), n)
-            self.assertTrue(any("FH2 Mod Platform 2.8.0" in s for s in did))
+            self.assertTrue(any("FH2 Mod Platform 2.9.0" in s for s in did))
             self.assertFalse(os.path.exists(os.path.join(d, "winmm.dll")))
 
     def locked(self, locked_path):
@@ -818,24 +818,24 @@ class ShimTests(unittest.TestCase):
 
     def test_platform_newer_older_and_foreign_are_replaced_with_exact_pin(self):
         with tempfile.TemporaryDirectory() as d:
-            self.write(platform_dll("2.8.0"), d, "d3dcompiler_47.dll")
+            self.write(platform_dll("2.9.0"), d, "d3dcompiler_47.dll")
             shim.install(d, self.DLL, platform=platform_files())
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.8.0"))          # only the supplied build is supported
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.9.0"))          # only the supplied build is supported
             self.write(platform_dll("2.7.2"), d, "d3dcompiler_47.dll")
             self.assertEqual(shim.installed(d), ("old", "0.1.0"))                        # too old for this shim: install again
             shim.install(d, self.DLL, platform=platform_files())
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.8.0"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.9.0"))
             self.write(b"MZ fh2wheel loader", d, "d3dcompiler_47.dll")                     # fh2wheel's own loader
             self.assertEqual(shim.platform_installed(d), ("foreign", ""))
             did = shim.install(d, self.DLL, platform=platform_files())
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.8.0"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.9.0"))
             self.assertEqual(self.read(d, "d3dcompiler_47.dll.old"), b"MZ fh2wheel loader")
             self.assertTrue(any("d3dcompiler_47.dll.old" in s for s in did))
 
     @unittest.skipIf(sys.platform in ("win32", "darwin"), "needs a case-sensitive file system")
     def test_another_loader_in_other_letter_case_is_moved_aside(self):
         with tempfile.TemporaryDirectory() as d:
-            self.write(platform_dll("2.8.0"), d, "d3dcompiler_47.dll")
+            self.write(platform_dll("2.9.0"), d, "d3dcompiler_47.dll")
             self.write(b"MZ radio mod loader", d, "D3DCompiler_47.dll")          # Wine would load this one
             self.assertEqual(shim.platform_installed(d), ("foreign", ""))
             shim.install(d, self.DLL, platform=platform_files())
@@ -879,7 +879,7 @@ class ShimTests(unittest.TestCase):
             shim.uninstall(d)
             self.assertEqual(shim.installed(d), ("none", ""))
             self.assertEqual(self.read(d, "winmm.dll"), b"MZ extra options")
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.8.0"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.9.0"))
 
     def test_shim_zip(self):
         from fh2mp_launcher import core, updater
@@ -1517,7 +1517,7 @@ class SaveAdoptionTests(unittest.TestCase):
 
 class DevModeTests(unittest.TestCase):
     def setUp(self):
-        patch = mock.patch.object(shim, 'PLATFORM_DLL_SHA256', hashlib.sha256(platform_dll('2.8.0')).hexdigest())
+        patch = mock.patch.object(shim, 'PLATFORM_DLL_SHA256', hashlib.sha256(platform_dll('2.9.0')).hexdigest())
         patch.start()
         self.addCleanup(patch.stop)
         self.home = tempfile.TemporaryDirectory()
@@ -1555,7 +1555,7 @@ class DevModeTests(unittest.TestCase):
         from fh2mp_launcher import core
         from fh2mp_launcher.settings import Settings
         with tempfile.TemporaryDirectory() as d:
-            for name, body in (("azimuth.exe", b"MZ"), ("d3dcompiler_47.dll", platform_dll("2.8.0")), ("DWrite.dll", platform_dll("2.8.0"))):     # a bare DLL needs the platform
+            for name, body in (("azimuth.exe", b"MZ"), ("d3dcompiler_47.dll", platform_dll("2.9.0")), ("DWrite.dll", platform_dll("2.9.0"))):     # a bare DLL needs the platform
                 with open(os.path.join(d, name), "wb") as f:
                     f.write(body)
             dll = os.path.join(d, "local.dll")

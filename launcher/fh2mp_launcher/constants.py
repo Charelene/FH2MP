@@ -60,12 +60,14 @@ AZIMUTH_ARCHIVE = {"name": "azimuth-windows-1.0.4.zip", "url": MIRROR_BASE + "az
 # release zip's SHA-256 and the DLL's inside it. `files` maps a file in the zip to where it goes in the Azimuth folder.
 _EO_WC_LANGS = ('BR', 'CHT', 'CZ', 'DE', 'EN', 'ES', 'FR', 'GB', 'HU', 'IT', 'JP', 'KO', 'MX', 'NL', 'PL', 'RU')    # Weather Control's page languages
 UPSTREAM = {
+    # 2.9.0 (API 10, 2026-11-14): FH2Platform.Online's going_online, which the shim asks before it goes online (shim/src/online_gate.inc).
+    # The zip also carries the SDK (include/, tools/, examples/); only the two loader DLLs and the licences are taken.
     "platform": {
-        "name": "FH2 Mod Platform", "author": "Trinculo54", "license": "MIT", "version": "2.8.0",
-        "url": "https://github.com/Trinculo54/fh2-mod-platform/releases/download/v2.8.0/FH2-Mod-Platform-v2.8.0.zip",
-        "mirror": MIRROR_BASE + "FH2-Mod-Platform-v2.8.0.zip",
-        "sha256": "24606e6578eebcbc2d831ad48041ff74cf615c2f36160f0950e1045fd7caddd7", "size": 2339464,
-        "dll": "d3dcompiler_47.dll", "dllSha256": "a7db4a14de47cd7af98fce036877a72a88ea65498818bb2ecb755628fc99d357",
+        "name": "FH2 Mod Platform", "author": "Trinculo54", "license": "MIT", "version": "2.9.0",
+        "url": "https://github.com/Trinculo54/fh2-mod-platform/releases/download/v2.9.0/FH2-Mod-Platform-v2.9.0.zip",
+        "mirror": MIRROR_BASE + "FH2-Mod-Platform-v2.9.0.zip",
+        "sha256": "1078c9629bb866af70092c934e6af12df31ca2dd6ecb99953ac6ee9e0bee819e", "size": 4103212,
+        "dll": "d3dcompiler_47.dll", "dllSha256": "fdb970d9f98329526eb7427ded89fb1504615db7cfd30735b833d9fdd1173f35",
         "files": {"d3dcompiler_47.dll": "d3dcompiler_47.dll", "DWrite.dll": "DWrite.dll", "LICENSE.txt": "LICENSE-FH2ModPlatform.txt",
                   "LICENSE-MinHook.txt": "LICENSE-MinHook.txt"},
     },
