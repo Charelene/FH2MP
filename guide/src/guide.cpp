@@ -911,11 +911,11 @@ void Guide::draw_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 ori
         dl->PushClipRect(p0, p1, true);
         float x = at(bx + 64 + 22, 0).x;
         if (toast_.detail.empty()) {
-            dl->AddText(bf, 17 * s, ImVec2(x, css_top(a.bold_m, 17 * s, at(0, by + 32).y)), kc, toast_.title.c_str());
+            add_text(dl, bf, 17 * s, ImVec2(x, css_top(a.bold_m, 17 * s, at(0, by + 32).y)), kc, toast_.title.c_str());
         } else {
             // two 22-unit lines centred in the 64-unit panel: their line boxes are centred on by + 21 and by + 43
-            dl->AddText(bf, 17 * s, ImVec2(x, css_top(a.bold_m, 17 * s, at(0, by + 21).y)), kc, toast_.title.c_str());
-            dl->AddText(a.text, 17 * s, ImVec2(x, css_top(a.text_m, 17 * s, at(0, by + 43).y)), WHITE, toast_.detail.c_str());
+            add_text(dl, bf, 17 * s, ImVec2(x, css_top(a.bold_m, 17 * s, at(0, by + 21).y)), kc, toast_.title.c_str());
+            add_text(dl, a.text, 17 * s, ImVec2(x, css_top(a.text_m, 17 * s, at(0, by + 43).y)), WHITE, toast_.detail.c_str());
         }
         dl->PopClipRect();
     }

@@ -34,15 +34,15 @@ const uint32_t I_LOCK = 0xe897;        // Material Icons "lock"
 void g_mark(ImDrawList* dl, const GuideAssets& a, float cx, float cy, float d, ImU32 col) {
     ImFont* f = a.text_bold ? a.text_bold : a.text;
     dl->AddCircle(ImVec2(cx, cy), d * 0.5f - d * 0.05f, col, 32, d * 0.1f);
-    float size = d * 0.62f, w = f->CalcTextSizeA(size, FLT_MAX, 0, "G").x;
-    dl->AddText(f, size, ImVec2(cx - w * 0.5f, caps_top(a.bold_m, size, cy)), col, "G");
+    float size = d * 0.62f, w = text_w(f, size, "G");
+    add_text(dl, f, size, ImVec2(cx - w * 0.5f, caps_top(a.bold_m, size, cy)), col, "G");
 }
 
 // A number with the mark before it, ending at x (right aligned), centred on cy; returns where it starts.
 float g_score(ImDrawList* dl, const GuideAssets& a, const View& v, float x, float cy, float size, ImU32 col, int points) {
     char num[16];
     snprintf(num, sizeof num, "%d", points);
-    float w = a.text->CalcTextSizeA(v.sz(size), FLT_MAX, 0, num).x;
+    float w = text_w(a.text, v.sz(size), num);
     text_mid(dl, a.text, a.text_m, v.sz(size), x, cy, col, num, true);
     float d = v.sz(size);
     g_mark(dl, a, x - w - v.sz(7) - d * 0.5f, cy, d, col);
@@ -677,8 +677,8 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
                     // the Gamerscore mark: a white disc with the G cut out
                     float gd = TSZ * 0.82f * s;
                     dl->AddCircleFilled(ImVec2(x2 + gd / 2, y2), gd / 2, col, 32);
-                    float gsz = gd * 0.66f, gw = bf->CalcTextSizeA(gsz, FLT_MAX, 0, "G").x;
-                    dl->AddText(bf, gsz, ImVec2(x2 + gd / 2 - gw / 2, caps_top(a.bold_m, gsz, y2)), alpha(PANEL, text_op), "G");
+                    float gsz = gd * 0.66f, gw = text_w(bf, gsz, "G");
+                    add_text(dl, bf, gsz, ImVec2(x2 + gd / 2 - gw / 2, caps_top(a.bold_m, gsz, y2)), alpha(PANEL, text_op), "G");
                     x2 += gd + 6 * s;
                 }
                 text_fit(dl, a.text, a.text_m, TSZ * s, x2, y2, (area - gmark) * s, col, second);

@@ -36,6 +36,14 @@ const float GUIDE_K = 0.84f, GUIDE_CY = 330, PAGE_L = 205, PAGE_W = 862;
 // Dear ImGui rounds a font size to whole pixels and asserts on 0 (ImFontAtlasBakedGetOrAdd, imgui_draw.cpp:5453), which stops the game
 // with an assert box; text or an icon under a pixel draws nothing instead (a toast's icon zooming out passes 0.36-0.5 px).
 inline bool font_px_ok(float size) { return size >= 1.0f; }
+// Every AddText and CalcTextSizeA at a size that scales (s, zoom, a toast's animation) goes through these: ImGui bakes the font at that size
+// in both, so both assert. #476 (2026-11-13, Guide 1.4.0, dump 6e9e4bb894970ba3: font_size 0.0, density 1.0, a 2560 x 1080 frame, the Guide
+// closed) stopped there in draw_toast, the toast's icon zooming out (what font_px_ok in icon_mid fixes); the badges, the hint bar, wrapped
+// text and the Gamerscore mark took scaled sizes straight to ImGui the same way.
+inline void add_text(ImDrawList* dl, ImFont* f, float size, ImVec2 at, ImU32 col, const char* text, const char* end = nullptr) {
+    if (font_px_ok(size)) dl->AddText(f, size, at, col, text, end);
+}
+inline float text_w(ImFont* f, float size, const char* text) { return font_px_ok(size) ? f->CalcTextSizeA(size, FLT_MAX, 0, text).x : 0.0f; }
 
 // Material Icons (filled).
 enum : uint32_t {
@@ -146,8 +154,8 @@ inline float badge(ImDrawList* dl, const GuideAssets& a, const char* key, ImU32 
     dl->AddRect(ImVec2(k0.x + s, k0.y + s), ImVec2(k1.x - s, k1.y - s), alpha(ring, op), std::max(0.0f, rr - s), 0, 2 * s);
     ImFont* kf = a.text_bold ? a.text_bold : a.text;
     float size = (wide || w > 0 ? 11 : 12) * s;
-    float tw = kf->CalcTextSizeA(size, FLT_MAX, 0, key).x;
-    dl->AddText(kf, size, ImVec2(x + (kw - tw) * 0.5f, caps_top(a.bold_m, size, cy)), alpha(ring, op), key);
+    float tw = text_w(kf, size, key);
+    add_text(dl, kf, size, ImVec2(x + (kw - tw) * 0.5f, caps_top(a.bold_m, size, cy)), alpha(ring, op), key);
     return kw;
 }
 
@@ -178,7 +186,7 @@ inline void hint_bar(ImDrawList* dl, const GuideAssets& a, const View& v, float 
         if (hints[i].label) {
             x += 7;
             ImVec2 q = v.pt(x, cy);
-            dl->AddText(a.text, v.sz(19), ImVec2(q.x, caps_top(a.text_m, v.sz(19), q.y)), alpha(WHITE, op), hints[i].label);
+            add_text(dl, a.text, v.sz(19), ImVec2(q.x, caps_top(a.text_m, v.sz(19), q.y)), alpha(WHITE, op), hints[i].label);
             x += a.text->CalcTextSizeA(19, FLT_MAX, 0, hints[i].label).x + 22;
         } else {
             x += 8;
@@ -259,7 +267,7 @@ inline float wrapped(ImDrawList* dl, const GuideAssets& a, const View& v, float 
         for (const char* q = p; q < brk; q++)
             if (*q == '\n') { stop = q; brk = q + 1; break; }
         ImVec2 at = v.pt(x, y + used + size * lh * 0.5f);
-        dl->AddText(a.text, v.sz(size), ImVec2(at.x, css_top(a.text_m, v.sz(size), at.y)), col, p, stop);
+        add_text(dl, a.text, v.sz(size), ImVec2(at.x, css_top(a.text_m, v.sz(size), at.y)), col, p, stop);
         used += size * lh;
         p = brk;
         while (p < end && *p == ' ') p++;
