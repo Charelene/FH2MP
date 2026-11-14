@@ -3242,6 +3242,7 @@ static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *
 #include "event_fix.inc"
 #include "event_stock.inc"
 #include "stall_trace.inc"
+#include "quickchat_sync.inc"
 
 /*
  * #64: a Monthly Rival started from the pause menu inside an online session loaded for ever. The menu's launch (RivalsModule
@@ -5737,6 +5738,7 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_CARSELECT_HOLD", env, 8) == 0) patch_carsel();
             patch_mods(g_exe_dir);    /* NitroSystem's NOS rule (always online) and other players' NOS and underglow */
             if (GetEnvironmentVariableW(L"FH2MP_NO_RACEWAIT", env, 8) == 0) patch_race_wait();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_QUICKCHAT", env, 8) == 0) start_quickchat();   /* nothing without QuickChat */
         }
         {
             wchar_t env[8];
