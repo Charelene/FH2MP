@@ -475,6 +475,13 @@ private:
     void draw_community_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now);
     void one_player(const one::Panel& p, float y, const Friend& f, Relation rel, bool greyed) const;
     void draw_theme_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now);
+    void draw_profile_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now);
+    void draw_edit_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now);
+    void draw_message_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now);
+    void draw_create_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now);
+    void draw_pick_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now);
+    void draw_compose_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now);
+    void draw_box_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, double now);
     void draw_voice_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now);
     one::Panel one_frame(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now, const std::string& title,
                          bool home = false) const;

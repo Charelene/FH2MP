@@ -551,6 +551,7 @@ void Guide::join_player(const Friend& p, std::vector<GuideRequest>& out, double 
 // Artboards 8 and 9: two tabs, then the options on the left and the player's card and a pane on the right. The tabs are the 360's tab
 // strip (42 canvas units, the chosen one the panel itself), the options its rows (28 of its units high, their text 18 in).
 void Guide::draw_profile(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now) {
+    if (guide_style_ == 1) return draw_profile_one(dl, a, origin, s, op, now);
     View v{origin, s, zoom};
     const float L = PAGE_L, W = PAGE_W;
     float slide, pop, title_op;
@@ -719,6 +720,7 @@ void Guide::handle_edit(PadEvent e, std::vector<GuideRequest>& out, double now) 
 }
 
 void Guide::draw_edit(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now) {
+    if (guide_style_ == 1) return draw_edit_one(dl, a, origin, s, op, now);
     View v{origin, s, zoom};
     const float L = PAGE_L, W = PAGE_W;
     float slide, pop, title_op;
@@ -883,4 +885,82 @@ void Guide::draw_community_one(ImDrawList* dl, const GuideAssets& a, ImVec2 orig
         const Hint hints[] = {{"B", "Back", RING_B}, lb, rb};
         p.hints(hints, 3);
     }
+}
+
+// ---- a player's profile and Edit Profile in the Xbox One layout (one.h)
+
+// The player's gamertag as the page's name, the two tabs' names, then their card (picture, level and club, Gamerscore, what they are
+// doing, where they are), the tab's options one line each, and on Personal Profile the four texts under them.
+void Guide::draw_profile_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now) {
+    using namespace one;
+    const Friend* live = find(prof_.xuid);
+    const Friend& f = live ? *live : prof_;
+    const bool me = f.xuid && f.xuid == social_.me.xuid;
+    Panel p = one_frame(dl, a, origin, s, op, now, f.tag.empty() ? "Profile" : f.tag);
+    static const char* const NAMES[2] = {"Gamer profile", "Personal profile"};
+    p.segments(NAMES, 2, prof_tab_);
+    const float top = PY + LIST + SEG_H;
+    if (!f.tag.empty()) {
+        p.avatar(me ? a.gamerpic : a.pic(f.xuid), f.xuid, p.L(PX + 72, top + 60), 44, p.lcol(WHITE));
+        std::string first = f.level > 0 ? "Level " + std::to_string(f.level) : "";
+        if (!f.club.empty()) first += (first.empty() ? "" : "  -  ") + f.club;
+        // Gamerscore, as on the console's card: this player's from the Achievements mod's file, another player's from the server
+        int score = me && ach_.known ? ach_.gamerscore() : f.gamerscore;
+        bool on = f.state != Friend::Offline || me;
+        std::string doing = f.state == Friend::Playing ? "Forza Horizon 2" : on ? "Online" : f.last_seen >= 0 ? ago(f.last_seen, "Last online ") : "Offline";
+        if (f.state == Friend::Playing) {
+            std::string where = !me && same_game(f, social_.me) ? "In Your Game" : lobby_words(f);
+            if (!where.empty()) doing += "  -  " + where;
+        }
+        std::string waiting = me ? "" : waiting_words(f, relation(f.xuid));
+        float y = top + 28;
+        if (!first.empty()) p.text(p.L(PX + 136, y), 26, p.lcol(WHITE), first, false, -1, 370), y += 32;
+        if (score >= 0) p.text(p.L(PX + 136, y), 23, p.lcol(GREY1), "Gamerscore " + std::to_string(score)), y += 30;
+        p.text(p.L(PX + 136, y), 23, p.lcol(on ? WHITE : GREY1), doing, false, -1, 370);
+        std::string under = f.location;
+        if (!waiting.empty()) under += (under.empty() ? "" : "  -  ") + waiting;
+        if (!under.empty()) p.text(p.L(PX + 32, top + 136), 23, p.lcol(waiting.empty() ? GREY1 : blend(ACCENT, WHITE, 0.4f)), under, false, -1, PW - 64);
+    }
+    p.divider(top + 162);
+
+    // the options (they come in when the tab changes)
+    float te = ease_guide(std::clamp(float((now - prof_at_) / 0.26), 0.0f, 1.0f));
+    p.cop *= te, p.cdx += (1 - te) * 40 * prof_dir_;
+    std::vector<Opt> opts = profile_options(prof_tab_);
+    const int row = prof_row_[prof_tab_];
+    const float oy = top + 176;
+    if (row >= 0 && row < int(opts.size()) && opts[row].enabled) p.focus(oy + prof_bar_.value(now) * LINE_H, LINE_H);
+    for (size_t i = 0; i < opts.size(); i++) p.line(oy + i * LINE_H, 0, opts[i].label, "", opts[i].enabled);
+    if (prof_tab_ == 1 && !f.tag.empty()) {
+        // the four texts: a small name over each; the console's words when there is none
+        const std::string* vals[4] = {&f.motto, &f.name, &f.location, &f.bio};
+        const char* none[4] = {"(No motto)", "(No name)", "(No location)", "(No bio)"};
+        float y = oy + opts.size() * LINE_H + 14;
+        p.divider(y);
+        y += 22;
+        dl->PushClipRect(p.P(PX, y - 8), p.P(PX + PW, PY + PH - 14), true);
+        for (int i = 0; i < 4; i++) {
+            p.text(p.L(PX + 32, y + 10), 19, p.lcol(GREY1), FIELD_NAME[i]);
+            y += 24;
+            bool has = !vals[i]->empty();
+            y += p.para(PX + 32, y, 23, p.lcol(has ? WHITE : GREY1), has ? *vals[i] : none[i], PW - 64) + 10;
+        }
+        dl->PopClipRect();
+    }
+    const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}, {"LB", nullptr, MUTED3}, {"RB", "Switch", MUTED3}};
+    p.hints(hints, 4);
+}
+
+// The four texts, two lines each: the text's name over what it says now.
+void Guide::draw_edit_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now) {
+    using namespace one;
+    Panel p = one_frame(dl, a, origin, s, op, now, "Edit profile");
+    const Friend& me = social_.me;
+    const std::string* vals[4] = {&me.motto, &me.name, &me.location, &me.bio};
+    const char* none[4] = {"(No motto)", "(No name)", "(No location)", "(No bio)"};
+    const float top = PY + LIST;
+    if (edit_row_ >= 0) p.focus(top + edit_bar_.value(now) * TWO_H, TWO_H);
+    for (int i = 0; i < 4; i++) p.two(top + i * TWO_H, PX + 32, FIELD_NAME[i], vals[i]->empty() ? none[i] : *vals[i], true, PW - 64);
+    const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}};
+    p.hints(hints, 2);
 }

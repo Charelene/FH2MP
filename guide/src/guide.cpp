@@ -741,8 +741,8 @@ bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double 
         float k = ease_guide(std::clamp(float((now - opened_) / 0.26), 0.0f, 1.0f));
         float zoom = 0.92f + 0.08f * k, op = k;
         // the Xbox One guide: its dim is lighter (0.45), and its own screens stand in its panel, not in the 360's frame
-        const bool one = guide_style_ == 1, one_screen = one && (page() == Page::Home || page() == Page::Notifications || page() == Page::Community ||
-                                                       page() == Page::Theme || page() == Page::Voice);
+        const bool one = guide_style_ == 1, one_screen = one && page() != Page::Keyboard && page() != Page::Achievements && page() != Page::Compare &&
+                                               page() != Page::AchDetail;  // those four have no Xbox One layout: they keep the 360's frame
         dl->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), IM_COL32(0, 0, 0, int((one ? 115 : 178) * op)));
         // a message box takes the frame over, as the 360's does: what the Guide was showing fades out under it
         if (box_.on) op *= 1 - ease_guide(std::clamp(float((now - box_.at) / 0.2), 0.0f, 1.0f));
@@ -908,6 +908,7 @@ void Guide::draw_home(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float
 // and the box's own legend under it. What the Guide was showing is not drawn while it is up (draw fades it out).
 void Guide::draw_box(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float w, float h, double now) {
     (void)w, (void)h;
+    if (guide_style_ == 1) return draw_box_one(dl, a, origin, s, now);
     float k = ease_guide(std::clamp(float((now - box_.at) / 0.2), 0.0f, 1.0f));
     View v{origin, s, 0.96f + 0.04f * k};
     side_fill(dl, v.pt(ux(243), uy(30)), v.pt(ux(608), uy(60)), k);
@@ -1036,4 +1037,30 @@ void Guide::draw_home_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, f
     }
     const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}, {"LB", nullptr, MUTED3}, {"RB", "Switch", MUTED3}};
     p.hints(hints, 4);
+}
+
+// The message box in the Xbox One layout: a panel in the middle of the screen (640 wide, the guide's corners and colour), its heading
+// bold, the text under it, and the buttons one line each with the guide's focus.
+void Guide::draw_box_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, double now) {
+    using namespace one;
+    float k = ease_guide(std::clamp(float((now - box_.at) / 0.2), 0.0f, 1.0f));
+    Panel p(dl, a, origin, s, k, 1);
+    const float W = 640, x = (p.size.x / p.U - W) / 2, pad = 36;
+    // how high the text is: laid out once without drawing (para draws), by the font's own wrapping
+    float text_h = 0;
+    for (const char *b = box_.body.c_str(), *e = b + box_.body.size(); b < e;) {
+        const char* br = p.tf->CalcWordWrapPosition(26, b, e, W - 2 * pad);
+        if (br == b) br = b + 1;
+        text_h += 26 * 1.3f, b = br;
+        while (b < e && *b == ' ') b++;
+    }
+    const float H = 96 + text_h + 30 + LINE_H * box_.buttons.size() + 20, y = (p.size.y / p.U - H) / 2 - 10 * (1 - k);
+    for (int i = 5; i >= 1; i--)
+        dl->AddRectFilled(p.P(x - i * 3, y - i * 3 + 6), p.P(x + W + i * 3, y + H + i * 3 + 6), IM_COL32(0, 0, 0, int(13 * k)), (13 + i * 3) * p.U);
+    dl->AddRectFilled(p.P(x, y), p.P(x + W, y + H), p.col(IM_COL32(0x1e, 0x1e, 0x1e, 255)), 13 * p.U);
+    p.text(p.P(x + pad, y + 52), 32, p.col(WHITE), box_.title, true, -1, W - 2 * pad);
+    p.para(x + pad, y + 96, 26, p.col(GREY1), box_.body, W - 2 * pad);
+    const float by = y + 96 + text_h + 30;
+    p.focus(by + box_.bar.value(now) * LINE_H, LINE_H, x + 13, W - 26);
+    for (size_t i = 0; i < box_.buttons.size(); i++) p.text(p.P(x + pad, by + i * LINE_H + LINE_H / 2), 26, p.col(WHITE), box_.buttons[i]);
 }
