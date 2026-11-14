@@ -154,6 +154,7 @@ void Guide::toggle(double now) {
     } else {
         closed_ = now, sent_.clear(), box_.on = false, draft_ = Draft(), waiting_xuid_ = 0, held_ = 0;
     }
+    if (guide_style_ == 1 && blade_ == 1) blade_ = 0;  // the Xbox One layout has no tab for the player's own blade
     if (!widths_set_) {
         for (int i = 0; i < 3; i++) width_[i].set(i == blade_ ? BLADE_W : STRIP_W);
         bar_[1].set(1);  // canvas: the player's blade opens on Friends
@@ -236,7 +237,7 @@ void Guide::entered(Page p, double now) {
     (void)now;
     if (p == Page::Community) {
         friends_.clamp(1 + int(friend_rows().size()), 6);
-        messages_.clamp(1 + int(messages().size()), 8);
+        messages_.clamp(1 + int(messages().size()), msg_rows());
         players_.clamp(int(social_.players.size()), 6);
         party_.clamp(int(party_rows().size()), 6);
     } else if (p == Page::Profile) {
@@ -369,7 +370,7 @@ void Guide::set_social(const Social& s) {
     Page p = page();
     if (p == Page::Community || p == Page::Recipients || p == Page::Profile || p == Page::Compose) {
         friends_.clamp(1 + int(friend_rows().size()), 6);
-        messages_.clamp(1 + int(messages().size()), 8);
+        messages_.clamp(1 + int(messages().size()), msg_rows());
         players_.clamp(int(social_.players.size()), 6);
         party_.clamp(int(party_rows().size()), 6);
         pick_.clamp(int(pick_rows().size()), 6);
@@ -540,9 +541,15 @@ void Guide::handle_home(PadEvent e, std::vector<GuideRequest>& out, double now) 
         if (f >= 0) bar_[blade_].go(float(f), now, 0.14f);
         break;
     case PadEvent::Left:
-    case PadEvent::Lb: switch_to(blade_ - 1, now); break;
+    case PadEvent::Lb:
+        if (guide_style_ == 1) one_tab_to(one_tab() - 1, now);
+        else switch_to(blade_ - 1, now);
+        break;
     case PadEvent::Right:
-    case PadEvent::Rb: switch_to(blade_ + 1, now); break;
+    case PadEvent::Rb:
+        if (guide_style_ == 1) one_tab_to(one_tab() + 1, now);
+        else switch_to(blade_ + 1, now);
+        break;
     case PadEvent::B: toggle(now); break;
     case PadEvent::A: {
         if (f < 0 || f >= int(rows.size()) || !rows[f].enabled) break;
@@ -586,6 +593,29 @@ void Guide::fix_home_focus() {
         if (f >= 0 && f < int(rows.size()) && rows[f].enabled) continue;
         f = first_enabled(rows);
         if (f >= 0) bar_[b].set(float(f));
+    }
+}
+
+// The Xbox One layout's tabs, split as the console's guide splits them: Games (the Games blade), Social (Community's Party, Friends
+// and Players), Messages (Community's Messages) and Settings (the Settings blade). The player's own blade has no tab there: its
+// rows only led to the two in the middle.
+int Guide::one_tab() const {
+    if (stack_.size() > 1 && stack_[1] == Page::Community) return comm_tab_ == TabMessages ? 2 : 1;
+    return blade_ == 0 ? 0 : 3;
+}
+
+void Guide::one_tab_to(int t, double now) {
+    const int from = one_tab();
+    if (t < 0 || t > 3 || t == from) return;
+    const int d = t > from ? 1 : -1;
+    if (t == 1 || t == 2) {
+        comm_tab_ = t == 2 ? TabMessages : TabFriends, comm_dir_ = d, comm_at_ = now;
+        stack_ = {Page::Home, Page::Community}, page_at_ = -10;
+        entered(Page::Community, now);
+    } else {
+        stack_ = {Page::Home}, page_at_ = -10;
+        switch_to(t == 0 ? 0 : 2, now);
+        switch_dir_ = d, switched_ = now;  // (also when the blade was that one already: the rows come in again)
     }
 }
 
@@ -1020,11 +1050,13 @@ one::Panel Guide::one_frame(ImDrawList* dl, const GuideAssets& a, ImVec2 origin,
     one::Panel p(dl, a, origin, s, op, ease_guide(std::clamp(float((now - opened_) / 0.25), 0.0f, 1.0f)));
     p.corner(ach_.known ? ach_.gamerscore() : -1, voice_mic_);
     p.panel();
-    float at = 0;
-    for (int i = 0; i < 3; i++) at += i * width_[i].value(now);
+    const int tab = one_tab();
+    if (one_bar_at_ < 0) one_bar_.set(float(tab));
+    else if (one_bar_at_ != tab) one_bar_.go(float(tab), now, 0.25f);
+    one_bar_at_ = tab;
     int unread = 0;
     for (const MessageItem& m : messages()) unread += m.unread;
-    p.tabs((at - 3 * STRIP_W) / (BLADE_W - STRIP_W), a.gamerpic, social_.me.xuid, gamertag, unread);
+    p.tabs(one_bar_.value(now), a.gamerpic, social_.me.xuid, gamertag, unread);
     if (home) {
         float e = ease_guide(std::clamp(float((now - switched_) / 0.25), 0.0f, 1.0f));
         p.cop = e, p.cdx = (1 - e) * 40 * switch_dir_;

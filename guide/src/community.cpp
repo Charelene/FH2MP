@@ -17,7 +17,7 @@ namespace {
 
 const int FRIEND_ROWS = 6;  // 69-unit rows under the tabs
 const int MSG_ROWS = 8;     // 56-unit rows
-const int ONE_MSG_ROWS = 5; // the Xbox One layout's cards, 139 apart
+const int ONE_MSG_ROWS = 6; // the Xbox One layout's cards, 139 apart
 const uint32_t COMM_ICON[4] = {I_GROUPS, I_PERSON, I_MAIL, I_GAMES};
 
 enum ProfileCmd { PInvite, PJoin, PMessage, PAddFriend, PAccept, PDecline, PCancel, PRemove, PBio, PEdit, PCompare };
@@ -139,6 +139,19 @@ void Guide::delete_message(const MessageItem& m, std::vector<GuideRequest>& out,
 }
 
 void Guide::handle_community(PadEvent e, std::vector<GuideRequest>& out, double now) {
+    if (guide_style_ == 1) {
+        // the Xbox One layout: Social and Messages are tabs of the guide. LB and RB go from tab to tab; left and right go through
+        // Social's lists (Party, Friends, Players) and on to the next tab at their ends; B closes the guide, as on any tab
+        static const int ORDER[3] = {TabParty, TabFriends, TabPlayers};
+        const int d = (e == PadEvent::Left || e == PadEvent::Lb) ? -1 : 1, i = comm_tab_ == TabParty ? 0 : comm_tab_ == TabFriends ? 1 : 2;
+        if (e == PadEvent::Lb || e == PadEvent::Rb) return one_tab_to(one_tab() + d, now);
+        if (e == PadEvent::Left || e == PadEvent::Right) {
+            if (comm_tab_ == TabMessages || i + d < 0 || i + d > 2) return one_tab_to(one_tab() + d, now);
+            comm_dir_ = d, comm_tab_ = ORDER[i + d], comm_at_ = now;
+            return;
+        }
+        if (e == PadEvent::B) return toggle(now);
+    }
     if (e == PadEvent::Left || e == PadEvent::Lb || e == PadEvent::Right || e == PadEvent::Rb) {
         int d = (e == PadEvent::Left || e == PadEvent::Lb) ? -1 : 1;
         int t = std::clamp(comm_tab_ + d, 0, 3);
@@ -793,8 +806,9 @@ void Guide::one_note(const one::Panel& p, float y, const MessageItem& m) const {
     if (!when.empty()) p.text(p.L(x + 500, cy - 18), 23, p.lcol(GREY1), when, false, 1);
 }
 
-// The chosen tab's name with its count, the four tabs' names under it, then the tab's list: players two lines high, messages on the
-// console's notification cards (five fit), the focus gliding over them.
+// The guide's Social and Messages tabs. Social: the chosen list's name with its count, its three lists' names under it, then the
+// players two lines high. Messages: its name with how many are new, then the messages on the console's notification cards (six
+// fit). The focus glides over either.
 void Guide::draw_community_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now) {
     using namespace one;
     std::vector<FriendRow> friends = friend_rows();
@@ -809,11 +823,12 @@ void Guide::draw_community_one(ImDrawList* dl, const GuideAssets& a, ImVec2 orig
     else if (comm_tab_ == TabMessages) snprintf(title, sizeof title, "Messages  -  %d new", unread);
     else snprintf(title, sizeof title, "Players  -  %d", int(players.size()));
     Panel p = one_frame(dl, a, origin, s, op, now, title);
-    static const char* const NAMES[4] = {"Party", "Friends", "Messages", "Players"};
-    p.segments(NAMES, 4, comm_tab_);
+    const bool social = comm_tab_ != TabMessages;
+    static const char* const NAMES[3] = {"Party", "Friends", "Players"};
+    if (social) p.segments(NAMES, 3, comm_tab_ == TabParty ? 0 : comm_tab_ == TabFriends ? 1 : 2);
     float ce = ease_guide(std::clamp(float((now - comm_at_) / 0.26), 0.0f, 1.0f));
     p.cop *= ce, p.cdx += (1 - ce) * 40 * comm_dir_;
-    const float top = PY + LIST + SEG_H;
+    const float top = PY + LIST + (social ? SEG_H : 0);
     auto empty = [&](const char* why) { p.text(p.L(PX + 32, top + 40), 23, p.lcol(GREY1), why); };
     dl->PushClipRect(p.P(PX, top - 6), p.P(PX + PW, PY + PH - 6), true);
     switch (comm_tab_) {
@@ -854,7 +869,7 @@ void Guide::draw_community_one(ImDrawList* dl, const GuideAssets& a, ImVec2 orig
             p.icon(I_EDIT, c, 34, p.lcol(WHITE));
             p.text(p.L(PX + 120, y + NOTE_H / 2), 26, p.lcol(WHITE), "Create new");
         }
-        p.more(messages_.top > 0, last < n);
+        p.more(messages_.top > 0, last < n, PY + PH - 14);  // under the sixth card
         break;
     }
     case TabParty: {

@@ -141,12 +141,12 @@ struct Panel {
             dl->AddRectFilled(P(PX - i * 3, PY - i * 3 + 6), P(PX + PW + i * 3, PY + PH + i * 3 + 6), IM_COL32(0, 0, 0, int(13 * op)), (13 + i * 3) * U);
         dl->AddRectFilled(P(PX, PY), P(PX + PW, PY + PH), col(PANEL1), 13 * U);
     }
-    // The tabs: the Guide's three blades (Games, the player's picture as the console's last tab is, Settings); bar: where the accent
-    // bar stands, as a tab's number (it glides between them); count: a counter in the accent on the player's tab (0: none), as the
-    // console's chat tab has.
+    // The tabs, split as the console's are: Games, Social (people), Messages (chat) and Settings (the player's picture, as the
+    // console's "Profile & system" is); bar: where the accent bar stands, as a tab's number (it glides between them); count: the
+    // counter in the accent on the Messages tab (0: none).
     void tabs(float bar, ImTextureID pic, uint64_t xuid, const std::string& tag, int count) const {
-        static const uint32_t ICON[3] = {I_GAMES, 0, I_SETTINGS};
-        for (int i = 0; i < 3; i++) {
+        static const uint32_t ICON[4] = {I_GAMES, I_GROUPS, I_MAIL, 0};
+        for (int i = 0; i < 4; i++) {
             ImVec2 c = P(PX + 63 + 84 * i, PY + 56);
             if (ICON[i]) icon(ICON[i], c, 38, col(WHITE));
             else avatar(pic, xuid, tag, c, 27, col(WHITE));
@@ -154,7 +154,7 @@ struct Panel {
         float x = PX + 63 + 84 * bar;
         dl->AddRectFilled(P(x - 41.5f, PY + 101), P(x + 41.5f, PY + 106), col(ACCENT), 2.5f * U);
         if (count <= 0) return;
-        ImVec2 b = P(PX + 63 + 84 + 21, PY + 36);
+        ImVec2 b = P(PX + 63 + 84 * 2 + 17, PY + 38);
         dl->AddCircleFilled(b, 13 * U, col(ACCENT), 24);
         text(b, 17, col(INK), std::to_string(std::min(count, 99)), true, 0);
     }
@@ -222,9 +222,9 @@ struct Panel {
         }
     }
     // Up and down marks at the panel's foot when a list has more above or below.
-    void more(bool up, bool down) const {
-        if (up) icon(I_EXPAND_LESS, P(PX + PW - 70, PY + PH - 26), 26, col(GREY1));
-        if (down) icon(I_EXPAND_MORE, P(PX + PW - 36, PY + PH - 26), 26, col(GREY1));
+    void more(bool up, bool down, float y = PY + PH - 26) const {
+        if (up) icon(I_EXPAND_LESS, P(PX + PW - 70, y), 26, col(GREY1));
+        if (down) icon(I_EXPAND_MORE, P(PX + PW - 36, y), 26, col(GREY1));
     }
 };
 

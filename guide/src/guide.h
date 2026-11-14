@@ -479,6 +479,11 @@ private:
     void one_player(const one::Panel& p, float y, const Friend& f, Relation rel, bool greyed) const;
     void one_note(const one::Panel& p, float y, const MessageItem& m) const;
     int msg_rows() const;  // how many of the Messages tab's entries show at once in this layout
+    // The Xbox One layout's four tabs (guide.cpp): which one the screen on top belongs to, and going to another.
+    int one_tab() const;
+    void one_tab_to(int tab, double now);
+    mutable Tween one_bar_;  // the accent bar under the tabs, gliding to the open one
+    mutable int one_bar_at_ = -1;
     void draw_theme_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now);
     void draw_profile_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now);
     void draw_edit_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now);
