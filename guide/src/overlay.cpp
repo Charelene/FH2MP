@@ -41,6 +41,7 @@
 #include "sysui.h"
 #include "ui.h"
 #include "voice.h"
+#include "../../shim/src/fh2mp_online.h"
 
 // probe.cpp
 void party_probe_start(const FH2ModApi* api, FH2Mod* mod, unsigned char* game, void (*log)(const char*));
@@ -49,6 +50,7 @@ namespace {
 
 const FH2ModApi* g_api;
 FH2Mod* g_mod;
+std::atomic<bool> g_held{false};   // FH2MP kept this game offline (online_held, below)
 
 void logf(const char* fmt, ...) {
     char buf[512];
@@ -668,6 +670,11 @@ static void memory_notice(double now) {
 // The server's side: the friend list (re-read twice a second at most), pictures that arrived, and what came of the player's actions.
 void social_and_toasts(double now) {
     memory_notice(now);
+    static bool held_told;
+    if (!held_told && g_held.load()) {
+        held_told = true;
+        g_guide.toast(ToastKind::Warning, "Online play is off", "Start the game again with Play", ui::I_CLOUD_OFF, 0, now);
+    }
     static double last_read;
     static uint64_t version = ~0ull;
     if (now - last_read > 0.5) {
@@ -1070,13 +1077,29 @@ DWORD WINAPI chain_watch(LPVOID) {
 // chain's queue. The device is made once the game has started, as before, never ahead of Azimuth's own.
 void net_log(const char* line) { logf("%s", line); }
 
+// FH2MP kept this game offline (FH2MP.Online version 2: the platform's going_online named mods that shouldn't run online and ran first). The
+// Guide then stays offline too, and its toast says so once. Asked from the hook thread: the first call may wait for FH2MP's answer.
+bool online_held() {
+    const FH2MPOnline* mp = g_api->api_version >= 2 && g_api->get_interface
+                                ? static_cast<const FH2MPOnline*>(g_api->get_interface(FH2MP_ONLINE_NAME, 2))
+                                : nullptr;
+    if (!mp || mp->version < 2 || mp->size < sizeof(FH2MPOnline) || !mp->online_held) return false;
+    char names[256] = {};
+    int n = mp->online_held(names, sizeof names);
+    if (n <= 0) return false;
+    logf("guide: FH2MP keeps this game offline (%d %s that shouldn't run online ran first: %s); the Guide does not connect", n,
+         n == 1 ? "mod" : "mods", names);
+    g_held.store(true);
+    return true;
+}
+
 DWORD WINAPI hook_thread(LPVOID late_factory) {
     if (!g_api->wait_for_game(180000)) {
         logf("guide: the game never came up: no Guide");
         return 0;
     }
     if (late_factory && !hook_factory()) return 0;
-    net_start(g_api->azimuth_dir, net_log);
+    if (!online_held()) net_start(g_api->azimuth_dir, net_log);
     WNDCLASSEXW wc{sizeof wc};
     wc.lpfnWndProc = dummy_proc, wc.hInstance = GetModuleHandleW(nullptr), wc.lpszClassName = L"FH2MPGuideProbe";
     RegisterClassExW(&wc);

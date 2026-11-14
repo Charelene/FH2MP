@@ -13,14 +13,15 @@
  * NULL means FH2MP is not installed (or older): there is nothing online to follow.
  *
  * Compatibility: like the platform's API, members are only ever added at the end, and `version` grows with them. Check `version` (or `size`) before
- * using a member added after version 1. Every function may be called from any thread and never blocks. */
+ * using a member added after version 1. Every function may be called from any thread and never blocks, except online_held (version 2), which
+ * may wait the first time (call it from a thread of your own). */
 #ifndef FH2MP_ONLINE_H
 #define FH2MP_ONLINE_H
 
 #include <stdint.h>
 
 #define FH2MP_ONLINE_NAME "FH2MP.Online"
-#define FH2MP_ONLINE_VERSION 1
+#define FH2MP_ONLINE_VERSION 2
 
 typedef struct FH2MPOnline {
     uint32_t size;                  /* sizeof(FH2MPOnline) of the FH2MP that published it */
@@ -37,6 +38,12 @@ typedef struct FH2MPOnline {
     /* 1 when the part (List_Upgrade<table> row id, e.g. table "Engine") is one of the game's, 0 when it is not (it is put back to stock in online
        events and Road Trip), -1 when FH2MP cannot tell. `table` is the name after "List_Upgrade". Offline: 1. */
     int (*part_allowed_in_events)(const char *table, uint32_t part_id);
+    /* ==== version 2 (FH2MP 1.4.1, FH2 Mod Platform 2.9.0) ==== */
+    /* How many mods that shouldn't run online had already run in this game when FH2MP was about to go online (the platform's going_online,
+       FH2Platform.Online): over 0, this game stays offline (is_online is then 0) and the player starts it again with Play in the FH2MP launcher.
+       Their names go into `names` ("Nitro, Other", UTF-8, NUL-terminated, cut to `size`); `names` may be NULL. 0 when nothing held it (or
+       offline without a session, or an older platform). The first call may wait for that answer. */
+    int (*online_held)(char *names, uint32_t size);
 } FH2MPOnline;
 
 #endif

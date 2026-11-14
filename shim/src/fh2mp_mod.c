@@ -248,6 +248,7 @@ static void mem_copy(void *dst, const void *src, SIZE_T n)
 }
 
 #include "log.inc"
+#include "online_gate.inc"
 
 /* "48 8b 5c" for n bytes; a game update shows up as a different run of these in a "not patched" line */
 static void log_hexbytes(const unsigned char *p, unsigned n)
@@ -3749,14 +3750,18 @@ static DWORD WINAPI option_monitor(LPVOID unused)
     monitor_start = GetTickCount();
     for (tick = 0; ; tick++) { /* for the whole process (2026-11-07): until then it stopped after 24000 ticks = 6.7 h, and with it the EO parking, the gamedb
                                 * retries, the import re-hooking and the online-setup watchdog */
-        /* Azimuth binds the game's imports after the helper loads; keep our pointers on top */
-        patch_game_winsock(img);
-        patch_game_cocreate(img);
-        patch_xsapi_cocreate();
+        /* Azimuth binds the game's imports after the helper loads; keep our pointers on top. A game online-gate keeps offline keeps
+         * Azimuth's own (online_gate.inc). */
+        int net = online_allowed();
+        if (net) {
+            patch_game_winsock(img);
+            patch_game_cocreate(img);
+            patch_xsapi_cocreate();
+        }
         {
             static int xb_state;
             wchar_t xb_env[8];
-            if (xb_state == 0 && GetEnvironmentVariableW(L"FH2MP_NO_XSBODY", xb_env, 8) == 0) {
+            if (net && xb_state == 0 && GetEnvironmentVariableW(L"FH2MP_NO_XSBODY", xb_env, 8) == 0) {
                 xb_state = patch_xsapi_body();
             }
         }
@@ -3764,7 +3769,7 @@ static DWORD WINAPI option_monitor(LPVOID unused)
             /* XSAPI is mapped a few seconds after the game image; retry until it is there */
             static int xs_state;
             wchar_t xs_env[8];
-            if (xs_state == 0 && GetEnvironmentVariableW(L"FH2MP_NO_XSTOKEN", xs_env, 8) == 0) {
+            if (net && xs_state == 0 && GetEnvironmentVariableW(L"FH2MP_NO_XSTOKEN", xs_env, 8) == 0) {
                 xs_state = patch_xsapi_token();
             } else if (xs_state == 1 && g_xs_calls == 0 && g_xs_hooked_at && GetTickCount() - g_xs_hooked_at > 45000) {
                 static int told;
@@ -5233,6 +5238,15 @@ static int gamedb_place(void)
 {
     int ok;
 
+    if (!online_allowed()) {
+        static int told;
+        if (!told) {
+            told = 1;
+            log_begin();
+            log_raw("gamedb: this game stays offline (online-gate), so the server's car database is not placed; the game reads its own\n");
+        }
+        return 1;                         /* nothing to retry */
+    }
     AcquireSRWLockExclusive(&g_gamedb_place_lock);
     ok = gamedb_place_locked();
     ReleaseSRWLockExclusive(&g_gamedb_place_lock);
@@ -5561,7 +5575,9 @@ static DWORD WINAPI late_init(LPVOID unused)
     {
         wchar_t tmp[8];
         if (GetEnvironmentVariableW(L"FH2MP_NO_WINSOCK", tmp, 8) == 0) {
-            patch_game_winsock(find_fh2_image());
+            if (online_allowed()) {
+                patch_game_winsock(find_fh2_image());
+            }
         }
     }
     {
