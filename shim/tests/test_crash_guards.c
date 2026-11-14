@@ -15,6 +15,7 @@ static int g_failed;
 static void log_begin(void) {}
 static void log_raw(const char *s) { strncat(g_raw, s, sizeof g_raw - strlen(g_raw) - 1); }
 static void log_hex(unsigned long long v, int digits) { char b[32]; sprintf(b, "%0*llx", digits, v); log_raw(b); }
+static void log_dec(unsigned long v) { char b[16]; sprintf(b, "%lu", v); log_raw(b); }
 static void mem_copy(void *d, const void *s, SIZE_T n) { memcpy(d, s, n); }
 static unsigned char *find_fh2_image(void) { return g_img; }
 static int code_is(const char *tag, const char *what, const unsigned char *img, unsigned rva, const void *expect, unsigned n)
@@ -43,6 +44,7 @@ static int plat_hook(const char *name, void *target, void *detour, void **origin
 
 #include "src/hook_guard.inc"
 #include "src/gameplaylog_guard.inc"
+#include "src/camanim_guard.inc"
 
 /* UpdateGauges stand-in: the real prologue, then a call to gauges_called with the same arguments */
 static void *g_gauges_self;
@@ -233,11 +235,52 @@ static void test_gameplaylog_guard(void)
     VirtualFree(g_img, 0, MEM_RELEASE);
 }
 
+
+/* The camera animation guard (src/camanim_guard.inc, #479): installs only on the game's bytes; a camera without a space provider keeps pos and is
+ * logged, one with a provider goes to the game's function. */
+static void *g_cam_seen;
+static void *cam_orig(void *camera, double *pos) { g_cam_seen = camera; pos[0] += 1.0; return pos; }
+
+static void test_camanim_guard(void)
+{
+    unsigned mode = 4;
+    unsigned *mode_ptr = &mode;
+    struct { void *vtable, *provider; char pad[0x178]; unsigned *mode; } cam = {(void *)0x142e779d8, NULL, {0}, NULL};
+    double pos[4] = {10, 20, 30, 1};
+
+    cam.mode = mode_ptr;
+    g_img = VirtualAlloc(NULL, 0x1040000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    CHECK(g_img != NULL);
+    memcpy(g_img + CAG_FN, g_cag_head, sizeof g_cag_head);
+    memcpy(g_img + 0x1031e93u, g_cag_load, sizeof g_cag_load);
+    memcpy(g_img + 0x1031eceu, g_cag_call, sizeof g_cag_call);
+    memcpy(g_img + 0x1031ef2u, g_cag_keep, sizeof g_cag_keep);
+    memcpy(g_img + 0x1031ef8u, g_cag_load, sizeof g_cag_load);
+    g_hooks = 0;
+    g_hook_original = (void *)cam_orig;
+    g_raw[0] = 0;
+    CHECK(patch_camanim_guard() && g_hooks == 1 && g_cag_orig == cam_orig);
+    CHECK(strstr(g_raw, "hook: camanim:") != NULL);
+
+    g_raw[0] = 0;
+    g_cam_seen = NULL;
+    CHECK(cag_detour(&cam, pos) == pos && pos[0] == 10 && g_cam_seen == NULL);       /* no provider: pos as it was, the game's code not run */
+    CHECK(strstr(g_raw, "camanim: a camera animation player (mode 4) has no space provider") != NULL);
+    cam.provider = (void *)&cam;
+    CHECK(cag_detour(&cam, pos) == pos && pos[0] == 11 && g_cam_seen == &cam);       /* with one: the game's own function */
+
+    g_img[0x1031eceu] = 0x90;                                                         /* another build: not installed */
+    g_hooks = 0;
+    CHECK(!patch_camanim_guard() && g_hooks == 0);
+    VirtualFree(g_img, 0, MEM_RELEASE);
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
     test_hook_guard();
     test_gameplaylog_guard();
+    test_camanim_guard();
     if (!g_failed) puts("crash guards: all checks pass");
     return g_failed != 0;
 }
