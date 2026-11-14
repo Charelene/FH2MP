@@ -20,6 +20,7 @@ import (
 	"fh2mp/internal/auth"
 	"fh2mp/internal/db"
 	"fh2mp/internal/diag"
+	"fh2mp/internal/ghost"
 	"fh2mp/internal/pyjson"
 	"fh2mp/internal/rivals"
 	"fh2mp/internal/scoreboard"
@@ -433,6 +434,10 @@ func (o *Ops) route(r *Req, method, path string, body []byte) (int, any, *Downlo
 		data, err := l.Crashes.Download(rest[0], rest[1])
 		mustOK(err)
 		return 200, nil, &Download{Data: data, Name: rest[1], ContentType: crashContentType(rest[1])}
+	}
+	if what == "runs" && len(rest) == 2 && rest[1] == "ghost" && isDigits(rest[0]) && method == "GET" {
+		sid, _ := strconv.ParseInt(rest[0], 10, 64)
+		return 200, o.runGhost(sid), nil
 	}
 	if what == "reports" {
 		if len(rest) == 0 && method == "GET" {
@@ -1649,6 +1654,90 @@ func (o *Ops) reportsQueue(limit int, offset int64) pyjson.Obj {
 			{K: "hidden", V: hidden}, {K: "hiddenBy", V: hiddenBy}, {K: "verdict", V: r.Any("verdict")}, {K: "reasons", V: reasons}})
 	}
 	return pyjson.Obj{{K: "entries", V: out}, {K: "hasNext", V: len(rows) > limit}}
+}
+
+func round3(v float64) float64 { return math.Round(v*1000) / 1000 }
+
+// runGhost decodes a run's stored ghost second by second for the admin panel's replay page (read only, any run that has a ghost, hidden or not).
+func (o *Ops) runGhost(id int64) pyjson.Obj {
+	c := o.C
+	row := must(c.DB.One(`SELECT s.*, COALESCE(p.gamertag, '') AS tag, g.data AS blob,
+        (SELECT hs.source FROM hidden_scores hs WHERE hs.submission_id = s.id) AS hidden_by,
+        v.verdict, v.reasons, v.measurements
+        FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid LEFT JOIN score_ghosts g ON g.submission_id = s.id
+        LEFT JOIN score_verdicts v ON v.submission_id = s.id WHERE s.id = ?`, id))
+	if row == nil {
+		panic(opsErr(404, "not_found", "unknown run"))
+	}
+	blob := row.Bytes("blob")
+	if len(blob) == 0 {
+		panic(opsErr(404, "no_ghost", "this run has no ghost"))
+	}
+	g, err := ghost.Parse(blob)
+	if err != nil {
+		panic(opsErr(422, "bad_ghost", err.Error()))
+	}
+	series := ghost.Series(g)
+	n := len(series)
+	cols := map[string][]any{}
+	for _, k := range []string{"t", "x", "z", "speed", "accel", "power", "climb", "gear", "rpm", "steer", "jump"} {
+		cols[k] = make([]any, 0, n)
+	}
+	for _, s := range series {
+		add := func(k string, v any) { cols[k] = append(cols[k], v) }
+		add("t", round3(s.T))
+		add("x", round3(s.X))
+		add("z", round3(s.Z))
+		add("speed", round3(s.Speed))
+		if s.Counted {
+			add("accel", round3(s.Accel))
+			add("power", round3(s.Power))
+		} else {
+			add("accel", nil)
+			add("power", nil)
+		}
+		add("climb", round3(s.Climb))
+		add("gear", s.Gear)
+		add("rpm", round3(s.Rpm))
+		add("steer", round3(s.Steer))
+		add("jump", s.Jump)
+	}
+	samples := pyjson.Obj{}
+	for _, k := range []string{"t", "x", "z", "speed", "accel", "power", "climb", "gear", "rpm", "steer", "jump"} {
+		samples = append(samples, pyjson.Pair{K: k, V: cols[k]})
+	}
+	reasons := any([]any{})
+	if rs := row.Str("reasons"); rs != "" {
+		reasons = must(pyjson.Parse(rs))
+	}
+	var measures any
+	if ms := row.Str("measurements"); ms != "" {
+		measures = must(pyjson.Parse(ms))
+	}
+	hits := make([]any, len(g.Collision))
+	for i, t := range g.Collision {
+		hits[i] = round3(t)
+	}
+	others := []any{}
+	for _, r := range must(c.DB.Query(`SELECT s.id, s.score, s.car, s.submitted, v.verdict FROM score_submissions s
+        JOIN score_ghosts g ON g.submission_id = s.id LEFT JOIN score_verdicts v ON v.submission_id = s.id
+        WHERE s.xuid = ? AND s.sb = ? AND s.st = ? AND s.id <> ? ORDER BY s.submitted DESC LIMIT 40`, row.Int("xuid"), row.Int("sb"), row.Int("st"), id)) {
+		others = append(others, pyjson.Obj{{K: "submissionId", V: r.Int("id")}, {K: "score", V: r.Float("score")}, {K: "car", V: r.Int("car")},
+			{K: "at", V: int64(r.Float("submitted"))}, {K: "verdict", V: r.Any("verdict")}})
+	}
+	var hiddenBy any
+	if hb := row.Str("hidden_by"); hb != "" {
+		hiddenBy = hb
+	}
+	names := must(c.Riv.Names()).Car
+	return pyjson.Obj{{K: "submissionId", V: id}, {K: "gamertag", V: o.gamertag(row.Str("tag"), row.Int("xuid"))}, {K: "xuid", V: row.Int("xuid")},
+		{K: "score", V: row.Float("score")}, {K: "boardType", V: row.Int("sb")}, {K: "scoreType", V: row.Int("st")}, {K: "track", V: row.Int("track")},
+		{K: "event", V: row.Int("gsid")}, {K: "carId", V: row.Int("car")}, {K: "car", V: names[row.Int("car")]}, {K: "at", V: int64(row.Float("submitted"))},
+		{K: "clean", V: row.Int("clean") != 0}, {K: "hiddenBy", V: hiddenBy}, {K: "verdict", V: row.Any("verdict")}, {K: "reasons", V: reasons},
+		{K: "measures", V: measures}, {K: "lastT", V: round3(g.LastT)}, {K: "collisions", V: hits},
+		{K: "limits", V: pyjson.Obj{{K: "speedFlag", V: 120.0}, {K: "speedHard", V: ghost.MaxSpeed}, {K: "accelFlag", V: 20.0}, {K: "accelHard", V: 30.0},
+			{K: "powerFlag", V: 700.0}, {K: "powerHard", V: 1000.0}, {K: "highSpeed", V: ghost.HighSpeed}}},
+		{K: "samples", V: samples}, {K: "others", V: others}}
 }
 
 func (o *Ops) moderate(submissionID int64, action string) pyjson.Obj {
