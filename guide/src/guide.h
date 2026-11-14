@@ -73,8 +73,9 @@ struct GuideAssets {
     ImFont* text = nullptr;       // Segoe UI, or ImGui's own font when Windows has none
     ImFont* text_bold = nullptr;  // Segoe UI Bold (toast titles), or the same as text
     ImFont* text_one = nullptr;   // the Xbox One toast's words: Game Bar's Segoe Sans Text where it is installed, else Segoe UI Semibold
+    ImFont* text_one_bold = nullptr;  // its bold, for the Xbox One guide's names: Game Bar's, else Segoe UI Bold
     ImFont* icons = nullptr;      // Material Icons (filled)
-    FontMetrics text_m, bold_m, one_m, icons_m;
+    FontMetrics text_m, bold_m, one_m, one_bold_m, icons_m;
     ImTextureID gamerpic = 0;     // the player's picture (Azimuth's data/player.png), 0 when there is none
     std::unordered_map<uint64_t, ImTextureID> pics;  // other players' pictures by xuid, as they arrive from the server
     AchToastArt ach;              // the achievement toast's art, when the player has the Xbox app
@@ -179,6 +180,8 @@ public:
     // Xbox 360's notification, 2 the Xbox One's toast. A change comes back as SetNotify (id: the style).
     void set_notify(int style) { ach_style_ = style == 1 || style == 2 ? style : 0; }
     int ach_style() const { return ach_style_; }
+    // How the Guide itself is laid out: 0 the Xbox 360's blades, 1 the Xbox One's panel (a first look: the blades only).
+    void set_guide_style(int style) { guide_style_ = style == 1 ? 1 : 0; }
     void open_notify(double now);
     // Settings > Theme, opened on the theme in use (theme_page.cpp).
     void open_theme(double now);
@@ -297,7 +300,7 @@ private:
     bool voice_mic_ = true, voice_chat_ = true;
     int voice_volume_ = 2, voice_row_ = 0;
     Tween voice_bar_;
-    int ach_style_ = 0, notify_row_ = 0;
+    int ach_style_ = 0, notify_row_ = 0, guide_style_ = 0;
     Tween notify_bar_;
     ListFocus party_;
     void handle_voice(PadEvent e, std::vector<GuideRequest>& out, double now);
@@ -463,6 +466,7 @@ private:
     void draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 origin, double now);
     void draw_ach_toast_360(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 origin, float t);
     void draw_ach_toast_one(ImDrawList* dl, const GuideAssets& g, float s, ImVec2 origin, float a);
+    void draw_home_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now);
     // The slide and fade of the page that just came in: x offset (canvas units) and opacity; title_op for the header's title.
     void page_motion(double now, float op, float* slide, float* pop, float* title_op) const;
 };

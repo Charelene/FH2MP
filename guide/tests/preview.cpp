@@ -166,6 +166,7 @@ int main(int argc, char** argv) {
 
     if (const char* theme = getenv("GUIDE_THEME")) theme_apply(theme);
     Guide g;
+    if (const char* style = getenv("GUIDE_STYLE")) g.set_guide_style(atoi(style));  // 1: the Xbox One guide's layout
     g.gamertag = "DebugFox";
     const double t0 = 100.0;
     // sample players for the pages (not real ones)
