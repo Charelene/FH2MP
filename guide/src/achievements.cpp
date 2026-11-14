@@ -501,6 +501,80 @@ void emblem(ImDrawList* dl, const GuideAssets& a, ImVec2 c, float d, ImU32 ink, 
 // When Hide starts (the panels' timers).
 float hide_at(int tier) { return tier == 2 ? 10.0f : 8.467f; }
 
+// The Xbox One toast's laurels (Settings > Notifications > Xbox One), as Game Bar builds them: one half of the wreath in a 112-unit
+// canvas from a stem curve and leaf outlines, mirrored for the other side. They are no picture: the outlines and the table of leaves
+// are the values Game Bar is compiled with, in its pixels (its capsule is 100 high). A leaf outline is its tip, a curve down to its base
+// and a curve back up; a stem its foot and one curve.
+const float LEAF[10][14] = {
+    {48.654f, -31.684f, 48.163f, -25.602f, 43.702f, -25.7f, 47.626f, -11.183f, 52.53f, -14.565f, 54.539f, -26.14f, 48.654f, -31.684f},
+    {48.705f, -31.919f, 48.187f, -25.645f, 43.439f, -19.909f, 47.626f, -11.183f, 52.221f, -16.37f, 55.038f, -27.595f, 48.705f, -31.919f},
+    {48.654f, -31.684f, 48.203f, -24.178f, 43.73f, -22.22f, 47.626f, -11.183f, 52.731f, -16.727f, 55.034f, -26.599f, 48.654f, -31.684f},
+    {48.956f, -31.747f, 48.43f, -24.68f, 43.737f, -21.537f, 47.626f, -11.183f, 52.884f, -17.048f, 55.367f, -26.838f, 48.956f, -31.747f},
+    {48.999f, -31.845f, 48.54f, -25.794f, 43.412f, -17.751f, 47.626f, -11.183f, 53.276f, -17.382f, 55.885f, -26.497f, 48.999f, -31.845f},
+    {49.478f, -33.175f, 46.504f, -30.487f, 45.299f, -19.893f, 47.626f, -11.183f, 53.213f, -13.066f, 54.324f, -23.581f, 49.478f, -33.175f},
+    {48.756f, -31.86f, 45.613f, -28.317f, 46.131f, -19.509f, 47.626f, -11.183f, 52.876f, -12.446f, 54.21f, -22.585f, 48.756f, -31.86f},
+    {49.003f, -32.571f, 46.084f, -28.364f, 45.876f, -19.866f, 47.579f, -10.994f, 53.421f, -11.328f, 54.708f, -24.245f, 49.003f, -32.571f},
+    {49.654f, -34.858f, 46.166f, -31.731f, 46.841f, -18.904f, 47.587f, -11.084f, 53.621f, -11.473f, 55.41f, -26.073f, 49.654f, -34.858f},
+    {48.654f, -31.684f, 48.163f, -25.602f, 45.346f, -23.118f, 47.626f, -11.183f, 53.943f, -15.597f, 55.571f, -24.598f, 48.654f, -31.684f},
+};
+const float STEM[2][8] = {{56.273f, 100.737f, 71.112f, 100.737f, 82.803f, 94.893f, 91.072f, 86.58f},     // rare: short
+                          {56.273f, 100.737f, 83.253f, 100.737f, 99.827f, 81.417f, 104.347f, 63.07f}};  // mythic: long
+const float LEAF_PIVOT[2] = {47.751f, -10.909f};  // every leaf turns and grows about this point (its base)
+// A leaf: its outline, the angle it rests at and the one it swings in from, where it goes, its size, and when it grows and shrinks (ms).
+struct Leaf {
+    int shape;
+    float rot, from_rot, x, y, scale, in0, in1, out0, out1;
+};
+const Leaf WREATH_RARE[5] = {{9, 34.2f, 69.2f, 40.088f, 100.488f, 1, 367, 933, 0, 250},      {3, 21.3f, -29.7f, 31.055f, 106.473f, 0.961f, 200, 800, 67, 317},
+                             {4, 41.3f, 17.3f, 13.888f, 111.476f, 1.033f, 0, 600, 167, 417}, {7, 76.9f, 136.9f, 26.591f, 108.632f, 1.025f, 67, 667, 133, 383},
+                             {8, 95.3f, 118.3f, 8.297f, 111.918f, 1.051f, 0, 567, 183, 433}};
+const Leaf WREATH_MYTHIC[9] = {{0, 0, 30, 56.068f, 75.967f, 1, 433, 933, 0, 250},              {1, -12, -63, 53.027f, 83.765f, 0.81f, 300, 800, 67, 317},
+                               {2, 4.4f, -46.6f, 44.199f, 96.468f, 0.883f, 133, 633, 150, 384}, {3, 21.3f, -29.7f, 31.055f, 106.473f, 0.961f, 67, 567, 184, 434},
+                               {4, 41.3f, 17.3f, 13.888f, 111.476f, 1.033f, 0, 500, 217, 467},  {5, 39.2f, 101.7f, 50.673f, 88.277f, 0.81f, 200, 700, 117, 367},
+                               {6, 59.4f, 119.4f, 40.275f, 100.196f, 0.965f, 100, 600, 167, 417}, {7, 76.9f, 136.9f, 26.591f, 108.632f, 1.025f, 33, 533, 200, 450},
+                               {8, 95.3f, 118.3f, 8.297f, 111.918f, 1.051f, 0, 467, 234, 467}};
+
+// The wreath round the icon at c (pixels; u: pixels per Game Bar pixel), t seconds into the toast and h into its Hide (negative before
+// it). The stem grows from its foot, each leaf grows while it swings open to its resting angle, and on Hide they fold back, tips first
+// (the first sprout 0.95 s after the capsule starts to open for the rare one, 1.05 s for the mythic, as captures of the console show).
+// Each is the colour given under a white sheen (Game Bar's runs from 60% to 20% across the leaf: 40% here).
+void laurels(ImDrawList* dl, ImVec2 c, float u, int tier, float t, float h, ImU32 leaf) {
+    auto seg = [](float v, float a, float b) { return std::clamp((v - a) / (b - a), 0.0f, 1.0f); };
+    auto exp_out = [](float x) { return (1 - expf(-7 * x)) / (1 - expf(-7.0f)); };
+    auto cube = [](float x) { return x * x * x; };
+    const float in = (t - (tier == 2 ? 2.48f : 2.38f)) * 1000, out = h * 1000;
+    const float stem = exp_out(seg(in, 100, 500)) * (1 - cube(seg(out, 0, tier == 2 ? 467.0f : 433.0f)));
+    const float* st = STEM[tier - 1];
+    const Leaf* wreath = tier == 2 ? WREATH_MYTHIC : WREATH_RARE;
+    const ImU32 sheen[2] = {leaf, IM_COL32(255, 255, 255, 102)};
+    for (float side : {1.0f, -1.0f}) {
+        // the half's canvas: its corner 56 left of the icon's centre and 50 above it
+        auto place = [&](float x, float y) { return ImVec2(c.x + side * (x - 56) * u, c.y + (y - 50) * u); };
+        if (stem > 0.001f) {
+            auto sp = [&](int i) { return place(st[0] + (st[i] - st[0]) * stem, st[1] + (st[i + 1] - st[1]) * stem); };
+            dl->AddBezierCubic(sp(0), sp(2), sp(4), sp(6), leaf, 1.569f * u);
+            dl->AddBezierCubic(sp(0), sp(2), sp(4), sp(6), IM_COL32(255, 255, 255, 51), 1.569f * u);
+        }
+        for (int i = 0; i < (tier == 2 ? 9 : 5); i++) {
+            const Leaf& L = wreath[i];
+            float k = exp_out(seg(in, L.in0, L.in1)) * (1 - cube(seg(out, L.out0, L.out1)));  // 0 folded away, 1 open
+            if (k <= 0.001f) continue;
+            float ang = (L.from_rot + (L.rot - L.from_rot) * k) * PI / 180, co = cosf(ang), si = sinf(ang), sc = L.scale * k;
+            auto pt = [&](int j) {
+                float x = (LEAF[L.shape][j] - LEAF_PIVOT[0]) * sc, y = (LEAF[L.shape][j + 1] - LEAF_PIVOT[1]) * sc;
+                return place(LEAF_PIVOT[0] + x * co - y * si + L.x, LEAF_PIVOT[1] + x * si + y * co + L.y);
+            };
+            for (ImU32 col : sheen) {
+                dl->PathLineTo(pt(0));
+                dl->PathBezierCubicCurveTo(pt(2), pt(4), pt(6));
+                dl->PathBezierCubicCurveTo(pt(8), pt(10), pt(12));
+                if (side < 0) std::reverse(dl->_Path.begin(), dl->_Path.end());  // the mirrored half runs the other way round
+                dl->PathFillConvex(col);
+            }
+        }
+    }
+}
+
 }  // namespace
 
 void ach_art_set(AchToastArt* art, const char* file, ImTextureID tex) {
@@ -571,6 +645,10 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
     const AchToast& n = ach_now_;
     const int tier = int(n.tier);
     const bool rare = tier == 1, mythic = tier == 2;
+    // Settings > Notifications > Xbox One: the same toast as the Xbox app and the console draw it, a capsule 100 of Game Bar's pixels
+    // high (66.7 units here) with a round icon at its left end, in the console's colours by tier, with laurels round a rare or a
+    // mythic one's icon. The times, the art and the words are the Guide's toast's; what differs is marked cap below.
+    const bool cap = ach_style_ == 2;
     const AchToastArt& art = a.ach;
     const float TR = 4.0f, TS = mythic ? 8.0f : 7.133f, TH = hide_at(tier), TE = 2.433f;
     const float h = t - TH;  // into Hide
@@ -578,8 +656,11 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
     auto at = [&](float x, float y) { return ImVec2(origin.x + x * s, origin.y + y * s); };
 
     // the Guide's toast: a 64-unit square and a panel as wide as its words (here the widest of its three turns), centred, at y 600
-    const float Q = 64, k = Q / 100, TSZ = 17;  // k: Game Bar pixels (its circle is 100 px) to canvas units
+    const float Q = cap ? 66.667f : 64, k = Q / 100, TSZ = cap ? 26 * k : 17;  // k: Game Bar pixels (its circle is 100 px) to canvas units
     ImFont* bf = a.text_bold ? a.text_bold : a.text;
+    // the capsule's two lines share one weight (Game Bar's Segoe Sans Text at 26); the Guide's title is bold
+    ImFont* tfont = cap ? a.text : bf;
+    const FontMetrics& tfont_m = cap ? a.text_m : a.bold_m;
     std::string title = mythic ? "Mythic Achievement unlocked" : rare ? "Rare Achievement unlocked" : "Achievement unlocked";
     if (rare && n.percent >= 0) {
         char pc[24];
@@ -590,12 +671,20 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
     const float gmark = n.g >= 0 ? TSZ * 0.82f + 6 : 0;
     const float ed = 18, gap = 6;  // the hint's emblem
     float wa = a.text->CalcTextSizeA(TSZ, FLT_MAX, 0, "Hold").x, wb = a.text->CalcTextSizeA(TSZ, FLT_MAX, 0, "to open").x;
-    float words = std::max({bf->CalcTextSizeA(TSZ, FLT_MAX, 0, title.c_str()).x, a.text->CalcTextSizeA(TSZ, FLT_MAX, 0, second.c_str()).x + gmark,
-                            std::min(380.0f, a.text->CalcTextSizeA(TSZ, FLT_MAX, 0, n.desc.c_str()).x), wa + gap + ed + gap + wb});
-    const float pw = std::clamp(std::ceil(words) + 22 + 12, 220.0f, 440.0f), half = pw * 0.5f, area = pw - 22 - 12;
+    float words = std::max({tfont->CalcTextSizeA(TSZ, FLT_MAX, 0, title.c_str()).x, a.text->CalcTextSizeA(TSZ, FLT_MAX, 0, second.c_str()).x + gmark,
+                            std::min(cap ? 460 * k : 380.0f, a.text->CalcTextSizeA(TSZ, FLT_MAX, 0, n.desc.c_str()).x), wa + gap + ed + gap + wb});
+    // the capsule fits its widest words: 18 of Game Bar's pixels after the icon, up to 460 of text, 50 to its right end
+    const float padl = cap ? 18 * k : 22, padr = cap ? 50 * k : 12;
+    const float pw = cap ? std::min(std::ceil(words), 460 * k) + padl + padr : std::clamp(std::ceil(words) + padl + padr, 220.0f, 440.0f);
+    const float half = pw * 0.5f, area = pw - padl - padr;
     const float bx = 640 - (Q + pw) * 0.5f, by = 600 - ach_lift_;
 
-    const ImU32 sq_col = ACCENT, light_col = mix(ACCENT, WHITE, 0.5f), medium_col = mix(ACCENT, WHITE, 0.25f), dark_col = mix(ACCENT, BLACK, 0.3f);
+    // the capsule's colours are the console's by tier (sampled from captures; the mythic one's is a pick), with Game Bar's lighter
+    // shades of each for the icon's disc and the rings
+    static const ImU32 CAP[3] = {IM_COL32(0x1e, 0x9e, 0x3e, 255), IM_COL32(0x8b, 0x1a, 0x5c, 255), IM_COL32(0x0e, 0x8f, 0x7e, 255)};
+    const ImU32 sq_col = cap ? mix(CAP[tier], WHITE, 0.18f) : ACCENT, light_col = cap ? mix(CAP[tier], WHITE, 0.4f) : mix(ACCENT, WHITE, 0.5f);
+    const ImU32 medium_col = cap ? sq_col : mix(ACCENT, WHITE, 0.25f), dark_col = cap ? CAP[tier] : mix(ACCENT, BLACK, 0.3f);
+    const ImU32 panel_col = cap ? CAP[tier] : TOAST, title_col = cap ? WHITE : ACCENT;
     const ImU32 ring_col[4] = {light_col, medium_col, dark_col, medium_col};
 
     float unfold = !hiding ? track({kf(1.433f, 0), kfeo(2.433f, 1)}, t) : h < 0.667f ? track({kf(0, 1), kfei(0.667f, 0)}, h) : 0;
@@ -604,7 +693,9 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
     float bg_scale = !hiding ? track({kf(0.667f, 0), kfs(1.433f, 1, .36f, .12f, .5f, 1)}, t) : 1;
     float bg_op = !hiding ? track({kf(0, 0), kf(0.167f, 1)}, t) : h < 0.8f ? track({kf(0, 1), kfei(0.8f, 0)}, h) : 0;
     auto square = [&](ImVec2 c, float side, ImU32 col) {
-        if (side > 0.5f) dl->AddRectFilled(ImVec2(c.x - side / 2, c.y - side / 2), ImVec2(c.x + side / 2, c.y + side / 2), col);
+        if (side <= 0.5f) return;
+        if (cap) dl->AddCircleFilled(c, side / 2, col, 48);
+        else dl->AddRectFilled(ImVec2(c.x - side / 2, c.y - side / 2), ImVec2(c.x + side / 2, c.y + side / 2), col);
     };
 
     // the mythic's aurora haze, behind everything: Game Bar's 260 x 120 cells have a 146 x 30 cut-out with the haze brightest at its edge;
@@ -638,8 +729,18 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
     // the panel, and what runs over it
     ImVec2 p0 = at(bx + Q + shift, by), p1 = at(bx + Q + pw - shift, by + Q);
     if (unfold > 0.002f) {
-        dl->AddRectFilled(p0, p1, TOAST);
-        dl->PushClipRect(p0, p1, true);
+        if (cap) {
+            // the capsule runs from the icon's left edge, over a soft shadow that opens with it
+            ImVec2 c0 = at(bx + shift, by);
+            for (int i = 3; i >= 1; i--) {
+                float d = i * 1.7f * s;
+                dl->AddRectFilled(ImVec2(c0.x - d, c0.y - d + 2 * s), ImVec2(p1.x + d, p1.y + d + 2 * s), IM_COL32(0, 0, 0, int(22 * unfold)), Q / 2 * s + d);
+            }
+            dl->AddRectFilled(c0, p1, panel_col, Q / 2 * s);
+        } else {
+            dl->AddRectFilled(p0, p1, TOAST);
+        }
+        dl->PushClipRect(p0, ImVec2(p1.x - (cap ? 40 * k * s : 0), p1.y), true);
         float tg = mythic ? TE + 2.631f : TE, len = mythic ? 3.95f : 3.0f, tau = (t - tg) * 1.3f;  // twice, 1.3 times as fast
         if ((rare || mythic) && tau >= 0 && tau < 2 * len) {
             float u = fmodf(tau, len), pc = bx + Q + half, ps = pw / 630;  // Game Bar's pill is 630 px: its places scale to the panel
@@ -658,26 +759,28 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
                     float sx = track({kf(q[2], 0.3f), kfei(q[3], q[5]), kf(q[4], 0.3f)}, u), sy = track({kf(q[2], 0.3f), kfei(q[3], q[6]), kf(q[4], 0.3f)}, u);
                     picture(dl, art.sparkle, at(pc + q[0] * ps, by + q[1] * Q), 14 * k * s * sx, 24 * k * s * sy, alpha(WHITE, op));
                 }
-                dl->PushClipRect(p0, p1, true);
+                dl->PushClipRect(p0, ImVec2(p1.x - (cap ? 40 * k * s : 0), p1.y), true);
             }
         }
 
         // the words: the title in the accent over the Gamerscore and name; from 4 s the description; from 7.133 s (8 s) the hint
-        const float x = bx + Q + 22 - 0.6f * half * (1 - unfold);
+        const float x = bx + Q + padl - 0.6f * half * (1 - unfold);
+        // the lines' centres: the capsule's are 14.1 above and 14.7 below its middle in Game Bar's pixels
+        const float line1 = cap ? Q / 2 - 14.1f * k : 21, line2 = cap ? Q / 2 + 14.7f * k : 43;
         float text_op = !hiding && t < TS ? track({kf(1.733f, 0), kf(2.333f, 1)}, t) : 0;
         if (text_op > 0.004f) {
             float dx = track({kf(1.333f, 60), kfeo(2.333f, 0)}, t), rt = t - TR;
             float front = rt < 0 ? 0 : track({kf(0, 0), kfei(0.267f, -Q)}, rt), back = rt < 0 ? Q : track({kf(0, Q), kf(0.233f, Q), kfeo(0.833f, 0)}, rt);
             ImU32 col = alpha(WHITE, text_op);
             if (front > -Q + 1) {
-                text_fit(dl, bf, a.bold_m, TSZ * s, at(x + dx, 0).x, at(0, by + 21 + front).y, area * s, alpha(ACCENT, text_op), title);
-                float y2 = at(0, by + 43 + front).y, x2 = at(x + dx, 0).x;
+                text_fit(dl, tfont, tfont_m, TSZ * s, at(x + dx, 0).x, at(0, by + line1 + front).y, area * s, alpha(title_col, text_op), title);
+                float y2 = at(0, by + line2 + front).y, x2 = at(x + dx, 0).x;
                 if (n.g >= 0) {
                     // the Gamerscore mark: a white disc with the G cut out
                     float gd = TSZ * 0.82f * s;
                     dl->AddCircleFilled(ImVec2(x2 + gd / 2, y2), gd / 2, col, 32);
                     float gsz = gd * 0.66f, gw = bf->CalcTextSizeA(gsz, FLT_MAX, 0, "G").x;
-                    dl->AddText(bf, gsz, ImVec2(x2 + gd / 2 - gw / 2, caps_top(a.bold_m, gsz, y2)), alpha(TOAST, text_op), "G");
+                    dl->AddText(bf, gsz, ImVec2(x2 + gd / 2 - gw / 2, caps_top(a.bold_m, gsz, y2)), alpha(panel_col, text_op), "G");
                     x2 += gd + 6 * s;
                 }
                 text_fit(dl, a.text, a.text_m, TSZ * s, x2, y2, (area - gmark) * s, col, second);
@@ -690,8 +793,8 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
                 if (br == b) br = e;
                 std::string first(b, br), rest(br < e && *br == ' ' ? br + 1 : br, e);
                 float xs = at(x + dx, 0).x;
-                text_mid(dl, a.text, a.text_m, TSZ * s, xs, at(0, by + (rest.empty() ? 32 : 21) + back).y, col, first.c_str());
-                if (!rest.empty()) text_fit(dl, a.text, a.text_m, TSZ * s, xs, at(0, by + 43 + back).y, area * s, col, rest);
+                text_mid(dl, a.text, a.text_m, TSZ * s, xs, at(0, by + (rest.empty() ? Q / 2 : line1) + back).y, col, first.c_str());
+                if (!rest.empty()) text_fit(dl, a.text, a.text_m, TSZ * s, xs, at(0, by + line2 + back).y, area * s, col, rest);
             }
         }
         float hint_op = 0, hint_dx = 0;
@@ -702,7 +805,7 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
             float w = wa + gap + ed + gap + wb, hx = bx + Q + half - w / 2 + hint_dx;
             float cy = at(0, by + Q / 2).y;
             text_mid(dl, a.text, a.text_m, TSZ * s, at(hx, 0).x, cy, alpha(WHITE, hint_op), "Hold");
-            emblem(dl, a, ImVec2(at(hx + wa + gap + ed / 2, 0).x, cy), ed * s, TOAST, 0, hint_op, I_GAMES);  // the button: a gamepad (user 2026-11-11)
+            emblem(dl, a, ImVec2(at(hx + wa + gap + ed / 2, 0).x, cy), ed * s, panel_col, 0, hint_op, I_GAMES);  // the button: a gamepad (user 2026-11-11)
             text_mid(dl, a.text, a.text_m, TSZ * s, at(hx + wa + gap + ed + gap, 0).x, cy, alpha(WHITE, hint_op), "to open");
         }
         dl->PopClipRect();
@@ -721,7 +824,8 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
         }
 
     // the icon: its intro (the emblem's frames replaced), its loop, and from Hide its exit
-    const float cellq = mythic ? Q * 0.86f * 160 / 105 : (rare ? 84.0f : 68.0f) * k;  // the mythic's ring (105 of 160 px) inside the square
+    // the mythic's ring (105 of 160 px) inside the square; the capsule's round icon takes it at Game Bar's own size
+    const float cellq = mythic ? (cap ? 160 * k : Q * 0.86f * 160 / 105) : (rare ? 84.0f : 68.0f) * k;
     const int x_end = rare ? 11 : 12, x_start = rare ? 21 : 20;                      // the console's emblem: intro before x_end, exit from x_start
     const float held = 38 / 30.0f;                                                   // frame 1 held for 36 more frames (plain, rare)
     const float disc = 60 * k;                                                       // the sheets' disc
@@ -771,6 +875,8 @@ void Guide::draw_ach_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2
             icon_mid(dl, a, disc * s * iscale * g, ic.x, ic.y, alpha(WHITE, g), glyph);
         }
     }
+
+    if (cap && tier > 0) laurels(dl, ic, k * s, tier, t, hiding ? h : -1, light_col);
 
     // over the mythic's icon: the ripple (from 4.433 s) and the two glows (from 2.433 s, turning and breathing; on Hide they shrink and go)
     if (mythic) {

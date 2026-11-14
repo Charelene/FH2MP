@@ -485,20 +485,22 @@ void apply_voice(bool mic, bool chat, int volume) {
     g_guide.set_voice(mic, chat, volume);
 }
 
-// How an achievement is shown: data\bin\fh2mp-guide-notify.txt, one number (0 the Xbox app's toast, 1 the Xbox 360's notification).
+// How an achievement is shown: data\bin\fh2mp-guide-notify.txt, one number (0 the Guide's toast, 1 the Xbox 360's notification, 2 the
+// Xbox One's toast).
 // Without the file: 0.
 std::wstring notify_file() { return std::wstring(g_api->azimuth_dir) + L"\\data\\bin\\fh2mp-guide-notify.txt"; }
 
 void load_notify() {
     std::vector<unsigned char> b = read_file(notify_file());
-    g_guide.set_notify(!b.empty() && b[0] == '1' ? 1 : 0);
+    g_guide.set_notify(b.empty() ? 0 : b[0] - '0');
 }
 
 void save_notify(int style) {
     HANDLE f = CreateFileW(notify_file().c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) return;
     DWORD wrote = 0;
-    WriteFile(f, style == 1 ? "1\n" : "0\n", 2, &wrote, nullptr);
+    const char line[2] = {char('0' + style), '\n'};
+    WriteFile(f, line, 2, &wrote, nullptr);
     CloseHandle(f);
 }
 
@@ -732,7 +734,7 @@ void ask(const GuideRequest& r) {
     }
     case GuideAction::SetNotify:
         save_notify(int(r.id));
-        logf("guide: achievements are shown as %s: kept in data\\bin\\fh2mp-guide-notify.txt", r.id == 1 ? "the Xbox 360's notification" : "the Xbox app's toast");
+        logf("guide: achievements are shown as %s: kept in data\\bin\\fh2mp-guide-notify.txt", r.id == 1 ? "the Xbox 360's notification" : r.id == 2 ? "the Xbox One's toast" : "the Guide's toast");
         break;
     case GuideAction::SetTheme:
         save_theme(r.name);

@@ -2,7 +2,8 @@
 // writes a PNG, so the look can be checked against the design canvas without a game.
 //   guide-preview.exe <out.png> <scene> [seconds] [gamerpic.png] [background.png]
 // GUIDE_THEME in the environment is the theme the scene is drawn in (a theme's key: xbox360, fh2mp, blue-plastic; Xbox without it).
-// GUIDE_ACH_STYLE=1 draws the achtoast scenes as the Xbox 360's notification; notifications is Settings > Notifications.
+// GUIDE_ACH_STYLE draws the achtoast scenes as the Xbox 360's notification (1) or the Xbox One's toast (2); notifications is
+// Settings > Notifications.
 // Scenes: home (the Guide, the player's blade), games, settings, down; friends, friends-nogame, party, players, messages; message,
 // message-invite, message-request; profile, profile-nogame, profile-personal, profile-request, profile-sent, profile-here; create,
 // exit-session; create-nogame; pick, pick-many, compose, compose-invite, discard, keyboard, keyboard-caps, add-friend; box-accept, box-gone;
@@ -254,10 +255,11 @@ int main(int argc, char** argv) {
         if (scene == "theme-fh2mp") press({D, D});
         if (scene == "theme-360") press({D});
 
-    } else if (scene == "notifications" || scene == "notifications-360") {
-        // Settings > Notifications, the focus on Xbox or moved down to Xbox 360
+    } else if (scene == "notifications" || scene == "notifications-one" || scene == "notifications-360") {
+        // Settings > Notifications, the focus on Guide or moved down to Xbox One or Xbox 360
         g.toggle(t0 - 10), g.handle(RB, t0 - 9), press({D, D, D}, t0 - 8), g.handle(A, t0 - 7);
-        if (scene == "notifications-360") press({D});
+        if (scene == "notifications-one") press({D});
+        if (scene == "notifications-360") press({D, D});
     } else if (scene == "voice") {
         // Settings > Voice with the microphone muted and the focus on Volume
         g.set_voice(false, true, 3);

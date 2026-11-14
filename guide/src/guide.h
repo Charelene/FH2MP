@@ -66,7 +66,7 @@ struct AchToastArt {
 void ach_art_set(AchToastArt* art, const char* file, ImTextureID tex);
 const char* const* ach_art_files(int where);
 // How long an achievement toast of a tier is on screen.
-float ach_toast_seconds(AchTier tier, int style = 0);  // style: 0 the Xbox app's toast, 1 the Xbox 360's
+float ach_toast_seconds(AchTier tier, int style = 0);  // style: 0 the Guide's toast, 1 the Xbox 360's notification, 2 the Xbox One's toast
 
 // Fonts and textures the Guide draws with (made by the overlay once Direct3D is ready).
 struct GuideAssets {
@@ -174,9 +174,9 @@ public:
     // (id: bit 0 mic, bit 1 chat, the volume from bit 2).
     void set_voice(bool mic, bool chat, int volume) { voice_mic_ = mic, voice_chat_ = chat, voice_volume_ = volume; }
     void open_voice(double now);
-    // Settings > Notifications as the overlay keeps it (notify_page.cpp): how an achievement is shown, 0 the Xbox app's toast, 1 the
-    // Xbox 360's notification. A change comes back as SetNotify (id: the style).
-    void set_notify(int style) { ach_style_ = style == 1 ? 1 : 0; }
+    // Settings > Notifications as the overlay keeps it (notify_page.cpp): how an achievement is shown, 0 the Guide's toast, 1 the
+    // Xbox 360's notification, 2 the Xbox One's toast. A change comes back as SetNotify (id: the style).
+    void set_notify(int style) { ach_style_ = style == 1 || style == 2 ? style : 0; }
     int ach_style() const { return ach_style_; }
     void open_notify(double now);
     // Settings > Theme, opened on the theme in use (theme_page.cpp).

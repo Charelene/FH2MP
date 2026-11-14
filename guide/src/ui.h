@@ -193,7 +193,7 @@ inline void row_text(ImDrawList* dl, ImFont* f, const FontMetrics& m, float size
 }
 
 inline void icon_mid(ImDrawList* dl, const GuideAssets& a, float size, float cx, float cy, ImU32 col, uint32_t icon) {
-    if (!a.icons || !icon) return;
+    if (!a.icons || !icon || size < 1) return;  // an icon shrunk to nothing (ImGui asserts on a font size that rounds to 0)
     char ic[5];
     utf8(icon, ic);
     float w = a.icons->CalcTextSizeA(size, FLT_MAX, 0, ic).x;
