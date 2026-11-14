@@ -2,19 +2,17 @@
 # Publishes a reviewed commit: pushes it, waits for its ci.yml checks, stores the signing key as a GitHub secret, tags, and lets the
 # workflow (.github/workflows/release.yml) build Windows + Linux, sign the manifest and create the GitHub release (pre-release if the tag has a '-').
 #   release/publish.sh v1.0.0-rc1
-# A hotfix (release/versions.py) is published from its hotfix/X.Y branch: ops/ship-hotfix.sh; a full release from develop: ops/ship.sh.
+# A hotfix (release/versions.sh) is published from its hotfix/X.Y branch: ops/ship-hotfix.sh; a full release from develop: ops/ship.sh.
 # Requires a clean, already committed tree; never stages or commits files.
 # Asks once before anything leaves this machine (ship.sh forwards its tag confirmation).
 # Needs: gh (logged in), the signing key at ~/.config/fh2mp-release/signing.key.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-# local Python: python3 on Linux; on Windows python3 is the Microsoft Store stub, so fall back to python
-PY=python3; "$PY" -c '' >/dev/null 2>&1 || PY=python
 tag=${1:?usage: release/publish.sh v1.0.0-rc1}
 key=${FH2MP_RELEASE_KEY_FILE:-$HOME/.config/fh2mp-release/signing.key}
 
 full=--full; [ -n "${FH2MP_PUBLISH_HOTFIX:-}" ] && full=
-"$PY" -I release/versions.py --tag "$tag" $full >/dev/null || exit 1
+release/versions.sh --tag "$tag" $full >/dev/null || exit 1
 [ -f "release/notes/$tag.md" ] || echo "note: no release/notes/$tag.md, GitHub will generate the notes"
 [ -f "$key" ] || { echo "signing key not found: $key"; exit 1; }
 gh auth status >/dev/null 2>&1 || { echo "gh is not logged in"; exit 1; }

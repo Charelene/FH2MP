@@ -11,7 +11,7 @@ The directory must hold (names are what the launcher expects):
     FH2MP-Launcher-<ver>-x86_64.AppImage                                           (optional)
 Writes manifest.json and manifest.json.sig next to them. The signature is Ed25519 over the exact bytes of manifest.json.
 
-A hotfix release (release/versions.py) builds one component and carries the other:
+A hotfix release (release/versions.sh) builds one component and carries the other:
     python3 -I release/make_manifest.py --tag v1.1.6 --shim-version 1.1.6 --launcher-version 1.1.5 --carry-dir carry/ --dist dist/
 The carried component's entry comes from carry/v<its version>/manifest.json (+ .sig), checked with this key's public half, and its files must
 be in --dist with exactly the sizes and SHA-256 of that entry: every release holds each file its manifest names, so a launcher that only
