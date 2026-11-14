@@ -17,6 +17,7 @@ namespace {
 
 const int FRIEND_ROWS = 6;  // 69-unit rows under the tabs
 const int MSG_ROWS = 8;     // 56-unit rows
+const int ONE_MSG_ROWS = 5; // the Xbox One layout's cards, 139 apart
 const uint32_t COMM_ICON[4] = {I_GROUPS, I_PERSON, I_MAIL, I_GAMES};
 
 enum ProfileCmd { PInvite, PJoin, PMessage, PAddFriend, PAccept, PDecline, PCancel, PRemove, PBio, PEdit, PCompare };
@@ -87,6 +88,8 @@ std::vector<const Friend*> Guide::party_rows() const {
 }
 
 // The Messages tab: friend requests, then game invites and friends' messages, newest first.
+int Guide::msg_rows() const { return guide_style_ == 1 ? ONE_MSG_ROWS : MSG_ROWS; }
+
 std::vector<MessageItem> Guide::messages() const {
     std::vector<MessageItem> out, dated;
     for (const Friend& f : social_.requests) {
@@ -131,7 +134,7 @@ void Guide::delete_message(const MessageItem& m, std::vector<GuideRequest>& out,
             if (social_.texts[i].id == m.id) social_.texts.erase(social_.texts.begin() + i--);
     }
     out.push_back(r);
-    messages_.clamp(1 + int(messages().size()), MSG_ROWS);
+    messages_.clamp(1 + int(messages().size()), msg_rows());
     (void)now;
 }
 
@@ -185,7 +188,7 @@ void Guide::handle_community(PadEvent e, std::vector<GuideRequest>& out, double 
         std::vector<MessageItem> list = messages();
         int n = 1 + int(list.size());
         if (dy) {
-            messages_.move(dy, n, MSG_ROWS, now);
+            messages_.move(dy, n, msg_rows(), now);
         } else if ((e == PadEvent::A && messages_.row == 0) || e == PadEvent::Y) {
             flow_base_ = int(stack_.size());
             new_row_ = -1;
@@ -748,7 +751,7 @@ void Guide::one_player(const one::Panel& p, float y, const Friend& f, Relation r
     using namespace one;
     bool here = same_game(f, social_.me), off = f.state == Friend::Offline, sent = sent_.count(f.xuid) > 0;
     ImVec2 c = p.L(PX + 60, y + TWO_H / 2);
-    p.avatar(p.a.pic(f.xuid), f.xuid, c, 34, p.lcol(WHITE, greyed ? 0.45f : 1));
+    p.avatar(p.a.pic(f.xuid), f.xuid, f.tag, c, 34, p.lcol(WHITE, greyed ? 0.45f : 1));
     if (!off && !greyed) {
         ImVec2 d(c.x + 24 * p.U, c.y + 24 * p.U);
         p.dl->AddCircleFilled(d, 11 * p.U, p.lcol(PANEL1), 24);
@@ -762,8 +765,36 @@ void Guide::one_player(const one::Panel& p, float y, const Friend& f, Relation r
     if (off && !greyed) p.text(p.L(PX + 112, y + 33), 26, p.lcol(GREY1), f.tag, false, -1, 380);
 }
 
-// The chosen tab's name with its count, the four tabs' names under it, then the tab's list: players two lines high, messages a little
-// lower (eight fit), the focus gliding over them.
+static const float NOTE_H = 124, NOTE_P = 139;  // a notification card, and the cards' pitch
+
+// How old a message is, as the console's notifications say it: "now", "5m", "3h", "2d", "1w".
+static std::string brief(int secs) {
+    if (secs < 60) return "now";
+    static const int PER[4] = {60, 3600, 86400, 604800};
+    int i = secs < PER[1] ? 0 : secs < PER[2] ? 1 : secs < PER[3] ? 2 : 3;
+    return std::to_string(secs / PER[i]) + "mhdw"[i];
+}
+
+// A message on one of the console's notification cards (the card under it is the caller's: one::Panel::card): the sender's picture
+// with what it is in a small disc at its foot, their gamertag in bold over the 360's summary, how old it is at the right end, and a
+// mark in the accent down its left edge while it is unread.
+void Guide::one_note(const one::Panel& p, float y, const MessageItem& m) const {
+    using namespace one;
+    const float x = PX + 9, cy = y + NOTE_H / 2;
+    if (m.unread) p.dl->AddRectFilled(p.L(x, y), p.L(x + 7, y + NOTE_H), p.lcol(ACCENT), 3 * p.U);
+    p.avatar(p.a.pic(m.from.xuid), m.from.xuid, m.from.tag, p.L(x + 59, cy), 34, p.lcol(WHITE));
+    ImVec2 b = p.L(x + 84, cy + 24);
+    p.dl->AddCircleFilled(b, 17 * p.U, p.lcol(PANEL1), 24);
+    p.dl->AddCircleFilled(b, 15 * p.U, p.lcol(IM_COL32(0x10, 0x7c, 0x10, 255)), 24);
+    p.icon(kind_icon(m), b, 17, p.lcol(WHITE));
+    std::string when = m.age >= 0 ? brief(m.age) : "";
+    p.text(p.L(x + 111, cy - 18), 25, p.lcol(WHITE), m.from.tag, true, -1, 380 - p.width(when, 23));
+    p.text(p.L(x + 111, cy + 18), 23, p.lcol(m.unread ? WHITE : GREY1), summary(m), false, -1, 390);
+    if (!when.empty()) p.text(p.L(x + 500, cy - 18), 23, p.lcol(GREY1), when, false, 1);
+}
+
+// The chosen tab's name with its count, the four tabs' names under it, then the tab's list: players two lines high, messages on the
+// console's notification cards (five fit), the focus gliding over them.
 void Guide::draw_community_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now) {
     using namespace one;
     std::vector<FriendRow> friends = friend_rows();
@@ -782,7 +813,7 @@ void Guide::draw_community_one(ImDrawList* dl, const GuideAssets& a, ImVec2 orig
     p.segments(NAMES, 4, comm_tab_);
     float ce = ease_guide(std::clamp(float((now - comm_at_) / 0.26), 0.0f, 1.0f));
     p.cop *= ce, p.cdx += (1 - ce) * 40 * comm_dir_;
-    const float top = PY + LIST + SEG_H, MSG_H = 88;
+    const float top = PY + LIST + SEG_H;
     auto empty = [&](const char* why) { p.text(p.L(PX + 32, top + 40), 23, p.lcol(GREY1), why); };
     dl->PushClipRect(p.P(PX, top - 6), p.P(PX + PW, PY + PH - 6), true);
     switch (comm_tab_) {
@@ -797,7 +828,7 @@ void Guide::draw_community_one(ImDrawList* dl, const GuideAssets& a, ImVec2 orig
                 // Add Friend, the list's first entry
                 ImVec2 c = p.L(PX + 60, y + TWO_H / 2);
                 dl->AddCircleFilled(c, 34 * p.U, p.lcol(CARD1), 48);
-                icon_mid(dl, a, 36 * p.U, c.x, c.y, p.lcol(WHITE), I_PERSON_ADD);
+                p.icon(I_PERSON_ADD, c, 36, p.lcol(WHITE));
                 p.text(p.L(PX + 112, y + TWO_H / 2), 26, p.lcol(WHITE), "Add friend");
                 continue;
             }
@@ -808,24 +839,22 @@ void Guide::draw_community_one(ImDrawList* dl, const GuideAssets& a, ImVec2 orig
     }
     case TabMessages: {
         int n = 1 + int(msgs.size());
-        p.focus(top + messages_.bar.value(now) * MSG_H, MSG_H);
-        for (int i = messages_.top; i < std::min(n, messages_.top + MSG_ROWS); i++) {
-            float y = top + (i - messages_.top) * MSG_H;
-            ImVec2 c = p.L(PX + 56, y + MSG_H / 2);
-            dl->AddCircleFilled(c, 27 * p.U, p.lcol(CARD1), 48);
-            if (i == 0) {
-                icon_mid(dl, a, 30 * p.U, c.x, c.y, p.lcol(WHITE), I_EDIT);
-                p.text(p.L(PX + 104, y + MSG_H / 2), 26, p.lcol(WHITE), "Create new");
+        // the console's notification cards: their fills first, the focus over the one it stands on, then what they say
+        const int last = std::min(n, messages_.top + msg_rows());
+        for (int i = messages_.top; i < last; i++) p.card(top + (i - messages_.top) * NOTE_P, NOTE_H);
+        p.focus(top + messages_.bar.value(now) * NOTE_P, NOTE_H, PX + 9, 522);
+        for (int i = messages_.top; i < last; i++) {
+            float y = top + (i - messages_.top) * NOTE_P;
+            if (i > 0) {
+                one_note(p, y, msgs[i - 1]);
                 continue;
             }
-            const MessageItem& m = msgs[i - 1];
-            // an unread one is marked at its left edge in the accent, as the console's notifications are
-            if (m.unread) dl->AddRectFilled(p.L(PX + 13, y + 6), p.L(PX + 19, y + MSG_H - 6), p.lcol(ACCENT), 3 * p.U);
-            p.icon(kind_icon(m), c, 30, p.lcol(m.unread ? WHITE : GREY1));
-            p.text(p.L(PX + 104, y + 28), 26, p.lcol(m.unread ? WHITE : GREY1), m.from.tag, false, -1, 390);
-            p.text(p.L(PX + 104, y + 60), 23, p.lcol(GREY1), summary(m), false, -1, 390);
+            ImVec2 c = p.L(PX + 68, y + NOTE_H / 2);
+            dl->AddCircleFilled(c, 34 * p.U, p.lcol(IM_COL32(0x45, 0x45, 0x45, 255)), 48);
+            p.icon(I_EDIT, c, 34, p.lcol(WHITE));
+            p.text(p.L(PX + 120, y + NOTE_H / 2), 26, p.lcol(WHITE), "Create new");
         }
-        p.more(messages_.top > 0, messages_.top + MSG_ROWS < n);
+        p.more(messages_.top > 0, last < n);
         break;
     }
     case TabParty: {
@@ -845,12 +874,12 @@ void Guide::draw_community_one(ImDrawList* dl, const GuideAssets& a, ImVec2 orig
             float ex = PX + 490;
             if (std::find(talking_.begin(), talking_.end(), mine ? 0 : f.xuid) != talking_.end()) {
                 ImVec2 mp = p.L(ex, y + TWO_H / 2);
-                icon_mid(dl, a, 30 * p.U, mp.x, mp.y, p.lcol(WHITE), I_MIC);
+                p.icon(I_MIC, mp, 30, p.lcol(WHITE));
                 ex -= 40;
             }
             if (social_.me.lobby_leader && f.xuid == social_.me.lobby_leader) {
                 ImVec2 sp = p.L(ex, y + TWO_H / 2);
-                icon_mid(dl, a, 30 * p.U, sp.x, sp.y, p.lcol(WHITE), I_STAR);  // the party's leader
+                p.icon(I_STAR, sp, 30, p.lcol(WHITE));  // the party's leader
             }
         }
         p.more(party_.top > 0, party_.top + FRIEND_ROWS < n);
@@ -866,7 +895,7 @@ void Guide::draw_community_one(ImDrawList* dl, const GuideAssets& a, ImVec2 orig
             one_player(p, y, f, relation(f.xuid), false);
             if (std::find(talking_.begin(), talking_.end(), f.xuid) != talking_.end()) {
                 ImVec2 mp = p.L(PX + 490, y + TWO_H / 2);
-                icon_mid(dl, a, 30 * p.U, mp.x, mp.y, p.lcol(WHITE), I_MIC);  // heard right now
+                p.icon(I_MIC, mp, 30, p.lcol(WHITE));  // heard right now
             }
         }
         p.more(players_.top > 0, players_.top + FRIEND_ROWS < n);
@@ -901,7 +930,7 @@ void Guide::draw_profile_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin
     p.segments(NAMES, 2, prof_tab_);
     const float top = PY + LIST + SEG_H;
     if (!f.tag.empty()) {
-        p.avatar(me ? a.gamerpic : a.pic(f.xuid), f.xuid, p.L(PX + 72, top + 60), 44, p.lcol(WHITE));
+        p.avatar(me ? a.gamerpic : a.pic(f.xuid), f.xuid, f.tag, p.L(PX + 66, top + 86), 30.5f, p.lcol(WHITE));
         std::string first = f.level > 0 ? "Level " + std::to_string(f.level) : "";
         if (!f.club.empty()) first += (first.empty() ? "" : "  -  ") + f.club;
         // Gamerscore, as on the console's card: this player's from the Achievements mod's file, another player's from the server
@@ -913,22 +942,24 @@ void Guide::draw_profile_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin
             if (!where.empty()) doing += "  -  " + where;
         }
         std::string waiting = me ? "" : waiting_words(f, relation(f.xuid));
-        float y = top + 28;
-        if (!first.empty()) p.text(p.L(PX + 136, y), 26, p.lcol(WHITE), first, false, -1, 370), y += 32;
-        if (score >= 0) p.text(p.L(PX + 136, y), 23, p.lcol(GREY1), "Gamerscore " + std::to_string(score)), y += 30;
-        p.text(p.L(PX + 136, y), 23, p.lcol(on ? WHITE : GREY1), doing, false, -1, 370);
+        // the console's card: a line of words, then the picture (61 across) with words beside it
+        p.text(p.L(PX + 32, top + 30), 26, p.lcol(on ? WHITE : GREY1), doing, false, -1, PW - 64);
+        std::string gs = score >= 0 ? "Gamerscore " + std::to_string(score) : "";
+        if (first.empty()) first.swap(gs);
+        p.text(p.L(PX + 111, top + 86 - (gs.empty() ? 0 : 16)), 26, p.lcol(WHITE), first, false, -1, 400);
+        if (!gs.empty()) p.text(p.L(PX + 111, top + 104), 23, p.lcol(GREY1), gs);
         std::string under = f.location;
         if (!waiting.empty()) under += (under.empty() ? "" : "  -  ") + waiting;
-        if (!under.empty()) p.text(p.L(PX + 32, top + 136), 23, p.lcol(waiting.empty() ? GREY1 : blend(ACCENT, WHITE, 0.4f)), under, false, -1, PW - 64);
+        if (!under.empty()) p.text(p.L(PX + 32, top + 148), 23, p.lcol(waiting.empty() ? GREY1 : blend(ACCENT, WHITE, 0.4f)), under, false, -1, PW - 64);
     }
-    p.divider(top + 162);
+    p.divider(top + 174);
 
     // the options (they come in when the tab changes)
     float te = ease_guide(std::clamp(float((now - prof_at_) / 0.26), 0.0f, 1.0f));
     p.cop *= te, p.cdx += (1 - te) * 40 * prof_dir_;
     std::vector<Opt> opts = profile_options(prof_tab_);
     const int row = prof_row_[prof_tab_];
-    const float oy = top + 176;
+    const float oy = top + 188;
     if (row >= 0 && row < int(opts.size()) && opts[row].enabled) p.focus(oy + prof_bar_.value(now) * LINE_H, LINE_H);
     for (size_t i = 0; i < opts.size(); i++) p.line(oy + i * LINE_H, 0, opts[i].label, "", opts[i].enabled);
     if (prof_tab_ == 1 && !f.tag.empty()) {

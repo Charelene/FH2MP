@@ -186,7 +186,10 @@ public:
     int ach_style() const { return ach_style_; }
     // How the Guide itself is laid out (Settings > System): 0 the Xbox 360's blades, 1 the Xbox One's panel (one.h). The theme's
     // surfaces follow it. A change comes back as SetLayout (id: the layout).
-    void set_guide_style(int style) { guide_style_ = style == 1 ? 1 : 0, theme_layout(guide_style_); }
+    void set_guide_style(int style) {
+        guide_style_ = style == 1 ? 1 : 0, theme_layout(guide_style_);
+        messages_.clamp(1 + int(messages().size()), msg_rows());  // the layouts show different numbers of messages
+    }
     void open_choices(int which, double now);  // 0 Settings > Notifications, 1 Settings > System
     // Settings > Theme, opened on the theme in use (theme_page.cpp).
     void open_theme(double now);
@@ -474,6 +477,8 @@ private:
     void draw_home_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now);
     void draw_community_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now);
     void one_player(const one::Panel& p, float y, const Friend& f, Relation rel, bool greyed) const;
+    void one_note(const one::Panel& p, float y, const MessageItem& m) const;
+    int msg_rows() const;  // how many of the Messages tab's entries show at once in this layout
     void draw_theme_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now);
     void draw_profile_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now);
     void draw_edit_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now);

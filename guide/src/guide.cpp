@@ -746,15 +746,28 @@ bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double 
         dl->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), IM_COL32(0, 0, 0, int((one ? 115 : 178) * op)));
         // a message box takes the frame over, as the 360's does: what the Guide was showing fades out under it
         if (box_.on) op *= 1 - ease_guide(std::clamp(float((now - box_.at) / 0.2), 0.0f, 1.0f));
+        // a page with no Xbox One layout keeps the 360's wide frame there, but as a wider panel: from the panel's left edge (78 of the
+        // screen's 1080ths in), in its colour and corners, under the same status corner
+        const bool wide_one = one && !one_screen;
+        const ImVec2 po = wide_one ? ImVec2((one::PX * 720 / 1080 - ux(137)) * s, origin.y) : origin;
         if (!one_screen && page() != Page::Home) {
             // a page's blade: the 360's full frame (137 to 712, 60 to 411), which the page then draws its panes on
             float slide, pop, title_op;
             page_motion(now, op, &slide, &pop, &title_op);
-            View v{origin, s, zoom};
+            View v{po, s, zoom};
             ImVec2 p0 = v.pt(ux(137) + slide, uy(60)), p1 = v.pt(ux(712) + slide, uy(411));
-            blade_shadow(dl, p0, p1, v.sz(uu(1)), pop);
             panel_span(p0.y, p1.y);
-            panel_fill(dl, p0, p1, pop);
+            if (wide_one) {
+                const float U = s * 720 / 1080;
+                one::Panel(dl, a, origin, s, op, 1).corner(ach_.known ? ach_.gamerscore() : -1, voice_mic_);
+                for (int i = 5; i >= 1; i--)
+                    dl->AddRectFilled(ImVec2(p0.x - i * 3 * U, p0.y - i * 3 * U + 6 * U), ImVec2(p1.x + i * 3 * U, p1.y + i * 3 * U + 6 * U),
+                                      IM_COL32(0, 0, 0, int(13 * pop)), (13 + i * 3) * U);
+                dl->AddRectFilled(p0, p1, alpha(one::PANEL1, pop), 13 * U);
+            } else {
+                blade_shadow(dl, p0, p1, v.sz(uu(1)), pop);
+                panel_fill(dl, p0, p1, pop);
+            }
         }
         switch (page()) {
         case Page::Home:
@@ -768,10 +781,10 @@ bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double 
         case Page::CreateNew: draw_create(dl, a, origin, s, zoom, op, now); break;
         case Page::Recipients: draw_pick(dl, a, origin, s, zoom, op, now); break;
         case Page::Compose: draw_compose(dl, a, origin, s, zoom, op, now); break;
-        case Page::Keyboard: draw_keyboard(dl, a, origin, s, zoom, op, now); break;
-        case Page::Achievements: draw_achievements(dl, a, origin, s, zoom, op, now); break;
-        case Page::Compare: draw_compare(dl, a, origin, s, zoom, op, now); break;
-        case Page::AchDetail: draw_ach_detail(dl, a, origin, s, zoom, op, now); break;
+        case Page::Keyboard: draw_keyboard(dl, a, po, s, zoom, op, now); break;
+        case Page::Achievements: draw_achievements(dl, a, po, s, zoom, op, now); break;
+        case Page::Compare: draw_compare(dl, a, po, s, zoom, op, now); break;
+        case Page::AchDetail: draw_ach_detail(dl, a, po, s, zoom, op, now); break;
         case Page::Theme: draw_theme(dl, a, origin, s, zoom, op, now); break;
         case Page::Voice: draw_voice(dl, a, origin, s, zoom, op, now); break;
         case Page::Notifications: draw_notify(dl, a, origin, s, zoom, op, now); break;
@@ -791,6 +804,13 @@ void Guide::draw_header(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, flo
     View v{origin, s, zoom};
     float tx = half ? 243 : 156, ty = half ? 103 : 36, py = half ? 98 : 24, cx = half ? 609 : 693, cy = half ? 123.5f : 48;
     ImVec2 t = v.pt(ux(tx) + slide, uy(ty + 10.5f));
+    if (guide_style_ == 1) {
+        // the Xbox One layout (only the pages without a panel of their own come here): the name in the panel's bold face; the picture
+        // and the clock are the status corner's
+        ImFont* bf = a.text_one_bold ? a.text_one_bold : a.text_bold ? a.text_bold : a.text;
+        text_fit(dl, bf, a.text_one_bold ? a.one_bold_m : a.bold_m, v.sz(uu(16)), t.x, t.y, v.sz(uu(712 - 19 - tx)), alpha(WHITE, op * title_op), title);
+        return;
+    }
     text_fit(dl, a.text, a.text_m, v.sz(uu(16)), t.x, t.y, v.sz(uu(410 - 8 - tx)), alpha(WHITE, op * title_op * 235 / 255), title);  // up to the picture
     player_pic(dl, a, a.gamerpic, social_.me.xuid, v.pt(ux(410), uy(py)), v.pt(ux(442), uy(py + 32)), op);
     SYSTEMTIME st;
@@ -1002,7 +1022,9 @@ one::Panel Guide::one_frame(ImDrawList* dl, const GuideAssets& a, ImVec2 origin,
     p.panel();
     float at = 0;
     for (int i = 0; i < 3; i++) at += i * width_[i].value(now);
-    p.tabs((at - 3 * STRIP_W) / (BLADE_W - STRIP_W), a.gamerpic, social_.me.xuid);
+    int unread = 0;
+    for (const MessageItem& m : messages()) unread += m.unread;
+    p.tabs((at - 3 * STRIP_W) / (BLADE_W - STRIP_W), a.gamerpic, social_.me.xuid, gamertag, unread);
     if (home) {
         float e = ease_guide(std::clamp(float((now - switched_) / 0.25), 0.0f, 1.0f));
         p.cop = e, p.cdx = (1 - e) * 40 * switch_dir_;

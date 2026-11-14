@@ -10,6 +10,8 @@
 #pragma once
 
 #include <algorithm>
+#include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <string>
@@ -24,21 +26,45 @@ const float PX = 78, PY = 32, PW = 540, PH = 1016, LIST = 170, LINE_H = 74, TWO_
 const ImU32 PANEL1 = IM_COL32(0x1e, 0x1e, 0x1e, 247), CARD1 = IM_COL32(0x2e, 0x2e, 0x2e, 255), FOCUS1 = IM_COL32(0x33, 0x33, 0x33, 255),
             LINE1 = IM_COL32(0x30, 0x30, 0x30, 255), GREY1 = IM_COL32(0x9e, 0x9e, 0x9e, 255), OFF1 = IM_COL32(0x5c, 0x5c, 0x5c, 255);
 
-// The Xbox Fluent glyph for one of the Guide's icons, or 0 where the Guide's own stays (the font's other glyphs are not known).
+// The Xbox Fluent glyph for one of the Guide's icons (picked by eye from the font, which names none of them), or 0 where the font has
+// no such picture and the Guide's own stays.
 inline uint32_t fluent(uint32_t icon) {
     switch (icon) {
-    case I_GAMES: return 0xeb9e;     // a controller
-    case I_PERSON:
-    case I_GROUPS: return 0xe939;    // people
+    case I_GAMES: return 0xeb9e;        // a controller
+    case I_PERSON: return 0xe93a;
+    case I_GROUPS: return 0xe939;       // two people
+    case I_PERSON_ADD: return 0xe937;
     case I_MAIL:
-    case I_CHAT: return 0xeab2;      // a speech bubble
-    case I_SETTINGS: return 0xe9bf;  // a gear
+    case I_DRAFTS: return 0xeab2;       // speech bubbles
+    case I_CHAT: return 0xe85b;
+    case I_SETTINGS: return 0xe9bf;     // a gear
     case I_BELL: return 0xea7c;
-    case I_VOLUME: return 0xea90;    // a speaker
-    case I_APPS: return 0xea88;      // a shelf of games
-    case I_PALETTE: return 0xe9a7;   // "customize"
+    case I_VOLUME: return 0xea90;       // a speaker
+    case I_MIC: return 0xe963;
+    case I_APPS: return 0xea88;         // a shelf of games
+    case I_PALETTE: return 0xe9a7;      // "customize"
+    case I_TROPHY: return 0xe993;       // Gamerscore's G (the font has no trophy)
+    case I_SENSORS: return 0xe9ec;      // a dish
+    case I_FLAG: return 0xe821;         // a group (the font has no flag)
+    case I_WIFI: return 0xe9c5;
+    case I_SCHEDULE: return 0xea8c;     // a timer
+    case I_STAR: return 0xe94d;
+    case I_SEND: return 0xea27;
+    case I_EDIT: return 0xe958;         // a pencil
+    case I_CHECK_BOX: return 0xe973;
+    case I_CHECK_BLANK: return 0xe974;
+    case I_EXPAND_LESS: return 0xe979;
+    case I_EXPAND_MORE: return 0xe978;
+    case I_CAR: return 0xebb6;
     }
     return 0;
+}
+
+// A stand-in picture's colour: a muted one of the player's own (a hue by their id, low in chroma, so a white letter reads on it).
+inline ImU32 tile(uint64_t xuid) {
+    float h = float(xuid * 47 % 360) / 60, c = 0.4f, x = c * (1 - std::fabs(std::fmod(h, 2.0f) - 1)), m = 0.2f;
+    const float r[6][3] = {{c, x, 0}, {x, c, 0}, {0, c, x}, {0, x, c}, {x, 0, c}, {c, 0, x}};
+    return IM_COL32(int((r[int(h)][0] + m) * 255), int((r[int(h)][1] + m) * 255), int((r[int(h)][2] + m) * 255), 255);
 }
 
 struct Panel {
@@ -81,11 +107,14 @@ struct Panel {
         float w = a.icons_one->CalcTextSizeA(sz * U, FLT_MAX, 0, g).x;
         dl->AddText(a.icons_one, sz * U, ImVec2(c.x - w * 0.5f, css_top(a.icons_one_m, sz * U, c.y)), colr, g);
     }
-    // A round picture of a player, or the Guide's stand-in in a disc.
-    void avatar(ImTextureID pic, uint64_t xuid, ImVec2 c, float r, ImU32 tint) const {
+    // A round picture of a player; without one, a disc in a colour of their own with their gamertag's first letter.
+    void avatar(ImTextureID pic, uint64_t xuid, const std::string& tag, ImVec2 c, float r, ImU32 tint) const {
         if (pic) return dl->AddImageRounded(pic, ImVec2(c.x - r * U, c.y - r * U), ImVec2(c.x + r * U, c.y + r * U), ImVec2(0, 0), ImVec2(1, 1), tint, r * U);
-        dl->AddCircleFilled(c, r * U, alpha(PIC_COLORS[xuid % (sizeof PIC_COLORS / sizeof PIC_COLORS[0])], ((tint >> IM_COL32_A_SHIFT) & 0xff) / 255.0f), 48);
-        icon_mid(dl, a, r * 1.3f * U, c.x, c.y, alpha(IM_COL32(0, 0, 0, 150), ((tint >> IM_COL32_A_SHIFT) & 0xff) / 255.0f), I_PERSON);
+        const float k = ((tint >> IM_COL32_A_SHIFT) & 0xff) / 255.0f;
+        dl->AddCircleFilled(c, r * U, alpha(tile(xuid), k), 48);
+        if (tag.empty() || (tag[0] & 0x80)) return icon(I_PERSON, c, r * 1.2f, alpha(WHITE, k));
+        const char first[2] = {char(std::toupper((unsigned char)tag[0])), 0};
+        text(c, r * 1.05f, alpha(WHITE, k), first, true, 0);
     }
 
     // The status corner: Gamerscore (none when below 0), the microphone, and the clock 50 high, bold, ending 131 from the right edge.
@@ -97,7 +126,7 @@ struct Panel {
         char clock[32];
         snprintf(clock, sizeof clock, "%d:%02d %s", hour % 12 ? hour % 12 : 12, minute, hour < 12 ? "AM" : "PM");
         text_mid(dl, bf, bm, 50 * U, right, o.y + 148 * U, col(WHITE), clock, true);
-        icon_mid(dl, a, 30 * U, right - 18 * U, y, col(WHITE, mic ? 1 : 0.45f), I_MIC);
+        icon(I_MIC, ImVec2(right - 18 * U, y), 30, col(WHITE, mic ? 1 : 0.45f));
         if (gamerscore < 0) return;
         std::string g = std::to_string(gamerscore);
         float gw = bf->CalcTextSizeA(20 * U, FLT_MAX, 0, g.c_str()).x, gx = right - 60 * U - gw;
@@ -113,16 +142,21 @@ struct Panel {
         dl->AddRectFilled(P(PX, PY), P(PX + PW, PY + PH), col(PANEL1), 13 * U);
     }
     // The tabs: the Guide's three blades (Games, the player's picture as the console's last tab is, Settings); bar: where the accent
-    // bar stands, as a tab's number (it glides between them).
-    void tabs(float bar, ImTextureID pic, uint64_t xuid) const {
+    // bar stands, as a tab's number (it glides between them); count: a counter in the accent on the player's tab (0: none), as the
+    // console's chat tab has.
+    void tabs(float bar, ImTextureID pic, uint64_t xuid, const std::string& tag, int count) const {
         static const uint32_t ICON[3] = {I_GAMES, 0, I_SETTINGS};
         for (int i = 0; i < 3; i++) {
             ImVec2 c = P(PX + 63 + 84 * i, PY + 56);
             if (ICON[i]) icon(ICON[i], c, 38, col(WHITE));
-            else avatar(pic, xuid, c, 27, col(WHITE));
+            else avatar(pic, xuid, tag, c, 27, col(WHITE));
         }
         float x = PX + 63 + 84 * bar;
         dl->AddRectFilled(P(x - 41.5f, PY + 101), P(x + 41.5f, PY + 106), col(ACCENT), 2.5f * U);
+        if (count <= 0) return;
+        ImVec2 b = P(PX + 63 + 84 + 21, PY + 36);
+        dl->AddCircleFilled(b, 13 * U, col(ACCENT), 24);
+        text(b, 17, col(INK), std::to_string(std::min(count, 99)), true, 0);
     }
     void title(const std::string& t) const { text(L(PX + 32, PY + 133), 35, lcol(WHITE), t, true, -1, PW - 64); }
     // A page's own tabs, under its name: their names in a row, the open one white over a bar in the accent. They take SEG_H.
@@ -142,6 +176,8 @@ struct Panel {
         for (int i = 4; i >= 1; i--) dl->AddRect(f0, f1, lcol(ACCENT, 0.13f), 6 * U, 0, (3 + i * 3.5f) * U);
         dl->AddRect(f0, f1, lcol(outline()), 6 * U, 0, 3 * U);
     }
+    // A card, as the console's notifications stand on: 522 wide from 9 in.
+    void card(float y, float h) const { dl->AddRectFilled(L(PX + 9, y), L(PX + 531, y + h), lcol(CARD1), 4 * U); }
     void divider(float y) const { dl->AddRectFilled(L(PX + 20, y), L(PX + PW - 20, y + 1.5f), lcol(LINE1)); }
     // A one-line entry: an icon (0: none), its words, and words in grey at its right end.
     void line(float y, uint32_t ic, const std::string& words, const std::string& meta, bool enabled, float k = 1) const {
@@ -187,8 +223,8 @@ struct Panel {
     }
     // Up and down marks at the panel's foot when a list has more above or below.
     void more(bool up, bool down) const {
-        if (up) icon_mid(dl, a, 30 * U, P(PX + PW - 70, 0).x, P(0, PY + PH - 26).y, col(GREY1), I_EXPAND_LESS);
-        if (down) icon_mid(dl, a, 30 * U, P(PX + PW - 36, 0).x, P(0, PY + PH - 26).y, col(GREY1), I_EXPAND_MORE);
+        if (up) icon(I_EXPAND_LESS, P(PX + PW - 70, PY + PH - 26), 26, col(GREY1));
+        if (down) icon(I_EXPAND_MORE, P(PX + PW - 36, PY + PH - 26), 26, col(GREY1));
     }
 };
 

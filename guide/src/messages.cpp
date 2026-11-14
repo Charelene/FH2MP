@@ -811,20 +811,18 @@ void Guide::draw_message_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin
     using namespace one;
     const MessageItem& m = open_msg_;
     Panel p = one_frame(dl, a, origin, s, op, now, type_name(m));
-    const Friend* live = find(m.from.xuid);
-    const Friend& from = live ? *live : m.from;
     const float top = PY + LIST;
-    p.avatar(a.pic(from.xuid), from.xuid, p.L(PX + 60, top + 50), 34, p.lcol(WHITE));
-    std::string when = m.expires_in >= 0 ? expires(m.expires_in) : m.age >= 0 ? ago(m.age) : "";
-    p.two(top, PX + 112, m.from.tag, when, true, 390);
+    p.card(top, 124);
+    one_note(p, top, m);  // the card the Messages tab lists it on
     // the console's wording: "%1 invites you to play %2." with what the sender added after it
     std::string body = m.kind == MessageItem::GameInvite      ? m.from.tag + " invites you to play Forza Horizon 2."
                        : m.kind == MessageItem::FriendRequest ? m.from.tag + " wants to be your friend."
                                                               : m.text;
-    float y = top + 118;
+    float y = top + 150;
     y += p.para(PX + 32, y, 26, p.lcol(WHITE), body, PW - 64);
     if (m.kind == MessageItem::GameInvite && !m.text.empty()) y += 8 + p.para(PX + 32, y + 8, 23, p.lcol(GREY1), m.text, PW - 64);
-    y = std::max(y + 20, top + 240);
+    if (m.expires_in >= 0) y += 8 + p.para(PX + 32, y + 8, 23, p.lcol(GREY1), expires(m.expires_in), PW - 64);
+    y = std::max(y + 20, top + 270);
     p.divider(y);
     y += 14;
     std::vector<Opt> opts = message_options(m);
@@ -877,7 +875,7 @@ void Guide::draw_pick_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, f
             bool check = g.on && ticked(f.xuid);
             for (const Friend& t : draft_.to) check |= t.xuid == f.xuid;
             ImVec2 c = p.L(PX + 484, y + TWO_H / 2);
-            icon_mid(dl, a, 34 * p.U, c.x, c.y, p.lcol(greyed ? OFF1 : WHITE), check ? I_CHECK_BOX : I_CHECK_BLANK);
+            p.icon(check ? I_CHECK_BOX : I_CHECK_BLANK, c, 34, p.lcol(greyed ? OFF1 : WHITE));
         }
     }
     char count[32];
