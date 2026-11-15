@@ -5629,7 +5629,8 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_STALLTRACE", env, 8) == 0) patch_stall_trace();
         }
 #endif
-        {
+        {   /* the game-bug guards here and below (hook, model, dtconv, cam, comp, nulltorque, torqueload, garagerating, cinematics,
+             * placement) are also made in offline runs, by offline_guards */
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_PARTYHUD", env, 8) == 0) patch_party_hud();
             if (GetEnvironmentVariableW(L"FH2MP_NO_RACETOAST", env, 8) == 0) patch_race_toast();
@@ -5797,6 +5798,52 @@ static DWORD WINAPI late_init(LPVOID unused)
     /* Always run: it re-applies the Winsock patch and serves on-demand trace arming even when
      * no NetSessionDirectIp argument is given (its option patching is gated on the argument). */
     return option_monitor(NULL);
+}
+
+/*
+ * Offline runs (FH2MP_OFFLINE): fh2mod_init returns before late_init, so none of its patches are made. The game-bug guards below need no
+ * session, server or other player, and offline players hit the same crashes (#412 drivetrain converter, #487/#491 placement texture stop,
+ * the garage rating family): this thread waits for the game's code as late_init does and makes only those, with late_init's switches and
+ * order. The GameplayLog, remote prediction and network string guards stay online-only: what they guard comes from the LSP or other players.
+ * A guard added to late_init that needs nothing online belongs here too.
+ */
+static DWORD WINAPI offline_guards(LPVOID unused)
+{
+    wchar_t env[8];
+    unsigned tried = 0, made = 0;
+    (void)unused;
+    if (!g_api->wait_for_code(0xFFFFFFFFu)) {
+        log_begin();
+        log_raw("offline: the platform returned no game base from wait_for_code; the crash guards are tried anyway\n");
+    }
+    wait_for_executable_game();
+    if (!find_fh2_image()) {
+        log_begin();
+        log_raw("offline: game image not found or not FH2 1.0.0.64, no crash guards made\n");
+        return 0;
+    }
+#define OFFLINE_GUARD(off_switch, call) \
+    if (GetEnvironmentVariableW(off_switch, env, 8) == 0) { ++tried; made += (call) ? 1u : 0u; }
+    OFFLINE_GUARD(L"FH2MP_NO_HOOKGUARD", patch_hook_guard())
+    OFFLINE_GUARD(L"FH2MP_NO_MODELGUARD", patch_model_unload_guard())
+    OFFLINE_GUARD(L"FH2MP_NO_DTCONVGUARD", patch_dtconv_guard())
+    OFFLINE_GUARD(L"FH2MP_NO_CAMGUARD", patch_camanim_guard())
+    OFFLINE_GUARD(L"FH2MP_NO_COMPGUARD", patch_component_lookup_guard())
+    OFFLINE_GUARD(L"FH2MP_NO_NULLTORQUE", patch_null_torque_curve())
+    OFFLINE_GUARD(L"FH2MP_NO_NULLTORQUE", patch_null_torque_scale())
+    OFFLINE_GUARD(L"FH2MP_NO_TORQUELOAD", patch_torque_load())
+    OFFLINE_GUARD(L"FH2MP_NO_GARAGERATING", patch_garage_rating_guard())
+    OFFLINE_GUARD(L"FH2MP_NO_CINEMATICS", patch_missing_cinematics())
+    OFFLINE_GUARD(L"FH2MP_NO_PLACEMENTFIX", patch_placement_fallback())
+#undef OFFLINE_GUARD
+    log_begin();
+    log_raw("offline: ");
+    log_dec(made);
+    log_raw(" of ");
+    log_dec(tried);
+    log_raw(" crash guards made");
+    log_raw(made == tried ? "\n" : " (the lines above name the ones that were not)\n");
+    return 0;
 }
 
 #include "session_age.inc"
@@ -6435,7 +6482,19 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
             patch_identity();
             gamedb_put_back();    /* restore the player's database before the platform builds its offline overrides */
             log_begin();
-            log_raw("offline: FH2MP_OFFLINE is set, account save profile active; online hooks, session and network patches skipped\n");
+            log_raw("offline: FH2MP_OFFLINE is set, account save profile active; online hooks, session and network patches skipped, "
+                    "crash guards follow once the game's code is ready\n");
+            {
+                HANDLE t = CreateThread(NULL, 0, offline_guards, NULL, 0, NULL);
+                if (t) {
+                    CloseHandle(t);
+                } else {
+                    log_begin();
+                    log_raw("offline: no crash guards, the thread could not start (CreateThread error ");
+                    log_dec(GetLastError());
+                    log_raw(")\n");
+                }
+            }
             return 0;
         }
     }

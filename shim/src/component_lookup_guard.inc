@@ -11,7 +11,7 @@
  * [confirmed: decompile]. Which entity is missing, and why, is not known (the crash came as many remote cars were being mapped; guess).
  * The guard hooks 0x454f20: for a NULL entity it answers an empty pointer ({0, 0}, the shape of a component that is not there) and does
  * not call the game's code; any other entity goes to the game's code. It logs the caller once in a while, to find the missing entity's
- * owner. FH2MP_NO_COMPGUARD=1 switches it off. Online runs only (FH2MP_OFFLINE skips the shim's guards). */
+ * owner. FH2MP_NO_COMPGUARD=1 switches it off. Offline runs too (offline_guards). */
 #define CL_FN 0x454f20u
 typedef void **(*cl_fn)(void *, void **);
 static cl_fn g_cl_orig;
