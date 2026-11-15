@@ -12,5 +12,5 @@ case "$(uname -s)" in
      RUN="env WINEPREFIX=$work/prefix WINEDEBUG=-all wine" ;;
 esac
 $CC -O2 -Wall -Wextra -Wno-unused-function -I . tests/test_event_options.c -o "$work/test.exe"
-for v in request reply_0 reply_1; do tr -d '\r' < "tests/vectors/eventopts_$v.hex" > "$work/$v"; done
-$RUN "$work/test.exe" "$work/request" "$work/reply_0" "$work/reply_1"
+for v in request reply_0 reply_1 reply_2; do tr -d '\r' < "tests/vectors/eventopts_$v.hex" > "$work/$v"; done
+$RUN "$work/test.exe" "$work/request" "$work/reply_0" "$work/reply_1" "$work/reply_2"

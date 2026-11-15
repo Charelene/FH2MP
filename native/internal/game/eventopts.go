@@ -13,12 +13,16 @@ import (
 // car pack's own car (CustomCar: a car the game data does not have) never raced in an event; with the row set to Allowed it may, in that one
 // Free Roam event, in a public session as in a private one. Road Trip never takes them.
 //
-// State, not events. Every client asks a few times a second and says what its leader row was set to when its player last started an event (0 Not
-// allowed, 1 Allowed) for a few seconds after that start, and 255 the rest of the time. The server keeps the newest choice per player. When a
+// State, not events. Every client asks a few times a second and says what its leader row is set to (0 Not allowed, 1 Allowed) while its player
+// has Event Options open and for a few seconds after that player started the event, and 255 the rest of the time. The server keeps the newest
+// choice per player. When a
 // player requests a race (MsgRequestRace) the choice it sent within eventoptsFresh seconds is the event's; a choice that arrives while that
 // request is still pending (the datagram and the game's message race each other) is taken as well. The event's setting lasts until EndEvent. The
 // reply tells every client of the world whether its pending or running event takes modded cars, so the shim's car pickers stop refusing them
-// (pickerpi) and the row is only shown against a server that answers. A Road Trip world does not answer: no row there.
+// (pickerpi) and the row is only shown against a server that answers. A second flag says that some other player of the world has the row on
+// Allowed right now: an event that player starts will take modded cars, and the game that shows its invite a moment later has to know by then
+// (the invite toast's wrench, shim/src/event_options.inc), before the request itself has made the round. A Road Trip world does not answer: no
+// row there.
 // FH2MP_NO_EVENTOPTS=1 turns it off (no answers, no row, custom cars refused as before).
 const (
 	eventoptsMagic       = "FH2MPEO1"
@@ -28,6 +32,8 @@ const (
 	eventoptsNone        = 255  // the request's choice byte: nothing to say
 	eventoptsFresh       = 20.0 // s a choice counts for the race its player requests
 	eventoptsModded      = 1    // reply flag: the world's pending or running event takes modded cars
+	eventoptsComing      = 2    // reply flag: another player of the world has its row on Allowed right now
+	eventoptsComingFor   = 1.5  // s such a choice counts as "right now"
 )
 
 var eventoptsLog = diag.Get("eventopts")
@@ -140,6 +146,12 @@ func (h *Hub) eventoptsHandle(data []byte, addr Addr, only *World) {
 	reply[19], reply[52] = 2, 0
 	if world.ModdedCars {
 		reply[52] = eventoptsModded
+	}
+	for _, other := range world.Others(peer) {
+		if st := other.Eventopts; other.Connected && st != nil && st.Choice == 1 && now-st.ChoiceAt <= eventoptsComingFor {
+			reply[52] |= eventoptsComing
+			break
+		}
 	}
 	h.Sock.SendTo(signed(reply, key), addr)
 }

@@ -3255,14 +3255,21 @@ static const char RIVALS_LAUNCH_NEW[] =
     "    <behavior id=\"ModuleMethodCall\" module_id=\"RivalsModule\" method=\"RequestLaunchRivalsEventFromMenu\" />\r\n"
     "  </state>";
 
-/* One exact replacement in a file of one of the game's media zips (stateflow.zip, UI.zip), handed to the platform (set_file <set_path>).
- * Nothing is changed unless the old text occurs exactly once. `tag` starts the log lines. */
-static int stateflow_replace(const WCHAR *zip_name, const char *file, const char *set_path, const char *old, size_t olen, const char *neu, size_t nlen,
-                             const char *tag)
+struct sf_pair {
+    const char *old;
+    size_t olen;
+    const char *neu;
+    size_t nlen;
+};
+
+/* Exact replacements, one after the other, in a file of one of the game's media zips (stateflow.zip, UI.zip), handed to the platform
+ * (set_file <set_path>). Nothing is changed unless each old text occurs exactly once. `tag` starts the log lines. */
+static int stateflow_replace_n(const WCHAR *zip_name, const char *file, const char *set_path, const struct sf_pair *pairs, unsigned n, const char *tag)
 {
     WCHAR zip[MAX_PATH];
     unsigned char *orig, *out;
-    size_t size = 0, at = 0, i, hits = 0;
+    size_t size = 0, i;
+    unsigned p;
     int ok;
 
     if (!g_api->game_dir[0] || lstrlenW(g_api->game_dir) + lstrlenW(zip_name) + 8 >= MAX_PATH) {
@@ -3286,34 +3293,40 @@ static int stateflow_replace(const WCHAR *zip_name, const char *file, const char
         log_raw(" (missing, unreadable or not a zip the reader handles), not changed\n");
         return 0;
     }
-    for (i = 0; i + olen <= size; i++) {
-        if (orig[i] == (unsigned char)old[0] && mem_equal(orig + i, (const unsigned char *)old, olen)) {
-            at = i;
-            hits++;
+    for (p = 0; p < n; p++) {
+        const char *old = pairs[p].old;
+        size_t olen = pairs[p].olen, nlen = pairs[p].nlen, at = 0, hits = 0;
+        for (i = 0; i + olen <= size; i++) {
+            if (orig[i] == (unsigned char)old[0] && mem_equal(orig + i, (const unsigned char *)old, olen)) {
+                at = i;
+                hits++;
+            }
         }
-    }
-    if (hits != 1 || !(out = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, size - olen + nlen))) {
+        if (hits != 1 || !(out = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, size - olen + nlen))) {
+            HeapFree(GetProcessHeap(), 0, orig);
+            log_begin();
+            log_raw(tag);
+            log_raw(": the state in ");
+            log_raw(file);
+            if (hits != 1) {
+                log_raw(" is not as expected (the text to replace occurs ");
+                log_dec((unsigned long)hits);
+                log_raw(" times in ");
+                log_dec((unsigned long)size);
+                log_raw(" bytes, it must occur once: another mod or a game update changed it), not changed\n");
+            } else {
+                log_raw(" could not be rewritten (out of memory), not changed\n");
+            }
+            return 0;
+        }
+        mem_copy(out, orig, at);
+        mem_copy(out + at, pairs[p].neu, nlen);
+        mem_copy(out + at + nlen, orig + at + olen, size - at - olen);
         HeapFree(GetProcessHeap(), 0, orig);
-        log_begin();
-        log_raw(tag);
-        log_raw(": the state in ");
-        log_raw(file);
-        if (hits != 1) {
-            log_raw(" is not as expected (the text to replace occurs ");
-            log_dec((unsigned long)hits);
-            log_raw(" times in ");
-            log_dec((unsigned long)size);
-            log_raw(" bytes, it must occur once: another mod or a game update changed it), not changed\n");
-        } else {
-            log_raw(" could not be rewritten (out of memory), not changed\n");
-        }
-        return 0;
+        orig = out;
+        size = size - olen + nlen;
     }
-    mem_copy(out, orig, at);
-    mem_copy(out + at, neu, nlen);
-    mem_copy(out + at + nlen, orig + at + olen, size - at - olen);
-    ok = g_api->set_file(g_mod, set_path, out, size - olen + nlen);
-    HeapFree(GetProcessHeap(), 0, out);
+    ok = g_api->set_file(g_mod, set_path, orig, size);
     HeapFree(GetProcessHeap(), 0, orig);
     if (ok) return ok;
     log_begin();
@@ -3324,6 +3337,18 @@ static int stateflow_replace(const WCHAR *zip_name, const char *file, const char
         log_raw(" was not changed (another mod replaces it, see fh2-mods\\platform.log)\n");
     }
     return ok;
+}
+
+/* One exact replacement (stateflow_replace_n with one pair). */
+static int stateflow_replace(const WCHAR *zip_name, const char *file, const char *set_path, const char *old, size_t olen, const char *neu, size_t nlen,
+                             const char *tag)
+{
+    struct sf_pair one;
+    one.old = old;
+    one.olen = olen;
+    one.neu = neu;
+    one.nlen = nlen;
+    return stateflow_replace_n(zip_name, file, set_path, &one, 1, tag);
 }
 
 static int stateflow_rivals_leave_session(void)
@@ -3362,6 +3387,12 @@ static int stateflow_bucket_cars_online(void)
  * bold gamertag and TitlePostGamertag, and line 2 as 'Press (X) to join'. The shim puts the track's name in TitlePreGamertag (empty for races). For a
  * race event (IsRaceEvent) line 1 no longer shows it, and line 2 starts with it in the gamertag's bold style: 'Castelletto Meadow Circuit | Press (X) to
  * join' (user 2026-11-05). Only converters and styles the file already uses. Disable with env FH2MP_NO_RACETOAST.
+ *
+ * The wrench (event_options.inc): in front of the event's name on line 2, shown when the event takes modded cars. It is a filled shape, one
+ * polygon drawn for this (a wrench in the manner of Material Symbols Sharp "build": the jaw up and to the left, a straight handle), in the
+ * colour of the name beside it. Its style collapses it while the popup's Text is empty or null, word for word the rule of the file's own
+ * A_Style_FZTextBlock_Notification_OptionalText; FZMaterial with an FZGeometry is how the game draws the pin under a name tag
+ * (Scenes/Anthem/AR_OpponentLabel.xaml). The style is the second replacement in the same file.
  */
 static const char RACE_TOAST_OLD[] =
     "                                <local:FZTextBlock Text=\"{Binding TitlePreGamertag}\"\r\n"
@@ -3390,16 +3421,58 @@ static const char RACE_TOAST_NEW[] =
     "                                <Grid Visibility=\"{Binding PlayerHasAccepted, Converter={StaticResource A_FZBooleanToVisibilityConverter_Inverse}}\">\r\n"
     "                                    <StackPanel Orientation=\"Horizontal\" \r\n"
     "                                            Visibility=\"{Binding IsInputBlocked, Converter={StaticResource A_FZBooleanToVisibilityConverter_Inverse}}\">\r\n"
+    "                                        <Grid Visibility=\"{Binding IsRaceEvent, Converter={StaticResource A_FZBooleanToVisibilityConverter}}\">\r\n"
+    "                                            <local:FZMaterial Style=\"{StaticResource FH2MP_Style_FZMaterial_Notification_ModdedCars}\"\r\n"
+    "                                                              Width=\"20\"\r\n"
+    "                                                              Height=\"20\"\r\n"
+    "                                                              Margin=\"0,0,6,0\">\r\n"
+    "                                                <local:FZMaterial.Data>\r\n"
+    "                                                    <local:FZGeometry Data=\"M10.06,6.38 5.79,2.11 7.19,1.9 8.59,2.06 9.9,2.57 11.04,3.4 11.92,4.5 12.49,5.79 12.7,7.19 12.54,8.59 12.03,9.9 11.93,10.09 20.66,18.83 18.83,20.66 10.09,11.93 8.79,12.49 7.4,12.7 6,12.54 4.69,12.03 3.55,11.19 2.67,10.09 2.11,8.79 1.9,7.4 2.06,6 2.11,5.79 6.38,10.06z\" />\r\n"
+    "                                                </local:FZMaterial.Data>\r\n"
+    "                                            </local:FZMaterial>\r\n"
+    "                                        </Grid>\r\n"
     "                                        <local:FZTextBlock Text=\"{Binding TitlePreGamertag}\"\r\n"
     "                                                   Visibility=\"{Binding IsRaceEvent, Converter={StaticResource A_FZBooleanToVisibilityConverter}}\"\r\n"
     "                                                   Style=\"{StaticResource A_Style_FZTextBlock_Notification_Gamertag}\"/>\r\n"
     "                                        <local:FZTextBlock Text=\"{local:Loc Lobby.IDS_Invite_Join_Prefix}\"\r\n"
     "                                                       Style=\"{StaticResource A_Style_FZTextBlock_Notification_BodyText}\"/>\r\n";
 
+/* The wrench's style, put after the optional text's style it takes its rule from. */
+static const char RACE_TOAST_STYLE_OLD[] =
+    "                <DataTrigger Binding=\"{Binding Text}\" Value=\"{x:Null}\">\r\n"
+    "                    <Setter Property=\"Visibility\" Value=\"Collapsed\"/>\r\n"
+    "                </DataTrigger>\r\n"
+    "            </Style.Triggers>\r\n"
+    "        </Style>\r\n";
+static const char RACE_TOAST_STYLE_NEW[] =
+    "                <DataTrigger Binding=\"{Binding Text}\" Value=\"{x:Null}\">\r\n"
+    "                    <Setter Property=\"Visibility\" Value=\"Collapsed\"/>\r\n"
+    "                </DataTrigger>\r\n"
+    "            </Style.Triggers>\r\n"
+    "        </Style>\r\n"
+    "\r\n"
+    "        <Style x:Key=\"FH2MP_Style_FZMaterial_Notification_ModdedCars\" TargetType=\"{x:Type local:FZMaterial}\">\r\n"
+    "            <Setter Property=\"Color\" Value=\"{StaticResource A_Color_Notification_GamertagText}\"/>\r\n"
+    "            <Setter Property=\"VerticalAlignment\" Value=\"Center\"/>\r\n"
+    "            <Setter Property=\"Visibility\" Value=\"Visible\"/>\r\n"
+    "            <Style.Triggers>\r\n"
+    "                <DataTrigger Binding=\"{Binding Text}\" Value=\"\">\r\n"
+    "                    <Setter Property=\"Visibility\" Value=\"Collapsed\"/>\r\n"
+    "                </DataTrigger>\r\n"
+    "                <DataTrigger Binding=\"{Binding Text}\" Value=\"{x:Null}\">\r\n"
+    "                    <Setter Property=\"Visibility\" Value=\"Collapsed\"/>\r\n"
+    "                </DataTrigger>\r\n"
+    "            </Style.Triggers>\r\n"
+    "        </Style>\r\n";
+
 static int ui_race_toast_layout(void)
 {
-    int ok = stateflow_replace(L"\\media\\UI.zip", "Controls/NotificationPopupControl.xaml", "UI/Controls/NotificationPopupControl.xaml", RACE_TOAST_OLD,
-                               sizeof RACE_TOAST_OLD - 1, RACE_TOAST_NEW, sizeof RACE_TOAST_NEW - 1, "racetoast layout");
+    static const struct sf_pair pairs[2] = {
+        {RACE_TOAST_OLD, sizeof RACE_TOAST_OLD - 1, RACE_TOAST_NEW, sizeof RACE_TOAST_NEW - 1},
+        {RACE_TOAST_STYLE_OLD, sizeof RACE_TOAST_STYLE_OLD - 1, RACE_TOAST_STYLE_NEW, sizeof RACE_TOAST_STYLE_NEW - 1},
+    };
+    int ok = stateflow_replace_n(L"\\media\\UI.zip", "Controls/NotificationPopupControl.xaml", "UI/Controls/NotificationPopupControl.xaml", pairs, 2,
+                                 "racetoast layout");
     if (ok) {
         InterlockedExchange(&g_rt_layout, 1);
         log_begin();

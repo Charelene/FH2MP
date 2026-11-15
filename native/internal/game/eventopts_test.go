@@ -42,7 +42,7 @@ func eoSend(r *modsRig, i int, seq uint64, choice byte) (byte, bool) {
 func TestEventoptsVectors(t *testing.T) {
 	req := eventoptsTestRequest(modsVecKey, modsVecEpoch, modsVecXuid, 9, 1)
 	checkVector(t, "eventopts_request.hex", req)
-	for flag, name := range map[byte]string{0: "eventopts_reply_0.hex", eventoptsModded: "eventopts_reply_1.hex"} {
+	for flag, name := range map[byte]string{0: "eventopts_reply_0.hex", eventoptsModded: "eventopts_reply_1.hex", eventoptsComing: "eventopts_reply_2.hex"} {
 		reply := append([]byte(nil), req[:eventoptsBase]...)
 		reply[19], reply[52] = 2, flag
 		checkVector(t, name, signed(reply, modsVecKey))
@@ -132,19 +132,29 @@ func TestEventoptsHandle(t *testing.T) {
 	}
 	// the choice first, then the race request
 	r.clk.t += 1
-	eoSend(r, 0, 1, 1)
+	if flag, _ := eoSend(r, 0, 1, 1); flag != 0 {
+		t.Fatalf("the player with the row on Allowed is told flag %d about itself", flag)
+	}
 	if r.w.ModdedCars {
 		t.Fatal("a choice with no race requested changed the world")
+	}
+	// the other player hears that an event with modded cars may be coming, for a moment
+	if flag, _ := eoSend(r, 1, 2, eventoptsNone); flag != eventoptsComing {
+		t.Fatalf("the other player is told flag %d while the leader's row is on Allowed", flag)
+	}
+	r.clk.t += eventoptsComingFor + 0.1
+	if flag, _ := eoSend(r, 1, 3, eventoptsNone); flag != 0 {
+		t.Fatalf("the other player is still told flag %d after the leader fell silent", flag)
 	}
 	r.w.PendingRace = &PendingRace{r.clk.t + 10, leader}
 	r.w.SetModdedCars(leader.allowsModded(r.clk.t), leader, "its Event Options at the race request")
 	r.clk.t += 1
-	if flag, _ := eoSend(r, 1, 2, eventoptsNone); flag != eventoptsModded {
+	if flag, _ := eoSend(r, 1, 4, eventoptsNone); flag != eventoptsModded {
 		t.Fatalf("the other player is told flag %d for an event that takes modded cars", flag)
 	}
 	// somebody who is not the leader cannot change it
 	r.clk.t += 1
-	if flag, _ := eoSend(r, 1, 3, 0); flag != eventoptsModded || !r.w.ModdedCars || other.Eventopts.Choice != 0 {
+	if flag, _ := eoSend(r, 1, 5, 0); flag != eventoptsModded || !r.w.ModdedCars || other.Eventopts.Choice != 0 {
 		t.Fatalf("a non-leader's choice: flag %d, world %v", flag, r.w.ModdedCars)
 	}
 	// the race request first, then the leader's choice

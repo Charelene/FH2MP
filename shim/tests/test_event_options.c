@@ -3,8 +3,10 @@
  * said to the server and when, what a reply and its absence do). Checked: the row is made the way the game's builder makes its own (title, two
  * choices, a function the game can call), it goes into the page's collection after the game's rows, every object the row code made is given
  * back exactly once, the leader's choice is said for a few seconds after the game calls the row's function, and nothing is added outside a
- * session, against a server that does not answer, or on a page without a collection. The game is never loaded, no network call is made.
- *   test.exe <request vector> <reply vector, event not modded> <reply vector, event modded> */
+ * session, against a server that does not answer, or on a page without a collection; the row's setting is said while the screen is open and
+ * a change of our row (and only ours) is noticed; an invite toast gets its wrench exactly when the server's newest answer says so. The game is
+ * never loaded, no network call is made.
+ *   test.exe <request vector> <reply vector, event not modded> <reply vector, event modded> <reply vector, one may be coming> */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
@@ -19,6 +21,7 @@ static void log_dec(unsigned long v) { char b[24]; sprintf(b, "%lu", v); strcat(
 #include "src/sha256.inc"
 #include "src/lighting_wire.h"
 static volatile LONG g_ppi_modded_ok;   /* picker_pi.inc's */
+static volatile LONG g_rt_layout = 1;   /* race_toast.inc's: the toast's layout is in place */
 static ULONGLONG g_now = 100000;
 #define EVO_NOW() g_now
 #define EVO_TEST
@@ -29,8 +32,9 @@ static int failed;
 #define CHECK(cond) do { if (!(cond)) { printf("FAIL line %d: %s\n", __LINE__, #cond); failed++; } } while (0)
 
 /* ---- a stand-in game: counted objects (the count at +0x10) and display strings released through their vftable ---- */
-/* the first 0x58 bytes are the game's (a choice list's five vftables go in there); the stand-in's own fields come after */
-struct object { void *vtable; void *pad; LONG count; int kind; unsigned char game[0x40]; char text[32]; int value; void *parts[8]; int n; int selected; struct evo_fn fn; };
+/* the first 0xa8 bytes are the game's (a choice list's five vftables, a row's SelectedIndex and function go in there); the stand-in's own
+ * fields come after */
+struct object { void *vtable; void *pad; LONG count; int kind; unsigned char game[0x90]; char text[32]; int value; void *parts[8]; int n; int selected; struct evo_fn fn; };
 enum { K_LIST = 1, K_ENTRY, K_TEXT, K_ROW };
 static int g_live_objects, g_live_strings, g_freed, g_in_session = 1, g_alloc_fails;
 static struct object *g_rows[8];
@@ -120,6 +124,8 @@ static void **fake_make_row(void **out, void **title, int selected, void **choic
     row->selected = selected;
     row->fn = *fn;
     row->fn.impl = &row->fn;
+    *(int *)((unsigned char *)row + EVO_ROW_SELECTED) = selected;
+    *(void **)((unsigned char *)row + EVO_ROW_FN_IMPL) = &row->fn;
     fn->impl = NULL;                                   /* the game empties the function it was given */
     InterlockedIncrement(&((struct object *)*title)->count);
     InterlockedIncrement(&((struct object *)*choices)->count);
@@ -138,6 +144,26 @@ static int fake_add_row(void *collection, void *row)
 }
 
 static int evo_in_session(const unsigned char *img) { (void)img; return g_in_session; }
+
+/* the game's setter of a row's SelectedIndex: the int is at +0x28 of the boxed value */
+static void *fake_selected(void *property, void *row, void *value)
+{
+    (void)property;
+    *(int *)((unsigned char *)row + EVO_ROW_SELECTED) = *(int *)((unsigned char *)value + 0x28);
+    return row;
+}
+static void set_row(void *row, int index)
+{
+    unsigned char boxed[0x30] = {0};
+    *(int *)(boxed + 0x28) = index;
+    CHECK(evo_selected_hook(NULL, row, boxed) == row);
+}
+
+/* the game's change notice, and the popup's Text property */
+static char g_text_prop;
+static int g_notices, g_text_notices;
+static void fake_notify(void *object, void *property) { (void)object; g_notices++; if (property == &g_text_prop) g_text_notices++; }
+static void *fake_text_property(void) { return &g_text_prop; }
 
 static void *fake_builder(void *page, void *b, void *c, void *d)
 {
@@ -186,6 +212,8 @@ static void wire(char **argv)
     CHECK(eo_response(reply, n, key, 0x9000123456789ull, 9, 8, epoch, &flags) && flags == 0);
     n = read_hex(argv[3], reply, sizeof reply);
     CHECK(eo_response(reply, n, key, 0x9000123456789ull, 9, 8, epoch, &flags) && flags == EO_MODDED);
+    n = read_hex(argv[4], reply, sizeof reply);
+    CHECK(eo_response(reply, n, key, 0x9000123456789ull, 9, 8, epoch, &flags) && flags == EO_COMING);
     CHECK(!eo_response(reply, n, key, 0x9000123456789ull, 9, 9, epoch, &flags));   /* already seen */
     CHECK(!eo_response(reply, n, key, 0x9000123456789ull, 8, 0, epoch, &flags));   /* never asked */
     CHECK(!eo_response(reply, n, key, 0x9000123456788ull, 9, 8, epoch, &flags));   /* another player's */
@@ -203,7 +231,7 @@ int main(int argc, char **argv)
     struct object *row, *title, *list;
     int i;
 
-    if (argc < 4) { printf("usage: test.exe <request vector> <reply 0 vector> <reply 1 vector>\n"); return 2; }
+    if (argc < 5) { printf("usage: test.exe <request vector> <reply 0 vector> <reply 1 vector> <reply 2 vector>\n"); return 2; }
     wire(argv);
 
     g_evo.make_string = fake_make_string;
@@ -218,6 +246,10 @@ int main(int argc, char **argv)
     g_evo.add_row = fake_add_row;
     for (i = 0; i < 5; i++) g_evo.list_vtable[i] = &g_list_vt[i];
     g_evo.fn_vtable = &g_fn_vt;
+    g_evo.notify = fake_notify;
+    g_evo.text_property = fake_text_property;
+    g_evo_selected_orig = fake_selected;
+    g_evo_toast_orig = fake_notify;
     g_evo_builder_orig = fake_builder;
     *(void **)(page + EVO_PAGE_ROWS) = g_rows;
 
@@ -246,8 +278,24 @@ int main(int argc, char **argv)
     CHECK(strstr(g_log, "the Modded cars row is on it (#1)") != NULL);
 
     /* the leader starts the event: the game calls the row's function with its SelectedIndex */
-    CHECK(evo_choice_to_say(g_now) == EO_NONE);                                         /* nothing to say before a start */
+    /* while the screen is open the row's setting is said: Not allowed at first, each change of our row at once, nobody else's row */
+    CHECK(g_evo_row == row && evo_choice_to_say(g_now) == 0);
+    InterlockedExchange(&g_evo_send_now, 0);
+    set_row(g_rows[0], 1);                                                              /* the game's own row */
+    CHECK(evo_choice_to_say(g_now) == 0 && !g_evo_send_now);
+    set_row(row, 1);
+    CHECK(evo_choice_to_say(g_now) == 1 && g_evo_send_now);
+    InterlockedExchange(&g_evo_send_now, 0);
+    set_row(row, 1);                                                                    /* no change: nothing new to say */
+    CHECK(!g_evo_send_now);
+    CHECK(evo_choice_to_say(g_now + EVO_OPEN_MS) == 1 && evo_choice_to_say(g_now + EVO_OPEN_MS + 1) == EO_NONE);   /* the screen cannot be open for ever */
+    set_row(row, 0);
+    CHECK(evo_choice_to_say(g_now) == 0);
+
+    /* the leader starts the event: the choice is final, the row is no longer watched */
     row->fn.fn(NULL, 1);
+    CHECK(g_evo_row == NULL);
+    set_row(row, 0);
     CHECK(evo_choice_to_say(g_now) == 1 && strstr(g_log, "Modded cars allowed (#1)") != NULL);
     CHECK(evo_choice_to_say(g_now + EVO_SAY_MS) == 1 && evo_choice_to_say(g_now + EVO_SAY_MS + 1) == EO_NONE);   /* said for a while, then no more */
     row->fn.fn(NULL, 0);
@@ -262,6 +310,32 @@ int main(int argc, char **argv)
     evo_expire(g_now);
     CHECK(!g_ppi_modded_ok && !evo_server_answers());
     evo_reply(0, g_now);
+
+    /* an invite toast: the wrench's switch (the popup's Text) is only set when the newest answer says modded cars, now or coming */
+    {
+        static unsigned char popup[0x200];
+        struct object *empty = new_object(K_TEXT), *text;
+        *(void **)(popup + EVO_TOAST_TEXT) = empty;
+        g_notices = g_text_notices = 0;
+        evo_toast_hook(popup, NULL);
+        CHECK(g_notices == 1 && *(void **)(popup + EVO_TOAST_TEXT) == empty);          /* the game's notice ran, Text is as the game left it */
+        evo_reply(EO_COMING, g_now);                                                    /* a player has the row on Allowed right now */
+        CHECK(!g_ppi_modded_ok);                                                        /* which lets no car in yet */
+        g_rt_layout = 0;
+        evo_toast_hook(popup, NULL);
+        CHECK(*(void **)(popup + EVO_TOAST_TEXT) == empty);                            /* without the layout there is no wrench to switch */
+        g_rt_layout = 1;
+        evo_toast_hook(popup, NULL);
+        text = *(void **)(popup + EVO_TOAST_TEXT);
+        CHECK(text != empty && text->kind == K_TEXT && !strcmp(text->text, " ") && text->count == 1 && g_text_notices == 1);
+        CHECK(strstr(g_log, "an invite toast shows the wrench") != NULL);
+        evo_reply(EO_MODDED, g_now);
+        evo_toast_hook(popup, NULL);
+        CHECK(*(void **)(popup + EVO_TOAST_TEXT) != text && g_text_notices == 2);      /* the old Text was given back */
+        evo_release(*(void **)(popup + EVO_TOAST_TEXT));
+        evo_reply(0, g_now);
+        CHECK(g_live_strings == 0);
+    }
 
     /* the screen closes: the game drops its rows, and nothing of ours is left behind */
     drop_rows();

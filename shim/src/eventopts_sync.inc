@@ -1,19 +1,24 @@
 /* The Modded cars event option between this game and the server (native/internal/game/eventopts.go, its own magic FH2MPEO1; the row itself is
  * event_options.inc). Like the horn (honk_sync.inc) it rides on the game port as signed datagrams: a few times a second this game asks, and
- * for EVO_SAY_MS after its player started an event it says what the Modded cars row was set to. The server keeps that as the event's setting
- * when the player is the event's leader, and its reply tells every game of the session whether the pending or running event takes modded
- * cars. Two things follow the reply here:
+ * while its player has Event Options open (for at most EVO_OPEN_MS) and for EVO_SAY_MS after that player started the event it says what the
+ * Modded cars row is set to; a change goes out at once. The server keeps that as the event's setting when the player is the event's leader,
+ * and its reply tells every game of the session whether the pending or running event takes modded cars, and whether another player has the
+ * row on Allowed right now. Three things follow the reply here:
  *   - the car pickers (picker_pi.inc, "custom cars out of online events") stop refusing a car pack's own car while the event takes them;
  *   - the row is only put on Event Options while the server answers (evo_server_answers), so a server without this, a Road Trip session (the
- *     server does not answer there) or blocked UDP replies leave the screen as the game makes it.
+ *     server does not answer there) or blocked UDP replies leave the screen as the game makes it;
+ *   - the invite toast of a race gets a wrench when the event takes modded cars or one that does may be coming (evo_invite_modded): the
+ *     toast is built when the invite arrives, a moment after the leader pressed Start, and what the leader's row said just before is the
+ *     only word this game can have by then.
  * A reply older than EVO_STALE_MS counts for nothing: modded cars are refused again and the row is not added. Needs the lighting hooks (the
  * server address, ticket epoch and generation are theirs). The network thread never touches the game. FH2MP_NO_EVENTOPTS=1 turns the row and
  * this off. */
 #include "eventopts_wire.h"
 
 #define EVO_POLL_MS 400u         /* a poll while there is nothing to say */
-#define EVO_BUSY_MS 80u          /* while the leader's choice is being said */
+#define EVO_BUSY_MS 150u         /* while the row's setting is being said */
 #define EVO_SAY_MS 8000u         /* how long after an event start the choice is said */
+#define EVO_OPEN_MS 40000u       /* how long Event Options can be open (its own countdown starts the event sooner) */
 #define EVO_STALE_MS 3000u       /* a reply older than this counts for nothing */
 
 #ifndef EVO_NOW
@@ -22,20 +27,56 @@
 
 static volatile LONG g_evo_allowed;        /* the Modded cars row at the last event start from this game: 1 Allowed */
 static volatile LONG64 g_evo_started_at;   /* when that was (EVO_NOW), 0: never */
+static volatile LONG g_evo_pending;        /* the row while Event Options is open: 1 Allowed */
+static volatile LONG64 g_evo_open_at;      /* when the screen opened with the row on it, 0: it is not open */
+static volatile LONG g_evo_invite_modded;  /* the newest answer: this session's event takes modded cars, or one that does may be coming */
+static volatile LONG g_evo_send_now;       /* something changed: the worker says it at once */
+static HANDLE g_evo_wake;                  /* the worker waits on it */
 static volatile LONG64 g_evo_reply_at;     /* when the server last answered, 0: never */
 static volatile LONG g_evo_running;        /* the worker runs (FH2MP_NO_EVENTOPTS unset) */
 
-/* The row's function calls this when the leader starts an event (event_options.inc). */
+static void evo_wake(void)
+{
+    InterlockedExchange(&g_evo_send_now, 1);
+    if (g_evo_wake) {
+        SetEvent(g_evo_wake);
+    }
+}
+
+/* Event Options opened with the row on it, at Not allowed (event_options.inc). */
+static void evo_screen_opened(void)
+{
+    InterlockedExchange(&g_evo_pending, 0);
+    InterlockedExchange64(&g_evo_open_at, (LONG64)EVO_NOW());
+    evo_wake();
+}
+
+/* The player changed the row while the screen is open. */
+static void evo_row_set(int index)
+{
+    if (g_evo_open_at && InterlockedExchange(&g_evo_pending, index == 1) != (index == 1)) {
+        evo_wake();
+    }
+}
+
+/* The row's function calls this when the leader starts an event (event_options.inc): the screen is gone, the choice is final. */
 static void evo_leader_chose(int allowed)
 {
     InterlockedExchange(&g_evo_allowed, allowed != 0);
     InterlockedExchange64(&g_evo_started_at, (LONG64)EVO_NOW());
+    InterlockedExchange64(&g_evo_open_at, 0);
+    evo_wake();
 }
 
-/* What the next request says: 0 or 1 for EVO_SAY_MS after an event start from this game, EO_NONE else. */
+/* What the next request says: the row (0 or 1) while Event Options is open, the choice for EVO_SAY_MS after an event start from this game,
+ * EO_NONE else. */
 static unsigned char evo_choice_to_say(ULONGLONG now)
 {
-    LONG64 at = g_evo_started_at;
+    LONG64 at = g_evo_open_at;
+    if (at && now - (ULONGLONG)at <= EVO_OPEN_MS) {
+        return g_evo_pending ? 1 : 0;
+    }
+    at = g_evo_started_at;
     if (!at || now - (ULONGLONG)at > EVO_SAY_MS) {
         return EO_NONE;
     }
@@ -49,19 +90,21 @@ static int evo_server_answers(void)
     return at && EVO_NOW() - (ULONGLONG)at <= EVO_STALE_MS;
 }
 
-/* An authenticated reply: what the car pickers may do, and that the server answers. */
+/* An authenticated reply: what the car pickers may do, what an invite toast shows, and that the server answers. */
 static void evo_reply(unsigned char flags, ULONGLONG now)
 {
     InterlockedExchange(&g_ppi_modded_ok, (flags & EO_MODDED) != 0);
+    InterlockedExchange(&g_evo_invite_modded, (flags & (EO_MODDED | EO_COMING)) != 0);
     InterlockedExchange64(&g_evo_reply_at, (LONG64)now);
 }
 
-/* No reply for EVO_STALE_MS: the pickers refuse modded cars again. */
+/* No reply for EVO_STALE_MS: the pickers refuse modded cars again, and a toast gets no wrench. */
 static void evo_expire(ULONGLONG now)
 {
     LONG64 at = g_evo_reply_at;
-    if (g_ppi_modded_ok && (!at || now - (ULONGLONG)at > EVO_STALE_MS)) {
+    if ((g_ppi_modded_ok || g_evo_invite_modded) && (!at || now - (ULONGLONG)at > EVO_STALE_MS)) {
         InterlockedExchange(&g_ppi_modded_ok, 0);
+        InterlockedExchange(&g_evo_invite_modded, 0);
     }
 }
 
@@ -131,7 +174,7 @@ static DWORD WINAPI evo_worker(void *unused)
             }
         }
         choice=evo_choice_to_say(now);
-        if(now-last_send>=(choice!=EO_NONE ? EVO_BUSY_MS : EVO_POLL_MS)) {
+        if(InterlockedExchange(&g_evo_send_now,0) || now-last_send>=(choice!=EO_NONE ? EVO_BUSY_MS : EVO_POLL_MS)) {
             WSABUF b; DWORD sent=0;
             eo_request(packet,g_ticket_key,g_xuid,++seq,epoch,choice);
             b.len=EO_REQUEST; b.buf=(char *)packet;
@@ -150,14 +193,16 @@ static DWORD WINAPI evo_worker(void *unused)
                 }
             }
         }
-        Sleep(20);
+        WaitForSingleObject(g_evo_wake,20);   /* a change of the row wakes it */
     }
 }
 
 /* FH2MP_NO_EVENTOPTS unset: the worker. The row's hook goes in with patch_event_options (event_options.inc). */
 static void start_eventopts(void)
 {
-    HANDLE thread=CreateThread(NULL,0,evo_worker,NULL,0,NULL);
+    HANDLE thread;
+    g_evo_wake=CreateEventW(NULL,FALSE,FALSE,NULL);
+    thread=g_evo_wake ? CreateThread(NULL,0,evo_worker,NULL,0,NULL) : NULL;
     if(thread) {CloseHandle(thread);InterlockedExchange(&g_evo_running,1);}
     else {log_begin();log_raw("eventopts: could not start its thread, error ");log_dec(GetLastError());log_raw("; no Modded cars row\n");}
 }

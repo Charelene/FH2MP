@@ -28,6 +28,19 @@
  * is started the row's function hands the leader's choice to eventopts_sync.inc, which says it to the server for a few seconds; the server
  * makes it the event's setting and tells every game of the session. FH2MP_NO_EVENTOPTS=1 turns the row and the channel off.
  *
+ * The row while the screen is open [C: disassembly]. A row's SelectedIndex is set through one function, the property's setter +d91c40
+ * (property, row, boxed value: it stores the int at row+0x78 and raises the change). It is hooked: when the row it sets is ours (the pointer
+ * kept from the builder, and its function still ours) the new setting goes to eventopts_sync.inc at once, so the server, and through it the
+ * other players' games, know what the leader is about to start with before Start is pressed.
+ *
+ * The wrench on the invite toast [C: disassembly; not seen in a game]. The toast of a race event (race_toast.inc) is built by
+ * NetworkRaceStartingPromptComponent::OnShowPrompt (+8193d0) on its popup object: it empties Text (+0x138; stored at +81951e, the property
+ * +792be0) and sets TitlePreGamertag (+0x120), each followed by the change notice +40a730 (object, property). The layout (fh2mp_mod.c
+ * ui_race_toast_layout) has a wrench in front of the event's name that is collapsed while Text is empty, the rule the file's own optional
+ * text uses. The notice for TitlePreGamertag (the call at +819801) is hooked: when the newest answer of the server says this session's event
+ * takes modded cars, or that a player has the row on Allowed right now, Text becomes a single space (made as the row's title is made) and
+ * its own change notice follows, so the wrench shows. Text is only drawn once the player has accepted, where a space shows nothing.
+ *
  * Safe by default: every function called and the two vftable sets are byte-checked before the hook goes in, and any mismatch leaves the screen
  * as the game makes it. At a call the page's collection is read through read_game_memory first. The game's functions are called as the builder
  * calls them, on the thread the builder runs on. */
@@ -46,6 +59,14 @@
 #define EVO_FN_VTABLE_RVA 0x2e105c0u     /* std::function's wrapper for a plain function (LaunchOptions &, int) */
 #define EVO_FN_CALL_RVA 0x17f1410u       /* its call, the third vftable entry */
 #define EVO_START_RVA 0xd6f4c7u          /* the start of the event reading a row's SelectedIndex and function */
+#define EVO_SELECTED_SET_RVA 0xd91c40u   /* a row's SelectedIndex setter (property, row, boxed value) */
+#define EVO_TOAST_SITE_RVA 0x819801u     /* OnShowPrompt: the change notice for TitlePreGamertag */
+#define EVO_TOAST_STORE_RVA 0x81951eu    /* OnShowPrompt: mov [rdi+0x138],rbx, the popup's Text */
+#define EVO_NOTIFY_RVA 0x40a730u         /* (object, property): a property changed */
+#define EVO_TEXT_PROP_RVA 0x792be0u      /* the popup's Text property */
+#define EVO_TOAST_TEXT 0x138u
+#define EVO_ROW_SELECTED 0x78u
+#define EVO_ROW_FN_IMPL 0xa0u            /* the row's function: the pointer to its wrapper, whose +8 is the plain function */
 #define EVO_PAGE_ROWS 0x410u
 #define EVO_LIST_SIZE 0x58u
 #define EVO_COUNT 0x10u
@@ -65,6 +86,8 @@ struct evo_game {
     void (*insert)(void *list, int index, void *entry);
     void **(*make_row)(void **out, void **title, int selected, void **choices, void *function);
     int (*add_row)(void *collection, void *row);
+    void (*notify)(void *object, void *property);
+    void *(*text_property)(void);
     void *list_vtable[5];
     void *fn_vtable;
 };
@@ -82,7 +105,8 @@ typedef void *(*evo_builder_fn)(void *page, void *b, void *c, void *d);
 static struct evo_game g_evo;
 static evo_builder_fn g_evo_builder_orig;
 static const unsigned char *g_evo_img;
-static volatile LONG g_evo_added, g_evo_started, g_evo_no_rows;
+static volatile LONG g_evo_added, g_evo_started, g_evo_no_rows, g_evo_wrenches;
+static void *volatile g_evo_row;   /* our row on the Event Options that is open (never used as an object: only compared and read safely) */
 
 static void evo_release(void *object)
 {
@@ -103,6 +127,7 @@ static void evo_on_start(void *launch_options, int index)
 {
     LONG n = InterlockedIncrement(&g_evo_started);
     (void)launch_options;
+    g_evo_row = NULL;
     evo_leader_chose(index == 1);
     if (n <= 20 || n % 100 == 0) {
         log_begin();
@@ -167,6 +192,7 @@ static int evo_add_row(void *page)
     g_evo.make_row(&row, &title, 0, &list, &fn);   /* takes the function out of `fn` */
     if (row) {
         g_evo.add_row(collection, row);
+        g_evo_row = row;
     }
     evo_release(row);
     evo_release(title);
@@ -183,6 +209,7 @@ static void *evo_builder_hook(void *page, void *b, void *c, void *d)
     void *ret = g_evo_builder_orig(page, b, c, d);
     if (evo_server_answers() && evo_in_session(g_evo_img) && evo_add_row(page)) {
         LONG n = InterlockedIncrement(&g_evo_added);
+        evo_screen_opened();
         if (n <= 20 || n % 100 == 0) {
             log_begin();
             log_raw("eventopts: Event Options opened, the Modded cars row is on it (#");
@@ -193,10 +220,81 @@ static void *evo_builder_hook(void *page, void *b, void *c, void *d)
     return ret;
 }
 
+/* ---- the row while the screen is open ---- */
+typedef void *(*evo_selected_fn)(void *property, void *row, void *value);
+static evo_selected_fn g_evo_selected_orig;
+
+static void *evo_selected_hook(void *property, void *row, void *value)
+{
+    void *ret = g_evo_selected_orig(property, row, value), *impl = NULL, *fn = NULL;
+    int index = -1;
+    if (row && row == g_evo_row && read_game_memory((const unsigned char *)row + EVO_ROW_FN_IMPL, &impl, sizeof impl) && impl &&
+        read_game_memory((const unsigned char *)impl + 8, &fn, sizeof fn) && fn == (void *)evo_on_start &&
+        read_game_memory((const unsigned char *)row + EVO_ROW_SELECTED, &index, sizeof index)) {
+        evo_row_set(index);
+    }
+    return ret;
+}
+
+/* ---- the wrench on the invite toast ---- */
+typedef void (*evo_notify_fn)(void *object, void *property);
+static evo_notify_fn g_evo_toast_orig;
+
+static void evo_toast_hook(void *popup, void *property)
+{
+    void *old = NULL, *name = NULL, *text = NULL;
+    g_evo_toast_orig(popup, property);
+    if (!g_evo_invite_modded || !g_rt_layout || !popup || !read_game_memory((const unsigned char *)popup + EVO_TOAST_TEXT, &old, sizeof old)) {
+        return;
+    }
+    g_evo.make_string(&name, " ", -1);
+    g_evo.text_from(&text, &name);
+    if (text) {
+        LONG n = InterlockedIncrement(&g_evo_wrenches);
+        *(void **)((unsigned char *)popup + EVO_TOAST_TEXT) = text;   /* the popup takes the count text_from gave */
+        evo_release(old);
+        g_evo.notify(popup, g_evo.text_property());
+        if (n <= 20 || n % 100 == 0) {
+            log_begin();
+            log_raw("eventopts: an invite toast shows the wrench: the event takes modded cars (#");
+            log_dec((unsigned long)n);
+            log_raw(")\n");
+        }
+    }
+    evo_release_string(name);
+}
+
 #ifndef EVO_TEST
 static int evo_in_session(const unsigned char *img)
 {
     return ppi_in_session(img);
+}
+
+/* The early notice and the toast's wrench: each needs its own code to be as expected; without it only that part is off. */
+static void patch_event_options_invite(unsigned char *img)
+{
+    static const unsigned char setter[16] = {0x40, 0x53, 0x48, 0x83, 0xec, 0x20, 0x41, 0x8b, 0x40, 0x28, 0x48, 0x8b, 0xda, 0x39, 0x42, 0x78};
+    static const unsigned char site[5] = {0xe8, 0x2a, 0x0f, 0xbf, 0xff};
+    static const unsigned char store[7] = {0x48, 0x89, 0x9f, 0x38, 0x01, 0x00, 0x00};
+    static const unsigned char notify[16] = {0x40, 0x57, 0x48, 0x83, 0xec, 0x60, 0x48, 0xc7, 0x44, 0x24, 0x20, 0xfe, 0xff, 0xff, 0xff, 0x48};
+    static const unsigned char prop[16] = {0x40, 0x57, 0x48, 0x83, 0xec, 0x30, 0x48, 0xc7, 0x44, 0x24, 0x20, 0xfe, 0xff, 0xff, 0xff, 0x48};
+
+    if (code_is("eventopts", "a row's SelectedIndex setter", img, EVO_SELECTED_SET_RVA, setter, sizeof setter) &&
+        plat_hook("eventopts: a row's SelectedIndex", img + EVO_SELECTED_SET_RVA, (void *)evo_selected_hook, (void **)&g_evo_selected_orig)) {
+        log_begin();
+        log_raw("hook: eventopts: the server hears the Modded cars row as the leader sets it, before Start (game+0xd91c40)\n");
+    }
+    if (code_is("eventopts", "the invite toast's change notice", img, EVO_TOAST_SITE_RVA, site, sizeof site) &&
+        code_is("eventopts", "the invite toast's Text", img, EVO_TOAST_STORE_RVA, store, sizeof store) &&
+        code_is("eventopts", "the change notice", img, EVO_NOTIFY_RVA, notify, sizeof notify) &&
+        code_is("eventopts", "the popup's Text property", img, EVO_TEXT_PROP_RVA, prop, sizeof prop)) {
+        g_evo.notify = (void (*)(void *, void *))(void *)(img + EVO_NOTIFY_RVA);
+        g_evo.text_property = (void *(*)(void))(void *)(img + EVO_TEXT_PROP_RVA);
+        if (plat_hook_call("eventopts: the invite toast's wrench", img + EVO_TOAST_SITE_RVA, (void *)evo_toast_hook, (void **)&g_evo_toast_orig)) {
+            log_begin();
+            log_raw("hook: eventopts: a race invite toast shows a wrench when its event takes modded cars (game+0x819801)\n");
+        }
+    }
 }
 
 static int patch_event_options(void)
@@ -256,6 +354,7 @@ static int patch_event_options(void)
     }
     log_begin();
     log_raw("hook: eventopts: the session leader's Event Options get a Modded cars row while the server answers event options (game+0xd78e50)\n");
+    patch_event_options_invite(img);
     return 1;
 }
 #endif
