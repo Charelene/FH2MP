@@ -28,3 +28,6 @@ std::string theme_name(const std::string& key);
 void theme_apply(const std::string& key);
 // The key now in use.
 const std::string& theme_current();
+// How the Guide is laid out (0 the Xbox 360's blades, 1 the Xbox One's panel): in the Xbox One layout every theme has that guide's own
+// dark surfaces and gives only its accent. Applies at once to the theme in use.
+void theme_layout(int layout);

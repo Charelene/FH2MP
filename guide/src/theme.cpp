@@ -77,6 +77,11 @@ Neutrals plastic_of(ImU32 accent) {
 }
 
 std::string g_current = "xbox";
+int g_layout = 0;
+
+// The Xbox One guide's surfaces (measured from screenshots: the panel 1E1E1E, cards 2E2E2E, lines 303030, secondary text 9E9E9E).
+const Neutrals ONE = {hex(0x1e1e1e), hex(0x262626), hex(0x303030), hex(0x2e2e2e), hex(0x2e2e2e), hex(0x9e9e9e),
+                      hex(0x8c8c8c), hex(0xc9ccd2), hex(0xd4d6da), hex(0x5c5c5c), hex(0x2f3034), hex(0x48494e)};
 
 }  // namespace
 
@@ -102,8 +107,8 @@ std::string theme_name(const std::string& key) {
 void theme_apply(const std::string& key) {
     const ThemeDef& t = theme_preset(key);
     bool plastic = theme_plastic(key) && t.plastic_too;
-    bool x360 = std::string(t.key) == "xbox360";
-    Neutrals n = plastic ? plastic_of(t.accent) : std::string(t.key) == "fh2mp" ? FH2MP : x360 ? XBOX360 : BASE;
+    bool x360 = std::string(t.key) == "xbox360" && g_layout != 1;
+    Neutrals n = g_layout == 1 ? ONE : plastic ? plastic_of(t.accent) : std::string(t.key) == "fh2mp" ? FH2MP : x360 ? XBOX360 : BASE;
     using namespace ui;
     ACCENT = t.accent, BRIGHT = t.bright, DARK = t.dark, INK = t.ink;
     PANEL = n.panel, PANE = n.pane, LINE = n.line, TAB = n.tab, RAISED = n.raised, MUTED = n.muted, MUTED2 = n.muted2, MUTED3 = n.muted3;
@@ -123,3 +128,8 @@ void theme_apply(const std::string& key) {
 }
 
 const std::string& theme_current() { return g_current; }
+
+void theme_layout(int layout) {
+    g_layout = layout == 1 ? 1 : 0;
+    theme_apply(std::string(g_current));
+}

@@ -504,6 +504,23 @@ void save_notify(int style) {
     CloseHandle(f);
 }
 
+// How the Guide is laid out: data\bin\fh2mp-guide-layout.txt, one number (0 the Xbox 360's blades, 1 the Xbox One's panel). Without
+// the file: 0.
+std::wstring layout_file() { return std::wstring(g_api->azimuth_dir) + L"\\data\\bin\\fh2mp-guide-layout.txt"; }
+
+void load_layout() {
+    std::vector<unsigned char> b = read_file(layout_file());
+    g_guide.set_guide_style(!b.empty() && b[0] == '1' ? 1 : 0);
+}
+
+void save_layout(int layout) {
+    HANDLE f = CreateFileW(layout_file().c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD wrote = 0;
+    WriteFile(f, layout == 1 ? "1\n" : "0\n", 2, &wrote, nullptr);
+    CloseHandle(f);
+}
+
 void load_voice() {
     std::vector<unsigned char> b = read_file(voice_file());
     std::string text(b.begin(), b.end());
@@ -611,6 +628,7 @@ bool setup(IDXGISwapChain3* sc) {
     load_theme();
     load_voice();
     load_notify();
+    load_layout();
     g_guide.gamertag = read_gamertag();
     g_hwnd = desc.OutputWindow;
     if (g_hwnd && !g_old_proc) g_old_proc = (WNDPROC)SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC, (LONG_PTR)guide_wndproc);
@@ -732,6 +750,10 @@ void ask(const GuideRequest& r) {
         save_voice(mic, chat, volume);
         break;
     }
+    case GuideAction::SetLayout:
+        save_layout(int(r.id));
+        logf("guide: the Guide is laid out as %s: kept in data\\bin\\fh2mp-guide-layout.txt", r.id == 1 ? "the Xbox One's" : "the Xbox 360's");
+        break;
     case GuideAction::SetNotify:
         save_notify(int(r.id));
         logf("guide: achievements are shown as %s: kept in data\\bin\\fh2mp-guide-notify.txt", r.id == 1 ? "the Xbox 360's notification" : r.id == 2 ? "the Xbox One's toast" : "the Guide's toast");

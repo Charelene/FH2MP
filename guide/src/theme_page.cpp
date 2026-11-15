@@ -3,6 +3,7 @@
 // B goes back to the one kept.
 #include <algorithm>
 
+#include "one.h"
 #include "ui.h"
 
 using namespace ui;
@@ -77,6 +78,7 @@ void Guide::handle_theme(PadEvent e, std::vector<GuideRequest>& out, double now)
 }
 
 void Guide::draw_theme(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float zoom, float op, double now) {
+    if (guide_style_ == 1) return draw_theme_one(dl, a, origin, s, op, now);
     View v{origin, s, zoom};
     const float L = PAGE_L, W = PAGE_W;
     float slide, pop, title_op;
@@ -128,4 +130,27 @@ void Guide::draw_theme(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, floa
     dl->PopClipRect();
     const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}, {"LB", nullptr, MUTED3}, {"RB", "Switch", MUTED3}};
     hint_bar(dl, a, v, HINT_X, HINT_Y, hints, 4, op);
+}
+
+// The Xbox One layout: the two tabs' names under the page's, then the themes one line each with their three colours at the right end.
+// The theme in focus shows at once on the whole guide, whose accent is the theme's.
+void Guide::draw_theme_one(ImDrawList* dl, const GuideAssets& a, ImVec2 origin, float s, float op, double now) {
+    using namespace one;
+    Panel p = one_frame(dl, a, origin, s, op, now, "Theme");
+    static const char* const NAMES[2] = {"Themes", "Plastic"};
+    p.segments(NAMES, 2, theme_tab_);
+    float te = ease_guide(std::clamp(float((now - theme_at_) / 0.26), 0.0f, 1.0f));
+    p.cop *= te, p.cdx += (1 - te) * 40 * theme_dir_;
+    std::vector<std::string> keys = theme_keys(theme_tab_);
+    const float top = PY + LIST + SEG_H;
+    p.focus(top + theme_bar_.value(now) * LINE_H, LINE_H);
+    for (size_t i = 0; i < keys.size(); i++) {
+        const ThemeDef& t = theme_preset(keys[i]);
+        float y = top + i * LINE_H;
+        p.line(y, 0, theme_name(keys[i]), "", true);
+        ImU32 sw[3] = {t.accent, t.bright, t.dark};
+        for (int k = 0; k < 3; k++) dl->AddRectFilled(p.L(PX + 407 + k * 36, y + 24), p.L(PX + 433 + k * 36, y + 50), p.lcol(sw[k]), 4 * p.U);
+    }
+    const Hint hints[] = {{"A", "Select", RING_A}, {"B", "Back", RING_B}, {"LB", nullptr, MUTED3}, {"RB", "Switch", MUTED3}};
+    p.hints(hints, 4);
 }
