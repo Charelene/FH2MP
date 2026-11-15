@@ -6305,6 +6305,8 @@ static int patch_identity(void)
     return (int)(follows + fixed);
 }
 
+#include "zipmanifest_guard.inc"
+
 #ifndef FH2MOD_PLATFORM_VERSION
 #define FH2MOD_PLATFORM_VERSION "2.7.1"
 #endif
@@ -6417,6 +6419,13 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
         log_raw(utc);
     }
     log_raw("\n");
+    {
+        /* now, offline too: the game reads zipmanifest.xml ~90 ms after it is mapped, before any hook of ours (zipmanifest_guard.inc) */
+        wchar_t zg_env[8];
+        if (GetEnvironmentVariableW(L"FH2MP_NO_ZIPGUARD", zg_env, 8) == 0) {
+            zipmanifest_check();
+        }
+    }
 
     /* Solo play keeps the same XboxUserId/save, without session loading, network hooks or worker threads. */
     {
