@@ -99,6 +99,44 @@ int main(void)
         CHECK(!health_memory_moved(8 * GB, U, 8 * GB, 5 * GB));       /* an unknown GPU reading is no move */
     }
 
+    {   /* the heap census: when it is due, what is a heap segment, the tally of pointers */
+        const unsigned long long GB = 1ull << 30;
+        static health_tally t;
+        unsigned char hdr[0x40] = {0};
+        unsigned long long heap = 0x1e741a30000ull, base = 0x1f546d60000ull;
+        unsigned top[3], n, k;
+        int stage = 0;
+
+        CHECK(!health_census_due(19 * GB, 16 * GB, &stage) && stage == 0);       /* 1.19 x RAM: a heavy but healthy game */
+        CHECK(health_census_due(20 * GB, 16 * GB, &stage) && stage == 1);        /* 1.25 x */
+        CHECK(!health_census_due(30 * GB, 16 * GB, &stage) && stage == 1);       /* once per stage */
+        CHECK(health_census_due(40 * GB, 16 * GB, &stage) && stage == 2);        /* 2.5 x */
+        CHECK(!health_census_due(61 * GB, 16 * GB, &stage) && stage == 2);       /* twice per game at most */
+        stage = 0;
+        CHECK(!health_census_due(61 * GB, 0, &stage) && stage == 0);             /* RAM unknown: never */
+
+        /* the segment the 2026-11-13 dump kept: 0xffeeffee at +0x10, heap at +0x28, its own base at +0x30 */
+        hdr[0x10] = 0xee, hdr[0x11] = 0xff, hdr[0x12] = 0xee, hdr[0x13] = 0xff, hdr[0x14] = 2;
+        for (k = 0; k < 8; k++) {
+            hdr[0x28 + k] = (unsigned char)(heap >> (8 * k));
+            hdr[0x30 + k] = (unsigned char)(base >> (8 * k));
+        }
+        CHECK(health_heap_segment(hdr, base) == heap);
+        CHECK(health_heap_segment(hdr, base + 0x10000) == 0);                   /* another allocation's copy of a header */
+        hdr[0x12] = 0;
+        CHECK(health_heap_segment(hdr, base) == 0);                             /* no signature */
+
+        for (k = 0; k < 5; k++) health_tally_add(&t, 0x1406f40f8ull);
+        for (k = 0; k < 2; k++) health_tally_add(&t, 0x14017fee0ull);
+        for (k = 0; k < 3; k++) health_tally_add(&t, 0x1406f3ec8ull);
+        health_tally_add(&t, 0x7ff800001000ull);
+        n = health_tally_top(&t, 3, top);
+        CHECK(n == 3 && t.key[top[0]] == 0x1406f40f8ull && t.count[top[0]] == 5);
+        CHECK(t.key[top[1]] == 0x1406f3ec8ull && t.key[top[2]] == 0x14017fee0ull);
+        for (k = 0; k < HEALTH_TALLY_SLOTS + 10; k++) health_tally_add(&t, 0x100000000ull + k * 8);   /* a full table counts what it drops */
+        CHECK(t.dropped == 14 && t.count[top[0]] == 5);
+    }
+
     CHECK(run_id_ok("ab12cd34"));
     CHECK(!run_id_ok("AB12CD34"));
     CHECK(!run_id_ok("ab12cd3"));

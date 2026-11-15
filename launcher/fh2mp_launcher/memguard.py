@@ -20,6 +20,7 @@ Nothing here may stop Play: any failure logs game.memguard_unavailable and the g
 """
 import ctypes
 import os
+import shutil
 import sys
 import threading
 import time
@@ -59,6 +60,39 @@ def runaway(samples, floor, grow=GROW, window=WINDOW_S):
     return None
 
 
+# What a game takes in its first minute: 7.5-8.5 GB at 720p on the dev PC, 12.2 GB at 37 s on a 16 GB laptop (#437). An "out of memory"
+# stop 20-35 s into a boot (#477, an RTX 2050 laptop, 2026-11-13) is Windows' commit limit (RAM + page file) reached while the game loads.
+BOOT_NEED = 8 * GB
+PAGE_FILE_RESERVE = 2 * GB                  # free space Windows leaves on a drive when it grows a managed page file (our margin, not Windows')
+
+
+def page_file_growth(entries, automatic, ram, size_of, free_of):
+    """How many more bytes the page files can still grow to. entries: the registry's PagingFiles lines ("C:\\pagefile.sys 0 0" managed by
+    Windows, "C:\\pagefile.sys 4096 8192" a set size in MB, "?:\\pagefile.sys" every drive managed); automatic: AutomaticManagedPagefile.
+    A managed page file grows to 3 x RAM at most and never past its drive's free space less PAGE_FILE_RESERVE. size_of(path), free_of(path):
+    current size and the free space of its drive in bytes (None when unknown, then that file counts 0). No Windows calls: tested everywhere."""
+    grow = 0
+    for line in entries:
+        parts = line.split()
+        if not parts:
+            continue
+        path = parts[0]
+        managed = automatic or path.startswith("?:") or len(parts) < 3 or parts[1:3] == ["0", "0"]
+        if path.startswith("?:"):
+            path = "C:" + path[2:]                           # automatic: Windows keeps it on the system drive
+        size = size_of(path) or 0
+        if managed:
+            free = free_of(path)
+            if free is not None:
+                grow += max(0, min(3 * ram - size, free - PAGE_FILE_RESERVE))
+        else:
+            try:
+                grow += max(0, int(parts[2]) * MB - size)
+            except ValueError:
+                pass
+    return grow
+
+
 def options(env):
     """-> (mode, cap in MB or None) from the game's environment (the launcher's own plus the Settings extra lines). mode: "watch" (default),
     "off" (FH2MP_MEMGUARD=0), "kill" (FH2MP_MEMGUARD=kill). Anything else is "watch": a typo never turns the old behaviour on."""
@@ -76,6 +110,7 @@ class Watch:
     def __init__(self, total_ram, floor=None):
         self.total, self.floor = total_ram, floor_bytes(total_ram) if floor is None else floor
         self.peak = self.min_free = self.sys_pct = None
+        self.sys_limit = None                # the system's commit limit (bytes) when its share in use was highest
         self.samples = 0
         self._recent = []                    # (t, commit) of the last WINDOW_S
         self._low_at, self._low_lines = None, 0
@@ -88,8 +123,8 @@ class Watch:
                 self.peak = v
         self.min_free = free if self.min_free is None else min(self.min_free, free)
         pct = round(100.0 * sys_used / sys_limit) if sys_used is not None and sys_limit else None
-        if pct is not None:
-            self.sys_pct = pct if self.sys_pct is None else max(self.sys_pct, pct)
+        if pct is not None and (self.sys_pct is None or pct >= self.sys_pct):
+            self.sys_pct, self.sys_limit = pct, sys_limit
         if commit is not None:
             self._recent.append((now, commit))
         while self._recent and now - self._recent[0][0] > WINDOW_S:
@@ -113,7 +148,7 @@ class Watch:
             return None
         return {"peak_mb": self.peak // MB if self.peak is not None else None,
                 "min_free_mb": self.min_free // MB if self.min_free is not None else None, "ram_mb": self.total // MB,
-                "sys_commit_pct": self.sys_pct}
+                "sys_commit_pct": self.sys_pct, "commit_limit_mb": self.sys_limit // MB if self.sys_limit else None}
 
 
 class NoGuard:
@@ -175,6 +210,49 @@ if WIN:
     _TERMINATE, _SET_QUOTA = 0x0001, 0x0100  # asked for only in kill mode / with an explicit cap
     _LIMIT_PROCESS_MEMORY = 0x100
     _EXTENDED_LIMIT_INFORMATION = 9
+
+
+def _page_files():
+    """-> (PagingFiles lines, AutomaticManagedPagefile) from the registry; ([], False) when unreadable."""
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management") as k:
+            lines = winreg.QueryValueEx(k, "PagingFiles")[0]
+            try:
+                auto = bool(winreg.QueryValueEx(k, "AutomaticManagedPagefile")[0])
+            except OSError:
+                auto = False
+    except OSError:
+        return [], False
+    return [ln for ln in (lines if isinstance(lines, list) else [lines]) if ln.strip()], auto
+
+
+def commit_room():
+    """Windows: -> {"room_mb", "limit_mb", "used_mb", "grow_mb", "ram_mb"}: what the system can still commit (its limit less its charge now,
+    plus what the page files can still grow), or None when it cannot be read (not Windows). Never raises."""
+    if not WIN:
+        return None
+    try:
+        free, total, used, limit = _system()
+        entries, auto = _page_files()
+
+        def size_of(path):
+            try:
+                return os.stat(path).st_size
+            except OSError:
+                return None
+
+        def free_of(path):
+            try:
+                return shutil.disk_usage(os.path.splitdrive(path)[0] + "\\").free
+            except OSError:
+                return None
+        grow = page_file_growth(entries, auto, total, size_of, free_of)
+    except Exception as e:                    # noqa: BLE001  never in the way of Play
+        logs.swallowed("game", "game.commit_room_unreadable", e)
+        return None
+    return {"room_mb": (limit - used + grow) // MB, "limit_mb": limit // MB, "used_mb": used // MB, "grow_mb": grow // MB, "ram_mb": total // MB,
+            "free_mb": free // MB}
 
 
 def _system():

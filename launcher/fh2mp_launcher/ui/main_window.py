@@ -296,6 +296,8 @@ class MainWindow(QMainWindow):
             return "warn", f"This launcher requires Azimuth {AZIMUTH_VERSION} and its supplied mod versions.", "Run setup", self.run_wizard
         if not info.game_folder:
             return "warn", "Azimuth can't find the game files.", "Azimuth setup", self._azimuth_clicked
+        if info.game_other:
+            return "warn", f"The game folder set for Forza Horizon 2 holds {info.game_other}.", "Azimuth setup", self._azimuth_clicked
         if s["offline_mode"]:
             return None
         if not (lc.has_identity() and s["gamertag"]):
@@ -729,7 +731,7 @@ class MainWindow(QMainWindow):
         def ok(_r):
             import time
             self._launched_at = time.time()
-            self.set_busy(False, " ".join(filter(None, ("Game started offline. Nothing is sent to the server.", getattr(lc, "disk_warning", "")))))
+            self.set_busy(False, " ".join(filter(None, ("Game started offline. Nothing is sent to the server.", lc.start_warnings()))))
             self.render()
 
         def fail(e):
@@ -767,7 +769,7 @@ class MainWindow(QMainWindow):
             import time
             _acct, notes = res
             self._launched_at = time.time()
-            self.set_busy(False, f"Game started. {lc.disk_warning}" if getattr(lc, "disk_warning", "") else "Game started. Have fun!")
+            self.set_busy(False, f"Game started. {lc.start_warnings()}" if lc.start_warnings() else "Game started. Have fun!")
             self.render()
 
         def fail(e):
@@ -778,6 +780,9 @@ class MainWindow(QMainWindow):
             if isinstance(e, PlayBlocked):
                 if e.code == "no_game":
                     self.say("Couldn't find your Forza Horizon 2 files. Open Azimuth setup and pick the folder.", theme.BAD)
+                    return self.render()
+                if e.code == "other_game":
+                    self.say(str(e), theme.BAD)
                     return self.render()
                 if e.code == "azimuth_unsupported":
                     return self.say(str(e), theme.BAD)
@@ -834,7 +839,16 @@ class MainWindow(QMainWindow):
             if note:
                 self.say("Online didn't start in this game run (\"Unable to connect to the Live configuration servers\"). "
                          "The game keeps running offline; to play online, close the game and press Play. Logs has the details.", theme.BAD)
-        if lc.process is not None and not lc.game_running():
+        if lc.process is not None and lc.game_running():
+            self._gone_ticks = 0
+            self._run_ticks = getattr(self, "_run_ticks", 0) + 1
+            if self._run_ticks % 60 == 0:
+                lc.touch_session()
+        elif lc.process is not None:
+            self._gone_ticks = getattr(self, "_gone_ticks", 0) + 1
+            if self._gone_ticks < 3:
+                return                              # a restart's new process can start a moment after the old one ended
+            self._gone_ticks = 0
             import time
             code = lc.process.returncode
             stopped = lc.note_game_exit(code)

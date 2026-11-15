@@ -64,7 +64,8 @@ run() {   # run <name> <command...>: time it and remember the result
 failed=0
 
 lane_unit() {
-    [ ! -d ops ] || run "release flow" "$py" -I -m unittest discover -s ops -p test_release_flow.py   # ops/ is private: present on the operator machine only
+    [ ! -d ops ] || run "release flow" ops/test_release_flow.sh   # ops/ is private: present on the operator machine only
+    run "release versions" release/test_versions.sh
     run "shim sha256" shim/tests/test_sha256.sh
     run "shim inflate" shim/tests/test_inflate.sh
     run "shim gamedb keep" shim/tests/test_gamedb_keep.sh
@@ -113,7 +114,7 @@ lane_shim() {
     logs=$(dirname "$tpl")
     declare -A pids
     t0=$(date +%s)
-    for t in gamedb_files game_image game_memory title_scope xhr_config health_thread session_log torque_scale net_strings torque_load speed_pb restricted_tools lighting honk mods diag party_hud car_pool crash_guards picker_pi event_stock race_wait; do
+    for t in gamedb_files game_image game_memory title_scope xhr_config health_thread session_log torque_scale net_strings torque_load speed_pb restricted_tools lighting honk mods diag party_hud car_pool crash_guards slot_put picker_pi event_stock race_wait heap_census online_gate; do
         "shim/tests/test_$t.sh" > "$logs/$t.log" 2>&1 &
         pids[$t]=$!
     done

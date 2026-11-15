@@ -17,7 +17,7 @@ from . import logs, paths, upstream
 from .constants import AZIMUTH_TLS_HELPERS, AZIMUTH_VERSION, BUILTIN_AZIMUTH_BUILDS, UPSTREAM
 from .constants import (EXTRA_MODS_DIR, EXTRA_MODS_RESERVED, EXTRA_OPTIONS_DIR, EXTRA_OPTIONS_DLL, EXTRA_OPTIONS_DLL_SHA256, EXTRA_OPTIONS_VERSION,
                         LEGACY_SHIM_DLL, LSP_FILE, MODS_DIR, PLATFORM_DLL, PLATFORM_DLL_SHA256, PLATFORM_FILES, PLATFORM_LOADERS, PLATFORM_VERSION,
-                        RETIRED_EXTRA_OPTIONS, SESSION_FILE, SHIM_DLL, GUIDE_DLL)
+                        PREVIOUS_EXTRA_OPTIONS, RETIRED_EXTRA_OPTIONS, SESSION_FILE, SHIM_DLL, GUIDE_DLL)
 
 MARKER = re.compile(rb"FH2MP-SHIM-VERSION:([0-9A-Za-z.+-]{1,32}):END")
 EXTRA_FILES_PREFIX = "FH2_ExtraOptions."
@@ -524,8 +524,10 @@ def _free_name(path):
 def install_extra(folder, files):
     """Installs FH2 Extra Options from its release (`files` = upstream.fetch("extraOptions"): winmm.dll, its default ini and its FH2 packages
     in mods\\Forza Horizon 2) unless the supported build is there already. Moves the rc5 layout over first. The winmm.dll it replaces is kept in
-    fh2extra: as winmm.dll.0.4.4 when it is the build earlier launchers installed, else as winmm.dll.unsupported-N. Settings that exist are
-    kept; the 0.4.4 packages FH2MP put at the mods root are moved aside (retire_old_extra_packages), and a mods folder Extra Options would not
+    fh2extra: as winmm.dll.<version> when it is a build earlier launchers installed (0.4.4, 0.6.0), else as winmm.dll.unsupported-N. A package
+    file that differs from the release's is replaced (the old one kept as <name>.before-fh2mp-setup, which Extra Options never loads: its
+    plugin scan takes names ending in .dll only); settings files (.ini) that exist are kept. The 0.4.4 packages FH2MP put at the mods root are
+    moved aside (retire_old_extra_packages), and a mods folder Extra Options would not
     load is put right where nothing is lost (eo_layout_repair). -> list of things done."""
     try:
         dll = files[EXTRA_OPTIONS_DLL]
@@ -556,12 +558,13 @@ def install_extra(folder, files):
         old = _extra_dll(folder)
         updated = ""
         if old:
-            retired = _sha256_file(old) == RETIRED_EXTRA_OPTIONS["dllSha256"]
+            earlier = {RETIRED_EXTRA_OPTIONS["dllSha256"]: RETIRED_EXTRA_OPTIONS["version"],
+                       PREVIOUS_EXTRA_OPTIONS["dllSha256"]: PREVIOUS_EXTRA_OPTIONS["version"]}.get(_sha256_file(old))
             dest = os.path.join(folder, EXTRA_OPTIONS_DIR, EXTRA_OPTIONS_DLL)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
-            if retired:
-                kept = _free_name(f"{dest}.{RETIRED_EXTRA_OPTIONS['version']}")
-                updated = RETIRED_EXTRA_OPTIONS["version"]
+            if earlier:
+                kept = _free_name(f"{dest}.{earlier}")
+                updated = earlier
             else:
                 n = 1
                 while os.path.exists(f"{dest}.unsupported-{n}"):
@@ -576,8 +579,8 @@ def install_extra(folder, files):
     except OSError as e:
         raise ShimError(f"could not install FH2 Extra Options: {e.strerror or e}. Is the game still running?") from None
     if updated:
-        return did + [f"updated FH2 Extra Options {updated} to {extra_options_version(folder)} (RokkuDayo, GPL-3.0) from its GitHub release; "
-                      "your mods move to mods\\Forza Horizon 2 when the game starts"]
+        moves = "; your mods move to mods\\Forza Horizon 2 when the game starts" if updated == RETIRED_EXTRA_OPTIONS["version"] else ""
+        return did + [f"updated FH2 Extra Options {updated} to {extra_options_version(folder)} (RokkuDayo, GPL-3.0) from its GitHub release{moves}"]
     return did + [f"installed FH2 Extra Options {extra_options_version(folder)} (RokkuDayo, GPL-3.0) from its GitHub release"]
 
 

@@ -28,6 +28,7 @@ DEFAULTS = {
     "tcp_auto": True,               # switch to TCP for this start when the server's UDP probe gets no answer (the server must advertise probes)
     "crash_report_ask": True,       # offer to send a report when the game crashed
     "crash_handled": 0.0,           # crashes recorded before this time (epoch) were already offered; 0 = not set up yet
+    "last_game_memory": {},         # what the memory watch saw of the last game (memguard summary + "ended" epoch), for its crash report
     "anna_bindings_moved": False,   # Extra Options' D-pad autodrive/hazard buttons (FH2 ANNA's) were set to None, once
     "eo_aero_restore": "",          # the player's Extra Options UnlockAeroTuning value while an online game runs with it at 0 (put back for offline play)
     "controls_swapped": False,      # Extra Options' headlight and roof toggles were moved from the right stick (honk) to the left stick, once; reset when a game's shim could not move the horn (fh2mp-controls.txt)

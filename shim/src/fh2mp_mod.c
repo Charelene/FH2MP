@@ -88,11 +88,7 @@ static DWORD g_init_tick;     /* GetTickCount() when fh2mod_init started */
 #define FH2MP_WSTR(x) FH2MP_WSTR2(x)
 /* The launcher finds out which shim is installed by reading this marker out of the DLL (it cannot run it). */
 const char fh2mp_shim_marker[] __attribute__((used)) = "FH2MP-SHIM-VERSION:" FH2MP_SHIM_VERSION ":END";
-/*
- * Import slots Azimuth fills at run time (patch_game_winsock, xhr2.inc) are still written directly, and their pages are left writable:
- * restoring the old protection raced with Azimuth, which binds the game's imports on other threads (0xc0000005 inside memcpy).
- */
-#define patch_done(addr, len, old) ((void)(addr), (void)(len), (void)(old))
+#include "slot_put.inc"
 
 /*
  * Code changes go through the FH2 Mod Platform. It refuses a change that overlaps another mod's hook or game code someone already
@@ -252,6 +248,7 @@ static void mem_copy(void *dst, const void *src, SIZE_T n)
 }
 
 #include "log.inc"
+#include "online_gate.inc"
 
 /* "48 8b 5c" for n bytes; a game update shows up as a different run of these in a "not patched" line */
 static void log_hexbytes(const unsigned char *p, unsigned n)
@@ -1008,7 +1005,7 @@ static void patch_game_winsock(unsigned char *img)
                            ? GetProcAddress(ws2, g_ws2_slots[i].name)
                            : GetProcAddress(ws2, (LPCSTR)(ULONG_PTR)g_ws2_slots[i].ordinal);
         char oldmod[40];
-        DWORD oldprot;
+        DWORD err;
         void *want = (void *)real;
 
         if (!real) {
@@ -1036,7 +1033,7 @@ static void patch_game_winsock(unsigned char *img)
         if (*slot == want) {
             continue; /* already the real function (or its tracer) */
         }
-        if (!VirtualProtect(slot, 8, PAGE_READWRITE, &oldprot)) {
+        if (!slot_put(slot, want, &err)) {
             static volatile LONG refused;
             if (InterlockedIncrement(&refused) <= 3) {
                 log_begin();
@@ -1044,11 +1041,11 @@ static void patch_game_winsock(unsigned char *img)
                 log_dec(i);
                 log_raw(" (game+0x");
                 log_hex(FH2_WS2_IAT_RVA + i * 8u, 8);
-                log_raw(") could not be made writable, error ");
-                log_dec(GetLastError());
+                log_raw(") could not be written, error ");
+                log_dec(err);
                 log_raw(": it keeps ");
                 log_raw(oldmod);
-                log_raw("\n");
+                log_raw(" until the next check\n");
             }
             continue;
         }
@@ -1064,8 +1061,6 @@ static void patch_game_winsock(unsigned char *img)
         log_raw(": ");
         log_raw(oldmod);
         log_raw(" -> ws2_32\n");
-        *slot = want;
-        patch_done(slot, 8, oldprot);
         changed++;
     }
     g_ws2_patched = 1;
@@ -2321,6 +2316,7 @@ static int patch_online_meet(void)
 #include "remote_prediction_guard.inc"
 #include "model_unload_guard.inc"
 #include "dtconv_guard.inc"
+#include "camanim_guard.inc"
 #include "component_lookup_guard.inc"
 #include "picker_pi.inc"
 #include "autodrive_rule.inc"
@@ -3584,6 +3580,11 @@ static unsigned char *eo_timelock_plugin(const struct eo_wc_layout **layout)
 {
     struct eo_wc_check { unsigned rva; unsigned char code[13]; unsigned n; };
     static const struct { const char *name; const struct eo_wc_layout *at; struct eo_wc_check check[4]; } builds[] = {
+        {"1.1.0 (Extra Options 0.6.1)", &EO_WC_1_1_0_EO061, {
+            {0x30c0, {0x31, 0xc0, 0x83, 0x3d, 0x27, 0x86, 0x00, 0x00, 0x00, 0x0f, 0x95, 0xc0, 0xc3}, 13},  /* enabled */
+            {0x3130, {0x8b, 0x05, 0xbe, 0x85, 0x00, 0x00, 0xc3}, 7},                                       /* generation */
+            {0x3590, {0x8b, 0x05, 0x62, 0x81, 0x00, 0x00, 0xc3}, 7},                                       /* weather */
+            {0x3908, {0x48, 0x39, 0x1d, 0x11, 0x7e, 0x00, 0x00}, 7}}},                                     /* held clock */
         {"1.1.0 (Extra Options 0.6.0)", &EO_WC_1_1_0, {
             {0x30c0, {0x31, 0xc0, 0x83, 0x3d, 0x27, 0x76, 0x00, 0x00, 0x00, 0x0f, 0x95, 0xc0, 0xc3}, 13},  /* enabled */
             {0x3130, {0x8b, 0x05, 0xbe, 0x75, 0x00, 0x00, 0xc3}, 7},                                       /* generation */
@@ -3634,7 +3635,7 @@ static unsigned char *eo_timelock_plugin(const struct eo_wc_layout **layout)
     }
     refused = 1;
     log_begin();
-    log_raw("timelock: unexpected EO_WeatherControl.dll (the builds in Extra Options 0.4.4 and 0.6.0 are known), its time lock is not parked online: at plugin+0x");
+    log_raw("timelock: unexpected EO_WeatherControl.dll (the builds in Extra Options 0.4.4, 0.6.0 and 0.6.1 are known), its time lock is not parked online: at plugin+0x");
     log_hex(first_check->rva, 4);
     if (first_readable) {
         log_raw(" expected ");
@@ -3749,14 +3750,18 @@ static DWORD WINAPI option_monitor(LPVOID unused)
     monitor_start = GetTickCount();
     for (tick = 0; ; tick++) { /* for the whole process (2026-11-07): until then it stopped after 24000 ticks = 6.7 h, and with it the EO parking, the gamedb
                                 * retries, the import re-hooking and the online-setup watchdog */
-        /* Azimuth binds the game's imports after the helper loads; keep our pointers on top */
-        patch_game_winsock(img);
-        patch_game_cocreate(img);
-        patch_xsapi_cocreate();
+        /* Azimuth binds the game's imports after the helper loads; keep our pointers on top. A game online-gate keeps offline keeps
+         * Azimuth's own (online_gate.inc). */
+        int net = online_allowed();
+        if (net) {
+            patch_game_winsock(img);
+            patch_game_cocreate(img);
+            patch_xsapi_cocreate();
+        }
         {
             static int xb_state;
             wchar_t xb_env[8];
-            if (xb_state == 0 && GetEnvironmentVariableW(L"FH2MP_NO_XSBODY", xb_env, 8) == 0) {
+            if (net && xb_state == 0 && GetEnvironmentVariableW(L"FH2MP_NO_XSBODY", xb_env, 8) == 0) {
                 xb_state = patch_xsapi_body();
             }
         }
@@ -3764,7 +3769,7 @@ static DWORD WINAPI option_monitor(LPVOID unused)
             /* XSAPI is mapped a few seconds after the game image; retry until it is there */
             static int xs_state;
             wchar_t xs_env[8];
-            if (xs_state == 0 && GetEnvironmentVariableW(L"FH2MP_NO_XSTOKEN", xs_env, 8) == 0) {
+            if (net && xs_state == 0 && GetEnvironmentVariableW(L"FH2MP_NO_XSTOKEN", xs_env, 8) == 0) {
                 xs_state = patch_xsapi_token();
             } else if (xs_state == 1 && g_xs_calls == 0 && g_xs_hooked_at && GetTickCount() - g_xs_hooked_at > 45000) {
                 static int told;
@@ -5233,6 +5238,15 @@ static int gamedb_place(void)
 {
     int ok;
 
+    if (!online_allowed()) {
+        static int told;
+        if (!told) {
+            told = 1;
+            log_begin();
+            log_raw("gamedb: this game stays offline (online-gate), so the server's car database is not placed; the game reads its own\n");
+        }
+        return 1;                         /* nothing to retry */
+    }
     AcquireSRWLockExclusive(&g_gamedb_place_lock);
     ok = gamedb_place_locked();
     ReleaseSRWLockExclusive(&g_gamedb_place_lock);
@@ -5561,7 +5575,9 @@ static DWORD WINAPI late_init(LPVOID unused)
     {
         wchar_t tmp[8];
         if (GetEnvironmentVariableW(L"FH2MP_NO_WINSOCK", tmp, 8) == 0) {
-            patch_game_winsock(find_fh2_image());
+            if (online_allowed()) {
+                patch_game_winsock(find_fh2_image());
+            }
         }
     }
     {
@@ -5622,6 +5638,7 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_PREDGUARD", env, 8) == 0) patch_remote_prediction_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_MODELGUARD", env, 8) == 0) patch_model_unload_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_DTCONVGUARD", env, 8) == 0) patch_dtconv_guard();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_CAMGUARD", env, 8) == 0) patch_camanim_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_COMPGUARD", env, 8) == 0) patch_component_lookup_guard();
         }
         patch_car_pool();

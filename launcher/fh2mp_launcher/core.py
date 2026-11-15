@@ -29,6 +29,16 @@ class PlayBlocked(Exception):
         self.code = code
 
 
+def no_game_blocked(folder):
+    """The PlayBlocked for an Azimuth that has no FH2 folder to start: the folder set for FH2 holds another game (#470), or none is set."""
+    own = azimuth.fh2_title(azimuth.read_ini(folder)).get("folder", "") if folder else ""
+    other = azimuth.other_game_name(own) if own else ""
+    if other:
+        return PlayBlocked(f"The game folder set for Forza Horizon 2 holds {other}. Pick your Forza Horizon 2 folder in Azimuth setup.",
+                           "other_game")
+    return PlayBlocked("Couldn't find your Forza Horizon 2 files.", "no_game")
+
+
 FRIENDLY = {
     "unreachable": "Can't reach the server.",
     "banned": "This account is banned.",
@@ -720,7 +730,7 @@ class Launcher:
         logs.step("mods")
         self.ensure_game()
         if require_game and not azimuth.has_game_configured(s["azimuth_dir"]):
-            raise PlayBlocked("Couldn't find your Forza Horizon 2 files.", "no_game")
+            raise no_game_blocked(s["azimuth_dir"])
         if (self.server or {}).get("maintenance"):
             raise PlayBlocked(self.server["maintenance"], "maintenance")
         logs.info("auth", "auth.sign_in_needed", why="play")
@@ -965,6 +975,8 @@ class Launcher:
             acct, notes = self.prepare_play(require_game=not azimuth_window)
             if self.check_disk():
                 notes.append(self.disk_warning)
+            if self.check_memory():
+                notes.append(self.memory_warning)
             try:
                 self.process = launch.start(self.settings, self.settings["azimuth_dir"], skip_launcher=not azimuth_window,
                                             extra_env=getattr(self, "game_env", None))
@@ -992,6 +1004,8 @@ class Launcher:
             seen = guard.summary()
             if seen:
                 logs.info("game", "game.memory_peak", **seen)
+                self.settings["last_game_memory"] = dict(seen, ended=time.time())     # crashreport puts it in the report of this game
+                self.settings.save()
         return stopped
 
     def play_offline(self, azimuth_window=False):
@@ -1012,7 +1026,7 @@ class Launcher:
             raise PlayBlocked(str(e), "tls_helper") from None
         self.ensure_game()
         if not azimuth_window and not azimuth.has_game_configured(d):
-            raise PlayBlocked("Couldn't find your Forza Horizon 2 files.", "no_game")
+            raise no_game_blocked(d)
         xuid = s["xuid"]
         use_identity = bool(xuid or os.path.isfile(os.path.join(shim.bin_dir(d), "fh2mp-identity.txt")))
         if use_identity and (self.shim_state()[0] != "ours" or not shim.supports_offline(d)):
@@ -1033,6 +1047,7 @@ class Launcher:
         self._offline_disabled = shim.disable(d) if not use_identity else False
         self.offline_run = True
         self.check_disk()
+        self.check_memory()
         try:
             self.process = launch.start(s, d, skip_launcher=not azimuth_window, extra_env=self.game_env)
         except Exception:
@@ -1043,6 +1058,25 @@ class Launcher:
             if self._offline_enabled:
                 shim.disable(d)
             raise
+
+    def check_memory(self):
+        """Windows: whether the system can still commit what a game takes to load (memguard.BOOT_NEED). -> what to show the player when it
+        cannot, else ''. #477 (2026-11-13): two boots in a row stopped "out of memory" 20-35 s in on a laptop whose earlier games ran. Never
+        blocks playing."""
+        room = memguard.commit_room()
+        self.memory_warning = ""
+        if room is None:
+            return ""
+        low = room["room_mb"] < memguard.BOOT_NEED // memguard.MB
+        logs.event("WARN" if low else "INFO", "play", "game.commit_room", **room, need_mb=memguard.BOOT_NEED // memguard.MB)
+        if low:
+            self.memory_warning = (f"Windows can give the game only {room['room_mb'] / 1024:.1f} GB more memory and it needs about "
+                                   f"{memguard.BOOT_NEED / memguard.GB:.0f} GB to load. Close other programs, or make the page file larger.")
+        return self.memory_warning
+
+    def start_warnings(self):
+        """The warnings of the last Play (disk, memory), joined for the status line."""
+        return " ".join(filter(None, (getattr(self, "disk_warning", ""), getattr(self, "memory_warning", ""))))
 
     def check_disk(self):
         """Looks at the free space of the drives with Azimuth (its saves and caches) and the game. -> what to show the player when one is
@@ -1061,15 +1095,21 @@ class Launcher:
         if not d or not os.path.isdir(d) or azimuth.has_game_configured(d):
             return ""
         # A different title may be selected in a shared Azimuth installation.
-        # Reuse FH2's own configured folder before searching for another copy.
+        # Reuse FH2's own configured folder before searching for another copy, unless that folder holds another game (FH3's package has
+        # the same exe name, #470): then an FH2 install found on this computer replaces it.
         own = azimuth.fh2_title(azimuth.read_ini(d)).get("folder", "")
-        if own:
+        other = azimuth.other_game_name(own) if own else ""
+        if own and not other:
             azimuth.configure_game(d, own, preserve_content=True)
             return own
         found = azimuth.find_game_installs()
         if not found:
+            if other:
+                logs.warn("play", "game.folder_other_game", folder=own, game=other, then="no FH2 install found to put in its place")
             return ""
         host, win = found[0]
+        if other:
+            logs.warn("play", "game.folder_other_game", folder=own, game=other, then=f"replaced by {win}")
         azimuth.configure_game(d, win)
         return host
 
@@ -1302,7 +1342,22 @@ class Launcher:
         return launch.start(self.settings, self.settings["azimuth_dir"], skip_launcher=False)
 
     def game_running(self):
-        return self.process is not None and self.process.poll() is None
+        """The game of the current Play runs: the process Play started, or, once that one ended, any azimuth.exe of this Azimuth folder (the Mod
+        Platform's Restart now and Azimuth's own window carry on in a new process). The Play's session lives exactly as long as this."""
+        if self.process is None:
+            return False
+        return self.process.poll() is None or bool(launch.game_processes(self.settings["azimuth_dir"]))
+
+    def touch_session(self):
+        """Keeps the session file fresh while the game runs: the shim takes one older than 30 minutes for a leftover of an earlier Play, and a
+        game that restarts itself reads it again."""
+        d = self.settings["azimuth_dir"]
+        path = os.path.join(shim.bin_dir(d), shim.SESSION_FILE) if d else ""
+        try:
+            if path and os.path.isfile(path):
+                os.utime(path, None)
+        except OSError as e:
+            logs.swallowed("game", "game.session_touch_failed", e)
 
     def status_lines(self):
         """The player's setup as (component, what is installed, what this launcher needs, ok: True / False / None for "nothing to judge").

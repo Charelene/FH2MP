@@ -14,6 +14,8 @@
  * follows what the game last set for its map's feature; Extra Options learns that only from the two offline calls, which it points at its
  * set_event_feature (thunk at 0x816f04). The network state's helper never reaches it, so online the gates stay off: no marker, no start.
  * [C: the source and the decompile; that this is the whole cause is inferred, not yet seen in a game.]
+ * Extra Options 0.6.1 (source d6d2003) only changes which championship routes count offline (load_championship_routes, the career check at
+ * 0x3a9d80); set_event_feature and the network path (gates follow the game's own value during a session) are as in 0.6.0 [C: the diff].
  *
  * The fix: after each of the other three states' helpers sets one of the two names, the same name and value also go to whatever the offline
  * call site calls now. When Extra Options redirected it, that is its set_event_feature, which records the value and passes it on to SetFeature

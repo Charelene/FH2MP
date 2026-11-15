@@ -33,12 +33,25 @@ const ImU32 RING_A = IM_COL32(0x5f, 0xd1, 0x1c, 255), RING_B = IM_COL32(0xff, 0x
 // The Guide's size against the canvas and the centre it is drawn around (canvas units); a page's left edge and width.
 const float GUIDE_K = 0.84f, GUIDE_CY = 330, PAGE_L = 205, PAGE_W = 862;
 
+// Dear ImGui rounds a font size to whole pixels and asserts on 0 (ImFontAtlasBakedGetOrAdd, imgui_draw.cpp:5453), which stops the game
+// with an assert box; text or an icon under a pixel draws nothing instead (a toast's icon zooming out passes 0.36-0.5 px).
+inline bool font_px_ok(float size) { return size >= 1.0f; }
+// Every AddText and CalcTextSizeA at a size that scales (s, zoom, a toast's animation) goes through these: ImGui bakes the font at that size
+// in both, so both assert. #476 (2026-11-13, Guide 1.4.0, dump 6e9e4bb894970ba3: font_size 0.0, density 1.0, a 2560 x 1080 frame, the Guide
+// closed) stopped there in draw_toast, the toast's icon zooming out (what font_px_ok in icon_mid fixes); the badges, the hint bar, wrapped
+// text and the Gamerscore mark took scaled sizes straight to ImGui the same way.
+inline void add_text(ImDrawList* dl, ImFont* f, float size, ImVec2 at, ImU32 col, const char* text, const char* end = nullptr) {
+    if (font_px_ok(size)) dl->AddText(f, size, at, col, text, end);
+}
+inline float text_w(ImFont* f, float size, const char* text) { return font_px_ok(size) ? f->CalcTextSizeA(size, FLT_MAX, 0, text).x : 0.0f; }
+
 // Material Icons (filled).
 enum : uint32_t {
     I_PERSON = 0xe7fd, I_GROUPS = 0xf233, I_MAIL = 0xe158, I_DRAFTS = 0xe151, I_SENSORS = 0xe51e, I_CHAT = 0xe0ca, I_GROUP_ADD = 0xe7f0,
     I_GAMES = 0xea28, I_TROPHY = 0xea23, I_PALETTE = 0xe40a, I_MIC = 0xe029, I_BELL = 0xe7f4, I_SETTINGS = 0xe8b8, I_FLAG = 0xe153,
     I_SCHEDULE = 0xe8b5, I_EXPAND_LESS = 0xe5ce, I_EXPAND_MORE = 0xe5cf, I_APPS = 0xe5c3, I_WIFI = 0xe63e, I_PERSON_ADD = 0xe7fe,
-    I_STAR = 0xe838, I_VOLUME = 0xe050, I_SEND = 0xe163, I_EDIT = 0xe3c9, I_CHECK_BOX = 0xe834, I_CHECK_BLANK = 0xe835, I_PLAY_CIRCLE = 0xe1c4, I_CAR = 0xe531
+    I_STAR = 0xe838, I_VOLUME = 0xe050, I_SEND = 0xe163, I_EDIT = 0xe3c9, I_CHECK_BOX = 0xe834, I_CHECK_BLANK = 0xe835, I_PLAY_CIRCLE = 0xe1c4, I_CAR = 0xe531,
+    I_MEMORY = 0xe322, I_CLOUD_OFF = 0xe2c1
 };
 
 inline void utf8(uint32_t cp, char out[5]) {
@@ -89,12 +102,14 @@ inline float caps_top(const FontMetrics& m, float size, float cy) { return cy + 
 
 // Text in a line box centred on cy (CSS align-items: center), starting at x or, with right, ending there.
 inline void text_mid(ImDrawList* dl, ImFont* f, const FontMetrics& m, float size, float x, float cy, ImU32 col, const char* text, bool right = false) {
+    if (!font_px_ok(size)) return;
     float w = f->CalcTextSizeA(size, FLT_MAX, 0.0f, text).x;
     dl->AddText(f, size, ImVec2(right ? x - w : x, css_top(m, size, cy)), col, text);
 }
 
 // The same, cut with an ellipsis to fit max_w (CSS text-overflow: ellipsis).
 inline void text_fit(ImDrawList* dl, ImFont* f, const FontMetrics& m, float size, float x, float cy, float max_w, ImU32 col, const std::string& text) {
+    if (!font_px_ok(size)) return;
     if (f->CalcTextSizeA(size, FLT_MAX, 0.0f, text.c_str()).x <= max_w) return text_mid(dl, f, m, size, x, cy, col, text.c_str());
     std::string t = text;
     while (!t.empty() && f->CalcTextSizeA(size, FLT_MAX, 0.0f, (t + "...").c_str()).x > max_w) {
@@ -105,7 +120,7 @@ inline void text_fit(ImDrawList* dl, ImFont* f, const FontMetrics& m, float size
 }
 
 inline void icon_mid(ImDrawList* dl, const GuideAssets& a, float size, float cx, float cy, ImU32 col, uint32_t icon) {
-    if (!a.icons || !icon) return;
+    if (!a.icons || !icon || !font_px_ok(size)) return;
     char ic[5];
     utf8(icon, ic);
     float w = a.icons->CalcTextSizeA(size, FLT_MAX, 0, ic).x;
@@ -115,6 +130,7 @@ inline void icon_mid(ImDrawList* dl, const GuideAssets& a, float size, float cx,
 // CSS writing-mode: vertical-rl: the text runs down from top, turned a quarter clockwise, its column centred on cx. Laid out without a
 // clip rect (ImGui drops glyphs outside the clip rect before they are turned, which cut the blade names short).
 inline void vertical_text(ImDrawList* dl, ImFont* f, const FontMetrics& m, float size, float cx, float top, ImU32 col, const char* text) {
+    if (!font_px_ok(size)) return;
     float baseline_x = cx - size * (m.asc - m.desc) * 0.5f;  // the ascent side faces right
     ImVec2 at(baseline_x + size * m.asc / (m.asc + m.desc), top);
     int from = dl->VtxBuffer.Size;
@@ -138,8 +154,8 @@ inline float badge(ImDrawList* dl, const GuideAssets& a, const char* key, ImU32 
     dl->AddRect(ImVec2(k0.x + s, k0.y + s), ImVec2(k1.x - s, k1.y - s), alpha(ring, op), std::max(0.0f, rr - s), 0, 2 * s);
     ImFont* kf = a.text_bold ? a.text_bold : a.text;
     float size = (wide || w > 0 ? 11 : 12) * s;
-    float tw = kf->CalcTextSizeA(size, FLT_MAX, 0, key).x;
-    dl->AddText(kf, size, ImVec2(x + (kw - tw) * 0.5f, caps_top(a.bold_m, size, cy)), alpha(ring, op), key);
+    float tw = text_w(kf, size, key);
+    add_text(dl, kf, size, ImVec2(x + (kw - tw) * 0.5f, caps_top(a.bold_m, size, cy)), alpha(ring, op), key);
     return kw;
 }
 
@@ -170,7 +186,7 @@ inline void hint_bar(ImDrawList* dl, const GuideAssets& a, const View& v, float 
         if (hints[i].label) {
             x += 7;
             ImVec2 q = v.pt(x, cy);
-            dl->AddText(a.text, v.sz(19), ImVec2(q.x, caps_top(a.text_m, v.sz(19), q.y)), alpha(WHITE, op), hints[i].label);
+            add_text(dl, a.text, v.sz(19), ImVec2(q.x, caps_top(a.text_m, v.sz(19), q.y)), alpha(WHITE, op), hints[i].label);
             x += a.text->CalcTextSizeA(19, FLT_MAX, 0, hints[i].label).x + 22;
         } else {
             x += 8;
@@ -251,7 +267,7 @@ inline float wrapped(ImDrawList* dl, const GuideAssets& a, const View& v, float 
         for (const char* q = p; q < brk; q++)
             if (*q == '\n') { stop = q; brk = q + 1; break; }
         ImVec2 at = v.pt(x, y + used + size * lh * 0.5f);
-        dl->AddText(a.text, v.sz(size), ImVec2(at.x, css_top(a.text_m, v.sz(size), at.y)), col, p, stop);
+        add_text(dl, a.text, v.sz(size), ImVec2(at.x, css_top(a.text_m, v.sz(size), at.y)), col, p, stop);
         used += size * lh;
         p = brk;
         while (p < end && *p == ' ') p++;

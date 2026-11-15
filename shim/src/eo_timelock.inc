@@ -11,7 +11,11 @@
  *     by setting the time again through game+0x197aec0 whenever it drifts (no +0x24), and when the lock goes off its hook drops the clock
  *     itself ("clock hold released; native timing retained"), +0x361 still cleared. Globals [C: its getters and TimeOfDay hook]: enabled 0xa6f0
  *     (getter 0x30c0), change counter 0xa6f4 (getter 0x3130, read by the hook each tick), weather mode 0xa6f8 (getter 0x3590, 0 = Dynamic),
- *     held clock 0xa718/0xa720 (last clock seen / the one it holds, hook 0x3890). */
+ *     held clock 0xa718/0xa720 (last clock seen / the one it holds, hook 0x3890).
+ *   1.1.0 in Extra Options 0.6.1 (EO_WeatherControl.dll file version 1.0.9, sha256 5399ac62...d349b4c9, read statically 2026-11-14; mod.json still
+ *     says 1.1.0): the same code at the same addresses up to the TimeOfDay hook, its .data one page later (0xb000), so every global is 0x1000
+ *     further on; the weather modes grow from 5 to 8 (Storm Island's Foggy, Heavy Fog, Foggy Storm), 0 is still Dynamic [C: objdump of both
+ *     builds with rip targets folded, and weather-control/config.h at RokkuDayo/ForzaHorizon2_ExtraOptions d6d2003]. */
 #define FH2_NET_GAME_MANAGER_RVA 0x34d6348u
 
 /* Where one build of the plugin keeps its settings (offsets in its image) */
@@ -20,6 +24,7 @@ struct eo_wc_layout {
 };
 static const struct eo_wc_layout EO_WC_1_0_4 = {0xa6dcu, 0xa6e4u, 0xa6e0u, 0xa708u};
 static const struct eo_wc_layout EO_WC_1_1_0 = {0xa6f0u, 0xa6f8u, 0xa6f4u, 0xa720u};
+static const struct eo_wc_layout EO_WC_1_1_0_EO061 = {0xb6f0u, 0xb6f8u, 0xb6f4u, 0xb720u};
 
 struct eo_lock {
     int parked, enabled, weather, clock_done;

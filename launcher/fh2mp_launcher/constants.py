@@ -60,24 +60,27 @@ AZIMUTH_ARCHIVE = {"name": "azimuth-windows-1.0.4.zip", "url": MIRROR_BASE + "az
 # release zip's SHA-256 and the DLL's inside it. `files` maps a file in the zip to where it goes in the Azimuth folder.
 _EO_WC_LANGS = ('BR', 'CHT', 'CZ', 'DE', 'EN', 'ES', 'FR', 'GB', 'HU', 'IT', 'JP', 'KO', 'MX', 'NL', 'PL', 'RU')    # Weather Control's page languages
 UPSTREAM = {
+    # 2.9.0 (API 10, 2026-11-14): FH2Platform.Online's going_online, which the shim asks before it goes online (shim/src/online_gate.inc).
+    # The zip also carries the SDK (include/, tools/, examples/); only the two loader DLLs and the licences are taken.
     "platform": {
-        "name": "FH2 Mod Platform", "author": "Trinculo54", "license": "MIT", "version": "2.8.0",
-        "url": "https://github.com/Trinculo54/fh2-mod-platform/releases/download/v2.8.0/FH2-Mod-Platform-v2.8.0.zip",
-        "mirror": MIRROR_BASE + "FH2-Mod-Platform-v2.8.0.zip",
-        "sha256": "24606e6578eebcbc2d831ad48041ff74cf615c2f36160f0950e1045fd7caddd7", "size": 2339464,
-        "dll": "d3dcompiler_47.dll", "dllSha256": "a7db4a14de47cd7af98fce036877a72a88ea65498818bb2ecb755628fc99d357",
+        "name": "FH2 Mod Platform", "author": "Trinculo54", "license": "MIT", "version": "2.9.0",
+        "url": "https://github.com/Trinculo54/fh2-mod-platform/releases/download/v2.9.0/FH2-Mod-Platform-v2.9.0.zip",
+        "mirror": MIRROR_BASE + "FH2-Mod-Platform-v2.9.0.zip",
+        "sha256": "1078c9629bb866af70092c934e6af12df31ca2dd6ecb99953ac6ee9e0bee819e", "size": 4103212,
+        "dll": "d3dcompiler_47.dll", "dllSha256": "fdb970d9f98329526eb7427ded89fb1504615db7cfd30735b833d9fdd1173f35",
         "files": {"d3dcompiler_47.dll": "d3dcompiler_47.dll", "DWrite.dll": "DWrite.dll", "LICENSE.txt": "LICENSE-FH2ModPlatform.txt",
                   "LICENSE-MinHook.txt": "LICENSE-MinHook.txt"},
     },
-    # 0.6.0 (Forza XB1 Extra Options: one winmm.dll for FH2, FH3 and FM5) keeps its FH2 packages in mods/Forza Horizon 2; on its first start it
-    # moves the player's older mods/<pack> folders and mods/loadorder.txt there itself (shim.py install_extra, eo_layout_repair). Only the FH2
-    # files are taken: not the FH3/FM5 settings and mods, not the plugin's import library.
+    # 0.6.0 on (Forza XB1 Extra Options: one winmm.dll for FH2, FH3 and FM5) keeps its FH2 packages in mods/Forza Horizon 2; on its first start
+    # it moves the player's older mods/<pack> folders and mods/loadorder.txt there itself (shim.py install_extra, eo_layout_repair). Only the FH2
+    # files are taken: not the FH3/FM5 settings and mods, not the plugin's import library. 0.6.1 (asset replaced in place under the same tag,
+    # 2026-11-13) changes winmm.dll, the Garage Revving and Weather Control DLLs and the inis' comments; same files, same layout.
     "extraOptions": {
-        'name': 'FH2 Extra Options', 'author': 'RokkuDayo', 'license': 'GPL-3.0', 'version': '0.6.0',
-        'url': 'https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions/releases/download/Azimuth_v1.0.4/Forza_XB1_Extra_Options_0.6.0-Azimuth.zip',
-        'mirror': MIRROR_BASE + 'Forza_XB1_Extra_Options_0.6.0-Azimuth.zip',
-        'sha256': '3531871c747843586abce8832508f0e4e9a324226f235dc235b68ebd63d18671', 'size': 1299318,
-        'dll': 'winmm.dll', 'dllSha256': '2b88d0e0ce6888e43c8f772b60e30968576f2304ee227b3378ebf26e535eb70c',
+        'name': 'FH2 Extra Options', 'author': 'RokkuDayo', 'license': 'GPL-3.0', 'version': '0.6.1',
+        'url': 'https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions/releases/download/Azimuth_v1.0.4/Forza_XB1_Extra_Options_0.6.1-Azimuth.zip',
+        'mirror': MIRROR_BASE + 'Forza_XB1_Extra_Options_0.6.1-Azimuth.zip',
+        'sha256': '63f524843a0b332752eccfe737ce3892f4c84f1d69288552855003d23524efd9', 'size': 1305861,
+        'dll': 'winmm.dll', 'dllSha256': '97c3eec397b355431c61f7e9cdbe603d13db4290bb69c86c55e3806519811508',
         'files': {name: name for name in (
             'winmm.dll',
             'FH2_ExtraOptions.ini',
@@ -95,7 +98,7 @@ UPSTREAM = {
         )},
         'fileSha256': {
             'mods/Forza Horizon 2/Extra Options - Garage Revving/mod.json': '4f70c5538490f61011f854c7afcdcea91658417aa54bafad98c5e61ea28af00f',
-            'mods/Forza Horizon 2/Extra Options - Garage Revving/plugins/EO_GarageEngineRev.dll': 'eb48f446f22eca24d6cc93f25d6a70bd60c387a8d3ef675921cc3ab1d1bc5e17',
+            'mods/Forza Horizon 2/Extra Options - Garage Revving/plugins/EO_GarageEngineRev.dll': 'ba6b6df6446c1c0d9f6045759b57e215ba00fe26b9d40e075907dffd56e98031',
             'mods/Forza Horizon 2/Extra Options - Model Fixes/mod.json': '275486dd81edf2e82852cf9b21a9088e356862a08ad4ae46af71ec4b1fc90dfe',
             'mods/Forza Horizon 2/Extra Options - Model Fixes/media/cars/DOD_ViperGTSACR_99/DOD_ViperGTSACR_99.carbin.json': '0d51924f4c48c73672d4891e4b4c1d863bfcd427cb1bbc65fccc469a0f7373be',
             'mods/Forza Horizon 2/Extra Options - Model Fixes/media/cars/DOD_ViperGTSACR_99/scene/Exterior/Doors/wingMirrorL_a.modelbin': '8e1b7c6e125e348975841990af0d2436c3c957cd1ca56661f071041d3e82e668',
@@ -110,7 +113,7 @@ UPSTREAM = {
                    '596cc2b192369c076bea72eccf9ab318fbffc3fd71b679d6eff643804ea44bf1', '59fef45cea1fc0276c05bbbfc2e03478cce51f73c2e92b65c17746b713223bf0',
                    '000a5e4ff23899eee5e2d77e8d378ddbfad4f0e6349ed8c550c8369f3fc18115', '6acbb97480ff59800f9017d83ac72ef96034376880faf63ab5e5d7efde233499',
                    '5f9b9b0f76ba658547c55c15f7a320ce325655d8f3426bd51ec019b416138557', '7481aca0221de0f62b15030ebc0073d7cb0d6d36f673883b59203b76bf182923'))},
-            'mods/Forza Horizon 2/Extra Options - Weather Control/plugins/EO_WeatherControl.dll': '8f8628c7c87c2e7f6d287fed24c35919d8babab18277b0a5e33b4e16ac7cbe67',
+            'mods/Forza Horizon 2/Extra Options - Weather Control/plugins/EO_WeatherControl.dll': '5399ac6225c5a038af6bef96fa9f3224505c68f6acf91fbef4edba19d349b4c9',
         },
     },
     "honkHonk": {
@@ -236,6 +239,12 @@ RETIRED_EXTRA_OPTIONS = {
             "plugins/EO_WeatherControl.dll": "4df33e3bc229e43c00bb631f4c8543e6803a9cc677721df2883342831d67dc24",
         },
     },
+}
+# The Extra Options build launchers 1.3.3 to 1.4.0 installed (0.6.0, zip Forza_XB1_Extra_Options_0.6.0-Azimuth.zip): only to recognise FH2MP's own
+# earlier install when 0.6.1 replaces it (kept as fh2extra\winmm.dll.0.6.0). Its packages are where 0.6.1's go; install_extra refreshes them.
+PREVIOUS_EXTRA_OPTIONS = {
+    "version": "0.6.0",
+    "dllSha256": "2b88d0e0ce6888e43c8f772b60e30968576f2304ee227b3378ebf26e535eb70c",
 }
 # Extra Options 0.6.0's packages folder, and the names it keeps for itself at the mods root (never a package).
 EXTRA_MODS_DIR = "mods/Forza Horizon 2"

@@ -273,13 +273,16 @@ func (w *World) TrackSpeed(peer *Peer, pos [3]float64, stamp *uint64, scene *int
 	}
 	if peer.ClimbS >= FlightSeconds && !peer.Flagged("flight") {
 		peer.Flag("flight")
+		trusted := w.trusted(peer.Xuid)
 		tail := ""
-		if SpeedPolicy == "kick" {
+		if SpeedPolicy == "kick" && trusted {
+			tail = ": trusted account, not kicked"
+		} else if SpeedPolicy == "kick" {
 			tail = ": ending the connection"
 		}
 		w.Logf("FLIGHT: owner %d xuid %#x car %s climbing at %.0f km/h for %.0f s, now at height %.0f%s",
 			peer.Owner, peer.Xuid, modelStr(peer), climb, peer.ClimbS, pos[1], tail)
-		if SpeedPolicy == "kick" && peer.KickReason == nil {
+		if SpeedPolicy == "kick" && !trusted && peer.KickReason == nil {
 			r := fmt.Sprintf("flying (%.0f km/h climb)", climb)
 			peer.leaving(&r)
 		}
@@ -308,12 +311,15 @@ func (w *World) TrackSpeed(peer *Peer, pos [3]float64, stamp *uint64, scene *int
 	}
 	if peer.HardS >= SpeedSeconds && !peer.Flagged("hard") {
 		peer.Flag("hard")
+		trusted := w.trusted(peer.Xuid)
 		tail := ""
-		if SpeedPolicy == "kick" {
+		if SpeedPolicy == "kick" && trusted {
+			tail = ": trusted account, not kicked"
+		} else if SpeedPolicy == "kick" {
 			tail = ": ending the connection"
 		}
 		w.Logf("SPEED: owner %d xuid %#x car %s drove %.0f km/h for %.0f s (hard cap %.0f)%s", peer.Owner, peer.Xuid, modelStr(peer), kmh, peer.HardS, HardCapKmh, tail)
-		if SpeedPolicy == "kick" && peer.KickReason == nil {
+		if SpeedPolicy == "kick" && !trusted && peer.KickReason == nil {
 			r := fmt.Sprintf("speed %.0f km/h", kmh)
 			peer.leaving(&r)
 		}

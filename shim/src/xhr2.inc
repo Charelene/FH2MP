@@ -1237,32 +1237,33 @@ static void patch_game_cocreate(unsigned char *img)
 {
     static int announced;
     void **slot;
-    DWORD old;
+    void *prev;
+    DWORD err;
     wchar_t tmp[8];
 
     if (GetEnvironmentVariableW(L"FH2MP_NO_XHR", tmp, 8) > 0) {
         return;
     }
     slot = (void **)(img + FH2_COCREATE_IAT_RVA);
-    if (*slot == (void *)hooked_cocreate || *slot == NULL) {
+    prev = *slot;
+    if (prev == (void *)hooked_cocreate || prev == NULL) {
         return;
     }
-    if (!VirtualProtect(slot, 8, PAGE_READWRITE, &old)) {
+    /* the real function is known before the slot leads to hooked_cocreate, which calls it */
+    g_real_cocreate = (co_create_fn)prev;
+    g_cocreate_img = img;
+    if (!slot_put(slot, (void *)hooked_cocreate, &err)) {
         static volatile LONG refused;
         if (InterlockedIncrement(&refused) <= 3) {
             log_begin();
             log_raw("xhr: the game's CoCreateInstance import (game+0x");
             log_hex(FH2_COCREATE_IAT_RVA, 8);
-            log_raw(") could not be made writable, error ");
-            log_dec(GetLastError());
-            log_raw(": requests keep going to Azimuth's offline stub\n");
+            log_raw(") could not be written, error ");
+            log_dec(err);
+            log_raw(": requests go to Azimuth's offline stub until the next check\n");
         }
         return;
     }
-    g_real_cocreate = (co_create_fn)*slot;
-    g_cocreate_img = img;
-    *slot = (void *)hooked_cocreate;
-    VirtualProtect(slot, 8, old, &old);
     if (!announced) {
         announced = 1;
         g_cocreate_hooked_tick = GetTickCount();
@@ -1283,7 +1284,7 @@ static void patch_xsapi_cocreate(void)
     static int announced;
     unsigned char *img;
     void **slot;
-    DWORD old;
+    DWORD err;
     wchar_t tmp[8];
 
     if (GetEnvironmentVariableW(L"FH2MP_NO_XHR", tmp, 8) > 0) {
@@ -1297,21 +1298,19 @@ static void patch_xsapi_cocreate(void)
     if (!slot || *slot == (void *)hooked_cocreate || *slot == NULL) {
         return;
     }
-    if (!VirtualProtect(slot, 8, PAGE_READWRITE, &old)) {
-        if (!announced) {
-            announced = 1;
-            log_begin();
-            log_raw("xhr: XSAPI's CoCreateInstance import could not be made writable, error ");
-            log_dec(GetLastError());
-            log_raw(": its requests keep going to Azimuth's offline stub\n");
-        }
-        return;
-    }
     if (!g_real_cocreate) {
         g_real_cocreate = (co_create_fn)*slot;
     }
-    *slot = (void *)hooked_cocreate;
-    VirtualProtect(slot, 8, old, &old);
+    if (!slot_put(slot, (void *)hooked_cocreate, &err)) {
+        if (!announced) {
+            announced = 1;
+            log_begin();
+            log_raw("xhr: XSAPI's CoCreateInstance import could not be written, error ");
+            log_dec(err);
+            log_raw(": its requests go to Azimuth's offline stub until the next check\n");
+        }
+        return;
+    }
     announced = 1;
 }
 

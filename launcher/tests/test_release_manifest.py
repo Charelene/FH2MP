@@ -1,6 +1,6 @@
-"""release/versions.py and release/make_manifest.py: full releases, hotfixes that carry a component, and what the launcher reads from them."""
+"""release/make_manifest.py: full releases, hotfixes that carry a component, and what the launcher reads from them. The version rules
+(what a tag builds, what is refused) are release/versions.sh's, tested by release/test_versions.sh."""
 import base64
-import importlib.util
 import json
 import os
 import subprocess
@@ -15,49 +15,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey 
 from fh2mp_launcher import updater  # noqa: E402
 
 RELEASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "release")
-
-
-def load_versions():
-    spec = importlib.util.spec_from_file_location("release_versions", os.path.join(RELEASE, "versions.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-class VersionRules(unittest.TestCase):
-    def setUp(self):
-        self.v = load_versions()
-
-    def plan(self, *a, **k):
-        return self.v.plan(*a, **k)
-
-    def test_a_full_release_builds_both(self):
-        p = self.plan("v1.2.0", "1.2.0", "1.2.0", full=True)
-        self.assertEqual((p["build_shim"], p["build_launcher"], p["kind"]), ("true", "true", "release"))
-        self.assertEqual(self.plan("v1.2.0-rc1", "1.2.0-rc1", "1.2.0-rc1")["kind"], "release")
-
-    def test_a_hotfix_builds_only_the_component_set_to_the_tag(self):
-        p = self.plan("v1.1.6", "1.1.6", "1.1.5")
-        self.assertEqual((p["build_shim"], p["build_launcher"], p["kind"]), ("true", "false", "hotfix"))
-        p = self.plan("v1.1.7", "1.1.6", "1.1.7")
-        self.assertEqual((p["build_shim"], p["build_launcher"], p["kind"]), ("false", "true", "hotfix"))
-        self.assertEqual(self.plan("v1.1.7", "1.1.5", "1.1.5")["kind"], "rollback")       # shim/VERSION set back: the release's shim again
-
-    def test_what_is_refused(self):
-        for args in [("v1.1.6", "1.1.6", "1.1.5", True),         # --full needs both
-                     ("v1.2.1", "1.2.1", "1.1.5", False),        # another line: a full release
-                     ("v1.1.6", "1.1.7", "1.1.6", False),        # above the tag
-                     ("v1.1.6-rc1", "1.1.6-rc1", "1.1.5", False),  # a candidate carries nothing
-                     ("v1.1.6", "1.1.6", "1.1.5-rc2", False),
-                     ("1.1.6", "1.1.6", "1.1.6", False),
-                     ("v1.1.6", "1.1.6", "nope", False)]:
-            with self.subTest(args=args), self.assertRaises(ValueError):
-                self.plan(*args[:3], full=args[3])
-
-    def test_the_repository_versions_are_readable(self):
-        shim, launcher = self.v.read()
-        self.assertRegex(shim, self.v.VER_RE)
-        self.assertRegex(launcher, self.v.VER_RE)
 
 
 class ManifestCarry(unittest.TestCase):

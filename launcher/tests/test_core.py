@@ -694,7 +694,7 @@ def platform_dll(version):
     return b"MZ" + u("ProductName\0\0FH2 Mod Platform\0") + u("ProductVersion\0") + b"\x00\x00" + u(version + "\0")
 
 
-def platform_files(version="2.8.0"):
+def platform_files(version="2.9.0"):
     return {"d3dcompiler_47.dll": platform_dll(version), "DWrite.dll": platform_dll(version), "LICENSE-FH2ModPlatform.txt": b"MIT License Trinculo54",
             "LICENSE-MinHook.txt": b"MinHook BSD"}
 
@@ -703,7 +703,7 @@ class ShimTests(unittest.TestCase):
     DLL = b"MZ....FH2MP-SHIM-VERSION:0.1.0:END...."
 
     def setUp(self):
-        patch = mock.patch.object(shim, 'PLATFORM_DLL_SHA256', hashlib.sha256(platform_dll('2.8.0')).hexdigest())
+        patch = mock.patch.object(shim, 'PLATFORM_DLL_SHA256', hashlib.sha256(platform_dll('2.9.0')).hexdigest())
         patch.start()
         self.addCleanup(patch.stop)
 
@@ -722,10 +722,10 @@ class ShimTests(unittest.TestCase):
             did = shim.install(d, self.DLL, platform=platform_files())
             self.assertEqual(shim.installed(d), ("ours", "0.1.0"))
             self.assertEqual(self.read(d, "fh2-mods", "FH2MP.dll"), self.DLL)
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.8.0"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.9.0"))
             for n in ("LICENSE-FH2ModPlatform.txt", "LICENSE-MinHook.txt"):
                 self.assertTrue(os.path.isfile(os.path.join(d, n)), n)
-            self.assertTrue(any("FH2 Mod Platform 2.8.0" in s for s in did))
+            self.assertTrue(any("FH2 Mod Platform 2.9.0" in s for s in did))
             self.assertFalse(os.path.exists(os.path.join(d, "winmm.dll")))
 
     def locked(self, locked_path):
@@ -818,24 +818,24 @@ class ShimTests(unittest.TestCase):
 
     def test_platform_newer_older_and_foreign_are_replaced_with_exact_pin(self):
         with tempfile.TemporaryDirectory() as d:
-            self.write(platform_dll("2.8.0"), d, "d3dcompiler_47.dll")
+            self.write(platform_dll("2.9.0"), d, "d3dcompiler_47.dll")
             shim.install(d, self.DLL, platform=platform_files())
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.8.0"))          # only the supplied build is supported
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.9.0"))          # only the supplied build is supported
             self.write(platform_dll("2.7.2"), d, "d3dcompiler_47.dll")
             self.assertEqual(shim.installed(d), ("old", "0.1.0"))                        # too old for this shim: install again
             shim.install(d, self.DLL, platform=platform_files())
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.8.0"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.9.0"))
             self.write(b"MZ fh2wheel loader", d, "d3dcompiler_47.dll")                     # fh2wheel's own loader
             self.assertEqual(shim.platform_installed(d), ("foreign", ""))
             did = shim.install(d, self.DLL, platform=platform_files())
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.8.0"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.9.0"))
             self.assertEqual(self.read(d, "d3dcompiler_47.dll.old"), b"MZ fh2wheel loader")
             self.assertTrue(any("d3dcompiler_47.dll.old" in s for s in did))
 
     @unittest.skipIf(sys.platform in ("win32", "darwin"), "needs a case-sensitive file system")
     def test_another_loader_in_other_letter_case_is_moved_aside(self):
         with tempfile.TemporaryDirectory() as d:
-            self.write(platform_dll("2.8.0"), d, "d3dcompiler_47.dll")
+            self.write(platform_dll("2.9.0"), d, "d3dcompiler_47.dll")
             self.write(b"MZ radio mod loader", d, "D3DCompiler_47.dll")          # Wine would load this one
             self.assertEqual(shim.platform_installed(d), ("foreign", ""))
             shim.install(d, self.DLL, platform=platform_files())
@@ -879,7 +879,7 @@ class ShimTests(unittest.TestCase):
             shim.uninstall(d)
             self.assertEqual(shim.installed(d), ("none", ""))
             self.assertEqual(self.read(d, "winmm.dll"), b"MZ extra options")
-            self.assertEqual(shim.platform_installed(d), ("platform", "2.8.0"))
+            self.assertEqual(shim.platform_installed(d), ("platform", "2.9.0"))
 
     def test_shim_zip(self):
         from fh2mp_launcher import core, updater
@@ -1140,7 +1140,7 @@ class ExtraOptionsTests(unittest.TestCase):
     def test_only_one_extra_options_pin_is_supplied(self):
         from fh2mp_launcher.constants import UPSTREAM
         self.assertEqual(set(UPSTREAM), {'platform', 'extraOptions', 'honkHonk', 'anna', 'achievements', 'nitroSystem', 'underglow'})
-        self.assertEqual(UPSTREAM['extraOptions']['version'], '0.6.0')
+        self.assertEqual(UPSTREAM['extraOptions']['version'], '0.6.1')
         self.assertEqual(UPSTREAM['extraOptions']['dll'], 'winmm.dll')
         with tempfile.TemporaryDirectory() as az:
             self.write(b'MZ-0.3.0-old', az, 'winmm.dll')
@@ -1215,6 +1215,32 @@ class ExtraOptionsTests(unittest.TestCase):
             self.write(b"MZ-0.4.4", az, "winmm.dll")                              # again (a 1.3.2 launcher put it back): the first copy stays
             shim.install_extra(az, self.release())
             self.assertEqual(self.read(az, "fh2extra", "winmm.dll.0.4.4-2"), b"MZ-0.4.4")
+
+    def test_the_0_6_0_build_is_updated_and_its_packages_refreshed(self):
+        """Launchers 1.3.3 to 1.4.0 installed 0.6.0: its winmm.dll is kept under its version, its plugin DLLs in mods/Forza Horizon 2 are
+        replaced by the release's (the old ones kept where Extra Options does not load them), the player's settings stay."""
+        h = lambda b: hashlib.sha256(b).hexdigest()  # noqa: E731
+        pkg = "mods/Forza Horizon 2/Extra Options - Weather Control"
+        release = dict(self.release(), **{f"{pkg}/mod.json": b"wc-json-1.1", f"{pkg}/plugins/EO_WeatherControl.dll": b"MZ-wc-1.0.9",
+                                          f"{pkg}/plugins/EO_WeatherControl.ini": b"; header\n[TimeLock]\nEnabled=0\n"})
+        with tempfile.TemporaryDirectory() as az, mock.patch.dict(shim.PREVIOUS_EXTRA_OPTIONS, dllSha256=h(b"MZ-0.6.0")):
+            self.write(b"MZ-0.6.0", az, "winmm.dll")
+            self.write(self.INI + b"Mine=1\n", az, "FH2_ExtraOptions.ini")
+            self.write(b"wc-json-1.1", az, *pkg.split("/"), "mod.json")
+            self.write(b"MZ-wc-1.0.8", az, *pkg.split("/"), "plugins", "EO_WeatherControl.dll")
+            self.write(b"[TimeLock]\nEnabled=1\n", az, *pkg.split("/"), "plugins", "EO_WeatherControl.ini")
+            did = shim.install_extra(az, release)
+            self.assertIn("updated FH2 Extra Options 0.6.0 to", did[-1])
+            self.assertNotIn("your mods move", did[-1])
+            self.assertEqual(self.read(az, "fh2extra", "winmm.dll.0.6.0"), b"MZ-0.6.0")
+            self.assertEqual(self.read(az, "winmm.dll"), b"MZ-release")
+            self.assertIn(b"Mine=1", self.read(az, "FH2_ExtraOptions.ini"))
+            plugins = os.path.join(az, *pkg.split("/"), "plugins")
+            self.assertEqual(self.read(plugins, "EO_WeatherControl.dll"), b"MZ-wc-1.0.9")
+            self.assertEqual(self.read(plugins, "EO_WeatherControl.dll.before-fh2mp-setup"), b"MZ-wc-1.0.8")
+            self.assertEqual(self.read(plugins, "EO_WeatherControl.ini"), b"[TimeLock]\nEnabled=1\n")
+            self.assertEqual([n for n in os.listdir(plugins) if n.lower().endswith(".dll")], ["EO_WeatherControl.dll"])
+            self.assertFalse(any("unsupported" in n for n in os.listdir(os.path.join(az, "fh2extra"))))
 
     def test_packages_go_to_the_fh2_folder_and_the_old_bundled_ones_are_retired(self):
         """0.6.0 brings its packages in mods/Forza Horizon 2; the 0.4.4 copies earlier launchers put at the mods root move to
@@ -1491,7 +1517,7 @@ class SaveAdoptionTests(unittest.TestCase):
 
 class DevModeTests(unittest.TestCase):
     def setUp(self):
-        patch = mock.patch.object(shim, 'PLATFORM_DLL_SHA256', hashlib.sha256(platform_dll('2.8.0')).hexdigest())
+        patch = mock.patch.object(shim, 'PLATFORM_DLL_SHA256', hashlib.sha256(platform_dll('2.9.0')).hexdigest())
         patch.start()
         self.addCleanup(patch.stop)
         self.home = tempfile.TemporaryDirectory()
@@ -1529,7 +1555,7 @@ class DevModeTests(unittest.TestCase):
         from fh2mp_launcher import core
         from fh2mp_launcher.settings import Settings
         with tempfile.TemporaryDirectory() as d:
-            for name, body in (("azimuth.exe", b"MZ"), ("d3dcompiler_47.dll", platform_dll("2.8.0")), ("DWrite.dll", platform_dll("2.8.0"))):     # a bare DLL needs the platform
+            for name, body in (("azimuth.exe", b"MZ"), ("d3dcompiler_47.dll", platform_dll("2.9.0")), ("DWrite.dll", platform_dll("2.9.0"))):     # a bare DLL needs the platform
                 with open(os.path.join(d, name), "wb") as f:
                     f.write(body)
             dll = os.path.join(d, "local.dll")
@@ -2061,6 +2087,66 @@ class HonkHonkTests(unittest.TestCase):
             with mock.patch.object(core.upstream, "fetch", return_value=self.files):
                 self.assertTrue(lc.ensure_honk())
             self.assertEqual(lc.honk_state(), (True, shim.honk_version()))
+
+
+class GameRunningTests(unittest.TestCase):
+    """The game of a Play runs while the process Play started, or any azimuth.exe of the Azimuth folder, runs: the Mod Platform's Restart now and
+    Azimuth's own window carry on in a new process, and the session must not end under it (a 1.4.0 player's restarted game went online unsigned)."""
+
+    class Ended:
+        pid = 111
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+    def setUp(self):
+        from fh2mp_launcher import core
+        from fh2mp_launcher.settings import Settings
+        self.az = tempfile.mkdtemp()
+        os.makedirs(shim.bin_dir(self.az), exist_ok=True)
+        self.lc = core.Launcher(Settings(os.path.join(self.az, "settings.json")), load_identity=False)   # never the player's own settings file
+        self.lc.settings["azimuth_dir"] = self.az
+
+    def test_a_new_process_of_the_folder_is_still_the_game(self):
+        from fh2mp_launcher import launch
+        self.lc.process = self.Ended()
+        with mock.patch.object(launch, "game_processes", return_value=[222]):
+            self.assertTrue(self.lc.game_running())
+        with mock.patch.object(launch, "game_processes", return_value=[]):
+            self.assertFalse(self.lc.game_running())
+        self.lc.process = None
+        with mock.patch.object(launch, "game_processes", side_effect=AssertionError("no Play, no look")):
+            self.assertFalse(self.lc.game_running())
+
+    def test_the_session_is_kept_fresh(self):
+        path = os.path.join(shim.bin_dir(self.az), shim.SESSION_FILE)
+        self.lc.touch_session()
+        self.assertFalse(os.path.exists(path))
+        with open(path, "w") as f:
+            f.write("token=t" + chr(10))
+        os.utime(path, (1_000_000, 1_000_000))
+        self.lc.touch_session()
+        self.assertGreater(os.path.getmtime(path), 1_000_000 + 3600)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows process list")
+    def test_a_real_azimuth_exe_of_the_folder_is_found_by_its_path(self):
+        import shutil
+        import subprocess
+        from fh2mp_launcher import launch
+        ping = os.path.join(os.environ.get("SystemRoot", "C:" + chr(92) + "Windows"), "System32", "PING.EXE")
+        if not os.path.isfile(ping):
+            self.skipTest("no ping.exe")
+        exe = os.path.join(self.az, "azimuth.exe")
+        shutil.copyfile(ping, exe)
+        self.assertEqual(launch.game_processes(self.az), [])
+        p = subprocess.Popen([exe, "-n", "3", "127.0.0.1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=0x08000000)
+        try:
+            self.assertEqual(launch.game_processes(self.az), [p.pid])
+            self.assertEqual(launch.game_processes(tempfile.mkdtemp()), [])        # another folder's azimuth.exe is not this one's
+        finally:
+            p.wait(timeout=20)
+        self.assertEqual(launch.game_processes(self.az), [])
 
 
 class OptionalModTests(unittest.TestCase):

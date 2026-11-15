@@ -263,8 +263,9 @@ class BuildTests(Base):
         self.write("data/logs/a.dmp", b"MDMP" + b"\1" * 20, now)
         rep = crashreport.build(FakeLauncher(self.st), crashreport.find_crash(self.folder, now - 10))
         f = dict(rep.fields)
-        self.assertEqual([k for k, _v in rep.fields], ["Date", "System", "GPU", "Driver's version", "Launcher version", "Azimuth version",
-                                                       "FH2 Extra Options version", "Your FH2MP name"])
+        self.assertEqual([k for k, _v in rep.fields], ["Date", "System", "GPU", "Driver's version", "Memory", "Launcher version",
+                                                       "Azimuth version", "FH2 Extra Options version", "Your FH2MP name"])
+        self.assertEqual(f["Memory"], "not measured")                # no game watched by this launcher
         self.assertEqual((f["System"], f["GPU"], f["Driver's version"]), ("Wine 11.0 (wine-11.0 (CachyOS)), CachyOS", "NVIDIA GeForce RTX 3080 Ti", "35.0.19.9999"))
         self.assertEqual((f["Your FH2MP name"], f["FH2 Extra Options version"]), ("Speedy", "not installed"))
         self.assertTrue(f["Date"].endswith(" UTC"))

@@ -64,7 +64,7 @@ class WatchTests(unittest.TestCase):
         lines = [wt.sample(t, free * MB, commit * MB, None, (commit + 6000) * MB, 24000 * MB)
                  for t, commit, free in ((1, 2102, 8145), (14, 7098, 5830), (15, 9180, 5217), (34, 11137, 3154), (36, 12243, 2420))]
         self.assertEqual(lines, [None] * 5)
-        self.assertEqual(wt.summary(), {"peak_mb": 12243, "min_free_mb": 2420, "ram_mb": 15676, "sys_commit_pct": 76})
+        self.assertEqual(wt.summary(), {"peak_mb": 12243, "min_free_mb": 2420, "ram_mb": 15676, "sys_commit_pct": 76, "commit_limit_mb": 24000})
 
     def test_a_32_gb_pc_at_16_gb_commit(self):                       # normal play at 1440p / ultra: 10.7-16.4 GB for 50 minutes
         wt = memguard.Watch(31883 * MB)
@@ -94,7 +94,7 @@ class WatchTests(unittest.TestCase):
         self.assertIsNone(memguard.Watch(16 * GB).summary())           # nothing read: no line at exit
         wt = memguard.Watch(16 * GB)
         self.assertIsNone(wt.sample(0.0, 8 * GB, None))                # commit unreadable
-        self.assertEqual(wt.summary(), {"peak_mb": None, "min_free_mb": 8192, "ram_mb": 16384, "sys_commit_pct": None})
+        self.assertEqual(wt.summary(), {"peak_mb": None, "min_free_mb": 8192, "ram_mb": 16384, "sys_commit_pct": None, "commit_limit_mb": None})
 
 
 class SwitchTests(unittest.TestCase):
@@ -161,7 +161,7 @@ class ExitAndReportTests(unittest.TestCase):
 
     def test_note_game_exit_logs_what_the_watch_saw(self):
         g = self.guard(seen={"peak_mb": 12243, "min_free_mb": 2420, "ram_mb": 15676, "sys_commit_pct": 76})
-        lc = mock.Mock(game_started_at=None, offline_run=False, process=mock.Mock(memguard=g))
+        lc = mock.Mock(game_started_at=None, offline_run=False, process=mock.Mock(memguard=g), settings=mock.MagicMock())
         with mock.patch.object(core.logs, "event") as event, mock.patch.object(core.logs, "info") as info:
             self.assertIsNone(core.Launcher.note_game_exit(lc, 0))
         self.assertIsNone(event.call_args.kwargs["ended_by"])
