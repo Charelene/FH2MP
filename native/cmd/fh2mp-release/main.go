@@ -170,9 +170,9 @@ func checkManifest(dir, tag, shim, launcher string, key ed25519.PublicKey) (stri
 		return "", errors.New("the release manifest signature is not valid")
 	}
 	var m struct {
-		Schema   int    `json:"schema"`
-		Tag      string `json:"tag"`
-		Shim     *struct {
+		Schema int    `json:"schema"`
+		Tag    string `json:"tag"`
+		Shim   *struct {
 			Version string `json:"version"`
 			asset
 		} `json:"shim"`
