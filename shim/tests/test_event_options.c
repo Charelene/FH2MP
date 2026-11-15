@@ -1,0 +1,218 @@
+/* Isolated tests of src/event_options.inc: the Modded cars row on the Event Options screen, with stand-ins for the game's functions. Checked: the
+ * row is made the way the game's builder makes its own (title, two choices, a function the game can call), it goes into the page's collection
+ * after the game's rows, every object the row code made is given back exactly once, the leader's choice is recorded when the game calls the
+ * row's function, and nothing is added outside a session or on a page without a collection. The game is never loaded. */
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static char g_log[16384];
+static int read_game_memory(const void *p, void *out, SIZE_T n) { if ((UINT_PTR)p < 0x10000) return 0; memcpy(out, p, n); return 1; }
+static void log_begin(void) { strcat(g_log, "|"); }
+static void log_raw(const char *s) { strcat(g_log, s); }
+static void log_dec(unsigned long v) { char b[24]; sprintf(b, "%lu", v); strcat(g_log, b); }
+#define EVO_TEST
+#include "src/event_options.inc"
+
+static int failed;
+#define CHECK(cond) do { if (!(cond)) { printf("FAIL line %d: %s\n", __LINE__, #cond); failed++; } } while (0)
+
+/* ---- a stand-in game: counted objects (the count at +0x10) and display strings released through their vftable ---- */
+/* the first 0x58 bytes are the game's (a choice list's five vftables go in there); the stand-in's own fields come after */
+struct object { void *vtable; void *pad; LONG count; int kind; unsigned char game[0x40]; char text[32]; int value; void *parts[8]; int n; int selected; struct evo_fn fn; };
+enum { K_LIST = 1, K_ENTRY, K_TEXT, K_ROW };
+static int g_live_objects, g_live_strings, g_freed, g_in_session = 1, g_alloc_fails;
+static struct object *g_rows[8];
+static int g_row_count;
+static char g_type_token, g_list_vt[5], g_fn_vt;
+
+struct dstring { void **vtable; int count; char text[32]; };
+static void ds_addref(void *s) { ((struct dstring *)s)->count++; }
+static void ds_release(void *s) { if (--((struct dstring *)s)->count == 0) { g_live_strings--; free(s); } }
+static void *g_ds_vtable[4] = {NULL, NULL, (void *)ds_addref, (void *)ds_release};
+
+static struct object *new_object(int kind)
+{
+    struct object *o = calloc(1, sizeof *o);
+    o->count = 1;
+    o->kind = kind;
+    g_live_objects++;
+    return o;
+}
+
+static void **fake_make_string(void **out, const char *text, int length)
+{
+    struct dstring *s = calloc(1, sizeof *s);
+    CHECK(length == -1);
+    s->vtable = g_ds_vtable;
+    s->count = 1;
+    strcpy(s->text, text);
+    g_live_strings++;
+    *out = s;
+    return out;
+}
+
+static void **fake_text_from(void **out, void **display)
+{
+    struct object *o = new_object(K_TEXT);
+    strcpy(o->text, ((struct dstring *)*display)->text);
+    *out = o;
+    return out;
+}
+
+static void fake_free(void *object)
+{
+    struct object *o = object;
+    int i;
+    CHECK(o->count == 0);
+    for (i = 0; i < o->n; i++) {   /* a list gives back its entries, a row its title and its choices, as the game's do */
+        struct object *p = o->parts[i];
+        if (InterlockedDecrement(&p->count) == 0) fake_free(p);
+    }
+    g_live_objects--;
+    g_freed++;
+    free(o);
+}
+
+static void *fake_list_type(void) { return &g_type_token; }
+
+static void *fake_alloc(unsigned long long size, void *type)
+{
+    CHECK(size == 0x58 && type == &g_type_token);
+    return g_alloc_fails ? NULL : new_object(K_LIST);
+}
+
+static void *fake_list_base(void *list) { return list; }
+
+static void **fake_make_entry(void **out, int *value, void **display)
+{
+    struct object *o = new_object(K_ENTRY);
+    o->value = *value;
+    strcpy(o->text, ((struct dstring *)*display)->text);
+    *out = o;
+    return out;
+}
+
+static void fake_insert(void *list, int index, void *entry)
+{
+    struct object *l = list;
+    CHECK(index == l->n && l->n < 8);
+    InterlockedIncrement(&((struct object *)entry)->count);
+    l->parts[l->n++] = entry;
+}
+
+static void **fake_make_row(void **out, void **title, int selected, void **choices, void *function)
+{
+    struct object *row = new_object(K_ROW);
+    struct evo_fn *fn = function;
+    CHECK(fn->vtable == &g_fn_vt && fn->impl == fn);   /* the wrapper in the function's own space */
+    row->selected = selected;
+    row->fn = *fn;
+    row->fn.impl = &row->fn;
+    fn->impl = NULL;                                   /* the game empties the function it was given */
+    InterlockedIncrement(&((struct object *)*title)->count);
+    InterlockedIncrement(&((struct object *)*choices)->count);
+    row->parts[row->n++] = *title;
+    row->parts[row->n++] = *choices;
+    *out = row;
+    return out;
+}
+
+static int fake_add_row(void *collection, void *row)
+{
+    CHECK(collection == (void *)g_rows);
+    InterlockedIncrement(&((struct object *)row)->count);
+    g_rows[g_row_count] = row;
+    return g_row_count++;
+}
+
+static int evo_in_session(const unsigned char *img) { (void)img; return g_in_session; }
+
+static void *fake_builder(void *page, void *b, void *c, void *d)
+{
+    (void)b; (void)c; (void)d;
+    if (*(void **)((unsigned char *)page + EVO_PAGE_ROWS)) {   /* the game's own rows come first */
+        struct object *row = new_object(K_ROW);
+        strcpy(row->text, "Car Class");
+        g_rows[g_row_count++] = row;
+    }
+    return (void *)0x1234;
+}
+
+static void drop_rows(void)
+{
+    while (g_row_count) {
+        struct object *row = g_rows[--g_row_count];
+        if (InterlockedDecrement(&row->count) == 0) fake_free(row);
+    }
+}
+
+int main(void)
+{
+    static unsigned char page[0x800], bare[0x800];
+    struct object *row, *title, *list;
+    int i;
+
+    g_evo.make_string = fake_make_string;
+    g_evo.text_from = fake_text_from;
+    g_evo.free_object = fake_free;
+    g_evo.list_type = fake_list_type;
+    g_evo.alloc = fake_alloc;
+    g_evo.list_base = fake_list_base;
+    g_evo.make_entry = fake_make_entry;
+    g_evo.insert = fake_insert;
+    g_evo.make_row = fake_make_row;
+    g_evo.add_row = fake_add_row;
+    for (i = 0; i < 5; i++) g_evo.list_vtable[i] = &g_list_vt[i];
+    g_evo.fn_vtable = &g_fn_vt;
+    g_evo_builder_orig = fake_builder;
+    *(void **)(page + EVO_PAGE_ROWS) = g_rows;
+
+    /* the screen opens in a session: the game's row, then ours */
+    CHECK(evo_builder_hook(page, NULL, NULL, NULL) == (void *)0x1234);
+    CHECK(g_row_count == 2 && !strcmp(g_rows[0]->text, "Car Class"));
+    row = g_rows[1];
+    title = row->parts[0];
+    list = row->parts[1];
+    CHECK(row->kind == K_ROW && row->selected == 0 && row->count == 1);                 /* only the collection holds the row */
+    CHECK(title->kind == K_TEXT && !strcmp(title->text, "Modded cars") && title->count == 1);
+    CHECK(list->kind == K_LIST && list->count == 1 && list->n == 2);
+    for (i = 0; i < 5; i++) CHECK(*(void **)((unsigned char *)list + g_evo_list_vtable_at[i]) == &g_list_vt[i]);
+    CHECK(((struct object *)list->parts[0])->value == 0 && !strcmp(((struct object *)list->parts[0])->text, "Not allowed"));
+    CHECK(((struct object *)list->parts[1])->value == 1 && !strcmp(((struct object *)list->parts[1])->text, "Allowed"));
+    CHECK(((struct object *)list->parts[0])->count == 1 && ((struct object *)list->parts[1])->count == 1);
+    CHECK(g_live_strings == 0);                                                          /* every display string was released */
+    CHECK(strstr(g_log, "the Modded cars row is on it (#1)") != NULL);
+
+    /* the leader starts the event: the game calls the row's function with its SelectedIndex */
+    CHECK(!evo_modded_allowed());
+    row->fn.fn(NULL, 1);
+    CHECK(evo_modded_allowed() && strstr(g_log, "Modded cars allowed (#1)") != NULL);
+    row->fn.fn(NULL, 0);
+    CHECK(!evo_modded_allowed() && strstr(g_log, "Modded cars not allowed (#2)") != NULL);
+
+    /* the screen closes: the game drops its rows, and nothing of ours is left behind */
+    drop_rows();
+    CHECK(g_live_objects == 0 && g_live_strings == 0);
+
+    /* outside a session the game's rows are left as they are */
+    g_in_session = 0;
+    evo_builder_hook(page, NULL, NULL, NULL);
+    CHECK(g_row_count == 1);
+    drop_rows();
+    g_in_session = 1;
+
+    /* a page without a row collection, and an allocation that gives nothing: the game's code still runs, nothing is added, nothing leaks */
+    CHECK(evo_builder_hook(bare, NULL, NULL, NULL) == (void *)0x1234 && g_row_count == 0);
+    CHECK(strstr(g_log, "no row collection") != NULL);
+    g_alloc_fails = 1;
+    evo_builder_hook(page, NULL, NULL, NULL);
+    CHECK(g_row_count == 1);
+    drop_rows();
+    CHECK(g_live_objects == 0 && g_live_strings == 0);
+
+    printf(failed ? "event options: %d check(s) FAILED\n" : "event options: all checks passed\n", failed);
+    return failed != 0;
+}

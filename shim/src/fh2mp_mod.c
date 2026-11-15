@@ -5379,6 +5379,7 @@ static int install_create_probe(void)
 }
 
 #include "eo_routes.inc"
+#include "event_options.inc"
 
 static int page_executable(const void *p);
 typedef void (*eor_helper_fn)(void *state, struct eor_str *name, unsigned char on);
@@ -5682,6 +5683,10 @@ static DWORD WINAPI late_init(LPVOID unused)
             }
             if (GetEnvironmentVariableW(L"FH2MP_NO_EOROUTES", env, 8) == 0) {
                 patch_eo_routes();
+            }
+            /* The leader's choice is only recorded so far (event_options.inc): a row that promises what nothing does is for testing only. */
+            if (GetEnvironmentVariableW(L"FH2MP_MODDED_CARS_ROW", env, 8) != 0) {
+                patch_event_options();
             }
             if (GetEnvironmentVariableW(L"FH2MP_NO_TUNEGATE", env, 8) == 0) {
                 patch_tune_gate();
