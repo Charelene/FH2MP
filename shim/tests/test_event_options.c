@@ -1,7 +1,10 @@
-/* Isolated tests of src/event_options.inc: the Modded cars row on the Event Options screen, with stand-ins for the game's functions. Checked: the
- * row is made the way the game's builder makes its own (title, two choices, a function the game can call), it goes into the page's collection
- * after the game's rows, every object the row code made is given back exactly once, the leader's choice is recorded when the game calls the
- * row's function, and nothing is added outside a session or on a page without a collection. The game is never loaded. */
+/* Isolated tests of the Modded cars event option: src/event_options.inc (the row on the Event Options screen, with stand-ins for the game's
+ * functions), src/eventopts_wire.h (the datagrams, against the vectors the server's tests froze) and the state of src/eventopts_sync.inc (what is
+ * said to the server and when, what a reply and its absence do). Checked: the row is made the way the game's builder makes its own (title, two
+ * choices, a function the game can call), it goes into the page's collection after the game's rows, every object the row code made is given
+ * back exactly once, the leader's choice is said for a few seconds after the game calls the row's function, and nothing is added outside a
+ * session, against a server that does not answer, or on a page without a collection. The game is never loaded, no network call is made.
+ *   test.exe <request vector> <reply vector, event not modded> <reply vector, event modded> */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
@@ -13,7 +16,13 @@ static int read_game_memory(const void *p, void *out, SIZE_T n) { if ((UINT_PTR)
 static void log_begin(void) { strcat(g_log, "|"); }
 static void log_raw(const char *s) { strcat(g_log, s); }
 static void log_dec(unsigned long v) { char b[24]; sprintf(b, "%lu", v); strcat(g_log, b); }
+#include "src/sha256.inc"
+#include "src/lighting_wire.h"
+static volatile LONG g_ppi_modded_ok;   /* picker_pi.inc's */
+static ULONGLONG g_now = 100000;
+#define EVO_NOW() g_now
 #define EVO_TEST
+#include "src/eventopts_sync.inc"
 #include "src/event_options.inc"
 
 static int failed;
@@ -149,11 +158,53 @@ static void drop_rows(void)
     }
 }
 
-int main(void)
+static int hex_value(int c) { return c >= 'a' ? c - 'a' + 10 : c >= 'A' ? c - 'A' + 10 : c - '0'; }
+static unsigned read_hex(const char *path, unsigned char *out, unsigned max)
+{
+    FILE *f = fopen(path, "r");
+    char line[1024];
+    unsigned n = 0, i;
+    if (!f || !fgets(line, sizeof line, f)) { printf("cannot read %s\n", path); exit(2); }
+    fclose(f);
+    for (i = 0; line[i] && line[i + 1] && line[i] != '\n' && line[i] != '\r' && n < max; i += 2) out[n++] = (unsigned char)(hex_value(line[i]) * 16 + hex_value(line[i + 1]));
+    return n;
+}
+
+/* the datagrams against the server's frozen vectors (key 0..31, epoch 16..31, xuid 0x9000123456789, sequence number 9, choice Allowed) */
+static void wire(char **argv)
+{
+    unsigned char key[32], epoch[16], want[128], got[EO_REQUEST], reply[128], flags = 9;
+    unsigned i, n;
+    for (i = 0; i < 32; i++) key[i] = (unsigned char)i;
+    for (i = 0; i < 16; i++) epoch[i] = (unsigned char)(16 + i);
+    n = read_hex(argv[1], want, sizeof want);
+    eo_request(got, key, 0x9000123456789ull, 9, epoch, 1);
+    CHECK(n == EO_REQUEST && !memcmp(got, want, EO_REQUEST));
+    eo_request(got, key, 0x9000123456789ull, 9, epoch, 7);
+    CHECK(got[52] == EO_NONE);                                             /* anything but 0 or 1 is said as "nothing" */
+    n = read_hex(argv[2], reply, sizeof reply);
+    CHECK(eo_response(reply, n, key, 0x9000123456789ull, 9, 8, epoch, &flags) && flags == 0);
+    n = read_hex(argv[3], reply, sizeof reply);
+    CHECK(eo_response(reply, n, key, 0x9000123456789ull, 9, 8, epoch, &flags) && flags == EO_MODDED);
+    CHECK(!eo_response(reply, n, key, 0x9000123456789ull, 9, 9, epoch, &flags));   /* already seen */
+    CHECK(!eo_response(reply, n, key, 0x9000123456789ull, 8, 0, epoch, &flags));   /* never asked */
+    CHECK(!eo_response(reply, n, key, 0x9000123456788ull, 9, 8, epoch, &flags));   /* another player's */
+    CHECK(!eo_response(want, EO_REQUEST, key, 0x9000123456789ull, 9, 8, epoch, &flags));   /* a request is not a reply */
+    reply[52] ^= 1;
+    CHECK(!eo_response(reply, n, key, 0x9000123456789ull, 9, 8, epoch, &flags));   /* changed on the way */
+    reply[52] ^= 1;
+    key[0] ^= 1;
+    CHECK(!eo_response(reply, n, key, 0x9000123456789ull, 9, 8, epoch, &flags));   /* signed with another key */
+}
+
+int main(int argc, char **argv)
 {
     static unsigned char page[0x800], bare[0x800];
     struct object *row, *title, *list;
     int i;
+
+    if (argc < 4) { printf("usage: test.exe <request vector> <reply 0 vector> <reply 1 vector>\n"); return 2; }
+    wire(argv);
 
     g_evo.make_string = fake_make_string;
     g_evo.text_from = fake_text_from;
@@ -170,7 +221,15 @@ int main(void)
     g_evo_builder_orig = fake_builder;
     *(void **)(page + EVO_PAGE_ROWS) = g_rows;
 
-    /* the screen opens in a session: the game's row, then ours */
+    /* a server that has not answered (one without event options, a Road Trip session): the screen is left as the game makes it */
+    CHECK(!evo_server_answers());
+    evo_builder_hook(page, NULL, NULL, NULL);
+    CHECK(g_row_count == 1);
+    drop_rows();
+    evo_reply(0, g_now);
+    CHECK(evo_server_answers() && !g_ppi_modded_ok);
+
+    /* the screen opens in a session whose server answers: the game's row, then ours */
     CHECK(evo_builder_hook(page, NULL, NULL, NULL) == (void *)0x1234);
     CHECK(g_row_count == 2 && !strcmp(g_rows[0]->text, "Car Class"));
     row = g_rows[1];
@@ -187,11 +246,22 @@ int main(void)
     CHECK(strstr(g_log, "the Modded cars row is on it (#1)") != NULL);
 
     /* the leader starts the event: the game calls the row's function with its SelectedIndex */
-    CHECK(!evo_modded_allowed());
+    CHECK(evo_choice_to_say(g_now) == EO_NONE);                                         /* nothing to say before a start */
     row->fn.fn(NULL, 1);
-    CHECK(evo_modded_allowed() && strstr(g_log, "Modded cars allowed (#1)") != NULL);
+    CHECK(evo_choice_to_say(g_now) == 1 && strstr(g_log, "Modded cars allowed (#1)") != NULL);
+    CHECK(evo_choice_to_say(g_now + EVO_SAY_MS) == 1 && evo_choice_to_say(g_now + EVO_SAY_MS + 1) == EO_NONE);   /* said for a while, then no more */
     row->fn.fn(NULL, 0);
-    CHECK(!evo_modded_allowed() && strstr(g_log, "Modded cars not allowed (#2)") != NULL);
+    CHECK(evo_choice_to_say(g_now) == 0 && strstr(g_log, "Modded cars not allowed (#2)") != NULL);
+
+    /* the server's answers: the car pickers follow the newest one, and an answer that has gone stale counts for nothing */
+    evo_reply(EO_MODDED, g_now);
+    CHECK(g_ppi_modded_ok && evo_server_answers());
+    evo_expire(g_now + EVO_STALE_MS);
+    CHECK(g_ppi_modded_ok);
+    g_now += EVO_STALE_MS + 1;
+    evo_expire(g_now);
+    CHECK(!g_ppi_modded_ok && !evo_server_answers());
+    evo_reply(0, g_now);
 
     /* the screen closes: the game drops its rows, and nothing of ours is left behind */
     drop_rows();

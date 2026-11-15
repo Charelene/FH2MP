@@ -23,10 +23,10 @@
  * and then changes rows itself, with these same game functions. So the builder is hooked here, not its call: the row is added right after the
  * game's own rows and before whatever Extra Options does, and neither mod's hook overlaps the other's.
  *
- * What this does: after the game has made its rows, in a network session, it adds "Modded cars" with "Not allowed" (the default, every time) and
- * "Allowed". When the event is started the row's function records the leader's choice (evo_modded_allowed) and writes one log line. Nothing else
- * yet: the choice is not sent to the game server and no car rule follows it, so the row is only added with FH2MP_MODDED_CARS_ROW=1 (for
- * testing) until the server's side exists.
+ * What this does: after the game has made its rows, in a network session whose server answers event options (eventopts_sync.inc: not a Road
+ * Trip session, not a server without them), it adds "Modded cars" with "Not allowed" (the default, every time) and "Allowed". When the event
+ * is started the row's function hands the leader's choice to eventopts_sync.inc, which says it to the server for a few seconds; the server
+ * makes it the event's setting and tells every game of the session. FH2MP_NO_EVENTOPTS=1 turns the row and the channel off.
  *
  * Safe by default: every function called and the two vftable sets are byte-checked before the hook goes in, and any mismatch leaves the screen
  * as the game makes it. At a call the page's collection is read through read_game_memory first. The game's functions are called as the builder
@@ -82,14 +82,7 @@ typedef void *(*evo_builder_fn)(void *page, void *b, void *c, void *d);
 static struct evo_game g_evo;
 static evo_builder_fn g_evo_builder_orig;
 static const unsigned char *g_evo_img;
-static volatile LONG g_evo_allowed;   /* the leader's choice at the last event start from this game: 1 = car packs' cars may race */
 static volatile LONG g_evo_added, g_evo_started, g_evo_no_rows;
-
-/* 1 when the leader of the last event started from this game allowed modded cars. */
-static int evo_modded_allowed(void)
-{
-    return g_evo_allowed != 0;
-}
 
 static void evo_release(void *object)
 {
@@ -110,14 +103,14 @@ static void evo_on_start(void *launch_options, int index)
 {
     LONG n = InterlockedIncrement(&g_evo_started);
     (void)launch_options;
-    InterlockedExchange(&g_evo_allowed, index == 1);
+    evo_leader_chose(index == 1);
     if (n <= 20 || n % 100 == 0) {
         log_begin();
         log_raw("eventopts: the leader started an event with Modded cars ");
         log_raw(index == 1 ? "allowed" : "not allowed");
         log_raw(" (#");
         log_dec((unsigned long)n);
-        log_raw("); nothing follows this choice yet\n");
+        log_raw("); the server is told\n");
     }
 }
 
@@ -188,7 +181,7 @@ static int evo_in_session(const unsigned char *img);
 static void *evo_builder_hook(void *page, void *b, void *c, void *d)
 {
     void *ret = g_evo_builder_orig(page, b, c, d);
-    if (evo_in_session(g_evo_img) && evo_add_row(page)) {
+    if (evo_server_answers() && evo_in_session(g_evo_img) && evo_add_row(page)) {
         LONG n = InterlockedIncrement(&g_evo_added);
         if (n <= 20 || n % 100 == 0) {
             log_begin();
@@ -262,7 +255,7 @@ static int patch_event_options(void)
         return 0;
     }
     log_begin();
-    log_raw("hook: eventopts: the session leader's Event Options get a Modded cars row; the choice is only recorded for now (game+0xd78e50)\n");
+    log_raw("hook: eventopts: the session leader's Event Options get a Modded cars row while the server answers event options (game+0xd78e50)\n");
     return 1;
 }
 #endif

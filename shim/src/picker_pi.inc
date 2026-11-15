@@ -737,11 +737,14 @@ static unsigned char *ppi_hook(void *car, unsigned char *out)
  * grey out a car it refuses and NetworkIsPlayerCarValidForEvent uses it before the race [C: decompile; args (restrictions, attributes), the
  * attributes being QueryCarAttributes' block, the car id a short at +0x1e]. With the server's list loaded and this game in a network session, a
  * car the list does not have (a car pack's own car) is refused here as well; the game server refuses it at Ready anyway (game.CustomCar), this
- * only spares the player picking it. Outside a session nothing changes. */
+ * only spares the player picking it. Outside a session nothing changes. While the server says the session's event takes modded cars (its
+ * leader set the Modded cars row of Event Options to Allowed: eventopts_sync.inc keeps g_ppi_modded_ok) the car is let through, as the server
+ * lets it through. */
 #define PPI_ALLOWED_RVA 0x996240u
 typedef unsigned long long (*ppi_allowed_fn)(void *restrictions, const unsigned char *attrs);
 static ppi_allowed_fn g_ppi_allowed_orig;
 static volatile LONG g_ppi_custom_refused;
+static volatile LONG g_ppi_modded_ok;   /* 1 while the server's newest answer says the session's event takes modded cars */
 
 /* 1 when the car id of the attribute block is a car the server's list lacks (0 also when no list is loaded or the block cannot be read) */
 static int ppi_custom_car(const unsigned char *attrs)
@@ -758,7 +761,7 @@ static int ppi_custom_car(const unsigned char *attrs)
 static unsigned long long ppi_allowed_hook(void *restrictions, const unsigned char *attrs)
 {
     unsigned long long ok = g_ppi_allowed_orig(restrictions, attrs);
-    if ((ok & 0xff) && ppi_custom_car(attrs) && ppi_in_session(g_ppi_img)) {
+    if ((ok & 0xff) && !g_ppi_modded_ok && ppi_custom_car(attrs) && ppi_in_session(g_ppi_img)) {
         LONG n = InterlockedIncrement(&g_ppi_custom_refused);
         if (n <= 10 || n % 100 == 0) {
             unsigned short id = 0;
@@ -783,7 +786,7 @@ static void patch_picker_custom(unsigned char *img)
     }
     if (plat_hook("pickerpi: custom cars out of online events", img + PPI_ALLOWED_RVA, (void *)ppi_allowed_hook, (void **)&g_ppi_allowed_orig)) {
         log_begin();
-        log_raw("hook: pickerpi: online, a car the server's car list does not have is not allowed into events (game+0x996240)\n");
+        log_raw("hook: pickerpi: online, a car the server's car list does not have is not allowed into events unless the event's leader allowed modded cars (game+0x996240)\n");
     }
 }
 

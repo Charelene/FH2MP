@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# The Modded cars row on the Event Options screen (src/event_options.inc) with stand-ins for the game's functions, without the game.
+# The Modded cars event option (src/event_options.inc, src/eventopts_wire.h, src/eventopts_sync.inc): the row with stand-ins for the game's
+# functions, the datagrams against the server's frozen vectors, and what is said and followed when. Without the game or the network.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 work=$(mktemp -d)
@@ -11,4 +12,5 @@ case "$(uname -s)" in
      RUN="env WINEPREFIX=$work/prefix WINEDEBUG=-all wine" ;;
 esac
 $CC -O2 -Wall -Wextra -Wno-unused-function -I . tests/test_event_options.c -o "$work/test.exe"
-$RUN "$work/test.exe"
+for v in request reply_0 reply_1; do tr -d '\r' < "tests/vectors/eventopts_$v.hex" > "$work/$v"; done
+$RUN "$work/test.exe" "$work/request" "$work/reply_0" "$work/reply_1"

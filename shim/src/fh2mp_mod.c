@@ -3220,6 +3220,7 @@ static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *
 #include "honk_sync.inc"
 #include "carsel_sync.inc"
 #include "mods_sync.inc"
+#include "eventopts_sync.inc"
 #include "nos_flames.inc"
 #include "ug_remote.inc"
 #include "race_wait.inc"
@@ -5684,9 +5685,8 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_EOROUTES", env, 8) == 0) {
                 patch_eo_routes();
             }
-            /* The leader's choice is only recorded so far (event_options.inc): a row that promises what nothing does is for testing only. */
-            if (GetEnvironmentVariableW(L"FH2MP_MODDED_CARS_ROW", env, 8) != 0) {
-                patch_event_options();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_EVENTOPTS", env, 8) == 0 && patch_event_options()) {
+                start_eventopts();   /* the row is only added while the server answers */
             }
             if (GetEnvironmentVariableW(L"FH2MP_NO_TUNEGATE", env, 8) == 0) {
                 patch_tune_gate();

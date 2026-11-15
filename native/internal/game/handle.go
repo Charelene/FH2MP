@@ -486,6 +486,10 @@ loop:
 			w.Logf("%d MsgRequestRace (owner %d) -> RaceReady=1", addr.Port, peer.Owner)
 			w.SetSessionHostBool(SHRaceReady, 1, "race requested")
 			w.PendingRace = &PendingRace{w.Mono() + RaceInviteSeconds, peer}
+			w.ModdedCars = false
+			if !w.Roadtrip {
+				w.SetModdedCars(peer.allowsModded(w.Mono()), peer, "its Event Options at the race request")
+			}
 			w.RaceRequestedAt = w.Mono()
 			w.RaceHardDeadline = w.Mono() + RaceJoinGraceSeconds
 			var invited []*Peer
