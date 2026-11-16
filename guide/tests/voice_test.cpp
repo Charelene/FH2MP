@@ -235,6 +235,23 @@ int main() {
         CHECK(g_engine.talkers.count(id.v) == 1);
         printf("mute and unmute through the game's ChatManager calls\n");
     }
+    // the audio devices follow the player's settings: voice chat off opens none, the microphone opens only with voice chat and the microphone on
+    {
+        g_engine.running = false;
+        g_engine.chat_user = false, g_engine.mic_user = false, g_engine.mic = true;
+        g_engine.running = true;
+        ensure_devices();
+        CHECK(!g_play_open && !g_cap_open);  // voice chat off: the join opens nothing
+        voice_settings(false, false, 2);
+        CHECK(!g_play_open && !g_cap_open);
+        voice_settings(false, true, 2);  // voice chat on, microphone muted: the playback only, the microphone stays closed
+        CHECK(g_play_open && !g_cap_open);
+        voice_settings(true, true, 2);  // both on: the microphone as well
+        CHECK(g_play_open && g_cap_open);
+        g_engine.running = false;  // the device threads end
+        Sleep(400);
+        printf("audio devices follow the voice chat and microphone settings\n");
+    }
     printf(g_fail ? "%d FAILED\n" : "all passed\n", g_fail);
     return g_fail ? 1 : 0;
 }
