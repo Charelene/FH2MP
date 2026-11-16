@@ -741,7 +741,7 @@ func (c *Core) removeOldClient(r *Req, req *http.Request) {
 
 // gamedbOK: a game whose car database is not the server's (X-FH2MP-GameDb, a player's own car pack) plays with other people like everyone else: the game
 // server shows its custom cars to the others as the stand-in car and keeps them out of events and Road Trip (game.CustomCar). The request is marked
-// (OwnCars) so the public boards refuse its scores. Only a server whose database cannot be read refuses everything.
+// (OwnCars) so the public boards take only what the server can check of it (scoreboard.OwnCarsRefusal). Only a server whose database cannot be read refuses everything.
 func (c *Core) gamedbOK(rw respWriter, r *Req, req *http.Request, acct *auth.Account) bool {
 	have := req.Header.Get("X-FH2MP-GameDb")
 	if c.Launcher == nil {
@@ -791,7 +791,7 @@ func (c *Core) gamedbOK(rw respWriter, r *Req, req *http.Request, acct *auth.Acc
 		if have == "" {
 			extra = "; the client sent no hash"
 		}
-		c.Log(r, fmt.Sprintf("  car database %s is not the server's %s: %s %#x plays with its own car pack: its custom cars stay out of events and Road Trip, its scores out of the boards (shim %s%s)",
+		c.Log(r, fmt.Sprintf("  car database %s is not the server's %s: %s %#x plays with its own car pack: its custom cars stay out of events and Road Trip, only time runs of catalog cars reach the boards, judged strictly (shim %s%s)",
 			pyjson.PyRepr(cut(have, 16)), cut(sha, 16), pyjson.PyRepr(acct.Gamertag), acct.Xuid, c.shimOrNone(r), extra))
 	}
 	return true

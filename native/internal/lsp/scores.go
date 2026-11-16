@@ -94,14 +94,12 @@ func sbSubmitScore(c *Core, r *Req, req *xls.Struct) (*xls.Struct, error) {
 		c.LogEvery(r, fmt.Sprintf("score-limit/%d", xuid), 60, fmt.Sprintf("  SubmitScore user=%#x: over the rate limit, ignored (more than %d per %d s for this account)", xuid, scoreLimit[0][0], scoreLimit[0][1]), diag.Warn, "")
 		return nil, nil
 	}
-	if r.OwnCars {
-		c.Log(r, fmt.Sprintf("  SubmitScore board=(%d,%d): not stored, the player runs its own car database", d.Int("scoreboardType"), typ))
-		return nil, nil
-	}
+	// a game with its own car database (OwnCars) is judged on what the server can check, see scoreboard.OwnCarsRefusal: a time run of a car in the
+	// catalog, its ghost strict; every other board stays refused
 	sub := &scoreboard.Submission{Score: uint64(d.Int("score")), ScoreboardType: d.Int("scoreboardType"), GameScoreboardID: d.Int("gameScoreboardId"), TrackID: d.Int("trackId"),
 		CarID: d.Int("carId"), CarClassID: d.Int("carClassId"), CarPerformanceIndex: d.Float("carPerformanceIndex"), IsClean: d.Int("isClean") != 0, UsedSTM: d.Int("usedSTM") != 0,
 		UsedTCS: d.Int("usedTCS") != 0, UsedABS: d.Int("usedABS") != 0, UsedAutoBrake: d.Int("usedAutoBrake") != 0, UsedAutoShifting: d.Int("usedAutoShifting") != 0,
-		UsedClutch: d.Int("usedClutch") != 0}
+		UsedClutch: d.Int("usedClutch") != 0, OwnCars: r.OwnCars}
 	if v, ok := d.Vals["score"].(uint64); ok {
 		sub.Score = v
 	}
@@ -113,7 +111,10 @@ func sbSubmitScore(c *Core, r *Req, req *xls.Struct) (*xls.Struct, error) {
 		score := scoreboard.U64ToDbl(sub.Score)
 		req := c.Sb.EventClass(sub.ScoreboardType, sub.GameScoreboardID)
 		var why string
+		own := c.Sb.OwnCarsRefusal(typ, sub)
 		switch {
+		case own != "":
+			why = "the player runs its own car database: " + own
 		case scoreboard.EventBoards[sub.ScoreboardType] && (sub.CarClassID == 6 || sub.CarClassID == 7):
 			why = "class X/R not allowed on a Rivals board"
 		case req != nil && sub.CarClassID != *req:
@@ -128,9 +129,13 @@ func sbSubmitScore(c *Core, r *Req, req *xls.Struct) (*xls.Struct, error) {
 		c.Log(r, fmt.Sprintf("  SubmitScore board=(%d,%d) track=%d: ignored, %s", sub.ScoreboardType, typ, sub.TrackID, why))
 		return nil, nil
 	}
-	c.Log(r, fmt.Sprintf("  SubmitScore board=(%d,%d) track=%d car=%d score=%.3f clean=%s -> ghost upload for score %x", sub.ScoreboardType, typ, sub.TrackID, sub.CarID,
-		s.Score, b2s(sub.IsClean), s.ScoreID[:4]))
-	if c.Sb.GhostPolicy != "enforce" || !scoreboard.GhostBoards[sub.ScoreboardType] {
+	own := ""
+	if sub.OwnCars {
+		own = " (own car database: the car is in the catalog, the run shows once its ghost passes the strict check)"
+	}
+	c.Log(r, fmt.Sprintf("  SubmitScore board=(%d,%d) track=%d car=%d score=%.3f clean=%s -> ghost upload for score %x%s", sub.ScoreboardType, typ, sub.TrackID, sub.CarID,
+		s.Score, b2s(sub.IsClean), s.ScoreID[:4], own))
+	if (c.Sb.GhostPolicy != "enforce" && !sub.OwnCars) || !scoreboard.GhostBoards[sub.ScoreboardType] {
 		func() {
 			defer func() {
 				if p := recover(); p != nil {
@@ -307,7 +312,7 @@ func (c *Core) announceRotation(r *Req) error {
 func sbUploadFile(c *Core, r *Req, req *xls.Struct) (*xls.Struct, error) {
 	xuid, tag := r.Xuid, c.Tag(r.Xuid)
 	scoreID, data := req.Bytes("scoreId"), req.Bytes("data")
-	sid, public, err := c.Sb.AttachGhost(scoreID, data, xuid)
+	sid, public, err := c.Sb.AttachGhostAs(scoreID, data, xuid, r.OwnCars)
 	if err != nil {
 		return nil, err
 	}
@@ -320,7 +325,7 @@ func sbUploadFile(c *Core, r *Req, req *xls.Struct) (*xls.Struct, error) {
 		id8 = id8[:8]
 	}
 	c.Log(r, fmt.Sprintf("  UploadFile scoreId=%s %d bytes -> %s user=%#x", id8, len(data), what, xuid))
-	if public && c.Sb.GhostPolicy == "enforce" {
+	if public && (c.Sb.GhostPolicy == "enforce" || r.OwnCars) {
 		sub, err := c.Sb.ByScoreID(scoreID)
 		if err != nil {
 			return nil, err

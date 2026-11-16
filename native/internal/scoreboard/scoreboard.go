@@ -263,6 +263,9 @@ type Submission struct {
 	CarPerformanceIndex                                          float64
 	IsClean, UsedSTM, UsedTCS, UsedABS                           bool
 	UsedAutoBrake, UsedAutoShifting, UsedClutch                  bool
+	// OwnCars: the game runs with its own car database (a player's car packs). Only a judged time run of a car the server's catalog has is taken, and
+	// its ghost is judged strictly whatever the ghost policy (see OwnCarsRefusal, AttachGhostAs).
+	OwnCars bool
 }
 
 func b2i(b bool) int64 {
@@ -293,7 +296,7 @@ func (s *Store) Submit(xuid int64, tag string, scoreType int64, d *Submission) (
 	}
 	now := Now()
 	scoreID := Urandom(16)
-	expectsGhost := s.GhostPolicy == "enforce" && GhostBoards[d.ScoreboardType] && Ascending[scoreType]
+	expectsGhost := (s.GhostPolicy == "enforce" || d.OwnCars) && GhostBoards[d.ScoreboardType] && Ascending[scoreType]
 	var id int64
 	err := s.DB.Do(func(t *db.Tx) error {
 		if err := db.TouchPlayer(t, xuid, tag, &now, nil); err != nil {
@@ -363,6 +366,30 @@ func (s *Store) Refusal(scoreType int64, d *Submission, score float64) string {
 	if req := s.EventClass(d.ScoreboardType, d.GameScoreboardID); req != nil && d.CarClassID != *req {
 		return fmt.Sprintf("car class %d does not match the event's class %d", d.CarClassID, *req)
 	}
+	return s.OwnCarsRefusal(scoreType, d)
+}
+
+// OwnCarsRefusal says why a score from a game with its own car database (d.OwnCars) is not taken ("" when it is, or when d is not from such a game).
+// The server cannot see such a game's parts or its car data, so it takes what it can check: a time run on a board whose ghosts are judged, of a car
+// the server's catalog has (a car pack's own car is not in it). The ghost then has to pass strictly (AttachGhostAs). Counters, speed boards and
+// experience have no ghost to judge and stay refused.
+func (s *Store) OwnCarsRefusal(scoreType int64, d *Submission) string {
+	if !d.OwnCars {
+		return ""
+	}
+	if !GhostBoards[d.ScoreboardType] || !Ascending[scoreType] {
+		return fmt.Sprintf("board (%d,%d) takes no score from a game with its own car database: only time runs whose ghost can be judged count", d.ScoreboardType, scoreType)
+	}
+	var known map[int64]bool
+	if s.KnownCars != nil {
+		known = s.KnownCars()
+	}
+	if known == nil {
+		return "the game's car catalog is not loaded, so the car of a game with its own car database cannot be checked"
+	}
+	if !known[d.CarID] {
+		return fmt.Sprintf("car %d is not in the game catalog (a car pack's own car)", d.CarID)
+	}
 	return ""
 }
 
@@ -413,7 +440,14 @@ type Verdict struct {
 }
 
 // JudgeRun judges a stored submission and its ghost.
-func (s *Store) JudgeRun(r *Row, data []byte) (*Verdict, error) {
+func (s *Store) JudgeRun(r *Row, data []byte) (*Verdict, error) { return s.judgeRun(r, data, false) }
+
+// ownCarsFlagReason heads the reasons of a flagged run of a game with its own car database, which is hidden like a hard one.
+const ownCarsFlagReason = "game with its own car database: a flag hides the run"
+
+// judgeRun is JudgeRun; strict (a game with its own car database, whose parts and car data the server cannot see) turns a flag into a hard verdict, so
+// such a run is public only when nothing about it or its ghost is doubtful.
+func (s *Store) judgeRun(r *Row, data []byte, strict bool) (*Verdict, error) {
 	kind, reasons, measured := ghost.Check(data, r.Score, r.Car)
 	hard, flags, err := s.Plausibility(r)
 	if err != nil {
@@ -425,12 +459,21 @@ func (s *Store) JudgeRun(r *Row, data []byte) (*Verdict, error) {
 		kind = ghost.Flag
 	}
 	all := append(append(append([]string{}, hard...), reasons...), flags...)
+	if strict && kind == ghost.Flag {
+		kind = ghost.Hard
+		all = append([]string{ownCarsFlagReason}, all...)
+	}
 	return &Verdict{kind, all, measured}, nil
 }
 
 // StoreVerdict records a verdict and, when enforcing, applies it. True if the run is public afterwards; an operator's hide stays and a restored run
 // stays shown.
 func (s *Store) StoreVerdict(t *db.Tx, sid int64, v *Verdict, now float64) (bool, error) {
+	return s.storeVerdict(t, sid, v, now, s.GhostPolicy == "enforce")
+}
+
+// storeVerdict is StoreVerdict with the policy given: enforce applies the verdict, otherwise it is only recorded.
+func (s *Store) storeVerdict(t *db.Tx, sid int64, v *Verdict, now float64, enforce bool) (bool, error) {
 	reasons, _ := pyjson.Dumps(stringsAny(v.Reasons), pyjson.Opts{})
 	measured := "{}"
 	if v.Measured != nil {
@@ -441,7 +484,7 @@ func (s *Store) StoreVerdict(t *db.Tx, sid int64, v *Verdict, now float64) (bool
 		"measurements=excluded.measurements, decided_at=excluded.decided_at", sid, ghost.CheckVersion, v.Kind, reasons, measured, now); err != nil {
 		return false, err
 	}
-	if s.GhostPolicy != "enforce" {
+	if !enforce {
 		return true, nil
 	}
 	restored, err := t.One("SELECT 1 FROM score_overrides WHERE submission_id=?", sid)
@@ -475,6 +518,12 @@ func stringsAny(l []string) []any {
 // AttachGhost stores the ghost `xuid` uploads for its own SubmitScore (matched by the scoreId we issued) and judges the run. The first upload stands:
 // the same bytes again are a harmless retry, anything else is refused. Returns (submission id, run is newly public), or (0, false) if refused.
 func (s *Store) AttachGhost(scoreID, data []byte, xuid int64) (int64, bool, error) {
+	return s.AttachGhostAs(scoreID, data, xuid, false)
+}
+
+// AttachGhostAs is AttachGhost for an upload from a game with its own car database (ownCars): its ghost is judged strictly (a flag hides the run) and
+// the verdict is applied whatever the ghost policy, because the server cannot check that game's parts or car data any other way.
+func (s *Store) AttachGhostAs(scoreID, data []byte, xuid int64, ownCars bool) (int64, bool, error) {
 	data = append([]byte(nil), data...)
 	r, err := s.DB.One("SELECT s.*, g.submission_id AS stored, '' AS tag FROM score_submissions s LEFT JOIN score_ghosts g ON g.submission_id = s.id WHERE s.score_id=?", scoreID)
 	if err != nil {
@@ -523,7 +572,7 @@ func (s *Store) AttachGhost(scoreID, data []byte, xuid int64) (int64, bool, erro
 	judged := GhostBoards[row.Sb] && Ascending[row.St]
 	var verdict *Verdict
 	if judged { // outside the transaction: a parse must never hold the lock
-		if verdict, err = s.JudgeRun(row, data); err != nil {
+		if verdict, err = s.judgeRun(row, data, ownCars); err != nil {
 			return 0, false, err
 		}
 	}
@@ -535,7 +584,7 @@ func (s *Store) AttachGhost(scoreID, data []byte, xuid int64) (int64, bool, erro
 		}
 		if judged {
 			var err error
-			public, err = s.StoreVerdict(t, row.ID, verdict, now)
+			public, err = s.storeVerdict(t, row.ID, verdict, now, s.GhostPolicy == "enforce" || ownCars)
 			return err
 		}
 		return nil
@@ -544,16 +593,20 @@ func (s *Store) AttachGhost(scoreID, data []byte, xuid int64) (int64, bool, erro
 		return 0, false, err
 	}
 	if judged {
-		s.logVerdict(row, verdict, public, len(data))
+		s.logVerdict(row, verdict, public, len(data), ownCars)
 	}
 	return row.ID, public && verdict.Kind != ghost.Hard, nil
 }
 
 // logVerdict writes one line per judged run: the verdict, what the policy did with it, and the figures that decided it.
-func (s *Store) logVerdict(r *Row, v *Verdict, public bool, size int) {
+func (s *Store) logVerdict(r *Row, v *Verdict, public bool, size int, ownCars bool) {
+	policy := s.GhostPolicy
+	if ownCars {
+		policy = "enforce, own car database" // applied whatever the server's ghost policy is, judged strictly
+	}
 	who := diag.KV(diag.KVP{K: "submission", V: r.ID}, diag.KVP{K: "xuid", V: hexX(r.Xuid)}, diag.KVP{K: "board", V: fmt.Sprintf("(%d,%d)", r.Sb, r.St)},
 		diag.KVP{K: "track", V: r.Track}, diag.KVP{K: "car", V: r.Car}, diag.KVP{K: "score", V: fmt.Sprintf("%.3f", r.Score)}, diag.KVP{K: "ghost_bytes", V: size},
-		diag.KVP{K: "policy", V: s.GhostPolicy}, diag.KVP{K: "shown", V: public})
+		diag.KVP{K: "policy", V: policy}, diag.KVP{K: "shown", V: public})
 	if v.Kind == ghost.Pass {
 		m := v.Measured
 		var frames any
@@ -571,7 +624,7 @@ func (s *Store) logVerdict(r *Row, v *Verdict, public bool, size int) {
 		rs, more = rs[:6], " ..."
 	}
 	tail := ""
-	if s.GhostPolicy != "enforce" {
+	if s.GhostPolicy != "enforce" && !ownCars {
 		tail = " (policy=log: stays public)"
 	}
 	log.Warn(fmt.Sprintf("ghost verdict %s %s reasons: ", v.Kind, who) + strings.Join(rs, "; ") + more + tail)
