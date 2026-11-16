@@ -2348,7 +2348,7 @@ class AnnaTests(unittest.TestCase):
         from fh2mp_launcher import upstream
         from fh2mp_launcher.constants import UPSTREAM
         pin = UPSTREAM["anna"]
-        self.assertTrue(pin["url"].startswith("https://github.com/qiangqiang101/FH2_ANNA/releases/download/1.2.0/"))
+        self.assertTrue(pin["url"].startswith("https://github.com/qiangqiang101/FH2-ANNA/releases/download/1.2.4/"))
         self.assertEqual(pin["files"], {"fh2-mods/FH2ANNA.dll": "fh2-mods/FH2ANNA.dll"})
         data, pin = fake_release("anna", {"fh2-mods/FH2ANNA.dll": self.dll, "DWrite.dll": b"MZ-platform", "README.md": b"r"}, "fh2-mods/FH2ANNA.dll")
         self.assertEqual(upstream.extract("anna", data, pin), {"fh2-mods/FH2ANNA.dll": self.dll})

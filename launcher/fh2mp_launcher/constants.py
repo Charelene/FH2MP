@@ -134,16 +134,16 @@ UPSTREAM = {
     },
     # Only the mod's DLL is taken: the zip also carries a build of the FH2 Mod Platform (DWrite.dll), which stays the pinned one above.
     "anna": {
-        "name": "FH2 ANNA", "author": "qiangqiang101", "license": "MIT", "version": "1.2.0",
-        "url": "https://github.com/qiangqiang101/FH2_ANNA/releases/download/1.2.0/FH2ANNA-1.2.0.zip",
-        "mirror": MIRROR_BASE + "FH2ANNA-1.2.0.zip",
-        "sha256": "b339186683f1b4f7949ec0ffce88e4ed00729c885085419105fa608c979554e8", "size": 1341846,
-        "dll": "fh2-mods/FH2ANNA.dll", "dllSha256": "da7032e35f3444fc77dc80b744f22418cb6fcffafd02617f7f597ce241cab02d",
+        "name": "FH2 ANNA", "author": "qiangqiang101", "license": "MIT", "version": "1.2.4",
+        "url": "https://github.com/qiangqiang101/FH2-ANNA/releases/download/1.2.4/FH2ANNA-1.2.4.zip",
+        "mirror": MIRROR_BASE + "FH2ANNA-1.2.4.zip",
+        "sha256": "959b5caad7185a93a5216a7bdd1aa08e95d925d7c47060d44932f18b60d4a9ad", "size": 2209500,
+        "dll": "fh2-mods/FH2ANNA.dll", "dllSha256": "7b4d1f2eb38e7bd8aa13df355cdfba0338371e3faf281ae122dc7bc865630a5d",
         "files": {
             "fh2-mods/FH2ANNA.dll": "fh2-mods/FH2ANNA.dll",
         },
         "fileSha256": {
-            "fh2-mods/FH2ANNA.dll": "da7032e35f3444fc77dc80b744f22418cb6fcffafd02617f7f597ce241cab02d",
+            "fh2-mods/FH2ANNA.dll": "7b4d1f2eb38e7bd8aa13df355cdfba0338371e3faf281ae122dc7bc865630a5d",
         },
     },
     # Not required to play: the game's 88 achievements, which the Guide lists and the server shows on gamercards. Only the mod's DLL is taken:
