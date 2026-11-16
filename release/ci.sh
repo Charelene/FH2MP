@@ -79,6 +79,7 @@ lane_unit() {
     run "shim model unload guard" shim/tests/test_model_unload.sh
     run "shim zip manifest check" shim/tests/test_zipmanifest.sh
     run "shim dtconv guard" shim/tests/test_dtconv.sh
+    run "shim blob limit" shim/tests/test_blob_limit.sh
     run "shim garage rating guard" shim/tests/test_garage_rating.sh
     run "shim chat link wire" shim/tests/test_chat_link.sh
     run "shim online setup" shim/tests/test_online_setup.sh

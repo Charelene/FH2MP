@@ -2316,6 +2316,7 @@ static int patch_online_meet(void)
 #include "remote_prediction_guard.inc"
 #include "model_unload_guard.inc"
 #include "dtconv_guard.inc"
+#include "blob_limit_guard.inc"
 #include "camanim_guard.inc"
 #include "component_lookup_guard.inc"
 #include "picker_pi.inc"
@@ -5641,6 +5642,10 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_DTCONVGUARD", env, 8) == 0) patch_dtconv_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_CAMGUARD", env, 8) == 0) patch_camanim_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_COMPGUARD", env, 8) == 0) patch_component_lookup_guard();
+        }
+        {   /* online only: an offline run sends no share anywhere */
+            wchar_t env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_BLOBLIMIT", env, 8) == 0) patch_blob_limit();
         }
         patch_car_pool();
         {
