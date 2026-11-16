@@ -15,7 +15,7 @@
  * For a car whose engine data is unusable it does not rate the car: the rating fields and the sample count are left at 0 (the CCarInGarage
  * comes from the game's heap, not zeroed), ClassID (+0x2cc, from the save row) and the save are not touched. The car stays in the garage
  * as it is; driving it goes through the torque load guard's placeholder. A car whose data cannot be read is rated by the game as before.
- * FH2MP_NO_GARAGERATING=1 switches it off. Online runs only (FH2MP_OFFLINE skips the shim's guards). */
+ * FH2MP_NO_GARAGERATING=1 switches it off. Offline runs too (offline_guards). */
 #include "garage_rating_rule.inc"
 
 #define GR_FN 0x2cfa50u
