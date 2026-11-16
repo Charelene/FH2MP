@@ -632,20 +632,40 @@ void playback_thread() {
     CloseHandle(ev);
 }
 
-void start_engine() {
-    if (g_engine.running.exchange(true)) return;
-    if (!load_wave()) {
+std::mutex g_dev_mu;
+std::atomic<bool> g_play_open{false}, g_cap_open{false};
+
+// Opens the audio devices the player's settings ask for, each once. Voice Chat off opens none (nothing is heard or sent, so the game's
+// audio is left alone); the microphone opens only with Voice Chat and the Microphone both on, so a muted player's microphone is never in
+// use. Called when the game's chat layer starts the engine and when the settings change, so turning them on in a session opens the device
+// then. A device stays open once it is. The join no longer opens a device for a player who has voice off: it was done for every player.
+void ensure_devices() {
+    if (!g_engine.running) return;
+    std::lock_guard<std::mutex> l(g_dev_mu);
+    if (!g_engine.chat_user) {
+        static bool said = false;
+        if (!said) said = true, logf("voice: voice chat is off: no audio device is opened (they open when it is turned on)");
+        return;
+    }
+    if (!g_wave.ok && !load_wave()) {
         logf("voice: the system winmm.dll has no wave functions: voice is off");
         g_engine.running = false;
         return;
     }
+    if (!g_play_open.exchange(true)) std::thread(playback_thread).detach();
+    if (!g_engine.mic) {
+        static bool said_env = false;
+        if (!said_env) said_env = true, logf("voice: FH2MP_VOICE_MIC=0: the microphone stays closed, this player only listens");
+        return;
+    }
+    if (g_engine.mic_user && !g_cap_open.exchange(true)) std::thread(capture_thread).detach();
+}
+
+void start_engine() {
+    if (g_engine.running.exchange(true)) return;
     const char* mic = getenv("FH2MP_VOICE_MIC");
     g_engine.mic = !(mic && mic[0] == '0');
-    std::thread(playback_thread).detach();
-    if (g_engine.mic)
-        std::thread(capture_thread).detach();
-    else
-        logf("voice: FH2MP_VOICE_MIC=0: the microphone stays closed, this player only listens");
+    ensure_devices();
 }
 
 // A relayed packet from the game's voice loop (the game's thread): its frames go to that console's queue.
@@ -1096,8 +1116,11 @@ public:
         // the local player's ChatUser must be there before the task completes: its continuation looks it up (game+0x3883f0)
         if (uint64_t x = user_xuid(user)) {
             chat_user(x, user);
+            // the device count is asked only when the game will be told about a microphone (Voice Chat and Microphone on): with them off the
+            // join does not touch the system's audio at all
+            bool on = g_engine.mic && g_engine.mic_user && g_engine.chat_user;
             logf("voice: the local player %#llx joins chat channel %d (a capture device is reported: %s)", (unsigned long long)x, int(ch),
-                 g_engine.mic && have_microphone() ? "yes" : "no, so the game shows no microphone");
+                 !on ? "no, voice chat or the microphone is off" : have_microphone() ? "yes" : "no, so the game shows no microphone");
         }
         return done(op);
     }
@@ -1217,6 +1240,7 @@ void voice_settings(bool mic, bool chat, int volume) {
         std::lock_guard<std::mutex> l(g_engine.mu);
         for (auto& kv : g_engine.talkers) kv.second.frames.clear();
     }
+    ensure_devices();  // turning voice chat or the microphone on in a session opens the device now
 }
 
 int voice_talking(uint64_t* ids, int max) {
