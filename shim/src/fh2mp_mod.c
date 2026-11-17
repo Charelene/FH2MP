@@ -1882,6 +1882,8 @@ static int patch_speed_pb(void)
     }
     g_speed_pb_resolve = (speed_pb_resolve_fn)(img + 0x3eb620);
     g_speed_pb_property = (speed_pb_property_fn)(img + 0x3d2d70);
+    g_speed_pb_zone_tail = img + 0x6b76b5;     /* checked by the signature above: 41 54 push r12, then 41 56 push r14 */
+    g_speed_pb_zone_cont = img + 0x6b76b7;
     /* Partial installation stays inert until every hook is available. */
     if (!plat_hook_call("speedpb: local PB fallback in HUD comparison", img + 0x5b0b9d,
                         (void *)speed_pb_score, (void **)&g_speed_pb_score) ||
@@ -3990,6 +3992,19 @@ static DWORD WINAPI option_monitor(LPVOID unused)
                 log_raw("speedpb: switched itself off, the thread-local slot could not be written (error ");
                 log_dec((unsigned long)(pb - 1));
                 log_raw("); speed notifications use the online result only\n");
+            }
+        }
+        {
+            static LONG head_seen;
+            LONG head = g_speed_pb_head_used;
+            if (head && !head_seen) {
+                const unsigned char found[2] = {(unsigned char)(head & 0xff), (unsigned char)((head >> 8) & 0xff)};
+                head_seen = head;
+                log_begin();
+                log_raw("speedpb: the zone handler's push r12 (41 54) at game+0x006b76b5 is now ");
+                log_hexbytes(found, 2);
+                log_raw(": another mod patched 7 bytes over the platform's 5-byte hook and chains into it; the shim runs the handler's"
+                        " first 7 bytes itself from now on\n");
             }
         }
         Sleep(1000);
