@@ -270,6 +270,8 @@ type World struct {
 	IsIdle         bool
 	Carmeet        bool
 	Roadtrip       bool
+	Eliminator     bool
+	El             *Eliminator
 
 	VisibilityChecked               float64
 	RtState                         int
@@ -344,6 +346,7 @@ type World struct {
 	honkRoutes       map[uint64]Addr
 	carselRoutes     map[uint64]Addr
 	modsRoutes       map[uint64]Addr
+	eliminatorRoutes map[uint64]Addr
 }
 
 // NewWorld is Server(...) for a hub-owned world.

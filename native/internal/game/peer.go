@@ -175,7 +175,8 @@ type Peer struct {
 	Honk             *HonkState
 	HonkLoggedAt     float64
 	Carsel           *CarselState
-	Mods             *ModState // add-on mods' state (modsync.go)
+	Elim             *CarselState // the last Eliminator request acted on (eliminator.go)
+	Mods             *ModState    // add-on mods' state (modsync.go)
 	ModsChanges      int
 	ModsLoggedAt     float64
 	ModsNosWarnedAt  float64
