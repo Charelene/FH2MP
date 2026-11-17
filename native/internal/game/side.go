@@ -162,6 +162,8 @@ func (h *Hub) sideForged(kind jobKind, xuid uint64) {
 		lg, name = carselLog, "car select"
 	case jobMods:
 		lg, name = modsLog, "mod state"
+	case jobEventopts:
+		lg, name = eventoptsLog, "event options"
 	case jobElim:
 		lg, name = elimLog, "eliminator"
 	}

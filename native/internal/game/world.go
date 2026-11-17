@@ -329,6 +329,7 @@ type World struct {
 	FreeRoamLaps         int64
 	FreeRoamEndCondition int64
 	Event                *Event
+	ModdedCars           bool // the leader allowed car packs' own cars in the pending or running event (eventopts.go)
 
 	raceClock    [2]int64
 	raceProgress struct {
@@ -345,6 +346,7 @@ type World struct {
 	honkRoutes       map[uint64]Addr
 	carselRoutes     map[uint64]Addr
 	modsRoutes       map[uint64]Addr
+	eventoptsRoutes  map[uint64]Addr
 	eliminatorRoutes map[uint64]Addr
 }
 
