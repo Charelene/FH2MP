@@ -11,6 +11,8 @@ const (
 	Counts       = "(SELECT COUNT(*) FROM score_reports sr WHERE sr.submission_id = s.id AND sr.dismissed = 0)"
 	OwnPending   = "(s.xuid = ? AND EXISTS (SELECT 1 FROM hidden_scores hs WHERE hs.submission_id = s.id AND hs.source = 'pending'))"
 	ReviewBoards = "(1,3,6,9)"
+	// CarOutsideCatalog is the hidden_scores reason of a run hidden because its car is not in the game catalog (scoreboard.HideUnknownCars).
+	CarOutsideCatalog = "car not in the game catalog"
 	// GhostFlag is a run the ghost rules flagged (not hard: those are hidden) and nobody has reviewed.
 	GhostFlag = "EXISTS (SELECT 1 FROM score_verdicts gv WHERE gv.submission_id = s.id AND gv.verdict = 'flag' AND gv.reviewed = 0)"
 )

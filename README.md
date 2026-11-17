@@ -77,7 +77,7 @@ another computer. Keep that code private.
 installed. The server refuses launchers and shims older than the minimum it announces (1.2.0 after this release is deployed), so an old install shows
 "update required" and has to update before it can play.
 
-Version 1.4.3 uses Azimuth 1.0.4, FH2 Extra Options 0.6.1, FH2 Mod Platform 2.9.0, HonkHonk 0.4.0 and FH2 ANNA 1.2.4; Achievements 1.0.2, NitroSystem 2.0.0 and Underglow 1.1.0 are optional. Setup installs the supported combination and preserves your existing settings and saves. The launcher downloads them from FH2MP's server (the authors' releases are the fallback) and checks every file against its pinned hash.
+Version 1.4.5 uses Azimuth 1.0.4, FH2 Extra Options 0.6.1, FH2 Mod Platform 2.9.0, HonkHonk 0.4.0 and FH2 ANNA 1.2.4; Achievements 1.0.2, NitroSystem 2.0.0 and Underglow 1.1.0 are optional. Setup installs the supported combination and preserves your existing settings and saves. The launcher downloads them from FH2MP's server (the authors' releases are the fallback) and checks every file against its pinned hash.
 
 **Linux.** Azimuth runs under Wine/Proton. The launcher picks the newest Proton it finds in the usual Steam folders and starts the game with
 `WINEDLLOVERRIDES="winmm,dwrite,d3dcompiler_47=n,b"`, so Wine loads FH2 Extra Options (`winmm.dll`) and the FH2 Mod Platform (`DWrite.dll` and `d3dcompiler_47.dll`)
@@ -156,9 +156,9 @@ release, using `release/notes/<tag>.md` as the description when that file exists
 - Forza Horizon 2, Xbox One build 1.0.0.64.
 - **Azimuth 1.0.4** only. The shim checks its hooks against byte signatures of that build and skips anything that does not match; the
   launcher warns you about other builds.
-- **FH2 Mod Platform 2.8.0** by Trinculo54, the `DWrite.dll` and `d3dcompiler_47.dll` next to `azimuth.exe` that load the shim. The launcher
-  installs the 2.8.0 release when your folder has another build.
-- **[FH2 Extra Options](https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions) 0.6.0** by RokkuDayo, the only supported build. When the `winmm.dll` next to `azimuth.exe` is not that build, the launcher downloads the author's release (a setting turns that off; another `winmm.dll` is kept in `fh2extra`).
+- **FH2 Mod Platform 2.9.0** by Trinculo54, the `DWrite.dll` and `d3dcompiler_47.dll` next to `azimuth.exe` that load the shim. The launcher
+  installs the 2.9.0 release when your folder has another build.
+- **[FH2 Extra Options](https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions) 0.6.1** by RokkuDayo, the only supported build. When the `winmm.dll` next to `azimuth.exe` is not that build, the launcher downloads the author's release (a setting turns that off; another `winmm.dll` is kept in `fh2extra`).
   It keeps its mods in `mods\Forza Horizon 2` and moves the ones in `mods` there itself the first time the game starts.
   By hand, put its `winmm.dll`, `FH2_ExtraOptions.ini` and `mods\Forza Horizon 2` next to `azimuth.exe`.
 - Other FH2 Mod Platform mods load next to the shim; the platform refuses any hook of theirs that would overlap one of ours. Online play uses the server's car
@@ -186,6 +186,12 @@ This project is **AI-assisted**. If that makes you close the tab, fair enough. I
 - **[FH2 Extra Options](https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions)** by RokkuDayo: quality-of-life patches, loaded next to the shim.
 - **[FH2 Mod Platform](https://github.com/Trinculo54/fh2-mod-platform)** by Trinculo54: the shared base the shim is built on (loading,
   shared hooks checked against other mods and Extra Options, crash reports).
+- **[HonkHonk](https://github.com/suderek22/FH2_HonkHonk)** by suderek22: horns, heard by the other players online.
+- **[FH2 ANNA](https://github.com/qiangqiang101/FH2-ANNA)** by qiangqiang101: headlights, display mode, pad and Auto Drive.
+- **[Achievements](https://github.com/Trinculo54/fh2-achievements)** by Trinculo54 (optional): the achievements the Guide shows.
+- **[NitroSystem](https://github.com/qiangqiang101/FH2-NitroSystem)** by qiangqiang101 (optional): nitro, switched off by FH2MP where it
+  isn't allowed online through its own off switch.
+- **[Underglow](https://github.com/qiangqiang101/FH2-Underglow)** by qiangqiang101 (optional): underglow, shown to the other players online.
 
 ## License
 
@@ -198,3 +204,8 @@ Third-party mods FH2MP uses (not part of FH2MP and not redistributed by it; the 
   © 2009-2017 Tsuda Kageyu (BSD 2-Clause) and [SQLite](https://sqlite.org) (public domain); the launcher keeps the release's
   `LICENSE.txt` (as `LICENSE-FH2ModPlatform.txt`) and `LICENSE-MinHook.txt` next to the DLL.
 - **[FH2 Extra Options](https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions)** © RokkuDayo, GPL-3.0.
+- **[HonkHonk](https://github.com/suderek22/FH2_HonkHonk)** © suderek22, GPL-3.0.
+- **[FH2 ANNA](https://github.com/qiangqiang101/FH2-ANNA)** © qiangqiang101, MIT License.
+- **[Achievements](https://github.com/Trinculo54/fh2-achievements)** © Trinculo54, GPL-3.0.
+- **[NitroSystem](https://github.com/qiangqiang101/FH2-NitroSystem)** © qiangqiang101, MIT License.
+- **[Underglow](https://github.com/qiangqiang101/FH2-Underglow)** © qiangqiang101, MIT License.
