@@ -175,7 +175,8 @@ type Peer struct {
 	Honk             *HonkState
 	HonkLoggedAt     float64
 	Carsel           *CarselState
-	Mods             *ModState // add-on mods' state (modsync.go)
+	Mods             *ModState       // add-on mods' state (modsync.go)
+	Eventopts        *EventoptsState // the leader choice its shim last sent (eventopts.go)
 	ModsChanges      int
 	ModsLoggedAt     float64
 	ModsNosWarnedAt  float64

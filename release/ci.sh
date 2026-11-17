@@ -73,6 +73,7 @@ lane_unit() {
     run "shim health" shim/tests/test_health.sh
     run "shim eo timelock" shim/tests/test_eo_timelock.sh
     run "shim eo routes" shim/tests/test_eo_routes.sh
+    run "shim event options" shim/tests/test_event_options.sh
     run "shim identity scope" shim/tests/test_identity_scope.sh
     run "shim tune gate" shim/tests/test_tune_gate.sh
     run "shim model unload guard" shim/tests/test_model_unload.sh
