@@ -270,6 +270,7 @@ type World struct {
 	IsIdle         bool
 	Carmeet        bool
 	Roadtrip       bool
+	El             *Eliminator // an Eliminator match's state; nil in every other world (Hub.WorldFor)
 
 	VisibilityChecked               float64
 	RtState                         int
@@ -346,6 +347,7 @@ type World struct {
 	carselRoutes     map[uint64]Addr
 	modsRoutes       map[uint64]Addr
 	eventoptsRoutes  map[uint64]Addr
+	eliminatorRoutes map[uint64]Addr
 }
 
 // NewWorld is Server(...) for a hub-owned world.

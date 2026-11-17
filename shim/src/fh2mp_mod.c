@@ -3222,6 +3222,7 @@ static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *
 #include "carsel_sync.inc"
 #include "mods_sync.inc"
 #include "eventopts_sync.inc"
+#include "eliminator.inc"
 #include "nos_flames.inc"
 #include "ug_remote.inc"
 #include "race_wait.inc"
@@ -5687,6 +5688,7 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_CARSELECT_HOLD", env, 8) == 0) patch_carsel();
             patch_mods(g_exe_dir);    /* NitroSystem's NOS rule (always online) and other players' NOS and underglow */
             if (GetEnvironmentVariableW(L"FH2MP_NO_RACEWAIT", env, 8) == 0) patch_race_wait();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_ELIMINATOR", env, 8) == 0) patch_eliminator();
         }
         {
             wchar_t env[8];
@@ -6544,6 +6546,7 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
         if (GetEnvironmentVariableW(L"FH2MP_NO_DEVBADGE", tmp, 8) == 0) {
             ui_dev_badge();
         }
+        eliminator_ui_init();          /* HUD/pad layers and the menu page must be registered in fh2mod_init */
     }
     {
         wchar_t cp_env[8];

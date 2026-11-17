@@ -22,6 +22,7 @@ const (
 	jobCarsel
 	jobMods
 	jobEventopts
+	jobElim
 	jobPause
 	jobStep
 	jobTick
@@ -156,6 +157,8 @@ func (wk *Worker) do(j job) bool {
 		wk.h.modsHandle(j.data, j.addr, j.w)
 	case jobEventopts:
 		wk.h.eventoptsHandle(j.data, j.addr, j.w)
+	case jobElim:
+		wk.h.eliminatorHandle(j.data, j.addr, j.w)
 	case jobPause:
 		j.ack.Done()
 		<-j.resume
@@ -259,6 +262,9 @@ func (h *Hub) HandleDatagram(data []byte, addr Addr) {
 	case len(data) >= 19 && string(data[11:19]) == eventoptsMagic:
 		h.sideDispatch(data, addr, jobEventopts)
 		return
+	case len(data) >= 19 && string(data[11:19]) == elimMagic:
+		h.sideDispatch(data, addr, jobElim)
+		return
 	case len(data) == probeLength && string(data[11:19]) == probeMagic:
 		h.probeHandle(data, addr)
 		return
@@ -322,6 +328,8 @@ func (h *Hub) sideDispatch(data []byte, addr Addr, kind jobKind) {
 				h.modsHandle(data, addr, nil)
 			case jobEventopts:
 				h.eventoptsHandle(data, addr, nil)
+			case jobElim:
+				h.eliminatorHandle(data, addr, nil)
 			default:
 				h.honkHandle(data, addr, nil)
 			}

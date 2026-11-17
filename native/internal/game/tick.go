@@ -60,6 +60,9 @@ func (w *World) dropPeer(peer *Peer, why string, quiet bool) {
 		w.Leader = nil
 	}
 	w.Peers.Delete(peer.Addr)
+	if w.El != nil {
+		w.El.Forget(peer.Owner) // or the mode never ends, and the next player with this owner id inherits the state
+	}
 	if w.Dirty.Has(peer) {
 		w.FlushPeer(peer)
 	}
@@ -327,6 +330,9 @@ func (w *World) Tick() {
 	}
 	if w.Roadtrip {
 		w.RoadTripTick(now)
+	}
+	if w.El != nil {
+		w.El.Tick(now)
 	}
 	if w.PendingRace != nil && now >= w.PendingRace.Deadline {
 		leader := w.PendingRace.Leader

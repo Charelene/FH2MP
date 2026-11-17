@@ -12,7 +12,8 @@ What is here:
 | File | What |
 |---|---|
 | `fh2mod.h` | The platform's API header from official release v2.8.0 (API 9). The shim compiles against it. |
-| `LICENSE` | The platform's MIT licence. It applies to `fh2mod.h` (and to the platform DLL, which FH2MP does not ship). |
+| `fh2mod_hud.h`, `fh2mod_pad.h` | The HUD layer and pad layer preview interfaces from release v2.9.0, the first platform to offer them. The shim's Eliminator groundwork compiles against them; on an older platform it finds no such interface and shows nothing. |
+| `LICENSE` | The platform's MIT licence. It applies to `fh2mod.h` and the two preview headers (and to the platform DLL, which FH2MP does not ship). |
 | `VERSION` | The platform release FH2MP is built and tested against. |
 
 The DLL itself is not in this repository or in FH2MP's releases: the launcher downloads the author's release zip

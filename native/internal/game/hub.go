@@ -120,6 +120,7 @@ type Hub struct {
 	CarselRoutes   map[uint64]Addr
 	ModsRoutes     map[uint64]Addr
 	EvoRoutes      map[uint64]Addr // event options' (eventopts.go)
+	ElimRoutes     map[uint64]Addr
 	probeSeen      map[Addr]probeEnt
 	autoWorlds     int
 	lastSweep      float64
@@ -144,7 +145,7 @@ func NewHub(cfg HubConfig) (*Hub, error) {
 		Assign: map[uint64]string{}, Follow: map[uint64]bool{}, Standins: map[uint64]map[int64]int64{}, CustomCars: map[uint64]map[int64]bool{}, Runs: map[uint64]string{}, Authed: map[uint64]authEnt{}, Flagged: omap.New[uint64, flagEnt](), Revoked: map[uint64]float64{},
 		Keys: map[uint64]map[string]float64{}, TicketEpochs: map[Addr][]byte{}, Bound: map[Addr]boundEnt{}, Nonces: omap.New[nonceKey, float64](), NonceCount: map[uint64]int{},
 		AuthLog: map[any]float64{}, Worlds: omap.New[WorldKey, *World](), Route: omap.New[Addr, *World](), EmptySince: map[WorldKey]float64{},
-		LightingRoutes: map[uint64]Addr{}, HonkRoutes: map[uint64]Addr{}, CarselRoutes: map[uint64]Addr{}, ModsRoutes: map[uint64]Addr{}, EvoRoutes: map[uint64]Addr{}, probeSeen: map[Addr]probeEnt{}, nxt: math.Inf(1)}
+		LightingRoutes: map[uint64]Addr{}, HonkRoutes: map[uint64]Addr{}, CarselRoutes: map[uint64]Addr{}, ModsRoutes: map[uint64]Addr{}, EvoRoutes: map[uint64]Addr{}, ElimRoutes: map[uint64]Addr{}, probeSeen: map[Addr]probeEnt{}, nxt: math.Inf(1)}
 	h.catalogPtr.Store(cfg.Catalog)
 	h.DefaultType = 2
 	h.PickRng = func() Rand { return pyrand.New(entropySeed()) }
@@ -235,6 +236,13 @@ func (h *Hub) WorldFor(lobbyType int, name string) *World {
 	k := key
 	w.HubKey = &k
 	w.Hub = h
+	// An Eliminator match is a Free Roam world of its own, told apart by its name: the lobby type only picks the session the game builds (and
+	// all six the game knows are taken: 1-3 on the mainland, 4-6 the same on Storm Island), the mode runs inside it as King and Infection do.
+	// Players are sent there with the control message "assign <xuid> elim-...", like a private Free Roam.
+	if lobbyType == LobbyTypeFreeRoam && strings.HasPrefix(name, ElimWorldPrefix) {
+		w.El = NewEliminator(w.Rng) // only such a world has one, so only it answers the Eliminator side channel
+		w.Logf("eliminator: this Free Roam world hosts a match (its name starts with %s)", ElimWorldPrefix)
+	}
 	if w.Roadtrip {
 		gamedb := envStr("FH2MP_GAMEDB", "")
 		if gamedb == "" {
@@ -993,6 +1001,10 @@ func (h *Hub) Handle(data []byte, addr Addr) {
 	}
 	if len(data) >= 19 && string(data[11:19]) == eventoptsMagic {
 		h.eventoptsHandle(data, addr, nil)
+		return
+	}
+	if len(data) >= 19 && string(data[11:19]) == elimMagic {
+		h.eliminatorHandle(data, addr, nil)
 		return
 	}
 	if h.probeHandle(data, addr) {

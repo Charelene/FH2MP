@@ -164,6 +164,8 @@ func (h *Hub) sideForged(kind jobKind, xuid uint64) {
 		lg, name = modsLog, "mod state"
 	case jobEventopts:
 		lg, name = eventoptsLog, "event options"
+	case jobElim:
+		lg, name = elimLog, "eliminator"
 	}
 	if ok, skipped := sideRate.Allow([2]any{"side-forged", xuid}, rejectLogSeconds); ok {
 		extra := ""
