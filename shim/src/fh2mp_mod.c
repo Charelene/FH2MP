@@ -3408,6 +3408,20 @@ static int ui_race_toast_layout(void)
     return ok;
 }
 
+/* Developer badge (src/dev_badge.inc): FH2MP's logo after a developer's gamertag on the name tag over their car. Disable with env FH2MP_NO_DEVBADGE. */
+#include "dev_badge.inc"
+
+static int ui_dev_badge(void)
+{
+    int ok = stateflow_replace(L"\\media\\UI.zip", "Scenes/Anthem/AR_OpponentLabel.xaml", "UI/Scenes/Anthem/AR_OpponentLabel.xaml", DEV_BADGE_OLD,
+                               sizeof DEV_BADGE_OLD - 1, DEV_BADGE_NEW, sizeof DEV_BADGE_NEW - 1, "devbadge");
+    if (ok) {
+        log_begin();
+        log_raw("devbadge: Scenes/Anthem/AR_OpponentLabel.xaml handed to the platform, FH2MP's developers have its logo after their gamertag on name tags\n");
+    }
+    return ok;
+}
+
 /*
  * The car database the game runs with (the mediaoverride copy gamedb_place keeps equal to the launcher's, session line gamedb=). Its SHA-256 goes
  * with every request as X-FH2MP-GameDb, so the server can refuse a game that runs with another database (a car pack the others do not
@@ -6448,6 +6462,9 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
         }
         if (GetEnvironmentVariableW(L"FH2MP_NO_RACETOAST", tmp, 8) == 0) {
             ui_race_toast_layout();    /* now: the game reads its UI files when the first screen loads */
+        }
+        if (GetEnvironmentVariableW(L"FH2MP_NO_DEVBADGE", tmp, 8) == 0) {
+            ui_dev_badge();
         }
     }
     {
