@@ -1670,6 +1670,11 @@ func (o *Ops) runGhost(id int64) pyjson.Obj {
 	for _, k := range []string{"t", "x", "z", "speed", "accel", "power", "climb", "gear", "rpm", "steer", "jump"} {
 		samples = append(samples, pyjson.Pair{K: k, V: cols[k]})
 	}
+	dist := []any{}
+	for _, d := range distances(series) {
+		dist = append(dist, math.Round(d*10)/10)
+	}
+	samples = append(samples, pyjson.Pair{K: "d", V: dist})
 	reasons := any([]any{})
 	if rs := row.Str("reasons"); rs != "" {
 		reasons = must(pyjson.Parse(rs))
@@ -1714,7 +1719,7 @@ func (o *Ops) runGhost(id int64) pyjson.Obj {
 		{K: "clean", V: row.Int("clean") != 0}, {K: "hiddenBy", V: hiddenBy}, {K: "hiddenKind", V: hiddenKind}, {K: "verdict", V: row.Any("verdict")}, {K: "reasons", V: reasons},
 		{K: "source", V: source}, {K: "why", V: why}, {K: "checker", V: plainReasons(reasons)},
 		{K: "measures", V: measures}, {K: "lastT", V: round3(g.LastT)}, {K: "collisions", V: hits},
-		{K: "limits", V: checkerLimits()}, {K: "samples", V: samples}, {K: "others", V: others}}
+		{K: "limits", V: checkerLimits()}, {K: "samples", V: samples}, {K: "others", V: others}, {K: "field", V: o.field(row, names)}}
 }
 
 func (o *Ops) moderate(submissionID int64, action string) pyjson.Obj {

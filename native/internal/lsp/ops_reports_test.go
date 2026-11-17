@@ -258,6 +258,37 @@ func TestReplayAndRivalsReviewRoutes(t *testing.T) {
 		field(limits, "speedHard") != 127.4 || field(limits, "speedFlag") != 120.0 {
 		t.Fatalf("replay: %d, board %v, source %v, %d samples, limits %s", st, field(out, "board"), field(out, "source"), len(samples.([]any)), dump(limits))
 	}
+	// The comparison: other drivers' best visible runs on the same board in the same class, as traces along the distance driven.
+	run := must(f.o.C.DB.One("SELECT * FROM score_submissions WHERE id = ?", id))
+	for i, x := range []int64{0x7001, 0x7002, 0x7002, 0x7003} {
+		cls := run.Int("cls")
+		if i == 3 {
+			cls++ // another class: not compared
+		}
+		r := must(f.o.C.DB.One("INSERT INTO score_submissions (xuid, sb, st, gsid, track, car, cls, cpi, score, clean, stm, tcs, abs, submitted) "+
+			"VALUES (?, ?, ?, ?, ?, 0, ?, 600, ?, 1, 0, 0, 0, 1.7e9) RETURNING id", x, run.Int("sb"), run.Int("st"), run.Int("gsid"), run.Int("track"), cls, 90.0+float64(i)))
+		if _, err := f.o.C.DB.Exec("INSERT INTO score_ghosts (submission_id, data, uploaded) VALUES (?, ?, 1.7e9)", r.Int("id"), blob); err != nil {
+			t.Fatal(err)
+		}
+		if i == 1 { // the same driver's better run is hidden: the comparison takes their best run on the boards
+			if _, err := f.o.C.DB.Exec("INSERT INTO hidden_scores (submission_id, hidden_at, source) VALUES (?, 1, 'operator')", r.Int("id")); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	_, obj, _ = f.o.route(nil, "GET", fmt.Sprintf("/ops/v1/runs/%d/ghost", id), nil)
+	fld := field(obj.(pyjson.Obj), "field").(pyjson.Obj)
+	runs := field(fld, "runs").([]any)
+	if len(runs) != 2 || field(fld, "step") != 20.0 || field(runs[0].(pyjson.Obj), "score") != 90.0 || field(runs[1].(pyjson.Obj), "score") != 92.0 {
+		t.Fatalf("comparison: %s", dump(pyjson.Obj{{K: "class", V: field(fld, "class")}, {K: "n", V: len(runs)}}))
+	}
+	speeds := field(runs[0].(pyjson.Obj), "speed").([]any)
+	d, _ := field(obj.(pyjson.Obj), "samples").(pyjson.Obj).Get("d")
+	dist := d.([]any)
+	if want := int(dist[len(dist)-1].(float64)/20) + 1; len(speeds) != want {
+		t.Fatalf("a comparison trace has %d points, want one every 20 m of the %v m driven (%d)", len(speeds), dist[len(dist)-1], want)
+	}
+
 	if st, code := opsCall(t, f.o, "GET", fmt.Sprintf("/ops/v1/runs/%d/ghost", f.ids["reported3"]), ""); st != 404 || code != "no_ghost" {
 		t.Fatalf("a run without a ghost answered %d %s", st, code)
 	}

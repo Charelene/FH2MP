@@ -309,6 +309,81 @@ func plainReasons(reasons any) []any {
 	return out
 }
 
+// distances is how far along the line driven each sample of a ghost is, in metres; a step that jumps across the map adds nothing.
+func distances(series []ghost.Sample) []float64 {
+	out := make([]float64, len(series))
+	for i := 1; i < len(series); i++ {
+		d := 0.0
+		if !series[i].Jump && !series[i-1].Jump {
+			d = math.Hypot(series[i].X-series[i-1].X, series[i].Z-series[i-1].Z)
+		}
+		out[i] = out[i-1] + d
+	}
+	return out
+}
+
+const (
+	fieldStep = 20.0 // metres between the points of a comparison trace
+	fieldMax  = 30   // other drivers in the comparison
+)
+
+func round2(v float64) float64 { return math.Round(v*100) / 100 }
+
+// fieldTrace resamples a ghost every fieldStep metres along the line driven: speed, acceleration, power (above the checker's high-speed floor
+// only) and climb, nil where the checker does not read the sample. Point k is k*fieldStep metres from the start.
+func fieldTrace(series []ghost.Sample) (speed, accel, power, climb []any) {
+	dist := distances(series)
+	j := 0
+	for k := 0; len(series) > 0 && float64(k)*fieldStep <= dist[len(dist)-1]; k++ {
+		for j < len(series)-1 && dist[j] < float64(k)*fieldStep {
+			j++
+		}
+		s := &series[j]
+		speed = append(speed, round2(s.Speed))
+		if s.Counted && !s.Jump {
+			accel = append(accel, round2(s.Accel))
+		} else {
+			accel = append(accel, nil)
+		}
+		if s.Counted && !s.Jump && s.Speed > ghost.HighSpeed {
+			power = append(power, round2(s.Power))
+		} else {
+			power = append(power, nil)
+		}
+		climb = append(climb, round2(s.Climb))
+	}
+	return
+}
+
+// field is the comparison for a run's replay: the best run of every other driver on the same board in the same class that is on the boards
+// and has a ghost, fastest first, each as a trace along the distance driven.
+func (o *Ops) field(row *db.Row, names *rivals.Names) pyjson.Obj {
+	c := o.C
+	ids := must(c.DB.Query(`SELECT id FROM (SELECT DISTINCT ON (s.xuid) s.id, s.score FROM score_submissions s
+        WHERE s.sb = ? AND s.st = ? AND s.gsid = ? AND s.track = ? AND s.cls = ? AND s.xuid <> ?
+        AND EXISTS (SELECT 1 FROM score_ghosts g WHERE g.submission_id = s.id) AND `+scorereports.Visible+`
+        ORDER BY s.xuid, s.score, s.id) best ORDER BY score, id LIMIT ?`,
+		row.Int("sb"), row.Int("st"), row.Int("gsid"), row.Int("track"), row.Int("cls"), row.Int("xuid"), fieldMax))
+	runs := []any{}
+	for _, r := range ids {
+		f := must(c.DB.One(`SELECT s.id, s.xuid, s.score, s.car, COALESCE(p.gamertag, '') AS tag, v.verdict, g.data AS blob FROM score_submissions s
+            JOIN score_ghosts g ON g.submission_id = s.id LEFT JOIN players p ON p.xuid = s.xuid LEFT JOIN score_verdicts v ON v.submission_id = s.id
+            WHERE s.id = ?`, r.Int("id")))
+		if f == nil {
+			continue
+		}
+		g, err := ghost.Parse(f.Bytes("blob"))
+		if err != nil {
+			continue
+		}
+		speed, accel, power, climb := fieldTrace(ghost.Series(g))
+		runs = append(runs, pyjson.Obj{{K: "submissionId", V: f.Int("id")}, {K: "gamertag", V: o.gamertag(f.Str("tag"), f.Int("xuid"))},
+			{K: "score", V: f.Float("score")}, {K: "car", V: names.Car[f.Int("car")]}, {K: "verdict", V: f.Any("verdict")},
+			{K: "speed", V: speed}, {K: "accel", V: accel}, {K: "power", V: power}, {K: "climb", V: climb}})
+	}
+	return pyjson.Obj{{K: "class", V: classText(row.Int("cls"))}, {K: "step", V: fieldStep}, {K: "runs", V: runs}}
+}
+
 // lapClock is m:ss.ss.
 func lapClock(t float64) string {
 	m := math.Floor(t / 60)
