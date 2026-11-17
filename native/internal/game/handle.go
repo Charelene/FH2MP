@@ -212,6 +212,7 @@ loop:
 				if whole {
 					w.TrackSpin(peer, rest)
 					w.TrackPush(peer, rest, *pos, *stamp, *scene)
+					w.TrackTelem(peer, rest, *pos, *stamp)
 				}
 			}
 			if peer.CarsRelayed%20 == 1 && pos != nil {
