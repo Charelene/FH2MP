@@ -207,11 +207,10 @@ static int patch_nos_flames(unsigned char *img)
     static const unsigned char frame[8] = {0x40, 0x56, 0x57, 0x41, 0x54, 0x41, 0x56, 0x41};
     static const unsigned char backfire[8] = {0x48, 0x8b, 0xc4, 0x48, 0x89, 0x50, 0x10, 0x55};
     static const unsigned char update[8] = {0x48, 0x8b, 0xc4, 0x48, 0x89, 0x58, 0x18, 0x57};
-    wchar_t env[8];
     g_nf_img = img;
     if (!mods_entry_ok(img, NF_FRAME_RVA, frame, 8, "the logic thread's frame step") ||
         !plat_hook("mods: logic frame step", img + NF_FRAME_RVA, (void *)nf_frame, (void **)&g_nf_frame_orig)) return 0;
-    if (GetEnvironmentVariableW(L"FH2MP_NO_MODSYNC", env, 8) != 0) return 1;
+    if (!g_mods_share) return 1;   /* FH2MP_NO_MODSYNC, or no lighting hooks: the rule only */
     if (!mods_entry_ok(img, NF_BACKFIRE_RVA, backfire, 8, "the backfire routine") ||
         !mods_entry_ok(img, NF_CAR_UPDATE_RVA, update, 8, "ForzaCar::Update") ||
         !plat_hook("mods: backfire routine", img + NF_BACKFIRE_RVA, (void *)nf_backfire, (void **)&g_nf_backfire_orig) ||

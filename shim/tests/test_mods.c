@@ -18,8 +18,20 @@ static unsigned long long g_xuid;
 static int (WINAPI *g_r_wsasendto)(UINT_PTR, void *, DWORD, DWORD *, DWORD, const void *, int, void *, void *);
 static int read_game_memory(const void *p, void *out, SIZE_T n) { if (!p) return 0; memcpy(out, p, n); return 1; }
 static void mem_copy(void *to, const void *from, SIZE_T n) { memcpy(to, from, n); }
-static unsigned char *find_fh2_image(void) { return NULL; }
-static int plat_hook(const char *name, void *target, void *detour, void **original) { (void)name; (void)target; (void)detour; (void)original; return 0; }
+/* NULL and refused unless a case sets them (patch_mods without the lighting hooks) */
+static unsigned char *g_fake_img;
+static int g_hook_ok;
+static char g_hooked[512];
+static unsigned long long fake_frame_step(void *self, void *flag) { (void)self; (void)flag; return 0; }
+static unsigned char *find_fh2_image(void) { return g_fake_img; }
+static int plat_hook(const char *name, void *target, void *detour, void **original)
+{
+    (void)target; (void)detour;
+    if (!g_hook_ok) return 0;
+    strcat(g_hooked, name); strcat(g_hooked, "|");
+    if (original) *original = (void *)fake_frame_step;
+    return 1;
+}
 static char g_log[1 << 16];
 static void log_begin(void) {}
 /* the newest lines stay: a full log drops its older half (Wine writes more than a native run) */
@@ -281,6 +293,31 @@ int main(int argc, char **argv)
     assert(g_blocked == 1);                                                         /* the server says event / Road Trip */
     InterlockedExchange(&g_nos_server_ok, 1); InterlockedExchange64(&g_nos_server_at, (LONG64)GetTickCount64() - NOS_SERVER_FRESH_MS - 10); tick_later();
     assert(g_blocked == 1);                                                         /* an old reply says nothing */
+    /* No session ticket (a game started from Azimuth itself): the lighting hooks are off. The rule still runs on the frame step, without the
+     * server and without sharing: NOS burns in solo Free Roam, not in events or network sessions (it stayed off for the whole game before). */
+    {
+        static const unsigned char frame[8] = {0x40, 0x56, 0x57, 0x41, 0x54, 0x41, 0x56, 0x41};
+        g_fake_img = VirtualAlloc(NULL, NF_FRAME_RVA + 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        assert(g_fake_img);
+        memcpy(g_fake_img + NF_FRAME_RVA, frame, sizeof frame);
+        g_hook_ok = 1; g_hooked[0] = 0; g_log[0] = 0;
+        g_nos_kind = NOS_UNKNOWN; g_nos_set = NULL; g_nos_active = NULL; g_blocked = -1;
+        InterlockedExchange(&g_nos_allowed, 0); InterlockedExchange(&g_nos_server_ok, 0); InterlockedExchange64(&g_nos_server_at, 0);
+        g_light_enabled = 0; g_ticket_ready = 0;
+        patch_mods(NULL);
+        assert(strstr(g_log, "no session ticket") && strstr(g_hooked, "mods: logic frame step|") && !strstr(g_hooked, "backfire") && !g_mods_share);
+        for (n = 0; n < 200 && g_nos_kind != NOS_SWITCH; n++) Sleep(10);   /* the worker finds the switch once the mods have started */
+        assert(g_nos_kind == NOS_SWITCH && g_blocked == 1);
+        InterlockedExchange(&g_mods_enabled, 0);
+        g_sess = 0; g_ctx = AD_FREE_ROAM; g_rt = 0;
+        Sleep(NOS_RULE_MS + 10); nf_frame(NULL, NULL);
+        assert(g_blocked == 0 && g_nos_allowed);                                    /* solo Free Roam */
+        g_ctx = 5; Sleep(NOS_RULE_MS + 10); nf_frame(NULL, NULL); assert(g_blocked == 1);   /* an event */
+        g_ctx = AD_FREE_ROAM; g_sess = 1; Sleep(NOS_RULE_MS + 10); nf_frame(NULL, NULL); assert(g_blocked == 1);   /* a session: no server */
+        g_sess = 0; Sleep(NOS_RULE_MS + 10); nf_frame(NULL, NULL); assert(g_blocked == 0);
+        g_hook_ok = 0; g_fake_img = NULL; g_mods_img = NULL;
+        Sleep(250);   /* the worker sees g_mods_enabled 0 within one 100 ms wait */
+    }
     /* no NitroSystem: nothing to switch, no flags */
     g_have_nos = 0; g_nos_set = NULL; g_nos_active = NULL; g_log[0] = 0;
     nos_find(); assert(g_nos_kind == NOS_ABSENT && nos_flags() == 0 && strstr(g_log, "not loaded"));

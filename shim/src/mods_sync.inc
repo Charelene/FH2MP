@@ -16,7 +16,8 @@
  * Visible to others: a worker thread polls the game server's mod state channel (its own magic FH2MPMD1, native/internal/game/modsync.go) with this
  * player's NOS (burning or not) and underglow (what Underglow's own `status` command says, read through the platform's command pipe once a second,
  * ug_status.h), and keeps the other players' states for nos_flames.inc (their exhaust flames) and ug_remote.inc (their neon). The network thread
- * never touches a car. Needs the lighting hooks (server address, ticket epoch, the car id and the remote car table are theirs).
+ * never touches a car. Needs the lighting hooks (server address, ticket epoch, the car id and the remote car table are theirs); without them
+ * (no session ticket) nothing is shared and the NOS rule runs on without the server.
  * FH2MP_NO_MODSYNC=1 turns the sharing off (the NOS rule stays). */
 #include "mods_wire.h"
 #include "ug_status.h"
@@ -458,14 +459,23 @@ static void patch_mods(const wchar_t *azimuth_dir)
         lstrcpyW(g_ug_ini, azimuth_dir); lstrcatW(g_ug_ini, L"\\fh2-mods\\Underglow.ini");
         lstrcpyW(g_ug_garage, azimuth_dir); lstrcatW(g_ug_garage, L"\\data\\titles\\1A96545B\\Underglow");
     }
-    if (!img || !g_light_enabled) {
+    if (!img) {
         log_begin();
-        log_raw(!img ? "mods: the game is not FH2 1.0.0.64" : "mods: the lighting hooks are off");
-        log_raw(": NitroSystem's NOS stays off online, other players' NOS and underglow are not shown\n");
+        log_raw("mods: the game is not FH2 1.0.0.64: NitroSystem's NOS stays off online, other players' NOS and underglow are not shown\n");
         /* the switch is still pulled: a NOS that nothing can turn on again is better than one that burns in events */
         thread = CreateThread(NULL, 0, nos_find_only, NULL, 0, NULL);
         if (thread) CloseHandle(thread);
         return;
+    }
+    if (!g_light_enabled) {
+        /* No ticket (a game started from Azimuth itself, or not signed in through the launcher) leaves the lighting hooks off. The rule needs
+         * only the frame step: solo Free Roam lets NOS burn, events and network sessions keep it off (no server reply without the lighting
+         * hooks' server address). Before, this case kept NOS off for the whole game, solo Free Roam included. */
+        share = 0;
+        log_begin();
+        log_raw(g_ticket_ready ? "mods: the lighting hooks are off" : "mods: no session ticket (the game was not started signed in through the launcher)");
+        log_raw(": other players' NOS and underglow are not shown; NitroSystem's NOS follows the rule without the server (on in solo Free Roam, "
+                "off in events, Rivals, Road Trip and network sessions)\n");
     }
     g_mods_img = img;
     InterlockedExchange(&g_mods_share, share);
