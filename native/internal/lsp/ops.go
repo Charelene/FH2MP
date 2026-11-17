@@ -441,7 +441,7 @@ func (o *Ops) route(r *Req, method, path string, body []byte) (int, any, *Downlo
 	}
 	if what == "reports" {
 		if len(rest) == 0 && method == "GET" {
-			return 200, o.reportsQueue(int(qInt(q, "limit", 50, 1, 100)), qInt(q, "offset", 0, 0, 1e9)), nil
+			return 200, o.reportsQueue(q.Get("view"), q.Get("by"), int(qInt(q, "limit", 50, 1, 100)), qInt(q, "offset", 0, 0, 1e9)), nil
 		}
 		if len(rest) > 0 && isDigits(rest[0]) {
 			sid, _ := strconv.ParseInt(rest[0], 10, 64)
@@ -1620,51 +1620,6 @@ func (*reportDup) Error() string { return "duplicate report" }
 
 var reportsLog = diag.Get("reports")
 
-// reportsQueue lists reported runs, runs hidden by a person or a verdict, and runs a verdict flagged. A run still waiting for its ghost is not a decision.
-func (o *Ops) reportsQueue(limit int, offset int64) pyjson.Obj {
-	c := o.C
-	rows := must(c.DB.Query(fmt.Sprintf(`SELECT s.*, COALESCE(p.gamertag, '') AS tag, %s AS report_count,
-        (SELECT hidden_at FROM hidden_scores hs WHERE hs.submission_id = s.id AND hs.source <> 'pending') AS hidden_at,
-        (SELECT hs.source FROM hidden_scores hs WHERE hs.submission_id = s.id) AS hidden_by,
-        v.verdict, v.reasons
-        FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid LEFT JOIN score_verdicts v ON v.submission_id = s.id
-        WHERE EXISTS (SELECT 1 FROM score_reports sr WHERE sr.submission_id = s.id AND sr.dismissed = 0)
-        OR EXISTS (SELECT 1 FROM hidden_scores hs WHERE hs.submission_id = s.id AND hs.source <> 'pending')
-        OR (v.verdict = 'flag' AND v.reviewed = 0)
-        ORDER BY report_count DESC, s.id DESC LIMIT ? OFFSET ?`, scorereports.Counts), limit+1, offset))
-	names := must(c.Riv.Names()).Car
-	out := []any{}
-	for i := range rows {
-		if i >= limit {
-			break
-		}
-		r := &rows[i]
-		unit := "m/s"
-		if r.Int("st") == 1 {
-			unit = "s"
-		}
-		cls := r.Int("cls")
-		clsText := strconv.FormatInt(cls, 10)
-		if cls >= 0 && int(cls) < len(rivals.ClassLetters) {
-			clsText = rivals.ClassLetters[cls]
-		}
-		hidden := r.Any("hidden_at") != nil
-		var hiddenBy any
-		if hidden {
-			hiddenBy = r.Any("hidden_by")
-		}
-		reasons := any([]any{})
-		if rs := r.Str("reasons"); rs != "" {
-			reasons = must(pyjson.Parse(rs))
-		}
-		out = append(out, pyjson.Obj{{K: "submissionId", V: r.Int("id")}, {K: "gamertag", V: o.gamertag(r.Str("tag"), r.Int("xuid"))}, {K: "xuid", V: r.Int("xuid")},
-			{K: "score", V: r.Float("score")}, {K: "unit", V: unit}, {K: "car", V: names[r.Int("car")]}, {K: "class", V: clsText}, {K: "boardType", V: r.Int("sb")},
-			{K: "track", V: r.Int("track")}, {K: "event", V: r.Int("gsid")}, {K: "at", V: int64(r.Float("submitted"))}, {K: "reports", V: r.Int("report_count")},
-			{K: "hidden", V: hidden}, {K: "hiddenBy", V: hiddenBy}, {K: "verdict", V: r.Any("verdict")}, {K: "reasons", V: reasons}})
-	}
-	return pyjson.Obj{{K: "entries", V: out}, {K: "hasNext", V: len(rows) > limit}}
-}
-
 func round3(v float64) float64 { return math.Round(v*1000) / 1000 }
 
 // runGhost decodes a run's stored ghost second by second for the admin panel's replay page (read only, any run that has a ghost, hidden or not).
@@ -1727,26 +1682,39 @@ func (o *Ops) runGhost(id int64) pyjson.Obj {
 	for i, t := range g.Collision {
 		hits[i] = round3(t)
 	}
+	names := must(c.Riv.Names())
 	others := []any{}
-	for _, r := range must(c.DB.Query(`SELECT s.id, s.score, s.car, s.submitted, v.verdict FROM score_submissions s
-        JOIN score_ghosts g ON g.submission_id = s.id LEFT JOIN score_verdicts v ON v.submission_id = s.id
-        WHERE s.xuid = ? AND s.sb = ? AND s.st = ? AND s.id <> ? ORDER BY s.submitted DESC LIMIT 40`, row.Int("xuid"), row.Int("sb"), row.Int("st"), id)) {
-		others = append(others, pyjson.Obj{{K: "submissionId", V: r.Int("id")}, {K: "score", V: r.Float("score")}, {K: "car", V: r.Int("car")},
-			{K: "at", V: int64(r.Float("submitted"))}, {K: "verdict", V: r.Any("verdict")}})
+	for _, r := range must(c.DB.Query(`SELECT s.id, s.score, s.car, s.submitted, v.verdict,
+        CASE WHEN EXISTS (SELECT 1 FROM hidden_scores hs WHERE hs.submission_id = s.id AND hs.source <> 'pending') THEN 1 ELSE 0 END AS hidden
+        FROM score_submissions s JOIN score_ghosts g ON g.submission_id = s.id LEFT JOIN score_verdicts v ON v.submission_id = s.id
+        WHERE s.xuid = ? AND s.sb = ? AND s.st = ? AND s.gsid = ? AND s.track = ? AND s.id <> ? ORDER BY s.submitted DESC LIMIT 40`,
+		row.Int("xuid"), row.Int("sb"), row.Int("st"), row.Int("gsid"), row.Int("track"), id)) {
+		others = append(others, pyjson.Obj{{K: "submissionId", V: r.Int("id")}, {K: "score", V: r.Float("score")}, {K: "car", V: names.Car[r.Int("car")]},
+			{K: "at", V: int64(r.Float("submitted"))}, {K: "verdict", V: r.Any("verdict")}, {K: "hidden", V: r.Int("hidden") != 0}})
 	}
 	var hiddenBy any
 	if hb := row.Str("hidden_by"); hb != "" {
 		hiddenBy = hb
 	}
-	names := must(c.Riv.Names()).Car
+	// the review's own words for the run: its board by name, why it is in the queue, the checker's reasons in plain units
+	board := boardLabel(row.Int("sb"), row.Int("st"), row.Int("track"), row.Int("gsid"), "", names)
+	source, why, hiddenKind := any(""), any([]any{}), any(nil)
+	if rr := o.reviewOne(id); rr != nil {
+		rv := o.reviewRow(rr, names)
+		b, _ := rv.Get("board")
+		board, _ = b.(string)
+		source, _ = rv.Get("source")
+		why, _ = rv.Get("why")
+		hiddenKind, _ = rv.Get("hiddenKind")
+	}
 	return pyjson.Obj{{K: "submissionId", V: id}, {K: "gamertag", V: o.gamertag(row.Str("tag"), row.Int("xuid"))}, {K: "xuid", V: row.Int("xuid")},
 		{K: "score", V: row.Float("score")}, {K: "boardType", V: row.Int("sb")}, {K: "scoreType", V: row.Int("st")}, {K: "track", V: row.Int("track")},
-		{K: "event", V: row.Int("gsid")}, {K: "carId", V: row.Int("car")}, {K: "car", V: names[row.Int("car")]}, {K: "at", V: int64(row.Float("submitted"))},
-		{K: "clean", V: row.Int("clean") != 0}, {K: "hiddenBy", V: hiddenBy}, {K: "verdict", V: row.Any("verdict")}, {K: "reasons", V: reasons},
+		{K: "event", V: row.Int("gsid")}, {K: "board", V: board}, {K: "carId", V: row.Int("car")}, {K: "car", V: names.Car[row.Int("car")]},
+		{K: "class", V: classText(row.Int("cls"))}, {K: "at", V: int64(row.Float("submitted"))},
+		{K: "clean", V: row.Int("clean") != 0}, {K: "hiddenBy", V: hiddenBy}, {K: "hiddenKind", V: hiddenKind}, {K: "verdict", V: row.Any("verdict")}, {K: "reasons", V: reasons},
+		{K: "source", V: source}, {K: "why", V: why}, {K: "checker", V: plainReasons(reasons)},
 		{K: "measures", V: measures}, {K: "lastT", V: round3(g.LastT)}, {K: "collisions", V: hits},
-		{K: "limits", V: pyjson.Obj{{K: "speedFlag", V: 120.0}, {K: "speedHard", V: ghost.MaxSpeed}, {K: "accelFlag", V: 20.0}, {K: "accelHard", V: 30.0},
-			{K: "powerFlag", V: 700.0}, {K: "powerHard", V: 1000.0}, {K: "highSpeed", V: ghost.HighSpeed}}},
-		{K: "samples", V: samples}, {K: "others", V: others}}
+		{K: "limits", V: checkerLimits()}, {K: "samples", V: samples}, {K: "others", V: others}}
 }
 
 func (o *Ops) moderate(submissionID int64, action string) pyjson.Obj {

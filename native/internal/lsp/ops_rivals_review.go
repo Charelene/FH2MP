@@ -74,7 +74,7 @@ func (o *Ops) rivalsRuns(eventID int64) pyjson.Obj {
 		}
 		run := pyjson.Obj{{K: "submissionId", V: r.Int("id")}, {K: "xuid", V: x}, {K: "gamertag", V: o.gamertag(r.Str("tag"), x)}, {K: "carId", V: r.Int("car")},
 			{K: "car", V: names[r.Int("car")]}, {K: "score", V: r.Float("score")}, {K: "at", V: int64(r.Float("submitted"))}, {K: "tries", V: r.Int("tries")},
-			{K: "clean", V: r.Int("clean") != 0}, {K: "verdict", V: r.Any("verdict")}, {K: "reasons", V: reasons}, {K: "hiddenBy", V: hiddenBy}}
+			{K: "clean", V: r.Int("clean") != 0}, {K: "verdict", V: r.Any("verdict")}, {K: "reasons", V: reasons}, {K: "why", V: plainReasons(reasons)}, {K: "hiddenBy", V: hiddenBy}}
 		blob := r.Bytes("blob")
 		var g *ghost.Ghost
 		if len(blob) > 0 {
@@ -100,9 +100,7 @@ func (o *Ops) rivalsRuns(eventID int64) pyjson.Obj {
 	}
 	return pyjson.Obj{{K: "event", V: pyjson.Obj{{K: "id", V: eventID}, {K: "name", V: ev.Str("name")}, {K: "track", V: ev.Str("trackname")}, {K: "laps", V: ev.Int("laps")},
 		{K: "class", V: cls}, {K: "month", V: monthLabel(ev.Int("month"))}}},
-		{K: "limits", V: pyjson.Obj{{K: "speedFlag", V: 120.0}, {K: "speedHard", V: ghost.MaxSpeed}, {K: "accelFlag", V: 20.0}, {K: "accelHard", V: 30.0},
-			{K: "powerFlag", V: 700.0}, {K: "powerHard", V: 1000.0}}},
-		{K: "runs", V: runs}}
+		{K: "limits", V: checkerLimits()}, {K: "runs", V: runs}}
 }
 
 // traceOf resamples a ghost's series every traceStep seconds: time, speed, acceleration, power and the line driven.

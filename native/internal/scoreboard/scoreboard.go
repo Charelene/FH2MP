@@ -220,8 +220,8 @@ func (s *Store) HideUnknownCars() (int, error) {
 	now := Now()
 	err = s.DB.Do(func(t *db.Tx) error {
 		for _, id := range bad {
-			if _, err := t.Exec("INSERT INTO hidden_scores (submission_id, hidden_at, source, reason) VALUES (?,?,'auto','car not in the game catalog') "+
-				"ON CONFLICT (submission_id) DO NOTHING", id, now); err != nil {
+			if _, err := t.Exec("INSERT INTO hidden_scores (submission_id, hidden_at, source, reason) VALUES (?,?,'auto',?) "+
+				"ON CONFLICT (submission_id) DO NOTHING", id, now, scorereports.CarOutsideCatalog); err != nil {
 				return err
 			}
 		}
