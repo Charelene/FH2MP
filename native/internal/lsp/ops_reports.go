@@ -170,9 +170,10 @@ func optInt(r *db.Row, name string) any {
 	return int64(r.Float(name))
 }
 
+// classText is the class letter of a run, X and R included (the classes above S2 a maxed-out car reports).
 func classText(cls int64) string {
-	if l := classLetter(cls); l != "" {
-		return l
+	if cls >= 0 && int(cls) < len(allClasses) {
+		return allClasses[cls]
 	}
 	return strconv.FormatInt(cls, 10)
 }
