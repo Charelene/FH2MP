@@ -15,7 +15,7 @@ what the next steps are, with exact anchors.
 | Vendored platform HUD/pad headers | `third_party/fh2-mod-platform/fh2mod_hud.h`, `fh2mod_pad.h` | copied from platform 2.9.0 |
 | Camera-anim game sites (verified bytes) | `fh2-mod-platform/include/fh2game.h` | a local, uncommitted edit in a platform clone; nothing in FH2MP uses it yet (FH2MP vendors `fh2mod.h` only) |
 | Server scaffold: state machine + `FH2MPEL1` handler | `native/internal/game/eliminator.go` | done (drop placement, shrink, challenge bookkeeping, finish condition, a player who leaves is forgotten) |
-| Server wiring: `World.El`, route cache, `Hub` and worker dispatch, tick, `LobbyTypeEliminator` | `native/internal/game/{world,hub,workers,side,tick,consts,peer}.go` | done (minimal) |
+| Server wiring: `World.El` for a Free Roam world named `elim-...`, route cache, `Hub` and worker dispatch, tick | `native/internal/game/{world,hub,workers,side,tick,peer}.go` | done (minimal) |
 
 **Verified.** `go build ./...`, `go vet ./internal/game/` and `go test ./internal/game/` pass,
 `gofmt -l` is clean, the shim builds, and `shim/tests/test_eliminator.sh` passes. The `fh2game.h`
@@ -23,18 +23,20 @@ camera bytes were checked against the real `forza_durango_release_final.exe` (Ti
 `0x565501ED`, PE32+): RVA `0x1031E40` maps to `.text` and reads exactly the
 `FH2_GAME_CAMERA_ANIM_TRANSFORM_BYTES` pattern. Nothing has run in the game or against a live server.
 
-**How it stays out of everyone else's way.** Only a world of lobby type 4 has an Eliminator, and only
-such a world answers `FH2MPEL1`. No player can reach one yet (step 1 below), so by default the shim's
-HUD and its LB chords never come on: they follow the server's replies.
+**How it stays out of everyone else's way.** A match is a Free Roam world of its own whose name
+starts with `elim-`. Only such a world has an Eliminator, and only such a world answers `FH2MPEL1`.
+The shim's HUD and its LB chords follow the server's replies, so anywhere else they never come on.
+The shim polls every 2 s while nothing answers and 4 times a second while something does.
+`FH2MP_NO_ELIMINATOR=1` switches the shim's side off (UI registration included) and the server's
+handler off.
 
-**Trying it in game: `FH2MP_ELIMINATOR=1` on the server.** A test switch, off by default: Free Roam
-worlds made while it is set host the mode too (the server log says so for each one). Players there
-get the HUD within about 2 s of entering, join with LB + X or the page's row, and with two players
-in the mode goes Waiting, Drop, Active. What it cannot show yet: nobody is ever eliminated, so the
-mode only ends when a player leaves, and it does not start again after Finished until the server
-makes that world anew. The shim polls every 2 s while
-nothing answers and 4 times a second while something does. `FH2MP_NO_ELIMINATOR=1` switches the
-shim's side off (UI registration included) and the server's handler off.
+**Trying it in game.** Send each player to a match's world with the control message
+`assign <xuid> elim-1` (any name that starts with `elim-`), the way a private Free Roam is assigned;
+the server log says "this Free Roam world hosts a match" when the world is made. When the players
+enter Free Roam they get the HUD within about 2 s, join with LB + X or the page's row, and with two
+players in the mode goes Waiting, Drop, Active. What it cannot show yet: nobody is ever eliminated,
+so the mode only ends when a player leaves. A finished match stays finished: the next one is a new
+world under a new name.
 
 ## The two protocols (do not mix them up)
 
@@ -45,22 +47,30 @@ shim's side off (UI registration included) and the server's handler off.
 
 ## Next steps (in dependency order)
 
-### 1. Let players enter an Eliminator world (lobby plumbing)
+### 1. Matchmaking: name a match's world and send its players there
 
-The server now understands lobby type 4: `LobbyTypeEliminator = 4` (`consts.go`), the `WorldFor`
-kind map (`4:"eliminator"`), the `w.Eliminator` flag on the world (which gates `Eliminator.Tick`),
-and the `MsgOpenConnection` parse accepting `a == 4` (`handle.go`). Verified with `go build`/`vet`/`test`.
+There is no lobby type for the mode, and there cannot be one. The lobby type only picks the session
+the game builds (the map and its base rules), and the game registers six, one entity group file each
+(`game+0x80e7d0`): 1 Road Trip, 2 Free Roam, 3 Car Meet on the mainland, and 4 / 5 / 6 the same three
+on Storm Island. The type reaches the game in a 3-bit field (`SHLobbyTypeBits`), and 7 has no group
+file. A mode runs inside a session, as the game's own King and Infection run inside type 2.
 
-What remains for players to actually reach it:
+So a match is a Free Roam world (type 2) of its own, told apart by its name: `Hub.WorldFor` gives a
+Free Roam world whose name starts with `elim-` (`ElimWorldPrefix`) the Eliminator state. Players
+reach it through the existing control message `assign <xuid> <lobby>`, as for a private Free Roam
+and for invites. The game and the shim see an ordinary Free Roam session.
 
-1. **`internal/capacity/capacity.go`** — `ForType(4)` returns the default 12; give Eliminator its own
-   capacity (battle royale wants ~24–72) once the world can host it.
-2. **`internal/netv2`** — a new Eliminator router/var table if the mode needs world objects the game's
-   Free Roam router doesn't already carry (CarMeet/Weather/RoadTrip each have their own; copy one).
-3. **Shim lobby redirect** — the game client must be pointed at an Eliminator lobby. Reuse
-   `fh2mp_mod.c` `redirect_freeroam_group` / `redirect_roadtrip_group`, or add a menu-page "Join" that
-   redirects and the server `openWorldFor` honors. (This is the client-side half; the game itself only
-   knows lobby types 1/2/3, so the shim must rewrite the OpenConnection `a` field.)
+What remains:
+
+1. **Who names the match and assigns the players.** Today the control message is sent by hand. The
+   web services should do it: a queue the shim's Join row (or a launcher button) puts a player in,
+   a new `elim-<id>` name once enough players wait, one `assign` for each of them, then the players'
+   games are sent into Free Roam.
+2. **Capacity.** A match's world has Free Roam's capacity (`internal/capacity`). A battle royale
+   wants more players than that; see what the game's session and the car pool take first.
+3. **The mode's own objects.** If car drops need world objects Free Roam's NetV2 router does not
+   carry, they need their own router/var table entries (CarMeet, Weather and RoadTrip each have
+   theirs to copy from).
 
 ### 2. Car drops (the biggest net-new piece)
 

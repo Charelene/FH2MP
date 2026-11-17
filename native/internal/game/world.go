@@ -270,8 +270,7 @@ type World struct {
 	IsIdle         bool
 	Carmeet        bool
 	Roadtrip       bool
-	Eliminator     bool
-	El             *Eliminator
+	El             *Eliminator // an Eliminator match's state; nil in every other world (Hub.WorldFor)
 
 	VisibilityChecked               float64
 	RtState                         int

@@ -55,6 +55,12 @@ standalone platform mod:
 Server-authoritative; the shim mirrors it. One `Eliminator` instance per world, owned by that world's
 goroutine (the `internal/game` rule: one world = one goroutine).
 
+Each match is a world of its own: a Free Roam world (lobby type 2) whose name starts with `elim-`.
+There is no lobby type for the mode. The type only picks the session the game builds, all six the
+game knows are taken (1-3 on the mainland, 4-6 the same on Storm Island), and a mode runs inside a
+session, as King and Infection do. Players are sent to a match with the control message
+`assign <xuid> elim-...`, the way a private Free Roam is assigned (IMPLEMENTATION.md, step 1).
+
 ```
 ELInitialising
     -> ELWaiting        (lobby fills; "start when N ready")

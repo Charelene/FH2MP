@@ -331,7 +331,7 @@ func (w *World) Tick() {
 	if w.Roadtrip {
 		w.RoadTripTick(now)
 	}
-	if w.Eliminator && w.El != nil {
+	if w.El != nil {
 		w.El.Tick(now)
 	}
 	if w.PendingRace != nil && now >= w.PendingRace.Deadline {

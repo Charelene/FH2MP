@@ -8,12 +8,13 @@ package game
 // other side channels (carsel.go / modsync.go) and of a world mode (roadtrip.go / carmeet.go).
 //
 // Groundwork status: the wire framing, authentication, reply snapshot and the state-machine skeleton
-// are here and compile. Only a world of lobby type 4 has an Eliminator (Hub.WorldFor) and answers
-// the side channel; with the test switch FH2MP_ELIMINATOR=1, Free Roam worlds do too. What is deliberately NOT wired yet (the next steps, all documented in
+// are here and compile. A match is a Free Roam world of its own whose name starts with
+// ElimWorldPrefix: only such a world has an Eliminator (Hub.WorldFor) and answers the side channel.
+// There is no lobby type for the mode: the type only picks the session the game builds, and the six
+// the game knows are taken. What is deliberately NOT wired yet (the next steps, all documented in
 // docs/eliminator/IMPLEMENTATION.md):
-//   - a way for the game client to enter such a world (the hub's DefaultType / lobbyStatus /
-//     followType, capacity.ForType, a NetV2 router and the shim's lobby redirect), so today no
-//     player can reach one;
+//   - matchmaking: something that names a match's world and sends its players there. Today that is
+//     the control message "assign <xuid> elim-...", sent by hand, as for a private Free Roam;
 //   - spawning/collecting car-drop pickups (net-new: the game's entity/object creation path);
 //   - driving the cinematic cameras (net-new; the client anchors the cam-anim transform).
 
@@ -25,6 +26,10 @@ import (
 
 	"fh2mp/internal/diag"
 )
+
+// ElimWorldPrefix starts the name of every Eliminator match's world (a Free Roam world, lobby type 2).
+// Private games' names are UUIDs, so no other lobby's name starts with it.
+const ElimWorldPrefix = "elim-"
 
 // Side-channel constants, kept in lockstep with shim/src/eliminator_wire.h.
 const (

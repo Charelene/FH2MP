@@ -216,7 +216,7 @@ func (h *Hub) WorldFor(lobbyType int, name string) *World {
 	if w, ok := h.Worlds.Get(key); ok {
 		return w
 	}
-	kind := map[int]string{1: "roadtrip", 2: "freeroam", 3: "carmeet", 4: "eliminator"}[lobbyType]
+	kind := map[int]string{1: "roadtrip", 2: "freeroam", 3: "carmeet"}[lobbyType]
 	if kind == "" {
 		kind = fmt.Sprint(lobbyType)
 	}
@@ -235,15 +235,12 @@ func (h *Hub) WorldFor(lobbyType int, name string) *World {
 	k := key
 	w.HubKey = &k
 	w.Hub = h
-	// FH2MP_ELIMINATOR=1 is a test switch, off by default: Free Roam worlds host the mode too, so it can be tried while no player can reach a
-	// world of lobby type 4. Read when the world is made: a world that exists already keeps what it was made with.
-	freeRoamHost := lobbyType == LobbyTypeFreeRoam && envStr("FH2MP_ELIMINATOR", "") == "1"
-	if lobbyType == LobbyTypeEliminator || freeRoamHost {
-		w.Eliminator = true
+	// An Eliminator match is a Free Roam world of its own, told apart by its name: the lobby type only picks the session the game builds (and
+	// all six the game knows are taken: 1-3 on the mainland, 4-6 the same on Storm Island), the mode runs inside it as King and Infection do.
+	// Players are sent there with the control message "assign <xuid> elim-...", like a private Free Roam.
+	if lobbyType == LobbyTypeFreeRoam && strings.HasPrefix(name, ElimWorldPrefix) {
 		w.El = NewEliminator(w.Rng) // only such a world has one, so only it answers the Eliminator side channel
-		if freeRoamHost {
-			w.Logf("eliminator: this Free Roam world hosts the mode (FH2MP_ELIMINATOR=1, a test switch)")
-		}
+		w.Logf("eliminator: this Free Roam world hosts a match (its name starts with %s)", ElimWorldPrefix)
 	}
 	if w.Roadtrip {
 		gamedb := envStr("FH2MP_GAMEDB", "")

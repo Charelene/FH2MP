@@ -60,7 +60,8 @@ func TestEliminatorWireVectors(t *testing.T) {
 	}
 }
 
-// Which worlds host the mode: lobby type 4 always, Free Roam only with the test switch FH2MP_ELIMINATOR=1, a Car Meet never.
+// Which worlds host a match: a Free Roam world whose name starts with elim-, and no other: not another Free Roam world, not a Car Meet or a
+// Road Trip of that name. A player gets there by the control message "assign <xuid> elim-...", like a private Free Roam.
 func TestEliminatorHostWorlds(t *testing.T) {
 	clk := &fakeClock{t: 1000.0}
 	cat, err := catalog.Load()
@@ -72,18 +73,19 @@ func TestEliminatorHostWorlds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hub.WorldFor(LobbyTypeFreeRoam, "off").El != nil {
-		t.Fatal("a Free Roam world hosts the mode without the switch")
+	hub.ControlText("assign 90000abd7df93 elim-1", nil)
+	name := hub.Assign[0x90000abd7df93]
+	if name != "elim-1" || hub.WorldFor(LobbyTypeFreeRoam, name).El == nil {
+		t.Fatalf("the Free Roam world a player is assigned to (%q) hosts no match", name)
 	}
-	if hub.WorldFor(LobbyTypeEliminator, "el").El == nil {
-		t.Fatal("a world of lobby type 4 has no Eliminator")
-	}
-	t.Setenv("FH2MP_ELIMINATOR", "1")
-	if w := hub.WorldFor(LobbyTypeFreeRoam, "on"); w.El == nil || !w.Eliminator {
-		t.Fatal("a Free Roam world does not host the mode with FH2MP_ELIMINATOR=1")
-	}
-	if hub.WorldFor(LobbyTypeCarMeet, "meet").El != nil || hub.WorldFor(LobbyTypeFreeRoam, "off").El != nil {
-		t.Fatal("the switch reached a Car Meet, or a Free Roam world made before it")
+	for _, other := range []struct {
+		lobbyType int
+		name      string
+	}{{LobbyTypeFreeRoam, ""}, {LobbyTypeFreeRoam, "33fe4922-5f61-4353-8106-6fd85869ac14"}, {LobbyTypeFreeRoam, "xelim-1"},
+		{LobbyTypeCarMeet, "elim-1"}, {LobbyTypeRoadTrip, "elim-1"}} {
+		if hub.WorldFor(other.lobbyType, other.name).El != nil {
+			t.Errorf("a world of lobby type %d named %q hosts a match", other.lobbyType, other.name)
+		}
 	}
 }
 

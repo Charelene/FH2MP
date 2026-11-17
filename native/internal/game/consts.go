@@ -101,10 +101,9 @@ const (
 	TagGridAssignDelay = 1.5
 	TagResyncS         = 3.0
 
-	LobbyTypeRoadTrip   = 1
-	LobbyTypeFreeRoam   = 2
-	LobbyTypeCarMeet    = 3
-	LobbyTypeEliminator = 4
+	LobbyTypeRoadTrip = 1
+	LobbyTypeFreeRoam = 2
+	LobbyTypeCarMeet  = 3
 
 	ResultOK, ResultVersionMismatch, ResultGameMismatch, ResultBanned = 0, 1, 2, 3
 	ResponseAck                                                       = 6
