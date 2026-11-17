@@ -544,6 +544,10 @@ func (o *Ops) route(r *Req, method, path string, body []byte) (int, any, *Downlo
 			eid, _ := strconv.ParseInt(rest[1], 10, 64)
 			return 200, o.rivalsRuns(eid), nil
 		}
+		if len(rest) == 3 && rest[0] == "events" && rest[2] == "review" && isDigits(rest[1]) {
+			eid, _ := strconv.ParseInt(rest[1], 10, 64)
+			return 200, o.rivalsReview(eid), nil
+		}
 	}
 	if what == "challenges" && method == "GET" {
 		return 200, o.challenges(int(qInt(q, "top", 3, 0, 25))), nil
