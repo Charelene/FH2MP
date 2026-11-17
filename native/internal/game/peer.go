@@ -151,6 +151,7 @@ type Peer struct {
 	PartLogged              string
 	SpeedRef                *SpeedRef
 	Push                    PushState
+	Telem                   TelemRing // the last TelemWindowS seconds of its car states, for speed trap and zone results (telem.go)
 	InvisibleLogged         bool
 	RepairNotified          map[int64]float64
 	NoticedAt               map[string]float64 // Message Center notices sent to this player by key (NotifyPlayer)
