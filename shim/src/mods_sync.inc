@@ -496,5 +496,7 @@ static void patch_mods(const wchar_t *azimuth_dir)
         return;
     }
     CloseHandle(thread);
-    if (!share) { log_begin(); log_raw("mods: FH2MP_NO_MODSYNC is set: other players' NOS and underglow are not shown (the NOS rule stays)\n"); }
+    if (GetEnvironmentVariableW(L"FH2MP_NO_MODSYNC", env, 8) != 0) {
+        log_begin(); log_raw("mods: FH2MP_NO_MODSYNC is set: other players' NOS and underglow are not shown (the NOS rule stays)\n");
+    }
 }

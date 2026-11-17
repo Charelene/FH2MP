@@ -153,6 +153,14 @@ static void tick_later(void)
     nos_rule_tick();
 }
 
+/* The same wait, then the game's frame step through the hook (nf_frame runs the rule). */
+static void frame_later(void)
+{
+    ULONGLONG t0 = GetTickCount64();
+    do Sleep(20); while (GetTickCount64() - t0 < NOS_RULE_MS + 10);
+    nf_frame(NULL, NULL);
+}
+
 int main(int argc, char **argv)
 {
     unsigned char packet[MODS_LIMIT], epoch[16], ug[MODS_UG], server = 0;
@@ -310,11 +318,12 @@ int main(int argc, char **argv)
         assert(g_nos_kind == NOS_SWITCH && g_blocked == 1);
         InterlockedExchange(&g_mods_enabled, 0);
         g_sess = 0; g_ctx = AD_FREE_ROAM; g_rt = 0;
-        Sleep(NOS_RULE_MS + 10); nf_frame(NULL, NULL);
+        frame_later();
         assert(g_blocked == 0 && g_nos_allowed);                                    /* solo Free Roam */
-        g_ctx = 5; Sleep(NOS_RULE_MS + 10); nf_frame(NULL, NULL); assert(g_blocked == 1);   /* an event */
-        g_ctx = AD_FREE_ROAM; g_sess = 1; Sleep(NOS_RULE_MS + 10); nf_frame(NULL, NULL); assert(g_blocked == 1);   /* a session: no server */
-        g_sess = 0; Sleep(NOS_RULE_MS + 10); nf_frame(NULL, NULL); assert(g_blocked == 0);
+        g_ctx = 5; frame_later(); assert(g_blocked == 1);                          /* an event */
+        g_ctx = AD_FREE_ROAM; g_sess = 1; frame_later(); assert(g_blocked == 1);   /* a session: no server */
+        g_sess = 0; frame_later(); assert(g_blocked == 0);
+        assert(!strstr(g_log, "FH2MP_NO_MODSYNC"));                                 /* not set here */
         g_hook_ok = 0; g_fake_img = NULL; g_mods_img = NULL;
         Sleep(250);   /* the worker sees g_mods_enabled 0 within one 100 ms wait */
     }
