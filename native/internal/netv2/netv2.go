@@ -51,6 +51,7 @@ const (
 	MsgTagCollision            = 36
 	MsgTagBuckets              = 37
 	MsgVoteForTrack            = 47
+	MsgSetGroupSatNav          = 52 // SetGroupSatNavEvent (game+0x18157f0): a SessionHost key and the signed 32-bit road node of the group route, 0 = cleared
 	MsgRTSelectedNextEvent     = 49
 	MsgRTConfigureGameOptions  = 50
 	MsgRTConfiguredGameOptions = 51
@@ -738,6 +739,16 @@ func CarMeetNotifyPending(action uint64) Msg {
 	return func(w *bits.Writer) { w.Bits(MsgCarMeetNotifyPending, 7); w.Bits(action, 2) }
 }
 
+// CarMeetConfigureWager is message 30 ConfigureGameOptionsForWagerRace: no payload (game+0x181fb00). It asks the Showdown starter's game to
+// take the GameOptions and fill them for the race (game+0x7d4790), which it answers with message 31.
+func CarMeetConfigureWager() Msg { return func(w *bits.Writer) { w.Bits(MsgCarMeetConfigureWager, 7) } }
+
+// CarMeetLaunchWagerRace is message 28 LaunchWagerRace: no payload (game+0x181fa40). It sends a Showdown racer's game to the race start
+// (script event NetworkLaunchCarMeetWagerRace, car_meet.xml launch_wager_race).
+func CarMeetLaunchWagerRace() Msg {
+	return func(w *bits.Writer) { w.Bits(MsgCarMeetLaunchWagerRace, 7) }
+}
+
 // CarMeetSessionReady is car_meet_session_ready.
 func CarMeetSessionReady(name, template string) Msg {
 	return func(w *bits.Writer) { w.Bits(MsgCarMeetSessionReady, 7); w.String(name); w.String(template) }
@@ -800,7 +811,7 @@ type UnusedLayout struct{ IDBits, Tail int }
 
 // UnusedMessageLayout is UNUSED_MESSAGE_LAYOUT.
 var UnusedMessageLayout = map[int]UnusedLayout{
-	20: {7, 352}, MsgCarCollision: {CarKeyIDBits, 192}, MsgRepairDamage: {CarKeyIDBits, 0}, 46: {2, 64}, 52: {2, 32},
+	20: {7, 352}, MsgCarCollision: {CarKeyIDBits, 192}, MsgRepairDamage: {CarKeyIDBits, 0}, 46: {2, 64},
 	54: {-1, 384}, 56: {-1, 224}, 58: {-1, 96}, 59: {7, 0}, 60: {-1, 0}, 70: {2, 0},
 }
 

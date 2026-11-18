@@ -540,10 +540,31 @@ func (w *World) Introduce(peer *Peer, point string) {
 	}
 }
 
-// SetSessionHostBool sets a SessionHost bool for every connected Free Roam / Road Trip client.
+// sessionHostGets says whether q gets the SessionHost race vars: in a Free Roam or Road Trip world every connected client but a Car Meet
+// game passing through on an invite; in a Car Meet world the racers of its last Showdown (the meet's other players stay in its menus).
+func (w *World) sessionHostGets(q *Peer) bool {
+	if !q.Connected {
+		return false
+	}
+	if w.Carmeet {
+		_, racer := w.Wager.Racers[q]
+		return racer
+	}
+	return !isCarMeetType(q.LobbyType)
+}
+
+// sessionHostAudience names who sessionHostGets sends to, for the log.
+func (w *World) sessionHostAudience() string {
+	if w.Carmeet {
+		return fmt.Sprintf("the Showdown's %d racer(s)", len(w.Wager.Racers))
+	}
+	return "all"
+}
+
+// SetSessionHostBool sets a SessionHost bool for every client sessionHostGets names.
 func (w *World) SetSessionHostBool(varID, value int, why string) {
 	for _, q := range w.Peers.Values() {
-		if !q.Connected || isCarMeetType(q.LobbyType) {
+		if !w.sessionHostGets(q) {
 			continue
 		}
 		vid, v := varID, value
@@ -553,7 +574,7 @@ func (w *World) SetSessionHostBool(varID, value int, why string) {
 		}))
 		q.HostSeq = (q.HostSeq + 1) % 0xFF
 	}
-	w.Logf("SessionHost var %d = %d sent to all (%s)", varID, value, why)
+	w.Logf("SessionHost var %d = %d sent to %s (%s)", varID, value, w.sessionHostAudience(), why)
 }
 
 // SetRaceClock sets CountdownType + RaceStartTime in one update.
@@ -572,7 +593,7 @@ func (w *World) SetRaceClock(startMs int64, why string) {
 	w.raceProgress.done, w.raceProgress.frac = 0, 0
 	w.SendSessionHostVars([]shVar{{SHCountdownType, SHCountdownTypeBits, uint64(kind)}, {SHRaceStartTime, 32, uint64(startMs) & 0xFFFFFFFF},
 		{SHNumLapsCompleted, 8, 0}, {SHFurthestProgress, 32, 0}})
-	w.Logf("SessionHost CountdownType = %d, RaceStartTime = %d, NumLapsCompleted = 0, FurthestProgress = 0 sent to all (%s)", kind, startMs, why)
+	w.Logf("SessionHost CountdownType = %d, RaceStartTime = %d, NumLapsCompleted = 0, FurthestProgress = 0 sent to %s (%s)", kind, startMs, w.sessionHostAudience(), why)
 }
 
 type shVar struct {
@@ -580,10 +601,12 @@ type shVar struct {
 	Value     uint64
 }
 
-// SendSessionHostVars sends one SessionHost update of (var id, width, value) triples to every connected Free Roam / Road Trip client.
-func (w *World) SendSessionHostVars(values []shVar) {
+// SendSessionHostVars sends one SessionHost update of (var id, width, value) triples to every client sessionHostGets names; returns how many
+// got it.
+func (w *World) SendSessionHostVars(values []shVar) int {
+	sent := 0
 	for _, q := range w.Peers.Values() {
-		if !q.Connected || isCarMeetType(q.LobbyType) {
+		if !w.sessionHostGets(q) {
 			continue
 		}
 		w.Send(q, false, netv2.SessionHostUpdate(uint64(q.HostSeq), func(b *bits.Writer) {
@@ -593,7 +616,9 @@ func (w *World) SendSessionHostVars(values []shVar) {
 			}
 		}))
 		q.HostSeq = (q.HostSeq + 1) % 0xFF
+		sent++
 	}
+	return sent
 }
 
 // NoteProgress handles the MsgInProgressScoreUpdate of a racer.
@@ -719,7 +744,8 @@ func pyBool(b bool) string {
 
 // sessionHostCreateVars is SessionHostSynced as this player's game gets it at the handshake (nil = every default): LobbyType where it is
 // not the default (mainland Free Roam: SyncedEnum<NetworkLobbyType,2,3,0> starts at 2, game+0x180ff70), so every Storm Island type, or the
-// game came in as another type (an accepted invite enters through a Car Meet), PrivacyMode for a private game.
+// game came in as another type (an accepted invite enters through a Car Meet), PrivacyMode for a private game, GroupSatNavNode while a Free
+// Roam group route is set.
 func (w *World) sessionHostCreateVars(peer *Peer) netv2.VarsWriter {
 	lobby := -1
 	switch {
@@ -733,7 +759,11 @@ func (w *World) sessionHostCreateVars(peer *Peer) netv2.VarsWriter {
 		lobby = peer.LobbyType
 	}
 	inviteOnly := w.Private && !w.Roadtrip && !isCarMeetType(peer.LobbyType)
-	if lobby < 0 && !inviteOnly {
+	route := w.GroupSatNav
+	if !w.groupRouteWorld() || !isFreeRoamType(peer.LobbyType) {
+		route = 0
+	}
+	if lobby < 0 && !inviteOnly && route == 0 {
 		return nil
 	}
 	return func(b *bits.Writer) {
@@ -744,6 +774,10 @@ func (w *World) sessionHostCreateVars(peer *Peer) netv2.VarsWriter {
 		if inviteOnly {
 			b.Bits(SHPrivacyMode, netv2.SessionHostVarBits)
 			b.Bits(SHPrivacyInviteOnly, SHPrivacyModeBits)
+		}
+		if route != 0 {
+			b.Bits(SHGroupSatNavNode, netv2.SessionHostVarBits)
+			b.Bits(uint64(uint32(route)), 32)
 		}
 	}
 }

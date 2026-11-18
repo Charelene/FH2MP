@@ -14,6 +14,7 @@ type bitsWriter = bits.Writer
 // Car Meet constants.
 const (
 	CMInviteNone     = 0
+	CMInviteShowdown = 0 // InviteRequest type 0 is "Start Showdown Race" (game+0x7d8ca0); in GameModeInviteType 0 is no invite
 	CMInviteFreeRoam = 1
 	CMInviteRoadTrip = 2
 	CMJoinNone       = 0
@@ -73,16 +74,23 @@ func (w *World) CmInvite(peer *Peer, inviteType int) {
 		w.cmBroadcast(netv2.CarMeetFields{InviteType: i64v(int64(inviteType)), Countdown: i64v(CMJoinWindowMs), ModeEnd: i64v(g.End),
 			Joins: map[int]int{w.cmSlot(peer): CMJoinGamemode}}, nil)
 		w.Logf("CarMeet: game-mode invite type %d started by owner %d, join window %d ms", inviteType, peer.Owner, CMJoinWindowMs)
+	} else if inviteType == CMInviteShowdown {
+		w.ShowdownInvite(peer)
 	} else {
-		w.Logf("%d CarMeet showdown (wager race) invite: not served yet", peer.Addr.Port)
+		w.Logf("%d CarMeet invite type %d from owner %d ignored: the game knows Showdown 0, Free Roam 1 and Road Trip 2", peer.Addr.Port, inviteType, peer.Owner)
 	}
 }
 
+// cmJoins are the meet's join types by slot: the Showdown's members 1, the Free Roam / Road Trip invite's 2 (a player in both shows as in the
+// Showdown), everybody else 0.
 func (w *World) cmJoins() map[int]int {
 	out := map[int]int{}
+	wager := w.showdownOpen()
 	for _, q := range w.cmMembers() {
 		v := CMJoinNone
-		if w.Gm.Joined.Has(q) {
+		if wager && w.Wager.Members.Has(q) {
+			v = CMJoinWager
+		} else if w.Gm.Joined.Has(q) {
 			v = CMJoinGamemode
 		}
 		out[w.cmSlot(q)] = v
@@ -93,7 +101,11 @@ func (w *World) cmJoins() map[int]int {
 // CmJoin handles MsgCarMeetJoinOrCancel.
 func (w *World) CmJoin(peer *Peer, join, joinType int) {
 	g := &w.Gm
-	if joinType == CMJoinWager || g.Phase != "joining" {
+	if joinType == CMJoinWager {
+		w.ShowdownJoin(peer, join != 0) // the bit is 1 for Leave, as for the game-mode invite (game+0x7d8b60 / +0x7d8d40)
+		return
+	}
+	if g.Phase != "joining" {
 		return
 	}
 	// The bit means the opposite of its name for the game-mode invite (observed in game 2026-10-17).
@@ -115,8 +127,9 @@ func (w *World) CmJoin(peer *Peer, join, joinType int) {
 	w.Logf("CarMeet: owner %d %s the game-mode invite (%d joined)", peer.Owner, verb, g.Joined.Len())
 }
 
-// CmTick runs the game-mode invite timers; nowMs is the world's network clock.
+// CmTick runs the Showdown's and the game-mode invite's timers; nowMs is the world's network clock.
 func (w *World) CmTick(nowMs int64) {
+	w.showdownTick(nowMs)
 	g := &w.Gm
 	if g.Phase == "ready" && ((nowMs-g.Reset)&0xFFFFFFFF) < 0x80000000 {
 		g.Phase, g.Type, g.Starter, g.Joined, g.Session = "idle", 0, nil, omap.New[*Peer, int](), nil

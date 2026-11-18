@@ -142,6 +142,9 @@ const (
 	SHRaceStartTime      = 9
 	SHNumLapsCompleted   = 10
 	SHFurthestProgress   = 11
+	// SessionHostSynced.GroupSatNavNode (var 12, SyncedInt<long, full range, 32>, default 0; ctor game+0x180ff70): the road node of the group
+	// route. Every game's SatNavComponent plans the group route to it each frame, 0 clears it (game+0xa52ce0).
+	SHGroupSatNavNode = 12
 
 	PlayerVarTeamID   = 90
 	PlayerVarIsLeader = 5
