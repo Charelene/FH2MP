@@ -61,13 +61,15 @@ AZIMUTH_ARCHIVE = {"name": "azimuth-windows-1.0.4.zip", "url": MIRROR_BASE + "az
 _EO_WC_LANGS = ('BR', 'CHT', 'CZ', 'DE', 'EN', 'ES', 'FR', 'GB', 'HU', 'IT', 'JP', 'KO', 'MX', 'NL', 'PL', 'RU')    # Weather Control's page languages
 UPSTREAM = {
     # 2.9.0 (API 10, 2026-11-14): FH2Platform.Online's going_online, which the shim asks before it goes online (shim/src/online_gate.inc).
+    # 2.9.1 (API 11, 2026-11-18): page texts, the HUD canvas, driving-view pad layers, choice rows up to 100; nothing FH2MP uses yet, and no new
+    # game hook (the source diff v2.9.0...v2.9.1 adds no game address).
     # The zip also carries the SDK (include/, tools/, examples/); only the two loader DLLs and the licences are taken.
     "platform": {
-        "name": "FH2 Mod Platform", "author": "Trinculo54", "license": "MIT", "version": "2.9.0",
-        "url": "https://github.com/Trinculo54/fh2-mod-platform/releases/download/v2.9.0/FH2-Mod-Platform-v2.9.0.zip",
-        "mirror": MIRROR_BASE + "FH2-Mod-Platform-v2.9.0.zip",
-        "sha256": "1078c9629bb866af70092c934e6af12df31ca2dd6ecb99953ac6ee9e0bee819e", "size": 4103212,
-        "dll": "d3dcompiler_47.dll", "dllSha256": "fdb970d9f98329526eb7427ded89fb1504615db7cfd30735b833d9fdd1173f35",
+        "name": "FH2 Mod Platform", "author": "Trinculo54", "license": "MIT", "version": "2.9.1",
+        "url": "https://github.com/Trinculo54/fh2-mod-platform/releases/download/v2.9.1/FH2-Mod-Platform-v2.9.1.zip",
+        "mirror": MIRROR_BASE + "FH2-Mod-Platform-v2.9.1.zip",
+        "sha256": "cb939c014145af21e2338451378dbd49a8a46b43aa1abff7a2c2fa4cd8045889", "size": 4172500,
+        "dll": "d3dcompiler_47.dll", "dllSha256": "81eff0ec5219659b16599618002ad3e166d47072d5b59b5fb861dd33e71c9b83",
         "files": {"d3dcompiler_47.dll": "d3dcompiler_47.dll", "DWrite.dll": "DWrite.dll", "LICENSE.txt": "LICENSE-FH2ModPlatform.txt",
                   "LICENSE-MinHook.txt": "LICENSE-MinHook.txt"},
     },

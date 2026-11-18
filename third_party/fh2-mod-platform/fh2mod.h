@@ -33,7 +33,7 @@
 extern "C" {
 #endif
 
-#define FH2MOD_API_VERSION 10
+#define FH2MOD_API_VERSION 11
 
 #ifdef __cplusplus
 #define FH2MOD_EXPORT extern "C" __declspec(dllexport)
@@ -104,6 +104,12 @@ typedef struct FH2ModInfo {
        ignore it. */
     int offline_only;
 } FH2ModInfo;
+
+/* A page text (API 11): the text for `page` now, as UTF-8 into `out` (`size` bytes with the
+   ending 0; "" for nothing). `page` is the game object the binding reads from: only compare
+   it or hand it to page_text_changed. Called on the game's UI thread each time a page reads
+   the text: keep it short, and don't call back into the game. */
+typedef void (*FH2PageTextFn)(void* user, void* page, char* out, size_t size);
 
 typedef struct FH2ModApi {
     uint32_t size;                /* sizeof(FH2ModApi) as the platform knows it */
@@ -791,6 +797,25 @@ typedef struct FH2ModApi {
        next time the page opens. Returns 1, or 0 for no such page, hint or
        kind. */
     int (*show_page_hint)(FH2Mod* mod, const char* page_key, int index, uint32_t kind);
+
+    /* ---- API 11 (platform 2.9.1) ---- */
+
+    /* A text of yours for one of the game's own pages. In the page's XAML (a game UI file
+       you replace with set_file: one the platform doesn't own), a binding
+       {Binding FH2Mod_Text_<name>} then shows what `get` writes, asked for by each page
+       object that reads it: the name tag over each car is one page per car, so each can show
+       its own. `name` is 1 to 40 letters, digits or '_'; start it with your mod's name
+       ("MyMod_Tag"). Call it from fh2mod_init, before the game loads the page. Returns
+       1, or 0 for a bad name, no `get`, or a name another mod has. The text reads as empty
+       while the menus' code doesn't match, on a platform before 2.9.1 (check api_version >=
+       11 before calling), and once your mod is stopped for online play. Keep to a small set
+       of texts: the game keeps every different one for the session, and past 256 different
+       texts for one name the rest read as empty. */
+    int (*add_page_text)(FH2Mod* mod, const char* name, FH2PageTextFn get, void* user);
+    /* The text changed: the pages showing it read it again, at the game's next tick. `page`
+       is one page that has read it (as `get` was given it), or NULL for every page that has.
+       From any thread. A page that has gone is skipped. */
+    void (*page_text_changed)(FH2Mod* mod, const char* name, void* page);
 } FH2ModApi;
 
 /* Called on the game's UI thread when the player changes a row: keep it
@@ -803,7 +828,7 @@ typedef void (*FH2SliderChangedFn)(void* user, const char* key, float value);
 #define FH2_SETTING_SLIDER 1
 #define FH2_SETTING_LINK   2   /* API 6 */
 #define FH2_SETTING_CHOICE 3   /* API 9 */
-#define FH2_SETTING_MAX_CHOICES 32
+#define FH2_SETTING_MAX_CHOICES 100   /* 32 up to platform 2.9.0 */
 
 /* One row on your mod's page (API 4; sliders API 5). */
 struct FH2Setting {
@@ -841,7 +866,12 @@ struct FH2Setting {
        them. `value` is the index of the one chosen (0 = the first), and
        on_change, get_setting and set_setting use that index. The names are
        copied. The slider fields are ignored. On an older platform it would
-       come out as an On/Off row, so only add one when api_version >= 9. ---- */
+       come out as an On/Off row, so only add one when api_version >= 9.
+       A row takes up to 100 choices from platform 2.9.1, and 32 before: an
+       older platform refuses a longer list (add_setting returns 0), so
+       when it does, add the choices as two rows instead. From 2.9.1 the
+       player can also press A on a row with more than eight choices to
+       pick from a list of them; on_change gets the pick as usual. ---- */
     const char* const* choices;    /* UTF-8, shown as given: "LB", "RB", "A" ... */
     uint32_t choice_count;         /* 2 to FH2_SETTING_MAX_CHOICES */
 };

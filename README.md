@@ -77,7 +77,7 @@ another computer. Keep that code private.
 installed. The server refuses launchers and shims older than the minimum it announces (1.2.0 after this release is deployed), so an old install shows
 "update required" and has to update before it can play.
 
-Version 1.4.7 uses Azimuth 1.0.4, FH2 Extra Options 0.6.1, FH2 Mod Platform 2.9.0, HonkHonk 0.4.0 and FH2 ANNA 1.2.4; Achievements 1.0.2, NitroSystem 2.0.1 and Underglow 1.1.1 are optional. Setup installs the supported combination and preserves your existing settings and saves. The launcher downloads them from FH2MP's server (the authors' releases are the fallback) and checks every file against its pinned hash.
+Version 1.4.7 uses Azimuth 1.0.4, FH2 Extra Options 0.6.1, FH2 Mod Platform 2.9.1, HonkHonk 0.4.0 and FH2 ANNA 1.2.4; Achievements 1.0.2, NitroSystem 2.0.1 and Underglow 1.1.1 are optional. Setup installs the supported combination and preserves your existing settings and saves. The launcher downloads them from FH2MP's server (the authors' releases are the fallback) and checks every file against its pinned hash.
 
 **Linux.** Azimuth runs under Wine/Proton. The launcher picks the newest Proton it finds in the usual Steam folders and starts the game with
 `WINEDLLOVERRIDES="winmm,dwrite,d3dcompiler_47=n,b"`, so Wine loads FH2 Extra Options (`winmm.dll`) and the FH2 Mod Platform (`DWrite.dll` and `d3dcompiler_47.dll`)
@@ -156,8 +156,8 @@ release, using `release/notes/<tag>.md` as the description when that file exists
 - Forza Horizon 2, Xbox One build 1.0.0.64.
 - **Azimuth 1.0.4** only. The shim checks its hooks against byte signatures of that build and skips anything that does not match; the
   launcher warns you about other builds.
-- **FH2 Mod Platform 2.9.0** by Trinculo54, the `DWrite.dll` and `d3dcompiler_47.dll` next to `azimuth.exe` that load the shim. The launcher
-  installs the 2.9.0 release when your folder has another build.
+- **FH2 Mod Platform 2.9.1** by Trinculo54, the `DWrite.dll` and `d3dcompiler_47.dll` next to `azimuth.exe` that load the shim. The launcher
+  installs the 2.9.1 release when your folder has another build.
 - **[FH2 Extra Options](https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions) 0.6.1** by RokkuDayo, the only supported build. When the `winmm.dll` next to `azimuth.exe` is not that build, the launcher downloads the author's release (a setting turns that off; another `winmm.dll` is kept in `fh2extra`).
   It keeps its mods in `mods\Forza Horizon 2` and moves the ones in `mods` there itself the first time the game starts.
   By hand, put its `winmm.dll`, `FH2_ExtraOptions.ini` and `mods\Forza Horizon 2` next to `azimuth.exe`.
