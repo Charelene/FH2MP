@@ -2,7 +2,9 @@ package game
 
 import (
 	"fmt"
+	"math"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -274,6 +276,97 @@ func TestPlaceholderStandinDropsTheCustomTune(t *testing.T) {
 	if f[playersetup.Model].Value.Uint64() != uint64(StandinCar) || words[2] != stand[2] || f[108].Value.Uint64() != tune {
 		t.Fatalf("old placeholder path: Model %d body %d tune %#x, want %d %d %#x", f[playersetup.Model].Value.Uint64(), words[2], f[108].Value.Uint64(),
 			StandinCar, stand[2], tune)
+	}
+}
+
+// A custom car's setup goes to the others as its stand-in's, with the stand-in's catalog class and PI, but the owner's game is never told: it keeps
+// its own car's values and later sends only the fields that change. After a change to a game car of the same class in the owner's game (the setup
+// carries the PI, not the class), the server must still know the owner's class. Prod 2026-11-17: a class A car (PI 748) driven after a car pack's
+// car was refused by every class A event as class C, the placeholder car's class.
+func TestStandinClassDoesNotStick(t *testing.T) {
+	if !StandinStock {
+		t.Skip("FH2MP_STANDIN_STOCK=0: the placeholder keeps the custom car's setup")
+	}
+	r := newLoadRig(t, 1)
+	r.w.Hub = nil // without a hub the stand-in is StandinCar
+	p := r.peers[0]
+	cat := r.w.cat()
+	stand, ok := cat.Choices[int(StandinCar)]
+	if !ok {
+		t.Skip("the placeholder car has no class and PI in this catalog")
+	}
+	if _, ok := parts.StockList(cat.Parts, StandinCar); !ok {
+		t.Skip("the placeholder car has no stock part list in this catalog")
+	}
+	own := int64(3) // the class the owner's game gives both cars: one the placeholder does not have
+	if int64(stand.Class) == own {
+		own = 4
+	}
+	ids := make([]int, 0, len(cat.Choices))
+	for id := range cat.Choices {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	car, stock := int64(-1), []uint32(nil)
+	for _, id := range ids {
+		_, rental := cat.Rentals[id]
+		_, blocked := cat.Blocked[id]
+		if rental || blocked || int64(id) == StandinCar {
+			continue
+		}
+		if s, ok := parts.StockList(cat.Parts, int64(id)); ok && len(parts.IntegrityErrors(cat.Parts, s)) == 0 {
+			car, stock = int64(id), s
+			break
+		}
+	}
+	if car < 0 {
+		t.Skip("no obtainable car with a clean stock part list")
+	}
+	custom := append([]uint32(nil), stock...)
+	custom[2] = 9024000 // a car pack's own body
+	partsValue := func(words []uint32) bits.Int {
+		t.Helper()
+		v, err := playersetup.PartsValue(words)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	pi := func(v float32) bits.Int { return bits.FromUint64(uint64(math.Float32bits(v))) }
+	send := func(vals map[int]bits.Int) map[int]playersetup.Field {
+		t.Helper()
+		size, payload, err := playersetup.Encode(vals)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, hide, n, out := r.w.CheckParts(p, size, payload, 1)
+		if hide {
+			t.Fatalf("the setup was withheld; log: %q", r.log)
+		}
+		out = r.w.NotePlayerChoices(p, size, payload, n, out)
+		f, err := playersetup.Fields(n, out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	check := func(what string, wantPI float32) {
+		t.Helper()
+		if p.Choices == nil || !p.Choices.HasClass || p.Choices.Class != own || p.Choices.PI != float64(wantPI) {
+			t.Fatalf("%s: server-side choices %+v, want class %d PI %v (the owner's game's)", what, p.Choices, own, wantPI)
+		}
+	}
+
+	f := send(map[int]bits.Int{playersetup.Model: bits.FromUint64(9024), playersetup.Parts: partsValue(custom), 81: bits.FromUint64(uint64(own)), 82: pi(0.71)})
+	if got := f[81].Value.Uint64(); got != uint64(stand.Class) {
+		t.Fatalf("the others see the stand-in as class %d, want the placeholder's %d", got, stand.Class)
+	}
+	check("custom car", 0.71)
+
+	send(map[int]bits.Int{playersetup.Model: bits.FromUint64(uint64(car)), playersetup.Parts: partsValue(stock), 82: pi(0.748)})
+	check("game car of the same class, only its PI sent", 0.748)
+	if ok, _ := r.w.carFitsEvent(p, &gameopts.Rule{Class: uint64(own)}); !ok {
+		t.Fatalf("a class %s event refused the owner's class %s car %d; log: %q", classLetter(uint64(own)), classLetter(uint64(own)), car, r.log)
 	}
 }
 
