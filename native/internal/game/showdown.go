@@ -40,6 +40,9 @@ const (
 
 	// ShowdownSetupSeconds: how long the starter's game has after message 30 to fill the GameOptions and answer message 31.
 	ShowdownSetupSeconds = 15.0
+	// ShowdownEndCounterMarginSecs: after the first finisher the server waits for the game's own EndRaceCounter plus this much (the racers'
+	// games end their race themselves when it runs out; the margin covers their packets on the way).
+	ShowdownEndCounterMarginSecs = 3.0
 )
 
 // Showdown is a Car Meet world's Showdown.
@@ -292,6 +295,27 @@ func (w *World) showdownGridOrder(ev *Event) {
 		dir = "lowest"
 	}
 	w.Logf("Showdown grid by PI, %s first (GameOptions GridOrderingType PI, Ascending %s): %s", dir, pyBool(asc), strings.Join(parts, ", "))
+}
+
+// showdownEndLimit is how long a Showdown's race runs on after its first finisher: the game's own EndRaceCounter from the options (32 s in the
+// starter's options on dev 2026-11-18; each racer's game counts it down and ends its own race) plus ShowdownEndCounterMarginSecs, or the
+// server's RaceLastFinisherSecs when the options set none. Said once per event.
+func (w *World) showdownEndLimit(ev *Event) float64 {
+	counter, ok, err := gameopts.EndRaceCounter(w.GameOptions)
+	limit := RaceLastFinisherSecs
+	why := "the options set no EndRaceCounter: the server's own limit"
+	switch {
+	case err != nil:
+		why = fmt.Sprintf("the options cannot be read (%v): the server's own limit", err)
+	case ok:
+		limit = counter + ShowdownEndCounterMarginSecs
+		why = fmt.Sprintf("the game's EndRaceCounter %.0f s plus %.0f s", counter, ShowdownEndCounterMarginSecs)
+	}
+	if !ev.EndLimitLogged {
+		ev.EndLimitLogged = true
+		w.Logf("Showdown race: it ends %.0f s after the first finisher (%s)", limit, why)
+	}
+	return limit
 }
 
 // showdownCallOff ends a Showdown that never raced and tells the meet's menus.

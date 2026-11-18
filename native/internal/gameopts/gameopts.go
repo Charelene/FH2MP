@@ -27,7 +27,32 @@ const (
 	GridOrderingTypeID = 401 // EGridOrderingType (game+0x112800): 0 None, 1 PI, 2 LobbyPoints, 3 HeatsPoints, 4 SeriesPoints, 5 Random, 6 AIDriverRank
 	GridAscendingID    = 402
 	GridOrderPI        = 1 // GridOrderingType's default
+
+	// EndConditionOptions (ctor game+0x1818dd0): EndConditionType 418, nested NumLaps 419, TimeOptions 420, AllPlayersInBucketOptions 421,
+	// SoccerOptions 422, then EndRaceCounter (float, default -1): the seconds each game counts after the first finisher. The id is inferred from
+	// that order and the widths (3, 32, 32, 8, 32, 32); a Car Meet Showdown's options carry 32.0 there.
+	EndRaceCounterID = 423
 )
+
+// EndRaceCounter is the options' end-of-race counter in seconds; ok=false when they leave it at its default (-1) or carry none.
+func EndRaceCounter(o *Options) (float64, bool, error) {
+	if o == nil {
+		return 0, false, nil
+	}
+	fs, err := Fields(o.Size, o.Payload)
+	if err != nil {
+		return 0, false, err
+	}
+	f, ok := fs[EndRaceCounterID]
+	if !ok {
+		return 0, false, nil
+	}
+	v := float64(math.Float32frombits(uint32(f.Value.Uint64())))
+	if math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 || v > MaxTimeLimit {
+		return 0, false, nil
+	}
+	return v, true, nil
+}
 
 // GridOrder is the grid ordering of the options: (EGridOrderingType, Ascending), with the game's defaults (PI, false) for what they leave out.
 func GridOrder(o *Options) (uint64, bool, error) {
