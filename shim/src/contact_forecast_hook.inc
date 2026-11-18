@@ -1,4 +1,4 @@
-/* The hooks of contact_forecast.inc (game side). Switch 4 of g_copy_flags (copy_path_hook.inc) turns the pause on; off by default. */
+/* The hooks of contact_forecast.inc (game side). Switch 4 of g_copy_flags (copy_path_hook.inc) turns the pause on (on in the default 63). */
 #include "contact_forecast.inc"
 
 #define CF_LIMITER_RVA 0x9c6900u /* LocalCarPrediction::vfunc_14: called for each contact of a local car with another car */

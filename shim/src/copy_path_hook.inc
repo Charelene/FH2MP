@@ -1,6 +1,7 @@
 /* The hooks of copy_path.inc (game side) and the switches of the contact changes for other players' cars.
  *
- * g_copy_flags (FH2MP_COPY_FLAGS=<0..31> at start, default 31; the install line gives its address so a debug build can change it live):
+ * g_copy_flags (FH2MP_COPY_FLAGS=<0..63> at start, default 63 = every switch on, 0 = every switch off; the install line gives its
+ * address so a debug build can change it live):
  *   1  another player's car restarts its blend from its owner's path, not from where this game's physics moved it (copy_path.inc)
  *   2  contacts add no offset to another player's car (RemoteCarPrediction::AddPositionOffset 0x9ecf80, called from the car's
  *      contact handler ForzaCar::vfunc_0_vt16 0x296ac0 through helper_272710; the offset is drawn on top of the blend)
