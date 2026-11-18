@@ -123,10 +123,10 @@ func (ev *Event) carselDeadline() float64 {
 
 // CarselAnswer is what the shim of this player is told (server/carsel.py): keep waiting?, the ms left to the group's deadline, and whether there is
 // a deadline at all. Only during a Free Roam event's setup. Waiting while a connected participant has not reached PreRace yet and the deadline plus
-// CarselHoldGraceSeconds has not passed.
+// CarselHoldGraceSeconds has not passed. A Car Meet Showdown has no car select (car_meet.xml launch_wager_race): never held.
 func (w *World) CarselAnswer(peer *Peer) (bool, uint32, bool) {
 	ev := w.Event
-	if w.Roadtrip || ev == nil || ev.Begun || !ev.has(peer) {
+	if w.Roadtrip || w.Carmeet || ev == nil || ev.Begun || !ev.has(peer) {
 		return false, 0, false
 	}
 	now := w.Mono()

@@ -230,6 +230,21 @@ func (w *World) ShowdownConfigured(peer *Peer, value uint64) {
 	w.Logf("CarMeet: Showdown launched (owner %d's game set it up, value %#x): LaunchWagerRace sent to %d racer(s) %s", peer.Owner, value, len(racers), owners(racers))
 }
 
+// showdownCarsLoaded: a Showdown racer's game cleared HasGrid during the race setup. The Car Meet flow sets no HasLoadedCarsForAllParticipants:
+// after the cars-loaded wait it clears HasGrid and waits for the route switch (car_meet.xml car_loading_cutscene_for_wager_race; Free Roam and
+// Road Trip set the flag first, network_freeroam_states.xml:468, network_roadtrip_states.xml:852). So that clear is its "cars loaded", and the
+// grid (MaybeBeginRace) goes out once every racer has sent it. HasGrid set before the start is dropped at StartEvent, so only a clear after it
+// counts.
+func (w *World) showdownCarsLoaded(peer *Peer, addr Addr) {
+	ev := w.Event
+	if !w.Carmeet || w.Wager.Phase != ShowdownRacing || ev == nil || ev.Begun || !ev.has(peer) || peer.ConsoleVars[ConsoleVarHasLoadedCars] {
+		return
+	}
+	peer.ConsoleVars[ConsoleVarHasLoadedCars] = true
+	w.NoteLoaded(peer)
+	w.Logf("%d Showdown racer owner %d cleared HasGrid after its cars-loaded wait: counted as HasLoadedCarsForAllParticipants (the Car Meet flow sends no such flag)", addr.Port, peer.Owner)
+}
+
 // showdownCallOff ends a Showdown that never raced and tells the meet's menus.
 func (w *World) showdownCallOff(why string) {
 	s := &w.Wager

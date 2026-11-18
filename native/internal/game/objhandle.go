@@ -429,6 +429,8 @@ func (w *World) consoleUpdate(peer *Peer, addr Addr, size int, payload bits.Int)
 			w.NoteRenderReady(peer, int(item[len(item)-1]-'0'))
 		} else if item == "HasLoadedCarsForAllParticipants=1" {
 			w.NoteLoaded(peer)
+		} else if item == "HasGrid=0" {
+			w.showdownCarsLoaded(peer, addr)
 		}
 	}
 	v3, has3 := peer.ConsoleVars[3]
