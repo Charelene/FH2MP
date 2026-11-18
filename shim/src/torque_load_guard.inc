@@ -11,7 +11,7 @@ typedef void **(*torque_part_fn)(void **, void **, int, unsigned, unsigned);
 static torque_preload_fn g_torque_preload_orig;
 static torque_parts_ctor_fn g_torque_parts_ctor;
 static torque_stock_fn g_torque_stock;
-static torque_part_fn g_torque_car_part, g_torque_engine_part;
+static torque_part_fn g_torque_car_part, g_torque_engine_part, g_torque_drivetrain_part;
 static unsigned char *g_torque_load_img;
 /* Loads this guard turned into the native unavailable-car fallback, and loads it had to cancel: the log lines are rate-limited by these. */
 static volatile LONG g_torque_rejects, g_torque_cancels, g_torque_skipped;
@@ -64,10 +64,80 @@ static void *torque_part(void *db, torque_part_fn fn, int slot, unsigned owner, 
     return row;
 }
 
+/* "<prefix><id>" into sql (room for the prefix, 10 digits and the terminator). */
+static void torque_sql_id(char *sql, const char *prefix, unsigned id)
+{
+    char digits[10];
+    unsigned n = 0, pos = (unsigned)lstrlenA(prefix);
+    memcpy(sql, prefix, pos);
+    do { digits[n++] = (char)('0' + id % 10); id /= 10; } while (id);
+    while (n) sql[pos++] = digits[--n];
+    sql[pos] = 0;
+}
+
+/* The other records game+0x1056210 builds a car's physics from without a NULL check (confirmed from the code, 2026-11-18). Its part
+ * records are one per CParts slot (slot s = parts[s + 2]), made by five resolvers: car parts 0-11 (game+0x10482f0, owner the car), engine
+ * parts 12-29 (+0x1048990, owner EngineID), drivetrain parts 30-33 (+0x1048640, owner the DrivetrainID of slot 1), car body parts 34-41
+ * (+0x1047fa0, owner the CarBodyID of slot 2), motor part 42 (+0x1048ce0). A part id with no row (or another owner's) gives a NULL record:
+ * - slots 1 and 2 (List_UpgradeDrivetrain, List_UpgradeCarBody): their DrivetrainID / CarBodyID are read at game+0x1056bae / +0x1056cc6
+ *   (#481 is slot 1).
+ * - slot 30, the clutch (List_UpgradeDrivetrainClutch): game+0x105bea0 reads "ClutchMaxTorque" from it (#328, game+0x105beec, a car
+ *   pack car's clutch).
+ * - slot 8, the tire compound part (List_UpgradeTireCompound): game+0x1058a20 reads its TireCompoundID and queries List_TireCompound;
+ *   with no row the tire builder game+0x1062f60 returns at once, the tires' data stays uninitialised heap, and game+0x12b7fb0 copies its
+ *   "curves" into a fixed buffer (report 312f1d36e5a754e8: 565 curves of 0 samples, write AV at game+0x12e26dd).
+ * Every stock car of the game's database passes these (data/gamedata.sqlite: 354 cars, each with a stock drivetrain, body, clutch and a
+ * tire compound whose row exists). */
+static int torque_records_valid(void *db, unsigned car, const unsigned parts[45], torque_fault *fault)
+{
+    void *drivetrain = torque_part(db, g_torque_car_part, 1, car, parts[3]);
+    void *body = NULL, *clutch = NULL, *tire = NULL, *compound = NULL;
+    int ok = 0;
+    if (torque_rows(drivetrain) <= 0) {
+        fault->why = "the car's drivetrain part row is missing (wrong id or owner)";
+        fault->detail = parts[3];
+        goto done;
+    }
+    body = torque_part(db, g_torque_car_part, 2, car, parts[4]);
+    if (torque_rows(body) <= 0) {
+        fault->why = "the car's body part row is missing (wrong id or owner)";
+        fault->detail = parts[4];
+        goto done;
+    }
+    clutch = torque_part(db, g_torque_drivetrain_part, 30, torque_uint(drivetrain, "DrivetrainID"), parts[32]);
+    if (torque_rows(clutch) <= 0) {
+        fault->why = "the clutch row is missing for the car's drivetrain (wrong id or owner)";
+        fault->detail = parts[32];
+        goto done;
+    }
+    tire = torque_part(db, g_torque_car_part, 8, car, parts[10]);
+    if (torque_rows(tire) <= 0) {
+        fault->why = "the car's tire compound part row is missing (wrong id or owner)";
+        fault->detail = parts[10];
+        goto done;
+    }
+    {
+        char sql[96];
+        unsigned compound_id = torque_uint(tire, "TireCompoundID");
+        torque_sql_id(sql, "SELECT * FROM List_TireCompound WHERE TireCompoundID=", compound_id);
+        compound = torque_query(db, sql);
+        ok = torque_rows(compound) > 0;
+        fault->why = "the tire compound part's TireCompoundID names no List_TireCompound row";
+        fault->detail = compound_id;
+    }
+done:
+    torque_release(compound);
+    torque_release(tire);
+    torque_release(clutch);
+    torque_release(body);
+    torque_release(drivetrain);
+    return ok;
+}
+
 /* Validate the SAME resolved IDs and ownership checks as 1056210. Electric
  * motors have their own constructor/curve and must not require an ICE camshaft.
- * This guard covers missing/empty/one-sample/oversized ICE curves, not every
- * possible physics-data defect.
+ * This guard covers missing/empty/one-sample/oversized ICE curves and the part
+ * records torque_records_valid() names, not every possible physics-data defect.
  */
 static int torque_parts_valid(void *db, unsigned car, const unsigned parts[45], torque_fault *fault)
 {
@@ -78,14 +148,10 @@ static int torque_parts_valid(void *db, unsigned car, const unsigned parts[45], 
         unsigned engine_id = torque_uint(engine, "EngineID");
         camshaft = torque_part(db, g_torque_engine_part, 12, engine_id, parts[14]);
         if (torque_rows(camshaft) > 0) {
-            char sql[96] = "SELECT * FROM List_TorqueCurve WHERE TorqueCurveID=";
-            char digits[10];
-            unsigned n = 0, pos = (unsigned)lstrlenA(sql);
+            char sql[96];
             unsigned curve_id = torque_uint(camshaft, "TorqueCurveFullThrottleID");
             fault->detail = curve_id;
-            do { digits[n++] = (char)('0' + curve_id % 10); curve_id /= 10; } while (curve_id);
-            while (n) sql[pos++] = digits[--n];
-            sql[pos] = 0;
+            torque_sql_id(sql, "SELECT * FROM List_TorqueCurve WHERE TorqueCurveID=", curve_id);
             curve = torque_query(db, sql);
             if (torque_rows(curve) > 0) {
                 unsigned count = torque_uint(curve, "NumTorqueValues");
@@ -109,7 +175,7 @@ static int torque_parts_valid(void *db, unsigned car, const unsigned parts[45], 
     torque_release(curve);
     torque_release(camshaft);
     torque_release(engine);
-    return ok;
+    return ok && torque_records_valid(db, car, parts, fault);
 }
 static void torque_stock_parts(void *db, unsigned car, unsigned parts[45])
 {

@@ -12,6 +12,8 @@
  * a car with a save row (this+0x2bc), writes them to the save's table [confirmed: decompile]. The torque load guard does not see this
  * route: it guards the asynchronous preloader +0xfcfe70.
  * The guard hooks +0x2cfa50: it checks the car's ordinal and installed parts with torque_parts_valid(), the resolution +0x1056210 makes.
+ * That includes the part records the builder reads without a NULL check (torque_records_valid): a car pack car whose tire compound has
+ * no List_TireCompound row reached +0x12e26dd through this route (report 312f1d36e5a754e8, car 2479, 2026-11-17).
  * For a car whose engine data is unusable it does not rate the car: the rating fields and the sample count are left at 0 (the CCarInGarage
  * comes from the game's heap, not zeroed), ClassID (+0x2cc, from the save row) and the save are not touched. The car stays in the garage
  * as it is; driving it goes through the torque load guard's placeholder. A car whose data cannot be read is rated by the game as before.
@@ -52,8 +54,8 @@ static void gr_detour(unsigned char *car_in_garage)
     if (n <= 20 || n % 50 == 0) {
         char line[400];
         wsprintfA(line, "garagerating: garage car %u (save row %u, engine part %u, camshaft part %u) is not rated (#%ld): %s, value %u; "
-                  "it stays in the garage with empty performance numbers instead of the torque curve constructor running past its samples "
-                  "(game+0x12e0a50)", car, row, parts[2], parts[14], (long)n, fault.why, fault.detail);
+                  "it stays in the garage with empty performance numbers instead of the game building its physics from the missing data",
+                  car, row, parts[2], parts[14], (long)n, fault.why, fault.detail);
         log_begin();
         log_raw(line);
         log_raw("\n");
