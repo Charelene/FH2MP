@@ -642,6 +642,46 @@ type CarRow struct {
 	PI    float64
 }
 
+// NotePlayerChoices records the class and PI of a player object that the last CheckParts let through and returns the payload to relay (sentSize/sent:
+// the object as the owner's game sent it; size/payload: as CheckParts passes it on to the others).
+//
+// A stand-in setup (a custom car shown to the others as a game car) carries the stand-in's catalog class and PI, but the owner's game is never told
+// about the stand-in: it keeps its own car's values and later sends only the fields that change. peer.Choices, which the event rules check, keeps
+// what the owner's game holds. Recording the stand-in's class kept it after a change to a game car of the same class in the owner's game, whose
+// setup carried only the new PI (prod 2026-11-17: a class A car, PI 748, refused by every class A event as class C, the placeholder car's class).
+func (w *World) NotePlayerChoices(peer *Peer, sentSize int, sent bits.Int, size int, payload bits.Int) bits.Int {
+	prev := peer.Choices
+	if size >= 240 {
+		payload = w.NoteChoices(peer, size, payload)
+	} else if size == 40 || size == 80 {
+		payload = w.ShortRentalChoices(peer, size, payload)
+	}
+	payload = w.NoteTypedChoices(peer, size, payload)
+	if w.standinApplied {
+		w.keepOwnChoices(peer, prev, sentSize, sent)
+	}
+	return payload
+}
+
+// keepOwnChoices sets peer.Choices to prev with the class and PI fields of the setup as the owner's game sent it (fields it did not send keep prev's).
+func (w *World) keepOwnChoices(peer *Peer, prev *Choices, size int, payload bits.Int) {
+	values, err := playersetup.Fields(size, payload)
+	if err != nil { // CheckParts withholds a setup it cannot decode, so a stand-in was never made from one
+		return
+	}
+	own := Choices{PI: math.NaN()}
+	if prev != nil {
+		own = *prev
+	}
+	if f, ok := values[81]; ok {
+		own.HasClass, own.Class = true, int64(f.Value.Uint64())
+	}
+	if f, ok := values[82]; ok {
+		own.PI = float64(math.Float32frombits(uint32(f.Value.Uint64())))
+	}
+	peer.Choices = &own
+}
+
 // NoteTypedChoices tracks independently dirty class/PI fields in every legal player delta.
 func (w *World) NoteTypedChoices(peer *Peer, size int, payload bits.Int) bits.Int {
 	values, err := playersetup.Fields(size, payload)

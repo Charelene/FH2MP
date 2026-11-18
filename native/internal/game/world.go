@@ -197,6 +197,7 @@ type Event struct {
 	SelectEnteredAt      *float64
 	Held                 map[*Peer]bool
 	HoldLimitLogged      bool
+	EndLimitLogged       bool    // a Showdown's after-the-first-finisher limit was logged (showdown.go)
 	LoadRestart          float64 // load clocks restart here after a suspect was dropped
 	SuspectDropped       bool
 	GridAt, GridReportAt float64
@@ -290,6 +291,7 @@ type World struct {
 	RtCandidates                    *RtCand
 	RtPickPlayers                   int
 	Gm                              Gm
+	Wager                           Showdown
 	IntroduceAt                     string
 	RtSeq                           int
 	ServerCounter                   uint64
@@ -325,6 +327,7 @@ type World struct {
 	// leader leaves, the player who has been here longest. Only the leader starts events.
 	Private              bool
 	Leader               *Peer
+	GroupSatNav          int32 // the road node of the Free Roam group route (SessionHostSynced.GroupSatNavNode), 0 = none; groupnav.go
 	FreeRoamLaps         int64
 	FreeRoamEndCondition int64
 	Event                *Event
@@ -352,6 +355,7 @@ func NewWorld(tag string, out *LogOut, clk Clock, rng Rand, sock PacketConn, eve
 	w := &World{Tag: tag, Out: out, Clk: clk, Rng: rng, Sock: sock, Events: events, Sinks: sinks, Cat: cat, Roadtrip: roadtrip, Carmeet: carmeet,
 		RtState: RTInitialising, RtVotes: omap.New[*Peer, int](), RtWinner: -1, RtDriveMs: RTDriveMs, RtPicked: map[*Peer]bool{},
 		Gm:            Gm{Phase: "idle", Joined: omap.New[*Peer, int]()},
+		Wager:         Showdown{Phase: ShowdownIdle, Members: omap.New[*Peer, struct{}]()},
 		ServerCounter: 1, MtSeen: map[int]int{}, Peers: omap.New[Addr, *Peer](), Dirty: omap.New[*Peer, struct{}](),
 		OwnerQuarantine: map[int]float64{}, FreeRoamLaps: 1, FreeRoamEndCondition: 1, RtSeq: 1, rate: diag.NewRateLimit(clk.Mono, 0)}
 	w.IntroduceAt = strings.ToLower(strings.TrimSpace(envStr("FH2MP_INTRODUCE_AT", "handshake")))

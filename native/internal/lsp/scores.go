@@ -147,6 +147,9 @@ func sbSubmitScore(c *Core, r *Req, req *xls.Struct) (*xls.Struct, error) {
 			}
 		}()
 	}
+	if scoreboard.SpeedBoards[sub.ScoreboardType] && (typ == 5 || typ == 6) {
+		go c.telemetryCheck(r, s)
+	}
 	out := xls.NewStruct()
 	out.Set("scoreId", s.ScoreID)
 	out.Set("uploadFiles", true)

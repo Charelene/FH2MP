@@ -93,6 +93,7 @@ func (w *World) EndEvent(why string, keepLeader bool) {
 	if w.Roadtrip {
 		w.RtNextEvent()
 	}
+	w.showdownRaceOver(why)
 }
 
 // ---- tag modes ----
@@ -365,6 +366,10 @@ func (w *World) ReportEvent(why string) {
 		seconds = math.RoundToEven((now-ev.RacingSince)*10) / 10
 	}
 	detail := pyjson.Obj{{K: "players", V: players}, {K: "end", V: why}, {K: "roadtrip", V: w.Roadtrip}, {K: "seconds", V: seconds}}
+	if w.Carmeet {
+		// a Car Meet Showdown; its mode stays "race", the one the LSP's /admin/result stores for a race
+		detail = append(detail, pyjson.Pair{K: "showdown", V: true})
+	}
 	mode := ""
 	if tag := ev.Tag; tag != nil {
 		w.TagAccount(tag, now)
@@ -918,7 +923,11 @@ func (w *World) ValidateEventCars() bool {
 }
 
 // StartEvent: participants = the leader plus every client that reported Console.Ready.
-func (w *World) StartEvent(leader *Peer) {
+func (w *World) StartEvent(leader *Peer) { w.StartEventWith(leader, nil) }
+
+// StartEventWith starts the event with participants chosen elsewhere (a Car Meet Showdown's racers, the leader first); nil = StartEvent's
+// choice.
+func (w *World) StartEventWith(leader *Peer, chosen []*Peer) {
 	if !w.Roadtrip {
 		opt := w.GameOptions
 		if opt == nil {
@@ -945,43 +954,52 @@ func (w *World) StartEvent(leader *Peer) {
 	}
 	people := []*Peer{leader}
 	excluded := map[*Peer]string{}
-	for _, q := range w.Peers.Values() {
-		if q != leader && q.Connected && !q.ConsoleVars[4] && w.refusedOnClass(q) && len(people) < capacity.ClientLimit {
-			w.Logf("event start: owner %d's Ready was refused on its car (it does not meet the restrictions yet); it is selected and gets the event car select, its car is checked again when every participant has loaded", q.Owner)
-			q.ReadyRetry = nil
-			w.SetConsoleBool(q, 4, 1, "selected: its Ready was refused on its car, the event car select follows")
-			q.ConsoleVars[4] = true
-			people = append(people, q)
-			continue
+	if chosen != nil {
+		people = append([]*Peer(nil), chosen...)
+		for _, q := range w.Peers.Values() {
+			if !inList(people, q) {
+				excluded[q] = "not in the Showdown"
+			}
 		}
-		if q == leader || !q.Connected || !q.ConsoleVars[4] {
-			if q != leader {
-				if !q.Connected {
-					excluded[q] = "handshake not finished"
-				} else {
-					excluded[q] = "never answered the invite with Ready"
-					if !w.Roadtrip && q.ReadyRetry != nil && *q.ReadyRetry == w.RaceRequestedAt {
-						// Its Ready was refused on its car and no car that fits followed: now the refusal is final.
-						w.noticeRefused(q, w.refusalNotice(q))
+	} else {
+		for _, q := range w.Peers.Values() {
+			if q != leader && q.Connected && !q.ConsoleVars[4] && w.refusedOnClass(q) && len(people) < capacity.ClientLimit {
+				w.Logf("event start: owner %d's Ready was refused on its car (it does not meet the restrictions yet); it is selected and gets the event car select, its car is checked again when every participant has loaded", q.Owner)
+				q.ReadyRetry = nil
+				w.SetConsoleBool(q, 4, 1, "selected: its Ready was refused on its car, the event car select follows")
+				q.ConsoleVars[4] = true
+				people = append(people, q)
+				continue
+			}
+			if q == leader || !q.Connected || !q.ConsoleVars[4] {
+				if q != leader {
+					if !q.Connected {
+						excluded[q] = "handshake not finished"
+					} else {
+						excluded[q] = "never answered the invite with Ready"
+						if !w.Roadtrip && q.ReadyRetry != nil && *q.ReadyRetry == w.RaceRequestedAt {
+							// Its Ready was refused on its car and no car that fits followed: now the refusal is final.
+							w.noticeRefused(q, w.refusalNotice(q))
+						}
 					}
 				}
+				continue
 			}
-			continue
-		}
-		if !w.EligibleForEvent(q, nil) {
-			excluded[q] = "car does not meet the event restrictions (see the 'not eligible' line above)"
-			w.SetConsoleBool(q, 4, 0, "car does not meet the event restrictions")
-			q.ConsoleVars[4] = false
-			w.SetConsoleBool(q, ConsoleVarParticipatingInRace, 0, "ineligible car")
-			q.ConsoleVars[ConsoleVarParticipatingInRace] = false
-		} else if len(people) >= capacity.ClientLimit {
-			excluded[q] = fmt.Sprintf("the event holds %d players", capacity.ClientLimit)
-			w.SetConsoleBool(q, 4, 0, "event full")
-			q.ConsoleVars[4] = false
-			w.SetConsoleBool(q, ConsoleVarParticipatingInRace, 0, "event full")
-			q.ConsoleVars[ConsoleVarParticipatingInRace] = false
-		} else {
-			people = append(people, q)
+			if !w.EligibleForEvent(q, nil) {
+				excluded[q] = "car does not meet the event restrictions (see the 'not eligible' line above)"
+				w.SetConsoleBool(q, 4, 0, "car does not meet the event restrictions")
+				q.ConsoleVars[4] = false
+				w.SetConsoleBool(q, ConsoleVarParticipatingInRace, 0, "ineligible car")
+				q.ConsoleVars[ConsoleVarParticipatingInRace] = false
+			} else if len(people) >= capacity.ClientLimit {
+				excluded[q] = fmt.Sprintf("the event holds %d players", capacity.ClientLimit)
+				w.SetConsoleBool(q, 4, 0, "event full")
+				q.ConsoleVars[4] = false
+				w.SetConsoleBool(q, ConsoleVarParticipatingInRace, 0, "event full")
+				q.ConsoleVars[ConsoleVarParticipatingInRace] = false
+			} else {
+				people = append(people, q)
+			}
 		}
 	}
 	invite := ""
@@ -1282,6 +1300,9 @@ func (w *World) MaybeBeginRace() {
 		la = strings.Join(loaded, " ")
 	}
 	w.Logf("all %d participant(s) loaded cars -> starting grid; loaded after %s", len(ev.People), la)
+	if w.Carmeet {
+		w.showdownGridOrder(ev)
+	}
 	var order []*Peer
 	for _, q := range ev.Order {
 		if ev.has(q) {
@@ -1291,6 +1312,9 @@ func (w *World) MaybeBeginRace() {
 	if len(order) != len(ev.People) {
 		order = append([]*Peer(nil), ev.People...)
 		shuffle(w.Rng, order)
+	}
+	if w.Carmeet {
+		w.showdownHeadStarts(order)
 	}
 	for _, q := range ev.People {
 		entries := make([]netv2.GridEntry, len(order))
@@ -1546,9 +1570,13 @@ func (w *World) CheckRaceEnd(now float64) {
 			all = false
 		}
 	}
+	limit := RaceLastFinisherSecs
+	if w.Carmeet {
+		limit = w.showdownEndLimit(ev)
+	}
 	if all {
 		w.EndRace("everybody finished")
-	} else if have && now >= first+RaceLastFinisherSecs {
+	} else if have && now >= first+limit {
 		w.EndRace("time limit after the first finisher")
 	}
 }

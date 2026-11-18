@@ -290,7 +290,7 @@ func parseHex(s string) (uint64, error) {
 	return strconv.ParseUint(s, 16, 64)
 }
 
-// ControlText handles one control message: assign, auth, logout, revoke, allow, unflag, flags, trust, untrust, trusted, run, tools, pop, lobbies, positions, bots.
+// ControlText handles one control message: assign, auth, logout, revoke, allow, unflag, flags, trust, untrust, trusted, run, tools, pop, lobbies, positions, telemetry, bots.
 func (h *Hub) ControlText(text string, replyTo *Addr) {
 	parts := strings.Fields(text)
 	n := len(parts)
@@ -303,6 +303,8 @@ func (h *Hub) ControlText(text string, replyTo *Addr) {
 		h.ctlReply(replyTo, "bots", []byte(h.botsCommand(parts)))
 	case n == 1 && parts[0] == "positions":
 		h.ctlReply(replyTo, "positions", []byte(jsonDumps(h.mapStatus())))
+	case n == 4 && parts[0] == "telemetry":
+		h.ctlReply(replyTo, "telemetry", []byte(jsonDumps(h.telemetryCommand(parts))))
 	case n == 1 && parts[0] == "flags":
 		h.ctlReply(replyTo, "flags", []byte(jsonDumps(h.flagStatus())))
 	case n == 1 && parts[0] == "trusted":

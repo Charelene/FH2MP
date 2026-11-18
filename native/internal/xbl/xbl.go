@@ -1975,6 +1975,11 @@ func (s *Server) HubUntrust(xuid int64) { s.Hub.Control(fmt.Sprintf("untrust %x"
 // HubPositions is HubLobbies plus where each car is in those lobbies, or nil when the hub cannot be reached.
 func (s *Server) HubPositions() pyjson.Obj { return s.Hub.Query("positions") }
 
+// HubTelemetry asks the game server to judge a speed trap ("trap") or zone ("zone") result in m/s against the player's live car stream.
+func (s *Server) HubTelemetry(xuid int64, kind string, value float64) pyjson.Obj {
+	return s.Hub.Query(fmt.Sprintf("telemetry %x %s %.4f", uint64(xuid), kind, value))
+}
+
 // ---------------------------------------------------------------- the hub over UDP
 
 // UDPHub talks to the game server's control port (env FH2MP_SERVER_CONTROL, default 127.0.0.1:5090).

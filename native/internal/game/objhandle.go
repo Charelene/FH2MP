@@ -98,12 +98,7 @@ func (w *World) handleObject(peer *Peer, r rd, br *bits.Reader, mtype int, data 
 		if w.standinApplied && w.HasCustomCars(peer) {
 			real = &relayVariant{rs, rp}
 		}
-		if size >= 240 {
-			payload = w.NoteChoices(peer, size, payload)
-		} else if size == 40 || size == 80 {
-			payload = w.ShortRentalChoices(peer, size, payload)
-		}
-		payload = w.NoteTypedChoices(peer, size, payload)
+		payload = w.NotePlayerChoices(peer, rs, rp, size, payload)
 		w.RetryRefusedReady(peer)
 		w.NotePlayerStatus(peer, size, payload)
 		w.NoteCarLook(peer, rs, rp)
@@ -429,6 +424,8 @@ func (w *World) consoleUpdate(peer *Peer, addr Addr, size int, payload bits.Int)
 			w.NoteRenderReady(peer, int(item[len(item)-1]-'0'))
 		} else if item == "HasLoadedCarsForAllParticipants=1" {
 			w.NoteLoaded(peer)
+		} else if item == "HasGrid=0" {
+			w.showdownCarsLoaded(peer, addr)
 		}
 	}
 	v3, has3 := peer.ConsoleVars[3]

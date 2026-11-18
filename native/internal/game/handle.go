@@ -212,6 +212,7 @@ loop:
 				if whole {
 					w.TrackSpin(peer, rest)
 					w.TrackPush(peer, rest, *pos, *stamp, *scene)
+					w.TrackTelem(peer, rest, *pos, *stamp)
 				}
 			}
 			if peer.CarsRelayed%20 == 1 && pos != nil {
@@ -695,7 +696,11 @@ loop:
 			}
 			w.CmSessionReady(peer, name, template)
 		case mtype == netv2.MsgCarMeetConfiguredWager:
-			w.Logf("%d CarMeet ConfiguredGameOptionsForWagerRace value=%#x", addr.Port, r.bits(32))
+			value := r.bits(32)
+			if !w.admit(peer, mtype) {
+				continue
+			}
+			w.ShowdownConfigured(peer, value)
 		case mtype == bucketlist.MsgSync:
 			slot, challenge := bucketlist.S32(r.bits(32)), bucketlist.S32(r.bits(32))
 			if !w.admit(peer, mtype) {
@@ -746,6 +751,15 @@ loop:
 				continue
 			}
 			w.RequestLeaderChange(peer, kind, int(owner))
+		case mtype == netv2.MsgSetGroupSatNav:
+			if err := netv2.SkipKey(br, netv2.RouterBits[netv2.RouterLobby][0]); err != nil {
+				panic(err)
+			}
+			node := int32(uint32(r.bits(32)))
+			if !w.admit(peer, mtype) {
+				continue
+			}
+			w.SetGroupSatNav(peer, node)
 		case mtype == netv2.MsgDropLeadership:
 			if !w.admit(peer, mtype) {
 				continue

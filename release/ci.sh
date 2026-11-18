@@ -83,6 +83,8 @@ lane_unit() {
     run "shim garage rating guard" shim/tests/test_garage_rating.sh
     run "shim chat link wire" shim/tests/test_chat_link.sh
     run "shim online setup" shim/tests/test_online_setup.sh
+    run "shim contact forecast" shim/tests/test_contact_forecast.sh
+    run "shim copy path" shim/tests/test_copy_path.sh
 }
 
 pg_root=
