@@ -139,14 +139,18 @@ const (
 	SHCountdownType      = 2
 	SHCountdownTypeBits  = 2
 	SHCountdownStartRace = 2
-	SHRaceStartTime      = 9
-	SHNumLapsCompleted   = 10
-	SHFurthestProgress   = 11
+	// SessionHostSynced.CountdownEndTime (var 3, u32, network clock): a Showdown's staggered start counts each car's RollOffDelay from it
+	// (States::WaitForPlayerBucketRollOffDelay game+0x964dc0, read while CountdownType is StartRace).
+	SHCountdownEndTime = 3
+	SHRaceStartTime    = 9
+	SHNumLapsCompleted = 10
+	SHFurthestProgress = 11
 	// SessionHostSynced.GroupSatNavNode (var 12, SyncedInt<long, full range, 32>, default 0; ctor game+0x180ff70): the road node of the group
 	// route. Every game's SatNavComponent plans the group route to it each frame, 0 clears it (game+0xa52ce0).
 	SHGroupSatNavNode = 12
 
 	PlayerVarTeamID   = 90
+	PlayerVarBucketID = 91 // PlayerChoices.PlayerBucketId (3 bits, 0..7), registered right after TeamId [I: order]
 	PlayerVarIsLeader = 5
 	// What the car wears, in the player object [I: registration order of Nerd::PlayerData (BufChoices 0, HasLivery 1, IsNewLivery 2, docs/protocol.md)
 	// and of PlayerChoices from CarClass 81 (TeamId 90 is confirmed): PlayerBucketId 91, PittingProfile 92, LiveryId 93, TuneId 94, both 64 bits in

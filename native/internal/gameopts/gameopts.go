@@ -32,7 +32,37 @@ const (
 	// SoccerOptions 422, then EndRaceCounter (float, default -1): the seconds each game counts after the first finisher. The id is inferred from
 	// that order and the widths (3, 32, 32, 8, 32, 32); a Car Meet Showdown's options carry 32.0 there.
 	EndRaceCounterID = 423
+
+	// Player buckets: 8 SPlayerBucket structs of len(bucketWidths) vars from id 22. SPlayerBucket (ctor game+0x17f93a0) registers its name, then
+	// RollOffDelay (float seconds, +0x60), CanStartEndOfRaceCountdown, MinPlayers, MaxPlayers, STraits, CarRestrictionOptions: its car class and PI
+	// limits land on 30-32, the ids CarRule reads, which is what pins this layout (inferred from the widths, not read from a write).
+	FirstBucketID      = 22
+	BucketRollOffIndex = 1
+	NumBuckets         = 8
 )
+
+// BucketRollOffDelayID is the GameOptions id of player bucket b's RollOffDelay.
+func BucketRollOffDelayID(b int) int { return FirstBucketID + b*len(bucketWidths) + BucketRollOffIndex }
+
+// WithFloats is the options with the given float32 fields set (a merge, like a client's write).
+func WithFloats(o *Options, values map[int]float32) (*Options, error) {
+	delta := map[int]Field{}
+	for id, v := range values {
+		if id < 0 || id >= len(optionWidths) || optionWidths[id] != 32 {
+			return nil, bad("not a 32-bit GameOptions variable")
+		}
+		delta[id] = Field{Width: 32, Value: bits.FromUint64(uint64(math.Float32bits(v)))}
+	}
+	size, payload, err := EncodeFields(delta)
+	if err != nil {
+		return nil, err
+	}
+	size, payload, err = Merge(o, size, payload)
+	if err != nil {
+		return nil, err
+	}
+	return &Options{Size: size, Payload: payload}, nil
+}
 
 // EndRaceCounter is the options' end-of-race counter in seconds; ok=false when they leave it at its default (-1) or carry none.
 func EndRaceCounter(o *Options) (float64, bool, error) {

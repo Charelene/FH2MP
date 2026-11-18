@@ -1313,6 +1313,9 @@ func (w *World) MaybeBeginRace() {
 		order = append([]*Peer(nil), ev.People...)
 		shuffle(w.Rng, order)
 	}
+	if w.Carmeet {
+		w.showdownHeadStarts(order)
+	}
 	for _, q := range ev.People {
 		entries := make([]netv2.GridEntry, len(order))
 		for i, p := range order {
