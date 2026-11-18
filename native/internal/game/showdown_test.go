@@ -277,6 +277,76 @@ func TestShowdownAlongsideAFreeRoamInvite(t *testing.T) {
 	}
 }
 
+// consoleVarsMsg is a client's Console update (router 3, its own object 0): (var id 4 bits, value 1 bit) pairs.
+func consoleVarsMsg(seq uint64, pairs ...[2]uint64) []byte {
+	return cmMsg(func(w *bits.Writer) {
+		var body bits.Writer
+		for _, p := range pairs {
+			body.Bits(p[0], netv2.ConsoleVarIDBits)
+			body.Bits(p[1], 1)
+		}
+		w.Bits(netv2.MsgObjectUpdate, 7)
+		w.Bits(3, 4)
+		w.Bits(0, 1)
+		w.Bits(0, 1)
+		w.Bits(0, netv2.RouterBits[3][0])
+		w.Bits(seq, 8)
+		w.Bits(uint64(body.Pos), 14)
+		w.Raw(body.Value(), body.Pos)
+	})
+}
+
+// launchedShowdown runs a two-player Showdown up to message 28.
+func launchedShowdown(t *testing.T) (*stateRig, []*Peer) {
+	r, p := carMeetRig(t, 2)
+	r.w.Handle(cmInvite(0), p[0].Addr)
+	r.w.Handle(cmJoinMsg(0, 1), p[1].Addr)
+	r.advance(21, p...)
+	r.w.Handle(gameOptionsOwnershipRequest(), p[0].Addr)
+	size, payload, err := gameopts.EncodeFields(map[int]gameopts.Field{30: {Width: 8, Value: bits.FromUint64(255)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.w.GameOptions = &gameopts.Options{Size: size, Payload: payload}
+	r.w.Handle(cmConfigured(1), p[0].Addr)
+	if r.w.Event == nil {
+		t.Fatal("the Showdown did not start its event")
+	}
+	clearQueues(p...)
+	return r, p
+}
+
+// The Car Meet's race flow has no car select (car_meet.xml launch_wager_race), so the shim's cars-loaded wait is never held for one: on dev
+// 2026-11-18 the hold made both racers wait 19 s for each other's car select.
+func TestShowdownHasNoCarSelectHold(t *testing.T) {
+	r, p := launchedShowdown(t)
+	for _, q := range p {
+		if hold, _, _ := r.w.CarselAnswer(q); hold {
+			t.Fatalf("owner %d's cars-loaded wait is held in a Showdown", q.Owner)
+		}
+	}
+}
+
+// The Car Meet flow never sets HasLoadedCarsForAllParticipants: after the cars-loaded wait it clears HasGrid and waits for the route switch
+// (car_meet.xml car_loading_cutscene_for_wager_race; Free Roam sets the flag first, network_freeroam_states.xml:468). So HasGrid=0 after the
+// start is a Showdown racer's "loaded", and the grid goes out once both have sent it (dev 2026-11-18: no grid, load timeout after 30 s).
+func TestShowdownGridAfterHasGridCleared(t *testing.T) {
+	r, p := launchedShowdown(t)
+	r.w.Handle(consoleVarsMsg(5, [2]uint64{ConsoleVarHasGrid, 0}), p[0].Addr)
+	if typesQueued(p[0], netv2.MsgStartingGrid) != 0 {
+		t.Fatal("the grid went out before the second racer loaded")
+	}
+	r.w.Handle(consoleVarsMsg(5, [2]uint64{ConsoleVarHasGrid, 0}), p[1].Addr)
+	for _, q := range p {
+		if typesQueued(q, netv2.MsgStartingGrid) != 1 {
+			t.Fatalf("owner %d got %d StartingGrid, want 1", q.Owner, typesQueued(q, netv2.MsgStartingGrid))
+		}
+	}
+	if !r.logHas("all 2 participant(s) loaded cars -> starting grid") {
+		t.Errorf("no grid line in %q", r.log)
+	}
+}
+
 func containsPair(l [][2]uint64, id int, v uint64) bool {
 	for _, x := range l {
 		if x[0] == uint64(id) && x[1] == v {
