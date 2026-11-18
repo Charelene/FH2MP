@@ -591,8 +591,13 @@ func (w *World) SetRaceClock(startMs int64, why string) {
 	}
 	w.raceClock = [2]int64{kind, startMs}
 	w.raceProgress.done, w.raceProgress.frac = 0, 0
-	w.SendSessionHostVars([]shVar{{SHCountdownType, SHCountdownTypeBits, uint64(kind)}, {SHRaceStartTime, 32, uint64(startMs) & 0xFFFFFFFF},
-		{SHNumLapsCompleted, 8, 0}, {SHFurthestProgress, 32, 0}})
+	vars := []shVar{{SHCountdownType, SHCountdownTypeBits, uint64(kind)}, {SHRaceStartTime, 32, uint64(startMs) & 0xFFFFFFFF},
+		{SHNumLapsCompleted, 8, 0}, {SHFurthestProgress, 32, 0}}
+	if w.Carmeet {
+		// a Showdown's staggered start counts each car's RollOffDelay from CountdownEndTime (showdown.go showdownHeadStarts)
+		vars = append(vars, shVar{SHCountdownEndTime, 32, uint64(startMs) & 0xFFFFFFFF})
+	}
+	w.SendSessionHostVars(vars)
 	w.Logf("SessionHost CountdownType = %d, RaceStartTime = %d, NumLapsCompleted = 0, FurthestProgress = 0 sent to %s (%s)", kind, startMs, w.sessionHostAudience(), why)
 }
 
