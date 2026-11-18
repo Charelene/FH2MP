@@ -61,13 +61,15 @@ AZIMUTH_ARCHIVE = {"name": "azimuth-windows-1.0.4.zip", "url": MIRROR_BASE + "az
 _EO_WC_LANGS = ('BR', 'CHT', 'CZ', 'DE', 'EN', 'ES', 'FR', 'GB', 'HU', 'IT', 'JP', 'KO', 'MX', 'NL', 'PL', 'RU')    # Weather Control's page languages
 UPSTREAM = {
     # 2.9.0 (API 10, 2026-11-14): FH2Platform.Online's going_online, which the shim asks before it goes online (shim/src/online_gate.inc).
+    # 2.9.1 (API 11, 2026-11-18): page texts, the HUD canvas, driving-view pad layers, choice rows up to 100; nothing FH2MP uses yet, and no new
+    # game hook (the source diff v2.9.0...v2.9.1 adds no game address).
     # The zip also carries the SDK (include/, tools/, examples/); only the two loader DLLs and the licences are taken.
     "platform": {
-        "name": "FH2 Mod Platform", "author": "Trinculo54", "license": "MIT", "version": "2.9.0",
-        "url": "https://github.com/Trinculo54/fh2-mod-platform/releases/download/v2.9.0/FH2-Mod-Platform-v2.9.0.zip",
-        "mirror": MIRROR_BASE + "FH2-Mod-Platform-v2.9.0.zip",
-        "sha256": "1078c9629bb866af70092c934e6af12df31ca2dd6ecb99953ac6ee9e0bee819e", "size": 4103212,
-        "dll": "d3dcompiler_47.dll", "dllSha256": "fdb970d9f98329526eb7427ded89fb1504615db7cfd30735b833d9fdd1173f35",
+        "name": "FH2 Mod Platform", "author": "Trinculo54", "license": "MIT", "version": "2.9.1",
+        "url": "https://github.com/Trinculo54/fh2-mod-platform/releases/download/v2.9.1/FH2-Mod-Platform-v2.9.1.zip",
+        "mirror": MIRROR_BASE + "FH2-Mod-Platform-v2.9.1.zip",
+        "sha256": "cb939c014145af21e2338451378dbd49a8a46b43aa1abff7a2c2fa4cd8045889", "size": 4172500,
+        "dll": "d3dcompiler_47.dll", "dllSha256": "81eff0ec5219659b16599618002ad3e166d47072d5b59b5fb861dd33e71c9b83",
         "files": {"d3dcompiler_47.dll": "d3dcompiler_47.dll", "DWrite.dll": "DWrite.dll", "LICENSE.txt": "LICENSE-FH2ModPlatform.txt",
                   "LICENSE-MinHook.txt": "LICENSE-MinHook.txt"},
     },
@@ -165,29 +167,29 @@ UPSTREAM = {
     # Underglow, whose neon the other players see. Installed only when the player ticks them in Settings. Only each mod's DLL is taken: both
     # zips also carry a build of the FH2 Mod Platform (DWrite.dll), which stays the pinned one above.
     "nitroSystem": {
-        "name": "NitroSystem", "author": "qiangqiang101", "license": "MIT", "version": "2.0.0",
-        "url": "https://github.com/qiangqiang101/FH2-NitroSystem/releases/download/2.0.0/FnFNitro-2.0.0.zip",
-        "mirror": MIRROR_BASE + "FnFNitro-2.0.0.zip",
-        "sha256": "24ad49c4472387b61ec9ad638f8e4f0b5cfd7ceedf2fecb0948aa9e7fb5ea7af", "size": 2573107,
-        "dll": "FnFNitro-2.0.0/azimuth-windows/fh2-mods/FnFNitro.dll", "dllSha256": "a695c4a858e949001fab185db56e5f0365d14061dd3bcb6dfe0a5b3179c37325",
+        "name": "NitroSystem", "author": "qiangqiang101", "license": "MIT", "version": "2.0.1",
+        "url": "https://github.com/qiangqiang101/FH2-NitroSystem/releases/download/2.0.1/FnFNitro-2.0.1.zip",
+        "mirror": MIRROR_BASE + "FnFNitro-2.0.1.zip",
+        "sha256": "37f79a2bf50ca4a76b20496a1ef208ebebd226f1ffee9353f3f090e38e2dcd4b", "size": 3445475,
+        "dll": "FnFNitro-2.0.1/azimuth-windows/fh2-mods/FnFNitro.dll", "dllSha256": "89fd76102054e433a727803a152242cbb3fff9dd0db265a2d2bede7b28f6f93b",
         "files": {
-            "FnFNitro-2.0.0/azimuth-windows/fh2-mods/FnFNitro.dll": "fh2-mods/FnFNitro.dll",
+            "FnFNitro-2.0.1/azimuth-windows/fh2-mods/FnFNitro.dll": "fh2-mods/FnFNitro.dll",
         },
         "fileSha256": {
-            "fh2-mods/FnFNitro.dll": "a695c4a858e949001fab185db56e5f0365d14061dd3bcb6dfe0a5b3179c37325",
+            "fh2-mods/FnFNitro.dll": "89fd76102054e433a727803a152242cbb3fff9dd0db265a2d2bede7b28f6f93b",
         },
     },
     "underglow": {
-        "name": "Underglow", "author": "qiangqiang101", "license": "MIT", "version": "1.1.0",
-        "url": "https://github.com/qiangqiang101/FH2-Underglow/releases/download/1.1.0/Underglow-1.1.0.zip",
-        "mirror": MIRROR_BASE + "Underglow-1.1.0.zip",
-        "sha256": "085063290b3973efe7474ef4973b75f7d48f224bc6b97dd8c541fff413814a3d", "size": 1884126,
-        "dll": "fh2-mods/Underglow.dll", "dllSha256": "6c37dd4384b6e94007574c0f69631957a7a30a3da489d570c068ee13ee880faa",
+        "name": "Underglow", "author": "qiangqiang101", "license": "MIT", "version": "1.1.1",
+        "url": "https://github.com/qiangqiang101/FH2-Underglow/releases/download/1.1.1/Underglow-1.1.1.zip",
+        "mirror": MIRROR_BASE + "Underglow-1.1.1.zip",
+        "sha256": "c1757da52361d30dc7d159c366ec1aed9859e5813e9e5144c8566a817d9858c4", "size": 2773865,
+        "dll": "fh2-mods/Underglow.dll", "dllSha256": "8aa8ec70d862c3e8a63a75f89ba9d1e0974edd9558fc4798843452d1ae683176",
         "files": {
             "fh2-mods/Underglow.dll": "fh2-mods/Underglow.dll",
         },
         "fileSha256": {
-            "fh2-mods/Underglow.dll": "6c37dd4384b6e94007574c0f69631957a7a30a3da489d570c068ee13ee880faa",
+            "fh2-mods/Underglow.dll": "8aa8ec70d862c3e8a63a75f89ba9d1e0974edd9558fc4798843452d1ae683176",
         },
     },
 }
