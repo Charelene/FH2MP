@@ -1300,6 +1300,9 @@ func (w *World) MaybeBeginRace() {
 		la = strings.Join(loaded, " ")
 	}
 	w.Logf("all %d participant(s) loaded cars -> starting grid; loaded after %s", len(ev.People), la)
+	if w.Carmeet {
+		w.showdownGridOrder(ev)
+	}
 	var order []*Peer
 	for _, q := range ev.Order {
 		if ev.has(q) {
