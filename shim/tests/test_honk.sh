@@ -15,3 +15,8 @@ WINEPREFIX="$work/prefix" WINEDEBUG=-all wine "$work/test.exe" --vector > "$work
 [ "$(tr -d '\r\n' < "$work/vector")" = "$(tr -d '\r\n' < tests/vectors/honk_request.hex)" ] || { echo 'C request differs from the server wire format (tests/vectors/honk_request.hex)'; exit 1; }
 tr -d '\r' < tests/vectors/honk_reply.hex > "$work/reply"
 WINEPREFIX="$work/prefix" WINEDEBUG=-all wine "$work/test.exe" --reply "$work/reply"
+# horn v2 (HonkHonk 1.0.0 numbering): vectors written by the Go server's test (native/internal/game/honk_test.go TestHonkV2Vectors)
+WINEPREFIX="$work/prefix" WINEDEBUG=-all wine "$work/test.exe" --vector2 > "$work/vector2"
+[ "$(tr -d '\r\n' < "$work/vector2")" = "$(tr -d '\r\n' < tests/vectors/honk2_request.hex)" ] || { echo 'C v2 request differs from the server wire format (tests/vectors/honk2_request.hex)'; exit 1; }
+tr -d '\r' < tests/vectors/honk2_reply.hex > "$work/reply2"
+WINEPREFIX="$work/prefix" WINEDEBUG=-all wine "$work/test.exe" --reply2 "$work/reply2"
