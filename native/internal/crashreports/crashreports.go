@@ -48,10 +48,13 @@ var FieldKeys = []string{"date", "system", "gpu", "driver", "launcher", "azimuth
 // OptionalFieldKeys are fields newer launchers send; kept and shown only when not empty, so reports of older launchers read as before.
 // memory (launcher 1.4.1): what the memory watch saw of the crashed game, e.g. "game peak 12.3 GB of 15.6 GB RAM, system commit peak 99%
 // of 24.0 GB, free RAM low 0.1 GB" (crash family memory-growth-oom: Windows' commit limit, #91 / #468 / #477).
-var OptionalFieldKeys = []string{"memory"}
+// game and shim (Encore Launcher): the game that crashed when it is not Forza Horizon 2 ("Forza Horizon 3") and its multiplayer shim's
+// version; such a crash gets issues of its own (IssueKey).
+var OptionalFieldKeys = []string{"memory", "game", "shim"}
 
 var fieldLabels = map[string]string{"date": "Date", "system": "System", "gpu": "GPU", "driver": "Driver's version", "launcher": "Launcher version",
-	"azimuth": "Azimuth version", "extraOptions": "FH2 Extra Options version", "name": "Your FH2MP name", "memory": "Memory"}
+	"azimuth": "Azimuth version", "extraOptions": "FH2 Extra Options version", "name": "Your FH2MP name", "memory": "Memory", "game": "Game",
+	"shim": "Shim version"}
 
 // IssueLabels: not "bug": that label is for what players report themselves, so the two kinds can be told apart.
 var IssueLabels = []string{"crash-report"}
@@ -460,6 +463,20 @@ func Signature(line string) (string, string) {
 		return "stop:" + what + "@" + strings.ToLower(group(m, 2)), "Azimuth stop at " + group(m, 2) + ": " + what
 	}
 	return "", "Game crash (no failure line in azimuth.log)"
+}
+
+// IssueKey is Signature for the report's game: a crash of another game than Forza Horizon 2 (the "game" field Encore sends) never joins an
+// FH2 issue, even at the same exception and address, and its title names the game. A report without the field is Forza Horizon 2's.
+func IssueKey(r *Report, line string) (string, string) {
+	key, title := Signature(line)
+	game := r.field("game")
+	if game == "" || game == "Forza Horizon 2" {
+		return key, title
+	}
+	if key != "" {
+		key = strings.ToLower(game) + "|" + key
+	}
+	return key, game + ": " + title
 }
 
 // code is inline code that cannot break out of its table cell or ping anyone.
@@ -895,7 +912,7 @@ func (c *Reports) index() pyjson.Obj {
 // Publish comments on the open issue for this crash, or opens one. It never fails loudly: a failure is logged and the report stays on disk.
 // Returns the issue number (0 = none).
 func (c *Reports) Publish(rid string, r *Report, line string) int64 {
-	key, title := Signature(line)
+	key, title := IssueKey(r, line)
 	var number int64
 	err := func() error {
 		c.mu.Lock() // two players crashing at once must not open two issues
