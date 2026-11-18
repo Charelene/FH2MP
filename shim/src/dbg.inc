@@ -1545,8 +1545,10 @@ static DWORD WINAPI dbg_server(LPVOID unused)
         return 0;
     }
     if (f_opt) {
+        /* Exclusive, not SO_REUSEADDR: on Windows SO_REUSEADDR lets a second game bind the same port, and every connection then reaches
+         * the first one (2026-11-18, win1 and win2 both on 47001). Exclusive makes the second bind fail, so the loop takes the next port. */
         int one = 1;
-        f_opt(ls, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof one);
+        f_opt(ls, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char *)&one, sizeof one);
     }
     for (port = 47001; port < 47040; port++) {
         d_zero(&sa, sizeof sa);
