@@ -1567,9 +1567,13 @@ func (w *World) CheckRaceEnd(now float64) {
 			all = false
 		}
 	}
+	limit := RaceLastFinisherSecs
+	if w.Carmeet {
+		limit = w.showdownEndLimit(ev)
+	}
 	if all {
 		w.EndRace("everybody finished")
-	} else if have && now >= first+RaceLastFinisherSecs {
+	} else if have && now >= first+limit {
 		w.EndRace("time limit after the first finisher")
 	}
 }
