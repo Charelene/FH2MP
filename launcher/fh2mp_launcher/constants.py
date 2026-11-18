@@ -196,8 +196,10 @@ UPSTREAM = {
 # The Guide's achievement toast: the Xbox app's and Game Bar's sounds and pictures for it (Microsoft's files, mirrored on the FH2MP website
 # at the user's decision 2026-11-11), put into the Azimuth folder's data/bin/achievement-toast by name -> (SHA-256, size). The sounds are
 # wav (Windows plays those from memory); the pictures keep the app's names, which the Guide looks for.
+# v2/ (2026-11-18): the same set with the user's new regular sound (ach-sound-normal.wav, NotifyPopup in stereo), which the Guide plays in
+# its FH2MP and Xbox One styles; the first set stays where it was for the launchers that pin it. Encore pins the same (encore-fh2 pins.rs).
 ACH_TOAST = {
-    "base": MIRROR_BASE + "achievement-toast/",
+    "base": MIRROR_BASE + "achievement-toast/v2/",
     "dir": "data/bin/achievement-toast",
     "files": {
     "Aurora.png": ("7ac037f055f7c6affe74cf7bb8032250aff7ccaad5a4e41a71c236b4b8a699bc", 409851),
@@ -220,7 +222,7 @@ ACH_TOAST = {
     "TrophyOutro.png": ("d16f0ae4012514184e4f4db2d3bd944a5e608924b2f497da7a048f3f64fb71b5", 27084),
     "gleam.png": ("d89a2daacde9f789f9f939bb4af01446ec6e20c0d917c23ee055d037e7aba12f", 3811),
     "ach-sound-mythic.wav": ("a38be51bfd0ded8b5c6fc45ee852fca796f9735e4ac8b559df2e586edfb4e395", 2647360),
-    "ach-sound-normal.wav": ("4995fa48d56e62773d2b465f630f8754714e4382863d37c43228d3eb5ab93a97", 96388),
+    "ach-sound-normal.wav": ("0b5a724a2321e76b955cb693e6deb1ca3e0edb2fe52cd02cf7ef07bdffacea0e", 297400),
     "ach-sound-rare.wav": ("a751d4c56801951fb47b98a4d0c6ccc2b9ec9b8adbe1bbe54acd4a56c259ee7e", 2294656),
     },
 }
