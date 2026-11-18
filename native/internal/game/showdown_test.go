@@ -347,6 +347,56 @@ func TestShowdownGridAfterHasGridCleared(t *testing.T) {
 	}
 }
 
+// gridQueued decodes the StartingGrid queued for p into relay owners in slot order (p's own entry is local, written as p.Owner): type 7 bits,
+// lobby key 4, count 4, then per slot A 1, B 1, car id 7 and, for another player's car (B=1), its owner 8 bits.
+func gridQueued(p *Peer) []int {
+	for _, m := range p.Outbox {
+		if m.Type() != netv2.MsgStartingGrid {
+			continue
+		}
+		n := int(m.V.Field(11, 4))
+		var out []int
+		for o, i := 15, 0; i < n; i++ {
+			b := m.V.Field(o+1, 1)
+			o += 2 + netv2.CarKeyIDBits
+			if b == 1 {
+				out = append(out, int(m.V.Field(o, 8)))
+				o += 8
+			} else {
+				out = append(out, p.Owner)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// A Showdown's GameOptions keep GridOrderingType at its default, PI (EGridOrderingType 1, enum registration game+0x112800), and set Ascending
+// (var 402 = 1 in the starter's options on dev 2026-11-18): the slowest car takes pole, the game's only evening-out of a Showdown (its
+// FirstCarHeadStartMeters and PerCarRollOffDelay stay 0). The server orders the grid it sends that way instead of shuffling it.
+func TestShowdownGridByPIAscending(t *testing.T) {
+	r, p := launchedShowdown(t)
+	size, payload, err := gameopts.EncodeFields(map[int]gameopts.Field{30: {Width: 8, Value: bits.FromUint64(255)},
+		gameopts.GridAscendingID: {Width: 1, Value: bits.FromUint64(1)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.w.GameOptions = &gameopts.Options{Size: size, Payload: payload}
+	p[0].Choices = &Choices{HasClass: true, Class: 3, PI: 0.720} // the starter drives the faster car
+	p[1].Choices = &Choices{HasClass: true, Class: 1, PI: 0.526}
+	for _, q := range p {
+		r.w.Handle(consoleVarsMsg(5, [2]uint64{ConsoleVarHasGrid, 0}), q.Addr)
+	}
+	for _, q := range p {
+		if got := gridQueued(q); len(got) != 2 || got[0] != p[1].Owner || got[1] != p[0].Owner {
+			t.Fatalf("owner %d's grid %v, want the slower car (owner %d) on pole", q.Owner, got, p[1].Owner)
+		}
+	}
+	if !r.logHas("Showdown grid by PI, lowest first") {
+		t.Errorf("no grid order line in %q", r.log)
+	}
+}
+
 func containsPair(l [][2]uint64, id int, v uint64) bool {
 	for _, x := range l {
 		if x[0] == uint64(id) && x[1] == v {
