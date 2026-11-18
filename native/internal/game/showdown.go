@@ -318,6 +318,67 @@ func (w *World) showdownEndLimit(ev *Event) float64 {
 	return limit
 }
 
+// Showdown head starts. From the game: after the 3-2-1 a wager race (only a wager race, race_flow.xml wait_for_rolloff_delay) holds each car,
+// parking brake on and controls off, until SessionHost.CountdownEndTime plus the RollOffDelay of the player's bucket, and shows the seconds left
+// (States::WaitForPlayerBucketRollOffDelay game+0x964dc0; the waiting player sees the timer). The starter's options set 8 buckets and leave every
+// RollOffDelay at 0: the delays were the original server's to set, and its numbers are not in the game. Players remember "the lower the PI, the
+// more head start", a stock Fulvia "at least 20 s" ahead and up to "about a minute"; FH2MP gives ShowdownSecsPerPI seconds per PI point over
+// the slowest car (0.1 s by default: 200 PI = 20 s), capped at ShowdownMaxHeadStart. Our numbers, tunable.
+var (
+	ShowdownSecsPerPI    = envFloat("FH2MP_SHOWDOWN_SECS_PER_PI", 0.1)
+	ShowdownMaxHeadStart = envFloat("FH2MP_SHOWDOWN_MAX_HEAD_START", 90)
+)
+
+// showdownHeadStarts puts each racer of a Showdown in its own player bucket in grid order (bucket 0 = pole, the most head start) and gives the
+// faster ones a RollOffDelay by their PI over the slowest. A racer whose PI is not known gets no delay. More than 8 racers share the last bucket.
+func (w *World) showdownHeadStarts(order []*Peer) {
+	pi := func(q *Peer) float64 {
+		if q.Choices == nil || math.IsNaN(q.Choices.PI) {
+			return math.NaN()
+		}
+		return q.Choices.PI * 1000
+	}
+	slowest := math.Inf(1)
+	for _, q := range order {
+		if v := pi(q); !math.IsNaN(v) && v < slowest {
+			slowest = v
+		}
+	}
+	delays := map[int]float32{}
+	parts := make([]string, len(order))
+	for i, q := range order {
+		bucket := i
+		if bucket >= gameopts.NumBuckets {
+			bucket = gameopts.NumBuckets - 1
+		}
+		d := 0.0
+		if v := pi(q); !math.IsNaN(v) && !math.IsInf(slowest, 0) {
+			d = math.Min(math.Max(0, (v-slowest)*ShowdownSecsPerPI), ShowdownMaxHeadStart)
+		}
+		if _, set := delays[bucket]; !set {
+			delays[bucket] = float32(math.Round(d*10) / 10)
+		}
+		w.SendPlayerVar(q, PlayerVarBucketID, 3, uint64(bucket), true)
+		parts[i] = fmt.Sprintf("owner%d bucket %d waits %.1f s", q.Owner, bucket, delays[bucket])
+	}
+	ids := map[int]float32{}
+	for b, d := range delays {
+		ids[gameopts.BucketRollOffDelayID(b)] = d
+	}
+	opts, err := gameopts.WithFloats(w.GameOptions, ids)
+	if err != nil {
+		w.Warnf("Showdown head starts not set: the GameOptions cannot take the delays (%v); everybody starts at once", err)
+		return
+	}
+	w.GameOptions = opts
+	for _, q := range w.Peers.Values() {
+		if q.Connected {
+			w.SendGameOptions(q, nil)
+		}
+	}
+	w.Logf("Showdown head starts (%.2f s per PI point over the slowest, at most %.0f s): %s", ShowdownSecsPerPI, ShowdownMaxHeadStart, strings.Join(parts, ", "))
+}
+
 // showdownCallOff ends a Showdown that never raced and tells the meet's menus.
 func (w *World) showdownCallOff(why string) {
 	s := &w.Wager

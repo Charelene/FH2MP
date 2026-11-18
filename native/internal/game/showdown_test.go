@@ -423,6 +423,85 @@ func TestShowdownWaitsForTheGamesEndRaceCounter(t *testing.T) {
 	}
 }
 
+// playerVarsQueued lists (var id, value) of the server updates of p's own player object (router 1, key 1 1, id 7 bits, seq 8, size 14, then
+// var id 8 bits and the value) whose single var has the given width.
+func playerVarsQueued(p *Peer, width int) [][2]uint64 {
+	var out [][2]uint64
+	for _, m := range p.Outbox {
+		if m.Type() != netv2.MsgObjectUpdate || m.V.Field(7, 4) != 1 || m.V.Field(11, 1) != 1 || m.V.Field(12, 1) != 1 {
+			continue
+		}
+		if int(m.V.Field(28, 14)) != 8+width {
+			continue
+		}
+		out = append(out, [2]uint64{m.V.Field(42, 8), m.V.Field(50, width)})
+	}
+	return out
+}
+
+// The Showdown's staggered start, from the game: after the 3-2-1 a wager race (and only a wager race, race_flow.xml wait_for_rolloff_delay)
+// holds each car until SessionHost.CountdownEndTime plus the RollOffDelay of the player's bucket and shows the seconds left
+// (States::WaitForPlayerBucketRollOffDelay game+0x964dc0). So each racer gets its own bucket in grid order and the slower cars the head start;
+// the size of it is ours (FH2MP_SHOWDOWN_SECS_PER_PI, 0.1 s per PI point by default: the original server's numbers are not in the game).
+func TestShowdownHeadStartByPI(t *testing.T) {
+	r, p := launchedShowdown(t)
+	size, payload, err := gameopts.EncodeFields(map[int]gameopts.Field{30: {Width: 8, Value: bits.FromUint64(255)},
+		gameopts.GridAscendingID: {Width: 1, Value: bits.FromUint64(1)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.w.GameOptions = &gameopts.Options{Size: size, Payload: payload}
+	p[0].Choices = &Choices{HasClass: true, Class: 3, PI: 0.720}
+	p[1].Choices = &Choices{HasClass: true, Class: 1, PI: 0.526}
+	for _, q := range p {
+		r.w.Handle(consoleVarsMsg(5, [2]uint64{ConsoleVarHasGrid, 0}), q.Addr)
+	}
+	// buckets: the slower car (pole) bucket 0, the faster one bucket 1
+	for q, want := range map[*Peer]uint64{p[1]: 0, p[0]: 1} {
+		if !containsPair(playerVarsQueued(q, 3), PlayerVarBucketID, want) {
+			t.Errorf("owner %d: player bucket %v, want %d", q.Owner, playerVarsQueued(q, 3), want)
+		}
+	}
+	fs, err := gameopts.Fields(r.w.GameOptions.Size, r.w.GameOptions.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delay := func(bucket int) float64 {
+		f, ok := fs[gameopts.BucketRollOffDelayID(bucket)]
+		if !ok {
+			return 0
+		}
+		return float64(math.Float32frombits(uint32(f.Value.Uint64())))
+	}
+	if d0, d1 := delay(0), delay(1); d0 != 0 || math.Abs(d1-19.4) > 0.01 {
+		t.Fatalf("roll-off delays %.2f / %.2f s, want 0 for pole and 19.4 s for the car 194 PI faster", d0, d1)
+	}
+	// the race start carries CountdownEndTime (var 3), what the delays count from
+	clearQueues(p...)
+	r.w.GoRace("test")
+	found := false
+	for _, m := range p[0].Outbox {
+		if m.Type() == netv2.MsgObjectUpdate && m.V.Field(7, 4) == netv2.RouterLobby {
+			end := 37 + int(m.V.Field(23, 14))
+			for o := 37; o+4 <= end; {
+				id := int(m.V.Field(o, 4))
+				o += 4
+				width := map[int]int{SHCountdownType: SHCountdownTypeBits, SHRaceStartTime: 32, SHNumLapsCompleted: 8, SHFurthestProgress: 32, SHCountdownEndTime: 32, SHInRace: 1}[id]
+				if width == 0 {
+					break
+				}
+				if id == SHCountdownEndTime && m.V.Field(o, 32) == r.w.Event.GoMs {
+					found = true
+				}
+				o += width
+			}
+		}
+	}
+	if !found {
+		t.Error("the race start sent no CountdownEndTime equal to the start time")
+	}
+}
+
 func containsPair(l [][2]uint64, id int, v uint64) bool {
 	for _, x := range l {
 		if x[0] == uint64(id) && x[1] == v {
