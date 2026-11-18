@@ -197,6 +197,7 @@ type Event struct {
 	SelectEnteredAt      *float64
 	Held                 map[*Peer]bool
 	HoldLimitLogged      bool
+	EndLimitLogged       bool    // a Showdown's after-the-first-finisher limit was logged (showdown.go)
 	LoadRestart          float64 // load clocks restart here after a suspect was dropped
 	SuspectDropped       bool
 	GridAt, GridReportAt float64

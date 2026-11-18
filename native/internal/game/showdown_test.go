@@ -2,6 +2,7 @@ package game
 
 import (
 	"fmt"
+	"math"
 	"testing"
 
 	"fh2mp/internal/bits"
@@ -394,6 +395,31 @@ func TestShowdownGridByPIAscending(t *testing.T) {
 	}
 	if !r.logHas("Showdown grid by PI, lowest first") {
 		t.Errorf("no grid order line in %q", r.log)
+	}
+}
+
+// A Showdown's options set EndConditionOptions.EndRaceCounter (var 423) to 32 s: each racer's game counts that long after the first finisher
+// before it ends its own race. The server's own limit (30 s) ended the race 2 s before the game's countdown ran out (dev 2026-11-18 04:29:40):
+// in a Showdown the server waits for the game's counter plus a margin instead.
+func TestShowdownWaitsForTheGamesEndRaceCounter(t *testing.T) {
+	r, p := launchedShowdown(t)
+	size, payload, err := gameopts.EncodeFields(map[int]gameopts.Field{30: {Width: 8, Value: bits.FromUint64(255)},
+		gameopts.EndRaceCounterID: {Width: 32, Value: bits.FromUint64(uint64(math.Float32bits(32)))}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.w.GameOptions = &gameopts.Options{Size: size, Payload: payload}
+	r.w.GoRace("test")
+	ev := r.w.Event
+	first := r.w.Mono()
+	ev.Finished.Set(p[0], first)
+	r.w.CheckRaceEnd(first + 31)
+	if ev.Over {
+		t.Fatal("the race ended before the game's own 32 s end-of-race counter")
+	}
+	r.w.CheckRaceEnd(first + 32 + ShowdownEndCounterMarginSecs + 0.1)
+	if !ev.Over {
+		t.Fatal("the race did not end after the game's end-of-race counter")
 	}
 }
 
