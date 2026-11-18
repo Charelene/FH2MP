@@ -2173,14 +2173,14 @@ class OptionalModTests(unittest.TestCase):
         from fh2mp_launcher import upstream
         from fh2mp_launcher.constants import UPSTREAM
         nos = UPSTREAM["nitroSystem"]
-        self.assertTrue(nos["url"].startswith("https://github.com/qiangqiang101/FH2-NitroSystem/releases/download/2.0.0/"))
+        self.assertTrue(nos["url"].startswith("https://github.com/qiangqiang101/FH2-NitroSystem/releases/download/2.0.1/"))
         self.assertEqual(list(nos["files"].values()), ["fh2-mods/FnFNitro.dll"])
-        inner = "FnFNitro-2.0.0/azimuth-windows/"
+        inner = "FnFNitro-2.0.1/azimuth-windows/"
         data, pin = fake_release("nitroSystem", {inner + "fh2-mods/FnFNitro.dll": b"MZ-nos", inner + "DWrite.dll": b"MZ-platform",
-                                                 "FnFNitro-2.0.0/README.md": b"r"}, inner + "fh2-mods/FnFNitro.dll")
+                                                 "FnFNitro-2.0.1/README.md": b"r"}, inner + "fh2-mods/FnFNitro.dll")
         self.assertEqual(upstream.extract("nitroSystem", data, pin), {"fh2-mods/FnFNitro.dll": b"MZ-nos"})
         ug = UPSTREAM["underglow"]
-        self.assertTrue(ug["url"].startswith("https://github.com/qiangqiang101/FH2-Underglow/releases/download/1.1.0/"))
+        self.assertTrue(ug["url"].startswith("https://github.com/qiangqiang101/FH2-Underglow/releases/download/1.1.1/"))
         data, pin = fake_release("underglow", {"fh2-mods/Underglow.dll": b"MZ-ug", "DWrite.dll": b"MZ-platform"}, "fh2-mods/Underglow.dll")
         self.assertEqual(upstream.extract("underglow", data, pin), {"fh2-mods/Underglow.dll": b"MZ-ug"})
 
