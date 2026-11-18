@@ -1719,6 +1719,9 @@ static int patch_traffic_request_ownership(void)
     return plat_patch("trafficown: RequestOwnership on every collision", at, je, nop2, 2);
 }
 
+#include "copy_path_hook.inc"
+#include "contact_forecast_hook.inc"
+
 /*
  * "Connected to Xbox Live" menu gates. Live-only menu actions (Show Gamercard in a Car Meet's player actions, and the other
  * Live-gated entries) test the byte at CLobby+0xf0 (CLobby = TBasicSingleton at RVA 0x34d6348):
@@ -5810,6 +5813,8 @@ static DWORD WINAPI late_init(LPVOID unused)
                 patch_traffic_request_ownership();
             }
         }
+        patch_copy_path();
+        patch_contact_forecast();
     }
 #ifdef FH2MP_DEBUG_BUILD
     install_trace();
