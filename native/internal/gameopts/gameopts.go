@@ -20,7 +20,34 @@ const (
 	MaxLaps        = 10
 	MaxTimeID      = 420
 	MaxTimeLimit   = 86400.0
+
+	// StartingGridOptions (ctor game+0x17fbe90: StartType, GridOrderingType, Ascending, Distribute, GroupByBucket, InterleaveTeams, CarsPerUniverse,
+	// ClusterHumansAtIndex, FirstCarHeadStartMeters, PerCarRollOffDelay, SoccerKickoffRollOffDelay) are ids 400-410: inferred from their widths in
+	// optionWidths (2, 3, 1, 1, 1, 1, 8, 8, 32, 32, 32) right before EndConditionID and NumLapsID, and a Showdown's options carry 402 = 1.
+	GridOrderingTypeID = 401 // EGridOrderingType (game+0x112800): 0 None, 1 PI, 2 LobbyPoints, 3 HeatsPoints, 4 SeriesPoints, 5 Random, 6 AIDriverRank
+	GridAscendingID    = 402
+	GridOrderPI        = 1 // GridOrderingType's default
 )
+
+// GridOrder is the grid ordering of the options: (EGridOrderingType, Ascending), with the game's defaults (PI, false) for what they leave out.
+func GridOrder(o *Options) (uint64, bool, error) {
+	if o == nil {
+		return GridOrderPI, false, nil
+	}
+	fs, err := Fields(o.Size, o.Payload)
+	if err != nil {
+		return 0, false, err
+	}
+	kind := uint64(GridOrderPI)
+	if f, ok := fs[GridOrderingTypeID]; ok {
+		kind = f.Value.Uint64()
+	}
+	asc := false
+	if f, ok := fs[GridAscendingID]; ok {
+		asc = f.Value.Uint64() != 0
+	}
+	return kind, asc, nil
+}
 
 var bucketWidths = []int{
 	-24, 32, 1, 8, 8, 32, 32, 32, 8, 16, 16, 32, 32, 32, 32, 32, 32,

@@ -2,8 +2,12 @@ package game
 
 import (
 	"fmt"
+	"math"
+	"sort"
+	"strings"
 
 	"fh2mp/internal/capacity"
+	"fh2mp/internal/gameopts"
 	"fh2mp/internal/netv2"
 	"fh2mp/internal/omap"
 )
@@ -243,6 +247,51 @@ func (w *World) showdownCarsLoaded(peer *Peer, addr Addr) {
 	peer.ConsoleVars[ConsoleVarHasLoadedCars] = true
 	w.NoteLoaded(peer)
 	w.Logf("%d Showdown racer owner %d cleared HasGrid after its cars-loaded wait: counted as HasLoadedCarsForAllParticipants (the Car Meet flow sends no such flag)", addr.Port, peer.Owner)
+}
+
+// showdownGridOrder puts a Showdown's grid in the order its GameOptions ask for. The starter's game leaves GridOrderingType at its default, PI
+// (EGridOrderingType 1, game+0x112800), and sets Ascending, so the car with the lowest performance index takes pole: the only evening-out of
+// different classes the game's Showdown has (its FirstCarHeadStartMeters and PerCarRollOffDelay stay 0). The grid order comes from the server
+// (MsgStartingGrid); without this it was shuffled. A racer whose PI is not known goes after the known ones.
+func (w *World) showdownGridOrder(ev *Event) {
+	kind, asc, err := gameopts.GridOrder(w.GameOptions)
+	if err != nil {
+		w.Warnf("Showdown grid: the GameOptions cannot be read (%v); the grid order stays as it is", err)
+		return
+	}
+	if kind != gameopts.GridOrderPI {
+		w.Logf("Showdown grid: GridOrderingType %d is not PI; the grid order stays as it is", kind)
+		return
+	}
+	pi := func(q *Peer) float64 {
+		if q.Choices == nil || math.IsNaN(q.Choices.PI) {
+			return math.NaN()
+		}
+		return q.Choices.PI
+	}
+	order := append([]*Peer(nil), ev.People...)
+	sort.SliceStable(order, func(i, j int) bool {
+		a, b := pi(order[i]), pi(order[j])
+		switch {
+		case math.IsNaN(a):
+			return false
+		case math.IsNaN(b):
+			return true
+		case asc:
+			return a < b
+		}
+		return a > b
+	})
+	ev.Order = order
+	parts := make([]string, len(order))
+	for i, q := range order {
+		parts[i] = fmt.Sprintf("owner%d PI %.0f", q.Owner, pi(q)*1000)
+	}
+	dir := "highest"
+	if asc {
+		dir = "lowest"
+	}
+	w.Logf("Showdown grid by PI, %s first (GameOptions GridOrderingType PI, Ascending %s): %s", dir, pyBool(asc), strings.Join(parts, ", "))
 }
 
 // showdownCallOff ends a Showdown that never raced and tells the meet's menus.
