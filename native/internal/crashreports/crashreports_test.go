@@ -592,3 +592,32 @@ func TestOptionalMemoryField(t *testing.T) {
 		t.Fatal("a report without memory must read as before")
 	}
 }
+
+// Encore's Forza Horizon 3 reports carry the game and its shim; they keep them, and a crash at the same exception and address as one of
+// Forza Horizon 2's opens its own issue, named for the game. Reports without the field read and group as before.
+func TestAnotherGamesCrashHasIssuesOfItsOwn(t *testing.T) {
+	base := `{"v": 1, "fields": {"date": "2026-11-17 20:00 UTC"%s}, "files": {"azimuth.log": "x"}}`
+	fh3, err := parseReport(t, fmt.Sprintf(base, `, "game": "Forza Horizon 3", "shim": "24"`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fh2, err := parseReport(t, fmt.Sprintf(base, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fh3.field("game") != "Forza Horizon 3" || fh3.field("shim") != "24" || fh2.field("game") != "" {
+		t.Fatalf("fields: fh3 %v, fh2 %v", fh3.Fields, fh2.Fields)
+	}
+	line := "[+12.3] CRASHED exception 0xc0000005 at game+0x125d9e8"
+	k2, t2 := IssueKey(fh2, line)
+	k3, t3 := IssueKey(fh3, line)
+	if k2b, t2b := Signature(line); k2 != k2b || t2 != t2b {
+		t.Fatalf("an FH2 report groups as before: %q %q", k2, t2)
+	}
+	if k3 == k2 || !strings.HasPrefix(t3, "Forza Horizon 3: ") {
+		t.Fatalf("the FH3 crash joined the FH2 issue: %q %q", k3, t3)
+	}
+	if !strings.Contains(CommentBody("0123456789abcdef", fh3, LinkBase), "| Game | `Forza Horizon 3` |") {
+		t.Fatal("the comment names the game")
+	}
+}
