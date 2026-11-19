@@ -93,6 +93,7 @@ type tconn struct {
 	done    chan struct{} // closed by tunnelClose; the writer goroutine leaves on it, so out is never closed under a sender
 	pending atomic.Int64
 	dead    atomic.Bool // set by tunnelClose on the hub goroutine, read by send on the workers
+	side    atomic.Bool // a signed side-channel request came over it (KeepSide): kept without a game connection of its own
 	why     string
 	rx      int
 	dropped atomic.Int64
@@ -112,6 +113,16 @@ func (t *tunnel) has(a game.Addr) bool {
 
 // HasConn implements game.TunnelHost.
 func (t *tunnel) HasConn(a game.Addr) bool { return t.has(a) }
+
+// KeepSide implements game.SideKeeper: the connection at a carries a player's signed side-channel traffic (the shim's horn socket and the like).
+func (t *tunnel) KeepSide(a game.Addr) {
+	t.mu.RLock()
+	c := t.conns[a]
+	t.mu.RUnlock()
+	if c != nil {
+		c.side.Store(true)
+	}
+}
 
 func (t *tunnel) send(data []byte, a game.Addr) bool {
 	t.mu.RLock()
@@ -455,8 +466,8 @@ func (s *Server) tunnelSweep(now float64) {
 		switch {
 		case now-c.lastRx > idleSeconds:
 			s.tunnelClose(c, fmt.Sprintf("silent for %.0f s (limit %g, the proxy sends a keep-alive every 15 s)", now-c.lastRx, idleSeconds))
-		case now-c.born > helloSeconds && !s.opened(c.addr):
-			s.tunnelClose(c, fmt.Sprintf("no game connection opened within %g s (the first datagrams were rejected, or none came)", helloSeconds))
+		case now-c.born > helloSeconds && !s.opened(c.addr) && !c.side.Load():
+			s.tunnelClose(c, fmt.Sprintf("no game connection opened and no signed side-channel request within %g s (the first datagrams were rejected, or none came)", helloSeconds))
 		}
 	}
 }

@@ -137,6 +137,11 @@ type TunnelHost interface {
 	HasConn(addr Addr) bool
 }
 
+// SideKeeper is a TCP carrier that keeps a connection carrying a player's signed side-channel traffic, although no game connection is opened on it.
+type SideKeeper interface {
+	KeepSide(addr Addr)
+}
+
 // NewHub opens the hub: the idle world, the flag file, the start-up checks.
 func NewHub(cfg HubConfig) (*Hub, error) {
 	if err := ValidatePolicies(); err != nil {
