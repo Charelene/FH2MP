@@ -583,6 +583,9 @@ func FileLinks(rid string, r *Report, linkBase string) string {
 // IssueBody is the text of a new issue.
 func IssueBody(rid string, r *Report, line, linkBase string) string {
 	head := "This issue was created automatically by launcher's crash reporter.\n\n" + SummaryTable(rid, r, line)
+	if s := DumpSummary(reportDump(r)); s != "" {
+		head += "\n" + s + "\n"
+	}
 	var blocks []string
 	for _, b := range []string{tailBlock("FH2 Mod Platform crash report", Redact(r.file("mod-crash.txt")), 80, 8_000), tailBlock("azimuth.log, last 40 lines", Redact(r.file("azimuth.log")), 40, 10_000)} {
 		if b != "" {
@@ -608,7 +611,11 @@ func CommentBody(rid string, r *Report, linkBase string) string {
 			b.WriteString("| " + fieldLabels[k] + " | " + code(Redact(f)) + " |\n")
 		}
 	}
-	b.WriteString("| Report id | `" + rid + "` |\n\n" + FileLinks(rid, r, linkBase))
+	b.WriteString("| Report id | `" + rid + "` |\n\n")
+	if s := DumpSummary(reportDump(r)); s != "" {
+		b.WriteString(s + "\n\n")
+	}
+	b.WriteString(FileLinks(rid, r, linkBase))
 	return b.String()
 }
 
