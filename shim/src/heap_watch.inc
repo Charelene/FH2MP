@@ -155,10 +155,24 @@ static int heap_watch_skipped(unsigned long long a)
     return 0;
 }
 
+/* 1 when this thread holds the loader lock (x64: the PEB at TEB+0x60, its LoaderLock at PEB+0x110, on Windows and Wine): a stack walk looks up unwind
+ * data, which the loader may be changing under that lock, so such an allocation is counted without a caller (0) instead. */
+static int heap_watch_in_loader(void)
+{
+    char *peb = *(char **)((char *)NtCurrentTeb() + 0x60);
+    PRTL_CRITICAL_SECTION lock = peb ? *(PRTL_CRITICAL_SECTION *)(peb + 0x110) : NULL;
+    return lock && (DWORD)(ULONG_PTR)lock->OwningThread == GetCurrentThreadId();
+}
+
 static unsigned long long heap_watch_caller(void)
 {
     void *frames[24];
-    USHORT n = RtlCaptureStackBackTrace(2, 24, frames, NULL), i;
+    USHORT n, i;
+
+    if (heap_watch_in_loader()) {
+        return 0;
+    }
+    n = RtlCaptureStackBackTrace(2, 24, frames, NULL);
 
     for (i = 0; i < n; i++) {
         unsigned long long a = (unsigned long long)(ULONG_PTR)frames[i];

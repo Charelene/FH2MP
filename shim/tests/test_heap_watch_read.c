@@ -112,6 +112,22 @@ int main(void)
         CHECK(strstr(held, " 20 MB (5), test.exe+0x") != NULL);          /* keep_from_here's five first, then main's grown block */
         CHECK(strstr(held, " 8 MB (1)") != NULL);
     }
+    /* the loader lock check reads the real lock: off here, on while ntdll's LdrLockLoaderLock holds it */
+    {
+        typedef LONG (NTAPI *lock_fn)(ULONG, PULONG, PULONG_PTR);
+        typedef LONG (NTAPI *unlock_fn)(ULONG, ULONG_PTR);
+        lock_fn lock = (lock_fn)(void *)GetProcAddress(ntdll, "LdrLockLoaderLock");
+        unlock_fn unlock = (unlock_fn)(void *)GetProcAddress(ntdll, "LdrUnlockLoaderLock");
+        ULONG_PTR cookie = 0;
+        CHECK(!heap_watch_in_loader());
+        CHECK(lock && unlock);
+        if (lock && unlock && lock(0, NULL, &cookie) >= 0) {
+            CHECK(heap_watch_in_loader());
+            CHECK(heap_watch_caller() == 0);
+            unlock(0, cookie);
+        }
+        CHECK(!heap_watch_in_loader());
+    }
     for (i = 5; i < BLOCKS; i++) HeapFree(GetProcessHeap(), 0, g_blocks[i]);
     HeapFree(GetProcessHeap(), 0, grown);
     if (!g_failed) {
