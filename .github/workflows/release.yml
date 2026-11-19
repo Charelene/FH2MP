@@ -2,7 +2,7 @@ name: release
 
 # Push a tag like v1.0.0 (it must equal shim/VERSION and launcher/fh2mp_launcher/version.py) to build everything and publish a GitHub release:
 # the shim, the launcher for Windows (installer + portable zip) and Linux (.deb + AppImage), and the signed manifest the launcher updates from.
-# A hotfix tag (release/versions.py: a patch of the same X.Y line where only one version file equals the tag) builds that component only; the
+# A hotfix tag (release/versions.sh: a patch of the same X.Y line where only one version file equals the tag) builds that component only; the
 # other one's signed manifest entry and files are copied from the release of its version, so the new release holds every file it names.
 # Secrets: RELEASE_SIGNING_KEY = base64 Ed25519 seed from release/keygen.py (its public half is in launcher/fh2mp_launcher/constants.py).
 on:
@@ -26,13 +26,11 @@ jobs:
       kind: ${{ steps.versions.outputs.kind }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with: { python-version: "3.12" }
       - name: versions agree with the tag
         id: versions
         run: |
           if [ "${GITHUB_EVENT_NAME}" = "push" ]; then set -- --tag "$GITHUB_REF_NAME"; else set --; fi
-          python3 -I release/versions.py "$@" --github-output "$GITHUB_OUTPUT"
+          release/versions.sh "$@" --github-output "$GITHUB_OUTPUT"
       # The same checks and image as ci.yml (release/ci.sh); publish.sh only tags commits whose ci.yml run passed, so this is the last word,
       # not the first.
       - uses: ./.github/actions/ci-image

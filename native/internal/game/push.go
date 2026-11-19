@@ -97,6 +97,11 @@ func (w *World) TrackPush(peer *Peer, rest bits.Int, pos [3]float64, stamp uint6
 	if len(st.samples) > pushSampleKeep {
 		st.samples = append(st.samples[:0], st.samples[len(st.samples)-pushSampleKeep:]...)
 	}
+	if w.nosBurningRecently(peer) {
+		// NitroSystem's NOS where it is allowed (online Free Roam, modsync.go): a push the player is entitled to, not read
+		st.coastS, st.powerS = 0, 0
+		return
+	}
 	// the newest window of at least PushWindowS
 	first := -1
 	for i := len(st.samples) - 2; i >= 0; i-- {

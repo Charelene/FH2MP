@@ -20,6 +20,7 @@ import (
 	"fh2mp/internal/auth"
 	"fh2mp/internal/db"
 	"fh2mp/internal/diag"
+	"fh2mp/internal/ghost"
 	"fh2mp/internal/pyjson"
 	"fh2mp/internal/rivals"
 	"fh2mp/internal/scoreboard"
@@ -271,6 +272,134 @@ func (o *Ops) nickname(hexXuid string) string {
 	return name
 }
 
+// flagsList is the game server's cheater pool with gamertags: {"flagged": [{xuid, gamertag, reason, until}]}.
+func (o *Ops) flagsList() pyjson.Obj {
+	result := o.C.Xbl.HubFlags()
+	if result == nil {
+		panic(opsErr(503, "unavailable", "the game server did not answer").with("flags query got no answer"))
+	}
+	fv, _ := result.Get("flagged")
+	out := []any{}
+	for _, f := range anyList(fv) {
+		fo, _ := f.(pyjson.Obj)
+		xv, _ := fo.Get("xuid")
+		rv, _ := fo.Get("reason")
+		uv, _ := fo.Get("until")
+		xs := pyjson.PyStr(xv)
+		x, _ := strconv.ParseInt(xs, 16, 64)
+		out = append(out, pyjson.Obj{{K: "xuid", V: x}, {K: "gamertag", V: o.nickname(xs)}, {K: "reason", V: rv}, {K: "until", V: uv}})
+	}
+	return pyjson.Obj{{K: "flagged", V: out}}
+}
+
+// unflag releases a player from the cheater pool and answers with whether the game server still lists them afterwards.
+func (o *Ops) unflag(decimalXuid string) pyjson.Obj {
+	x, err := strconv.ParseInt(decimalXuid, 10, 64)
+	if err != nil || x <= 0 {
+		panic(opsErr(400, "bad_xuid", "that is not a player id"))
+	}
+	if o.C.Xbl.HubFlags() == nil {
+		panic(opsErr(503, "unavailable", "the game server did not answer").with("flags query got no answer"))
+	}
+	o.C.Xbl.HubUnflag(x)
+	time.Sleep(150 * time.Millisecond) // the control datagram and the query travel on separate sockets
+	still := false
+	if result := o.C.Xbl.HubFlags(); result != nil {
+		fv, _ := result.Get("flagged")
+		for _, f := range anyList(fv) {
+			fo, _ := f.(pyjson.Obj)
+			xv, _ := fo.Get("xuid")
+			if v, err := strconv.ParseInt(pyjson.PyStr(xv), 16, 64); err == nil && v == x {
+				still = true
+			}
+		}
+	}
+	opsLog.Info(fmt.Sprintf("operator released %#x from the cheater pool (still flagged afterwards: %v)", x, still))
+	return pyjson.Obj{{K: "ok", V: !still}, {K: "xuid", V: x}}
+}
+
+// trustedList is the game server's trusted players with gamertags: {"trusted": [{xuid, gamertag, since}]}.
+func (o *Ops) trustedList() pyjson.Obj {
+	result := o.C.Xbl.HubTrusted()
+	if result == nil {
+		panic(opsErr(503, "unavailable", "the game server did not answer").with("trusted query got no answer"))
+	}
+	tv, _ := result.Get("trusted")
+	out := []any{}
+	for _, t := range anyList(tv) {
+		to, _ := t.(pyjson.Obj)
+		xv, _ := to.Get("xuid")
+		sv, _ := to.Get("since")
+		xs := pyjson.PyStr(xv)
+		x, _ := strconv.ParseInt(xs, 16, 64)
+		out = append(out, pyjson.Obj{{K: "xuid", V: x}, {K: "gamertag", V: o.nickname(xs)}, {K: "since", V: sv}})
+	}
+	return pyjson.Obj{{K: "trusted", V: out}}
+}
+
+// trustTarget reads {"xuid": n} or {"gamertag": "name"} (any case; the players table, most recently seen first).
+func (o *Ops) trustTarget(body pyjson.Obj) int64 {
+	if v, ok := body.Get("xuid"); ok {
+		var x int64
+		switch n := v.(type) {
+		case int64:
+			x = n
+		case float64:
+			x = int64(n)
+		case string:
+			x, _ = strconv.ParseInt(n, 10, 64)
+		}
+		if x <= 0 {
+			panic(opsErr(400, "bad_xuid", "that is not a player id"))
+		}
+		return x
+	}
+	gv, _ := body.Get("gamertag")
+	tag, _ := gv.(string)
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		panic(opsErr(400, "bad_request", "send xuid or gamertag"))
+	}
+	rows := must(o.C.DB.Query("SELECT xuid FROM players WHERE LOWER(gamertag) = LOWER(?) ORDER BY last_seen DESC LIMIT 3", tag))
+	switch len(rows) {
+	case 0:
+		panic(opsErr(404, "unknown_player", "no player has that gamertag"))
+	case 1:
+		return rows[0].Int("xuid")
+	}
+	panic(opsErr(409, "ambiguous_gamertag", "more than one player has that gamertag: send the xuid"))
+}
+
+// trust adds a player to the trusted list (on) or takes them off it, and answers with whether the game server lists them afterwards.
+func (o *Ops) trust(x int64, on bool) pyjson.Obj {
+	if o.C.Xbl.HubTrusted() == nil {
+		panic(opsErr(503, "unavailable", "the game server did not answer").with("trusted query got no answer"))
+	}
+	if on {
+		o.C.Xbl.HubTrust(x)
+	} else {
+		o.C.Xbl.HubUntrust(x)
+	}
+	time.Sleep(150 * time.Millisecond) // the control datagram and the query travel on separate sockets
+	listed := false
+	if result := o.C.Xbl.HubTrusted(); result != nil {
+		tv, _ := result.Get("trusted")
+		for _, t := range anyList(tv) {
+			to, _ := t.(pyjson.Obj)
+			xv, _ := to.Get("xuid")
+			if v, err := strconv.ParseInt(pyjson.PyStr(xv), 16, 64); err == nil && v == x {
+				listed = true
+			}
+		}
+	}
+	verb := "trusted"
+	if !on {
+		verb = "untrusted"
+	}
+	opsLog.Info(fmt.Sprintf("operator %s %#x (on the trusted list afterwards: %v)", verb, x, listed))
+	return pyjson.Obj{{K: "ok", V: listed == on}, {K: "xuid", V: x}, {K: "gamertag", V: o.nickname(fmt.Sprintf("%x", x))}, {K: "trusted", V: listed}}
+}
+
 func must[T any](v T, err error) T {
 	if err != nil {
 		panic(err)
@@ -306,9 +435,13 @@ func (o *Ops) route(r *Req, method, path string, body []byte) (int, any, *Downlo
 		mustOK(err)
 		return 200, nil, &Download{Data: data, Name: rest[1], ContentType: crashContentType(rest[1])}
 	}
+	if what == "runs" && len(rest) == 2 && rest[1] == "ghost" && isDigits(rest[0]) && method == "GET" {
+		sid, _ := strconv.ParseInt(rest[0], 10, 64)
+		return 200, o.runGhost(sid), nil
+	}
 	if what == "reports" {
 		if len(rest) == 0 && method == "GET" {
-			return 200, o.reportsQueue(int(qInt(q, "limit", 50, 1, 100)), qInt(q, "offset", 0, 0, 1e9)), nil
+			return 200, o.reportsQueue(q.Get("view"), q.Get("by"), int(qInt(q, "limit", 50, 1, 100)), qInt(q, "offset", 0, 0, 1e9)), nil
 		}
 		if len(rest) > 0 && isDigits(rest[0]) {
 			sid, _ := strconv.ParseInt(rest[0], 10, 64)
@@ -347,6 +480,29 @@ func (o *Ops) route(r *Req, method, path string, body []byte) (int, any, *Downlo
 		}
 		return 200, result, nil
 	}
+	if what == "flags" {
+		if len(rest) == 0 && method == "GET" {
+			return 200, o.flagsList(), nil
+		}
+		if len(rest) == 2 && rest[1] == "unflag" && method == "POST" && isDigits(rest[0]) {
+			return 200, o.unflag(rest[0]), nil
+		}
+	}
+	if what == "trusted" {
+		if len(rest) == 0 && method == "GET" {
+			return 200, o.trustedList(), nil
+		}
+		if len(rest) == 0 && method == "POST" {
+			return 200, o.trust(o.trustTarget(opsJSON(body)), true), nil
+		}
+		if len(rest) == 1 && isDigits(rest[0]) && (method == "POST" || method == "DELETE") {
+			x, err := strconv.ParseInt(rest[0], 10, 64)
+			if err != nil || x <= 0 {
+				panic(opsErr(400, "bad_xuid", "that is not a player id"))
+			}
+			return 200, o.trust(x, method == "POST"), nil
+		}
+	}
 	if what == "positions" && len(rest) == 0 && method == "GET" {
 		result := c.Xbl.HubPositions()
 		if result == nil {
@@ -379,6 +535,19 @@ func (o *Ops) route(r *Req, method, path string, body []byte) (int, any, *Downlo
 	}
 	if what == "online" && method == "GET" {
 		return 200, pyjson.Obj{{K: "players", V: o.online()}}, nil
+	}
+	if what == "rivals" && method == "GET" {
+		if len(rest) == 1 && rest[0] == "events" {
+			return 200, o.rivalsEvents(), nil
+		}
+		if len(rest) == 3 && rest[0] == "events" && rest[2] == "runs" && isDigits(rest[1]) {
+			eid, _ := strconv.ParseInt(rest[1], 10, 64)
+			return 200, o.rivalsRuns(eid), nil
+		}
+		if len(rest) == 3 && rest[0] == "events" && rest[2] == "review" && isDigits(rest[1]) {
+			eid, _ := strconv.ParseInt(rest[1], 10, 64)
+			return 200, o.rivalsReview(eid), nil
+		}
 	}
 	if what == "challenges" && method == "GET" {
 		return 200, o.challenges(int(qInt(q, "top", 3, 0, 25))), nil
@@ -1455,49 +1624,106 @@ func (*reportDup) Error() string { return "duplicate report" }
 
 var reportsLog = diag.Get("reports")
 
-// reportsQueue lists reported runs, runs hidden by a person or a verdict, and runs a verdict flagged. A run still waiting for its ghost is not a decision.
-func (o *Ops) reportsQueue(limit int, offset int64) pyjson.Obj {
+func round3(v float64) float64 { return math.Round(v*1000) / 1000 }
+
+// runGhost decodes a run's stored ghost second by second for the admin panel's replay page (read only, any run that has a ghost, hidden or not).
+func (o *Ops) runGhost(id int64) pyjson.Obj {
 	c := o.C
-	rows := must(c.DB.Query(fmt.Sprintf(`SELECT s.*, COALESCE(p.gamertag, '') AS tag, %s AS report_count,
-        (SELECT hidden_at FROM hidden_scores hs WHERE hs.submission_id = s.id AND hs.source <> 'pending') AS hidden_at,
+	row := must(c.DB.One(`SELECT s.*, COALESCE(p.gamertag, '') AS tag, g.data AS blob,
         (SELECT hs.source FROM hidden_scores hs WHERE hs.submission_id = s.id) AS hidden_by,
-        v.verdict, v.reasons
-        FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid LEFT JOIN score_verdicts v ON v.submission_id = s.id
-        WHERE EXISTS (SELECT 1 FROM score_reports sr WHERE sr.submission_id = s.id AND sr.dismissed = 0)
-        OR EXISTS (SELECT 1 FROM hidden_scores hs WHERE hs.submission_id = s.id AND hs.source <> 'pending')
-        OR (v.verdict = 'flag' AND v.reviewed = 0)
-        ORDER BY report_count DESC, s.id DESC LIMIT ? OFFSET ?`, scorereports.Counts), limit+1, offset))
-	names := must(c.Riv.Names()).Car
-	out := []any{}
-	for i := range rows {
-		if i >= limit {
-			break
-		}
-		r := &rows[i]
-		unit := "m/s"
-		if r.Int("st") == 1 {
-			unit = "s"
-		}
-		cls := r.Int("cls")
-		clsText := strconv.FormatInt(cls, 10)
-		if cls >= 0 && int(cls) < len(rivals.ClassLetters) {
-			clsText = rivals.ClassLetters[cls]
-		}
-		hidden := r.Any("hidden_at") != nil
-		var hiddenBy any
-		if hidden {
-			hiddenBy = r.Any("hidden_by")
-		}
-		reasons := any([]any{})
-		if rs := r.Str("reasons"); rs != "" {
-			reasons = must(pyjson.Parse(rs))
-		}
-		out = append(out, pyjson.Obj{{K: "submissionId", V: r.Int("id")}, {K: "gamertag", V: o.gamertag(r.Str("tag"), r.Int("xuid"))}, {K: "xuid", V: r.Int("xuid")},
-			{K: "score", V: r.Float("score")}, {K: "unit", V: unit}, {K: "car", V: names[r.Int("car")]}, {K: "class", V: clsText}, {K: "boardType", V: r.Int("sb")},
-			{K: "track", V: r.Int("track")}, {K: "event", V: r.Int("gsid")}, {K: "at", V: int64(r.Float("submitted"))}, {K: "reports", V: r.Int("report_count")},
-			{K: "hidden", V: hidden}, {K: "hiddenBy", V: hiddenBy}, {K: "verdict", V: r.Any("verdict")}, {K: "reasons", V: reasons}})
+        v.verdict, v.reasons, v.measurements
+        FROM score_submissions s LEFT JOIN players p ON p.xuid = s.xuid LEFT JOIN score_ghosts g ON g.submission_id = s.id
+        LEFT JOIN score_verdicts v ON v.submission_id = s.id WHERE s.id = ?`, id))
+	if row == nil {
+		panic(opsErr(404, "not_found", "unknown run"))
 	}
-	return pyjson.Obj{{K: "entries", V: out}, {K: "hasNext", V: len(rows) > limit}}
+	blob := row.Bytes("blob")
+	if len(blob) == 0 {
+		panic(opsErr(404, "no_ghost", "this run has no ghost"))
+	}
+	g, err := ghost.Parse(blob)
+	if err != nil {
+		panic(opsErr(422, "bad_ghost", err.Error()))
+	}
+	series := ghost.Series(g)
+	n := len(series)
+	cols := map[string][]any{}
+	for _, k := range []string{"t", "x", "z", "speed", "accel", "power", "climb", "gear", "rpm", "steer", "jump"} {
+		cols[k] = make([]any, 0, n)
+	}
+	for _, s := range series {
+		add := func(k string, v any) { cols[k] = append(cols[k], v) }
+		add("t", round3(s.T))
+		add("x", round3(s.X))
+		add("z", round3(s.Z))
+		add("speed", round3(s.Speed))
+		if s.Counted {
+			add("accel", round3(s.Accel))
+			add("power", round3(s.Power))
+		} else {
+			add("accel", nil)
+			add("power", nil)
+		}
+		add("climb", round3(s.Climb))
+		add("gear", s.Gear)
+		add("rpm", round3(s.Rpm))
+		add("steer", round3(s.Steer))
+		add("jump", s.Jump)
+	}
+	samples := pyjson.Obj{}
+	for _, k := range []string{"t", "x", "z", "speed", "accel", "power", "climb", "gear", "rpm", "steer", "jump"} {
+		samples = append(samples, pyjson.Pair{K: k, V: cols[k]})
+	}
+	dist := []any{}
+	for _, d := range distances(series) {
+		dist = append(dist, math.Round(d*10)/10)
+	}
+	samples = append(samples, pyjson.Pair{K: "d", V: dist})
+	reasons := any([]any{})
+	if rs := row.Str("reasons"); rs != "" {
+		reasons = must(pyjson.Parse(rs))
+	}
+	var measures any
+	if ms := row.Str("measurements"); ms != "" {
+		measures = must(pyjson.Parse(ms))
+	}
+	hits := make([]any, len(g.Collision))
+	for i, t := range g.Collision {
+		hits[i] = round3(t)
+	}
+	names := must(c.Riv.Names())
+	others := []any{}
+	for _, r := range must(c.DB.Query(`SELECT s.id, s.score, s.car, s.submitted, v.verdict,
+        CASE WHEN EXISTS (SELECT 1 FROM hidden_scores hs WHERE hs.submission_id = s.id AND hs.source <> 'pending') THEN 1 ELSE 0 END AS hidden
+        FROM score_submissions s JOIN score_ghosts g ON g.submission_id = s.id LEFT JOIN score_verdicts v ON v.submission_id = s.id
+        WHERE s.xuid = ? AND s.sb = ? AND s.st = ? AND s.gsid = ? AND s.track = ? AND s.id <> ? ORDER BY s.submitted DESC LIMIT 40`,
+		row.Int("xuid"), row.Int("sb"), row.Int("st"), row.Int("gsid"), row.Int("track"), id)) {
+		others = append(others, pyjson.Obj{{K: "submissionId", V: r.Int("id")}, {K: "score", V: r.Float("score")}, {K: "car", V: names.Car[r.Int("car")]},
+			{K: "at", V: int64(r.Float("submitted"))}, {K: "verdict", V: r.Any("verdict")}, {K: "hidden", V: r.Int("hidden") != 0}})
+	}
+	var hiddenBy any
+	if hb := row.Str("hidden_by"); hb != "" {
+		hiddenBy = hb
+	}
+	// the review's own words for the run: its board by name, why it is in the queue, the checker's reasons in plain units
+	board := boardLabel(row.Int("sb"), row.Int("st"), row.Int("track"), row.Int("gsid"), "", names)
+	source, why, hiddenKind := any(""), any([]any{}), any(nil)
+	if rr := o.reviewOne(id); rr != nil {
+		rv := o.reviewRow(rr, names)
+		b, _ := rv.Get("board")
+		board, _ = b.(string)
+		source, _ = rv.Get("source")
+		why, _ = rv.Get("why")
+		hiddenKind, _ = rv.Get("hiddenKind")
+	}
+	return pyjson.Obj{{K: "submissionId", V: id}, {K: "gamertag", V: o.gamertag(row.Str("tag"), row.Int("xuid"))}, {K: "xuid", V: row.Int("xuid")},
+		{K: "score", V: row.Float("score")}, {K: "boardType", V: row.Int("sb")}, {K: "scoreType", V: row.Int("st")}, {K: "track", V: row.Int("track")},
+		{K: "event", V: row.Int("gsid")}, {K: "board", V: board}, {K: "carId", V: row.Int("car")}, {K: "car", V: names.Car[row.Int("car")]},
+		{K: "class", V: classText(row.Int("cls"))}, {K: "at", V: int64(row.Float("submitted"))},
+		{K: "clean", V: row.Int("clean") != 0}, {K: "hiddenBy", V: hiddenBy}, {K: "hiddenKind", V: hiddenKind}, {K: "verdict", V: row.Any("verdict")}, {K: "reasons", V: reasons},
+		{K: "source", V: source}, {K: "why", V: why}, {K: "checker", V: plainReasons(reasons)},
+		{K: "measures", V: measures}, {K: "lastT", V: round3(g.LastT)}, {K: "collisions", V: hits},
+		{K: "limits", V: checkerLimits()}, {K: "samples", V: samples}, {K: "others", V: others}, {K: "field", V: o.field(row, names)}}
 }
 
 func (o *Ops) moderate(submissionID int64, action string) pyjson.Obj {

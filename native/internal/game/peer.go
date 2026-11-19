@@ -1,6 +1,7 @@
 package game
 
 import (
+	"fmt"
 	"math"
 
 	"fh2mp/internal/bits"
@@ -100,6 +101,8 @@ type Peer struct {
 	VipHidden                             *VipHidden
 	PlayerStatus                          int // latest LobbyPlayer.PlayerStatus this client wrote (PlayerVarStatus); valid when HasPlayerStatus
 	HasPlayerStatus                       bool
+	PlayerStatusAt                        float64 // when PlayerStatus last changed (monotonic)
+	Look                                  CarLook
 	GoptsReleased                         bool
 	GoptsOwnSeq                           *int
 	ConsoleOid                            *int
@@ -121,39 +124,50 @@ type Peer struct {
 	Pos                                   *[3]float64
 	PosFlagged                            bool
 	UnknownLogged                         map[int]struct{}
-	MalformedLogged                       bool
-	MalformedCount                        int
-	OpenedAt                              float64
-	OpenResult                            *int
-	LostSeen                              int
-	UnmappedLogged                        map[[2]int]struct{}
-	ModelID                               *int64
-	ModelLogged                           *int64
-	MaxY                                  float64
-	ClimbS                                float64
-	TopClimb                              float64
-	CarPayloadLogs                        int
-	KickReason                            *string
-	PartNotes                             int
-	PartLogged                            string
-	SpeedRef                              *SpeedRef
-	Push                                  PushState
-	InvisibleLogged                       bool
-	RepairNotified                        map[int64]float64
-	NoticedAt                             map[string]float64 // Message Center notices sent to this player by key (NotifyPlayer)
-	TopKmh                                float64
-	HardS, SoftS                          float64
-	SpeedFlagged                          map[string]struct{}
-	MaxAbs                                float64
-	Outbox                                []netv2.Baked
-	Window                                reliable.Window
-	RxSeq                                 map[ObjKey]int
-	DupObjects, DupRequests               int
-	Due                                   float64
-	Hold                                  float64
-	AckCache                              *[2]int
-	State                                 PeerState   // half-open / connected / entered / leaving / removed (peerstate.go)
-	Refused                               map[int]int // messages not acted on because of the state, per type
+	// voice relay (voice.go): the send budget, counts, and whether its first packet and a refused one were logged
+	VoiceTokens, VoiceAt        float64
+	VoicePackets, VoiceDropped  int
+	VoiceLogged, VoiceBadLogged bool
+	// LobbyPlayer.PlayerChatStates as this client wrote them (vars 41..76: id, Muted, Friend for 12 players): whom its player muted
+	ChatIDs   [ChatStates]uint64
+	ChatMuted [ChatStates]bool
+	// the lobby type the game asked for in its OpenConnection when the hub sent it to a world of another type (a private game's member);
+	// 0 = the same
+	ClaimedLobbyType        int
+	MalformedLogged         bool
+	MalformedCount          int
+	OpenedAt                float64
+	OpenResult              *int
+	LostSeen                int
+	UnmappedLogged          map[[2]int]struct{}
+	ModelID                 *int64
+	ModelLogged             *int64
+	MaxY                    float64
+	ClimbS                  float64
+	TopClimb                float64
+	CarPayloadLogs          int
+	KickReason              *string
+	PartNotes               int
+	PartLogged              string
+	SpeedRef                *SpeedRef
+	Push                    PushState
+	Telem                   TelemRing // the last TelemWindowS seconds of its car states, for speed trap and zone results (telem.go)
+	InvisibleLogged         bool
+	RepairNotified          map[int64]float64
+	NoticedAt               map[string]float64 // Message Center notices sent to this player by key (NotifyPlayer)
+	TopKmh                  float64
+	HardS, SoftS            float64
+	SpeedFlagged            map[string]struct{}
+	MaxAbs                  float64
+	Outbox                  []netv2.Baked
+	Window                  reliable.Window
+	RxSeq                   map[ObjKey]int
+	DupObjects, DupRequests int
+	Due                     float64
+	Hold                    float64
+	AckCache                *[2]int
+	State                   PeerState   // half-open / connected / entered / leaving / removed (peerstate.go)
+	Refused                 map[int]int // messages not acted on because of the state, per type
 
 	// attributes Python sets dynamically (getattr / setattr in lighting.py, honk.py and the world)
 	Lighting         *LightState
@@ -162,6 +176,10 @@ type Peer struct {
 	Honk             *HonkState
 	HonkLoggedAt     float64
 	Carsel           *CarselState
+	Mods             *ModState // add-on mods' state (modsync.go)
+	ModsChanges      int
+	ModsLoggedAt     float64
+	ModsNosWarnedAt  float64
 	ClientReports    ClientReports // what this client's shim told the server about why it waits (carsel.go)
 	Extra            map[string]any
 	TeamID           int
@@ -179,6 +197,37 @@ func NewPeer(addr Addr, now float64) *Peer {
 		RepairNotified: map[int64]float64{}, NoticedAt: map[string]float64{}, SpeedFlagged: map[string]struct{}{}, RxSeq: map[ObjKey]int{}, Due: math.Inf(1),
 		Extra: map[string]any{}, Refused: map[int]int{},
 	}
+}
+
+// CarLook is what a player's car wears as its game last wrote it in the player object: HasLivery (var 1), IsNewLivery (var 2), LiveryId (93) and
+// TuneId (94). Seen has bit k set once the k-th of those four was written.
+type CarLook struct {
+	HasLivery, NewLivery bool
+	LiveryID, TuneID     int64
+	Seen                 uint8
+}
+
+// String is "livery 48873 (HasLivery=1 IsNewLivery=0), tune -1"; a field the game has not written yet is "?".
+func (l CarLook) String() string {
+	if l.Seen == 0 {
+		return "livery and tune not written yet"
+	}
+	flag := func(bit uint8, v bool) string {
+		if l.Seen&bit == 0 {
+			return "?"
+		}
+		if v {
+			return "1"
+		}
+		return "0"
+	}
+	num := func(bit uint8, v int64) string {
+		if l.Seen&bit == 0 {
+			return "?"
+		}
+		return fmt.Sprint(v)
+	}
+	return fmt.Sprintf("livery %s (HasLivery=%s IsNewLivery=%s), tune %s", num(4, l.LiveryID), flag(1, l.HasLivery), flag(2, l.NewLivery), num(8, l.TuneID))
 }
 
 // Flagged reports whether a speed/policy report was already made.

@@ -540,10 +540,31 @@ func (w *World) Introduce(peer *Peer, point string) {
 	}
 }
 
-// SetSessionHostBool sets a SessionHost bool for every connected Free Roam / Road Trip client.
+// sessionHostGets says whether q gets the SessionHost race vars: in a Free Roam or Road Trip world every connected client but a Car Meet
+// game passing through on an invite; in a Car Meet world the racers of its last Showdown (the meet's other players stay in its menus).
+func (w *World) sessionHostGets(q *Peer) bool {
+	if !q.Connected {
+		return false
+	}
+	if w.Carmeet {
+		_, racer := w.Wager.Racers[q]
+		return racer
+	}
+	return q.LobbyType != LobbyTypeCarMeet
+}
+
+// sessionHostAudience names who sessionHostGets sends to, for the log.
+func (w *World) sessionHostAudience() string {
+	if w.Carmeet {
+		return fmt.Sprintf("the Showdown's %d racer(s)", len(w.Wager.Racers))
+	}
+	return "all"
+}
+
+// SetSessionHostBool sets a SessionHost bool for every client sessionHostGets names.
 func (w *World) SetSessionHostBool(varID, value int, why string) {
 	for _, q := range w.Peers.Values() {
-		if !q.Connected || q.LobbyType == LobbyTypeCarMeet {
+		if !w.sessionHostGets(q) {
 			continue
 		}
 		vid, v := varID, value
@@ -553,7 +574,7 @@ func (w *World) SetSessionHostBool(varID, value int, why string) {
 		}))
 		q.HostSeq = (q.HostSeq + 1) % 0xFF
 	}
-	w.Logf("SessionHost var %d = %d sent to all (%s)", varID, value, why)
+	w.Logf("SessionHost var %d = %d sent to %s (%s)", varID, value, w.sessionHostAudience(), why)
 }
 
 // SetRaceClock sets CountdownType + RaceStartTime in one update.
@@ -570,9 +591,14 @@ func (w *World) SetRaceClock(startMs int64, why string) {
 	}
 	w.raceClock = [2]int64{kind, startMs}
 	w.raceProgress.done, w.raceProgress.frac = 0, 0
-	w.SendSessionHostVars([]shVar{{SHCountdownType, SHCountdownTypeBits, uint64(kind)}, {SHRaceStartTime, 32, uint64(startMs) & 0xFFFFFFFF},
-		{SHNumLapsCompleted, 8, 0}, {SHFurthestProgress, 32, 0}})
-	w.Logf("SessionHost CountdownType = %d, RaceStartTime = %d, NumLapsCompleted = 0, FurthestProgress = 0 sent to all (%s)", kind, startMs, why)
+	vars := []shVar{{SHCountdownType, SHCountdownTypeBits, uint64(kind)}, {SHRaceStartTime, 32, uint64(startMs) & 0xFFFFFFFF},
+		{SHNumLapsCompleted, 8, 0}, {SHFurthestProgress, 32, 0}}
+	if w.Carmeet {
+		// a Showdown's staggered start counts each car's RollOffDelay from CountdownEndTime (showdown.go showdownHeadStarts)
+		vars = append(vars, shVar{SHCountdownEndTime, 32, uint64(startMs) & 0xFFFFFFFF})
+	}
+	w.SendSessionHostVars(vars)
+	w.Logf("SessionHost CountdownType = %d, RaceStartTime = %d, NumLapsCompleted = 0, FurthestProgress = 0 sent to %s (%s)", kind, startMs, w.sessionHostAudience(), why)
 }
 
 type shVar struct {
@@ -580,10 +606,12 @@ type shVar struct {
 	Value     uint64
 }
 
-// SendSessionHostVars sends one SessionHost update of (var id, width, value) triples to every connected Free Roam / Road Trip client.
-func (w *World) SendSessionHostVars(values []shVar) {
+// SendSessionHostVars sends one SessionHost update of (var id, width, value) triples to every client sessionHostGets names; returns how many
+// got it.
+func (w *World) SendSessionHostVars(values []shVar) int {
+	sent := 0
 	for _, q := range w.Peers.Values() {
-		if !q.Connected || q.LobbyType == LobbyTypeCarMeet {
+		if !w.sessionHostGets(q) {
 			continue
 		}
 		w.Send(q, false, netv2.SessionHostUpdate(uint64(q.HostSeq), func(b *bits.Writer) {
@@ -593,7 +621,9 @@ func (w *World) SendSessionHostVars(values []shVar) {
 			}
 		}))
 		q.HostSeq = (q.HostSeq + 1) % 0xFF
+		sent++
 	}
+	return sent
 }
 
 // NoteProgress handles the MsgInProgressScoreUpdate of a racer.
@@ -715,6 +745,110 @@ func pyBool(b bool) string {
 		return "True"
 	}
 	return "False"
+}
+
+// sessionHostCreateVars is SessionHostSynced as this player's game gets it at the handshake (nil = every default): LobbyType where it is
+// not the default (Free Roam) or the game came in as another type (an accepted invite enters through a Car Meet), PrivacyMode for a private
+// game, GroupSatNavNode while a Free Roam group route is set.
+func (w *World) sessionHostCreateVars(peer *Peer) netv2.VarsWriter {
+	lobby := -1
+	if w.Roadtrip {
+		lobby = LobbyTypeRoadTrip
+	} else if peer.LobbyType == LobbyTypeCarMeet {
+		lobby = LobbyTypeCarMeet
+	} else if peer.ClaimedLobbyType != 0 && peer.ClaimedLobbyType != peer.LobbyType {
+		lobby = peer.LobbyType
+	}
+	inviteOnly := w.Private && !w.Roadtrip && peer.LobbyType != LobbyTypeCarMeet
+	route := w.GroupSatNav
+	if !w.groupRouteWorld() || peer.LobbyType != LobbyTypeFreeRoam {
+		route = 0
+	}
+	if lobby < 0 && !inviteOnly && route == 0 {
+		return nil
+	}
+	return func(b *bits.Writer) {
+		if lobby >= 0 {
+			b.Bits(SHLobbyType, netv2.SessionHostVarBits)
+			b.Bits(uint64(lobby), SHLobbyTypeBits)
+		}
+		if inviteOnly {
+			b.Bits(SHPrivacyMode, netv2.SessionHostVarBits)
+			b.Bits(SHPrivacyInviteOnly, SHPrivacyModeBits)
+		}
+		if route != 0 {
+			b.Bits(SHGroupSatNavNode, netv2.SessionHostVarBits)
+			b.Bits(uint64(uint32(route)), 32)
+		}
+	}
+}
+
+// KeepPrivateLeader gives a private game without a leader one: the player who has been in it longest (its host, while the host is there).
+func (w *World) KeepPrivateLeader(why string) {
+	if !w.Private || w.Roadtrip || w.Leader != nil {
+		return
+	}
+	var first *Peer
+	for _, q := range w.Peers.Values() {
+		if q.Connected && q.Entered && q.LobbyType != LobbyTypeCarMeet && (first == nil || q.ConnectedAt < first.ConnectedAt) {
+			first = q
+		}
+	}
+	if first != nil {
+		w.SetLeader(first, why)
+	}
+}
+
+// RequestLeaderChange handles message 59 in a private game: the leader names another player of the game as its leader (the player popup's
+// Make Session Leader). The key is the named player's object as the sender sees it: a relay key carries that player's relay owner id.
+func (w *World) RequestLeaderChange(peer *Peer, kind string, owner int) {
+	var target *Peer
+	if kind == "relay" {
+		for _, q := range w.Peers.Values() {
+			if q.Owner == owner && q.Connected && q.Entered {
+				target = q
+			}
+		}
+	}
+	switch {
+	case w.Leader != peer:
+		w.Logf("%d RequestLeaderChange (owner %d) ignored: it is not the leader", peer.Addr.Port, peer.Owner)
+	case w.Event != nil || w.PendingRace != nil:
+		w.Logf("%d RequestLeaderChange (owner %d) ignored: an event is being set up or running", peer.Addr.Port, peer.Owner)
+	case target == nil || target == peer:
+		w.Logf("%d RequestLeaderChange (owner %d) ignored: the key names no other player here (%s key, owner %d)", peer.Addr.Port, peer.Owner, kind, owner)
+	default:
+		w.ReleaseOptions(peer, fmt.Sprintf("leadership passed to owner %d", target.Owner))
+		w.SetLeader(target, fmt.Sprintf("named by the leader, owner %d", peer.Owner))
+	}
+}
+
+// KickFromPrivate handles message 46 in a private game: its leader removes a player (the popup's Kick From Session). The player's
+// connection is closed with the reason PlayerKick and the hub forgets that the player belongs here, so only a new invite brings them back.
+func (w *World) KickFromPrivate(peer *Peer, target uint64) {
+	var q *Peer
+	for _, c := range w.Peers.Values() {
+		if c.Xuid == target && c.Connected {
+			q = c
+		}
+	}
+	switch {
+	case w.Leader != peer:
+		w.Logf("%d kick of %#x (owner %d) ignored: only the private game's leader removes players", peer.Addr.Port, target, peer.Owner)
+	case q == nil || q == peer:
+		w.Logf("%d kick of %#x (owner %d) ignored: no other player here has that id", peer.Addr.Port, target, peer.Owner)
+	default:
+		w.Logf("kick: owner %d xuid %#x removed from the private game by its leader, owner %d; it comes back only by a new invite", q.Owner, q.Xuid, peer.Owner)
+		w.Send(q, false, netv2.CloseConnection(CloseReasonPlayerKick, q.ClientCounter, w.ServerCounter))
+		w.DropPeer(q, "kicked by the private game's leader")
+		if w.Hub != nil {
+			hub, xuid := w.Hub, target
+			hub.Defer(func() {
+				delete(hub.Assign, xuid)
+				delete(hub.Follow, xuid)
+			})
+		}
+	}
 }
 
 // SendLeaderFlag writes IsLeader of a player.

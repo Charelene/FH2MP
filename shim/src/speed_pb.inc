@@ -133,9 +133,31 @@ static void speed_pb_trap(void *trigger, void *player)
     g_speed_pb_trap(trigger, player);
 }
 
+/* #509 (report 38b1b2beedda46aa). The zone handler game+0x6B76B0 starts
+ *     +0 mov rax,rsp   +3 push rbp   +4 push rdi   +5 push r12   +7 push r14 ...
+ * The platform (MinHook) patches 5 bytes, so its trampoline runs +0..+4 and continues at +5. DriftZones 0.7.5 (an Extra Options
+ * plugin, not a platform mod) patches 7 bytes later on, `jmp` + `nop nop`, and chains into the jump it found there, i.e. into us:
+ * the trampoline then continues into its nops, push r12 is lost, and the handler runs 8 bytes off. Its own call of the PersonalBest
+ * getter then faults on the getter's aligned xmm6 save (game+0x3D2D8B, "reading 0xFFFFFFFFFFFFFFFF"); its epilogue would pop r12
+ * that was never pushed. Confirmed from the dump: entry rsp aligned, rbp/rdi/r14/r15 saved with no r12 between, bytes at +0
+ * `e9 .. .. .. .. 90 90 41 56`. When +5 no longer holds push r12, speed_pb_zone_head runs the handler's first 7 bytes itself and
+ * continues at +7, so the handler gets its whole frame whoever patched over the trampoline's return. */
+static const unsigned char *g_speed_pb_zone_tail;           /* game+0x6B76B5: push r12 (41 54) */
+__attribute__((used)) static void *g_speed_pb_zone_cont;    /* game+0x6B76B7: push r14 */
+static volatile LONG g_speed_pb_head_used;                  /* set once the head ran instead of the trampoline; logged by the monitor */
+void speed_pb_zone_head(void *trigger);
+__asm__(".text\n.p2align 4\n.def speed_pb_zone_head; .scl 3; .type 32; .endef\nspeed_pb_zone_head:\n"
+        "  mov %rsp, %rax\n  push %rbp\n  push %rdi\n  push %r12\n  jmp *g_speed_pb_zone_cont(%rip)\n");
+
 static void speed_pb_zone(void *trigger)
 {
+    const unsigned char *tail = g_speed_pb_zone_tail;
     if (g_speed_pb_active && !*((unsigned char *)trigger + 0x3b8)) speed_pb_capture(trigger, 0x318, 0x1f8, 0xd0);
+    if (tail && g_speed_pb_zone_cont && (tail[0] != 0x41 || tail[1] != 0x54)) {
+        if (!g_speed_pb_head_used) InterlockedExchange(&g_speed_pb_head_used, (LONG)(tail[0] | tail[1] << 8 | 0x10000));
+        speed_pb_zone_head(trigger);
+        return;
+    }
     g_speed_pb_zone(trigger);
 }
 

@@ -4,9 +4,20 @@
  * either way. */
 #include "fh2mp_online.h"
 
-static int ona_is_online(void) { return g_token[0] != 0; }
+static int ona_is_online(void) { return g_token[0] != 0 && !g_net_held; }
 
-static int ona_keeps_own_cars(void) { return g_token[0] != 0 && !g_gamedb_path[0]; }
+static int ona_keeps_own_cars(void) { return g_token[0] != 0 && !g_net_held && !g_gamedb_path[0]; }
+
+/* version 2: what kept this game offline (online_gate.inc) */
+static int ona_online_held(char *names, uint32_t size)
+{
+    if (online_allowed()) {
+        if (names && size) names[0] = 0;
+        return 0;
+    }
+    if (names && size) lstrcpynA(names, g_held_names, (int)size);
+    return g_held_count;
+}
 
 static int ona_car_allowed_in_events(uint32_t car_id)
 {
@@ -30,7 +41,7 @@ static int ona_part_allowed_in_events(const char *table, uint32_t part_id)
 }
 
 static const FH2MPOnline g_online_api = {sizeof(FH2MPOnline), FH2MP_ONLINE_VERSION, ona_is_online, ona_keeps_own_cars, ona_car_allowed_in_events,
-                                         ona_part_allowed_in_events};
+                                         ona_part_allowed_in_events, ona_online_held};
 
 /* After the session is read: a game that keeps its own car packs loads the server's part list, then the interface is published. */
 static void online_api_start(void)

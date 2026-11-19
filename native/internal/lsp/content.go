@@ -519,6 +519,16 @@ func cvGetLivery(c *Core, r *Req, req *xls.Struct) (*xls.Struct, error) {
 	res := c.defCall("ForzaContentVersioningRetrieveVersionedLiveryById_Results")
 	d := res.Sub("versionedLiveryData")
 	data := ugc.StripLiveryPrefix(append([]byte{}, v.Data...)) // the client's own compression-stream blob, served as uploaded
+	if stamp, ok := ugc.LiveryCreator(data); ok && stamp == xuid && v.Creator != 0 && v.Creator != xuid && os.Getenv("FH2MP_LIVERY_RESTAMP_OFF") == "" {
+		// A design that names the downloader as its creator although someone else shared it (the FH4 conversions carried the converter's xuid): that
+		// player's game takes it as its own, keeps no versioned id when applying it, and other players see the plain base livery (#255).
+		if fixed, err := ugc.RestampLiveryCreator(data, v.Creator); err == nil {
+			data = fixed
+			c.Log(r, fmt.Sprintf("  RetrieveVersionedLivery %d: the design names the downloader %#x as its creator but %#x shared it; served with %#x as the creator", v.ID, xuid, v.Creator, v.Creator))
+		} else {
+			c.Warn(r, fmt.Sprintf("  RetrieveVersionedLivery %d: the design names the downloader %#x as its creator but %#x shared it; served unchanged, the restamp failed: %v", v.ID, xuid, v.Creator, err))
+		}
+	}
 	var car int64
 	if v.CarID != nil {
 		car = *v.CarID
@@ -1069,32 +1079,30 @@ func storeRemove(c *Core, r *Req, req *xls.Struct) (*xls.Struct, error) {
 	return nil, nil
 }
 
+// featuredPick is the featured liveries' choice: at most n, one per car, in the order given. A livery without a car is left out: the game
+// shows it as a car card with no car, and its drivetrain converter reads NULL for that card (#412, game+0xb99cd3).
+func featuredPick(files []*ugc.File, n int) []*ugc.File {
+	seen := map[int64]bool{}
+	var out []*ugc.File
+	for _, f := range files {
+		if len(out) >= n {
+			break
+		}
+		if f.CarID == nil || *f.CarID <= 0 || seen[*f.CarID] {
+			continue
+		}
+		seen[*f.CarID] = true
+		out = append(out, f)
+	}
+	return out
+}
+
 func storeFeaturedLiveries(c *Core, r *Req, req *xls.Struct) (*xls.Struct, error) {
 	all, err := c.Ugc.Search(ugc.SearchSpec{Kind: "livery", Limit: 200})
 	if err != nil {
 		return nil, err
 	}
-	seen := map[int64]bool{}
-	hasNil := false
-	var files []*ugc.File
-	for _, f := range c.shown(r, all) {
-		key := int64(-1)
-		if f.CarID != nil {
-			key = *f.CarID
-		}
-		dup := seen[key]
-		if f.CarID == nil {
-			dup, hasNil = hasNil, true
-		} else {
-			seen[key] = true
-		}
-		if !dup {
-			files = append(files, f)
-		}
-		if len(files) >= int(max(1, req.Int("numCars"))) {
-			break
-		}
-	}
+	files := featuredPick(c.shown(r, all), int(max(1, req.Int("numCars"))))
 	tmpl := c.elemTemplate("ForzaStorefrontGetFeaturedLiveriesForRandomCars_Results", "liveryData")
 	rows := []any{}
 	for _, f := range files {

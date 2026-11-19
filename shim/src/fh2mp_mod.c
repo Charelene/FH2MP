@@ -88,11 +88,7 @@ static DWORD g_init_tick;     /* GetTickCount() when fh2mod_init started */
 #define FH2MP_WSTR(x) FH2MP_WSTR2(x)
 /* The launcher finds out which shim is installed by reading this marker out of the DLL (it cannot run it). */
 const char fh2mp_shim_marker[] __attribute__((used)) = "FH2MP-SHIM-VERSION:" FH2MP_SHIM_VERSION ":END";
-/*
- * Import slots Azimuth fills at run time (patch_game_winsock, xhr2.inc) are still written directly, and their pages are left writable:
- * restoring the old protection raced with Azimuth, which binds the game's imports on other threads (0xc0000005 inside memcpy).
- */
-#define patch_done(addr, len, old) ((void)(addr), (void)(len), (void)(old))
+#include "slot_put.inc"
 
 /*
  * Code changes go through the FH2 Mod Platform. It refuses a change that overlaps another mod's hook or game code someone already
@@ -252,6 +248,7 @@ static void mem_copy(void *dst, const void *src, SIZE_T n)
 }
 
 #include "log.inc"
+#include "online_gate.inc"
 
 /* "48 8b 5c" for n bytes; a game update shows up as a different run of these in a "not patched" line */
 static void log_hexbytes(const unsigned char *p, unsigned n)
@@ -1008,7 +1005,7 @@ static void patch_game_winsock(unsigned char *img)
                            ? GetProcAddress(ws2, g_ws2_slots[i].name)
                            : GetProcAddress(ws2, (LPCSTR)(ULONG_PTR)g_ws2_slots[i].ordinal);
         char oldmod[40];
-        DWORD oldprot;
+        DWORD err;
         void *want = (void *)real;
 
         if (!real) {
@@ -1036,7 +1033,7 @@ static void patch_game_winsock(unsigned char *img)
         if (*slot == want) {
             continue; /* already the real function (or its tracer) */
         }
-        if (!VirtualProtect(slot, 8, PAGE_READWRITE, &oldprot)) {
+        if (!slot_put(slot, want, &err)) {
             static volatile LONG refused;
             if (InterlockedIncrement(&refused) <= 3) {
                 log_begin();
@@ -1044,11 +1041,11 @@ static void patch_game_winsock(unsigned char *img)
                 log_dec(i);
                 log_raw(" (game+0x");
                 log_hex(FH2_WS2_IAT_RVA + i * 8u, 8);
-                log_raw(") could not be made writable, error ");
-                log_dec(GetLastError());
+                log_raw(") could not be written, error ");
+                log_dec(err);
                 log_raw(": it keeps ");
                 log_raw(oldmod);
-                log_raw("\n");
+                log_raw(" until the next check\n");
             }
             continue;
         }
@@ -1064,8 +1061,6 @@ static void patch_game_winsock(unsigned char *img)
         log_raw(": ");
         log_raw(oldmod);
         log_raw(" -> ws2_32\n");
-        *slot = want;
-        patch_done(slot, 8, oldprot);
         changed++;
     }
     g_ws2_patched = 1;
@@ -1724,6 +1719,9 @@ static int patch_traffic_request_ownership(void)
     return plat_patch("trafficown: RequestOwnership on every collision", at, je, nop2, 2);
 }
 
+#include "copy_path_hook.inc"
+#include "contact_forecast_hook.inc"
+
 /*
  * "Connected to Xbox Live" menu gates. Live-only menu actions (Show Gamercard in a Car Meet's player actions, and the other
  * Live-gated entries) test the byte at CLobby+0xf0 (CLobby = TBasicSingleton at RVA 0x34d6348):
@@ -1887,6 +1885,8 @@ static int patch_speed_pb(void)
     }
     g_speed_pb_resolve = (speed_pb_resolve_fn)(img + 0x3eb620);
     g_speed_pb_property = (speed_pb_property_fn)(img + 0x3d2d70);
+    g_speed_pb_zone_tail = img + 0x6b76b5;     /* checked by the signature above: 41 54 push r12, then 41 56 push r14 */
+    g_speed_pb_zone_cont = img + 0x6b76b7;
     /* Partial installation stays inert until every hook is available. */
     if (!plat_hook_call("speedpb: local PB fallback in HUD comparison", img + 0x5b0b9d,
                         (void *)speed_pb_score, (void **)&g_speed_pb_score) ||
@@ -2319,10 +2319,18 @@ static int patch_online_meet(void)
 #include "hook_guard.inc"
 #include "gameplaylog_guard.inc"
 #include "remote_prediction_guard.inc"
+#include "model_unload_guard.inc"
+#include "dtconv_guard.inc"
+#include "blob_limit_guard.inc"
+#include "camanim_guard.inc"
+#include "component_lookup_guard.inc"
 #include "picker_pi.inc"
 #include "autodrive_rule.inc"
+#include "tune_gate.inc"
 
-static int patch_torque_load(void)
+/* Checks the native car part resolvers torque_parts_valid() calls and binds them. -> 1 when they are this build's. Used by the torque load
+ * guard and the garage rating guard (garage_rating_guard.inc); either may run first, or alone. */
+static int torque_bind(void)
 {
     static const struct { unsigned rva; unsigned char bytes[16]; } signatures[] = {
         {0xfcfe70, {0x40,0x55,0x53,0x56,0x57,0x41,0x54,0x41,0x56,0x41,0x57,0x48,0x8d,0x6c,0x24,0x80}},
@@ -2330,23 +2338,39 @@ static int patch_torque_load(void)
         {0x1042d10, {0x48,0xc7,0x01,0xff,0xff,0xff,0xff,0x33,0xd2,0x4c,0x8d,0x41,0x08,0x0f,0x1f,0x00}},
         {0x10482f0, {0x48,0x8b,0xc4,0x48,0x89,0x50,0x10,0x48,0x89,0x48,0x08,0x55,0x57,0x41,0x55,0x41}},
         {0x1048990, {0x48,0x8b,0xc4,0x48,0x89,0x50,0x10,0x48,0x89,0x48,0x08,0x55,0x57,0x41,0x55,0x41}},
+        {0x1048640, {0x48,0x8b,0xc4,0x48,0x89,0x50,0x10,0x48,0x89,0x48,0x08,0x55,0x57,0x41,0x55,0x41}},
     };
+    /* The resolvers share their prologue: the physics builder's drivetrain-part loop calls CreateDrivetrainPartUpgradeRecord here. */
+    static const unsigned char drivetrain_call[5] = {0xe8, 0xf9, 0x19, 0xff, 0xff};      /* game+0x1056c42: call game+0x1048640 */
     unsigned char *img = find_fh2_image();
     unsigned i;
+    if (g_torque_load_img) return 1;
     if (!img) return 0;
     for (i = 0; i < sizeof signatures / sizeof signatures[0]; ++i) {
         if (!code_is("torqueload", "the native car preloader/part resolver", img, signatures[i].rva, signatures[i].bytes, 16)) {
             return 0;
         }
     }
-    g_torque_load_img = img;
+    if (!code_is("torqueload", "the physics builder's drivetrain part call", img, 0x1056c42, drivetrain_call, sizeof drivetrain_call)) {
+        return 0;
+    }
     g_torque_parts_ctor = (torque_parts_ctor_fn)(img + 0x1042d10);
     g_torque_stock = (torque_stock_fn)(img + 0x104d5f0);
     g_torque_car_part = (torque_part_fn)(img + 0x10482f0);
     g_torque_engine_part = (torque_part_fn)(img + 0x1048990);
-    return plat_hook("torqueload: native fallback for invalid engine curves", img + 0xfcfe70,
+    g_torque_drivetrain_part = (torque_part_fn)(img + 0x1048640);
+    g_torque_load_img = img;
+    return 1;
+}
+
+static int patch_torque_load(void)
+{
+    if (!torque_bind()) return 0;
+    return plat_hook("torqueload: native fallback for invalid engine curves", g_torque_load_img + 0xfcfe70,
                      (void *)torque_preload_guard, (void **)&g_torque_preload_orig);
 }
+
+#include "garage_rating_guard.inc"
 
 static int patch_net_string_receivers(void)
 {
@@ -3204,6 +3228,10 @@ static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *
 #include "lighting_sync.inc"
 #include "honk_sync.inc"
 #include "carsel_sync.inc"
+#include "mods_sync.inc"
+#include "nos_flames.inc"
+#include "ug_remote.inc"
+#include "race_wait.inc"
 #include "event_stock.inc"
 #include "stall_trace.inc"
 
@@ -3565,6 +3593,11 @@ static unsigned char *eo_timelock_plugin(const struct eo_wc_layout **layout)
 {
     struct eo_wc_check { unsigned rva; unsigned char code[13]; unsigned n; };
     static const struct { const char *name; const struct eo_wc_layout *at; struct eo_wc_check check[4]; } builds[] = {
+        {"1.1.0 (Extra Options 0.6.1)", &EO_WC_1_1_0_EO061, {
+            {0x30c0, {0x31, 0xc0, 0x83, 0x3d, 0x27, 0x86, 0x00, 0x00, 0x00, 0x0f, 0x95, 0xc0, 0xc3}, 13},  /* enabled */
+            {0x3130, {0x8b, 0x05, 0xbe, 0x85, 0x00, 0x00, 0xc3}, 7},                                       /* generation */
+            {0x3590, {0x8b, 0x05, 0x62, 0x81, 0x00, 0x00, 0xc3}, 7},                                       /* weather */
+            {0x3908, {0x48, 0x39, 0x1d, 0x11, 0x7e, 0x00, 0x00}, 7}}},                                     /* held clock */
         {"1.1.0 (Extra Options 0.6.0)", &EO_WC_1_1_0, {
             {0x30c0, {0x31, 0xc0, 0x83, 0x3d, 0x27, 0x76, 0x00, 0x00, 0x00, 0x0f, 0x95, 0xc0, 0xc3}, 13},  /* enabled */
             {0x3130, {0x8b, 0x05, 0xbe, 0x75, 0x00, 0x00, 0xc3}, 7},                                       /* generation */
@@ -3615,7 +3648,7 @@ static unsigned char *eo_timelock_plugin(const struct eo_wc_layout **layout)
     }
     refused = 1;
     log_begin();
-    log_raw("timelock: unexpected EO_WeatherControl.dll (the builds in Extra Options 0.4.4 and 0.6.0 are known), its time lock is not parked online: at plugin+0x");
+    log_raw("timelock: unexpected EO_WeatherControl.dll (the builds in Extra Options 0.4.4, 0.6.0 and 0.6.1 are known), its time lock is not parked online: at plugin+0x");
     log_hex(first_check->rva, 4);
     if (first_readable) {
         log_raw(" expected ");
@@ -3730,14 +3763,18 @@ static DWORD WINAPI option_monitor(LPVOID unused)
     monitor_start = GetTickCount();
     for (tick = 0; ; tick++) { /* for the whole process (2026-11-07): until then it stopped after 24000 ticks = 6.7 h, and with it the EO parking, the gamedb
                                 * retries, the import re-hooking and the online-setup watchdog */
-        /* Azimuth binds the game's imports after the helper loads; keep our pointers on top */
-        patch_game_winsock(img);
-        patch_game_cocreate(img);
-        patch_xsapi_cocreate();
+        /* Azimuth binds the game's imports after the helper loads; keep our pointers on top. A game online-gate keeps offline keeps
+         * Azimuth's own (online_gate.inc). */
+        int net = online_allowed();
+        if (net) {
+            patch_game_winsock(img);
+            patch_game_cocreate(img);
+            patch_xsapi_cocreate();
+        }
         {
             static int xb_state;
             wchar_t xb_env[8];
-            if (xb_state == 0 && GetEnvironmentVariableW(L"FH2MP_NO_XSBODY", xb_env, 8) == 0) {
+            if (net && xb_state == 0 && GetEnvironmentVariableW(L"FH2MP_NO_XSBODY", xb_env, 8) == 0) {
                 xb_state = patch_xsapi_body();
             }
         }
@@ -3745,7 +3782,7 @@ static DWORD WINAPI option_monitor(LPVOID unused)
             /* XSAPI is mapped a few seconds after the game image; retry until it is there */
             static int xs_state;
             wchar_t xs_env[8];
-            if (xs_state == 0 && GetEnvironmentVariableW(L"FH2MP_NO_XSTOKEN", xs_env, 8) == 0) {
+            if (net && xs_state == 0 && GetEnvironmentVariableW(L"FH2MP_NO_XSTOKEN", xs_env, 8) == 0) {
                 xs_state = patch_xsapi_token();
             } else if (xs_state == 1 && g_xs_calls == 0 && g_xs_hooked_at && GetTickCount() - g_xs_hooked_at > 45000) {
                 static int told;
@@ -3965,6 +4002,19 @@ static DWORD WINAPI option_monitor(LPVOID unused)
                 log_raw("speedpb: switched itself off, the thread-local slot could not be written (error ");
                 log_dec((unsigned long)(pb - 1));
                 log_raw("); speed notifications use the online result only\n");
+            }
+        }
+        {
+            static LONG head_seen;
+            LONG head = g_speed_pb_head_used;
+            if (head && !head_seen) {
+                const unsigned char found[2] = {(unsigned char)(head & 0xff), (unsigned char)((head >> 8) & 0xff)};
+                head_seen = head;
+                log_begin();
+                log_raw("speedpb: the zone handler's push r12 (41 54) at game+0x006b76b5 is now ");
+                log_hexbytes(found, 2);
+                log_raw(": another mod patched 7 bytes over the platform's 5-byte hook and chains into it; the shim runs the handler's"
+                        " first 7 bytes itself from now on\n");
             }
         }
         Sleep(1000);
@@ -5214,6 +5264,15 @@ static int gamedb_place(void)
 {
     int ok;
 
+    if (!online_allowed()) {
+        static int told;
+        if (!told) {
+            told = 1;
+            log_begin();
+            log_raw("gamedb: this game stays offline (online-gate), so the server's car database is not placed; the game reads its own\n");
+        }
+        return 1;                         /* nothing to retry */
+    }
     AcquireSRWLockExclusive(&g_gamedb_place_lock);
     ok = gamedb_place_locked();
     ReleaseSRWLockExclusive(&g_gamedb_place_lock);
@@ -5542,7 +5601,9 @@ static DWORD WINAPI late_init(LPVOID unused)
     {
         wchar_t tmp[8];
         if (GetEnvironmentVariableW(L"FH2MP_NO_WINSOCK", tmp, 8) == 0) {
-            patch_game_winsock(find_fh2_image());
+            if (online_allowed()) {
+                patch_game_winsock(find_fh2_image());
+            }
         }
     }
     {
@@ -5576,6 +5637,8 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_HONK", env, 8) == 0) patch_honk(g_exe_dir, g_dir);
             else honk_switched_off(g_exe_dir, g_dir);
             if (GetEnvironmentVariableW(L"FH2MP_NO_CARSELECT_HOLD", env, 8) == 0) patch_carsel();
+            patch_mods(g_exe_dir);    /* NitroSystem's NOS rule (always online) and other players' NOS and underglow */
+            if (GetEnvironmentVariableW(L"FH2MP_NO_RACEWAIT", env, 8) == 0) patch_race_wait();
         }
         {
             wchar_t env[8];
@@ -5592,13 +5655,22 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_STALLTRACE", env, 8) == 0) patch_stall_trace();
         }
 #endif
-        {
+        {   /* the game-bug guards here and below (hook, model, dtconv, cam, comp, nulltorque, torqueload, garagerating, cinematics,
+             * placement) are also made in offline runs, by offline_guards */
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_PARTYHUD", env, 8) == 0) patch_party_hud();
             if (GetEnvironmentVariableW(L"FH2MP_NO_RACETOAST", env, 8) == 0) patch_race_toast();
             if (GetEnvironmentVariableW(L"FH2MP_NO_HOOKGUARD", env, 8) == 0) patch_hook_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_LOGGUARD", env, 8) == 0) patch_gameplaylog_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_PREDGUARD", env, 8) == 0) patch_remote_prediction_guard();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_MODELGUARD", env, 8) == 0) patch_model_unload_guard();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_DTCONVGUARD", env, 8) == 0) patch_dtconv_guard();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_CAMGUARD", env, 8) == 0) patch_camanim_guard();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_COMPGUARD", env, 8) == 0) patch_component_lookup_guard();
+        }
+        {   /* online only: an offline run sends no share anywhere */
+            wchar_t env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_BLOBLIMIT", env, 8) == 0) patch_blob_limit();
         }
         patch_car_pool();
         {
@@ -5641,6 +5713,9 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_TORQUELOAD", env, 8) == 0) {
                 patch_torque_load();
             }
+            if (GetEnvironmentVariableW(L"FH2MP_NO_GARAGERATING", env, 8) == 0) {
+                patch_garage_rating_guard();
+            }
         }
         {
             wchar_t env[8];
@@ -5655,6 +5730,9 @@ static DWORD WINAPI late_init(LPVOID unused)
             }
             if (GetEnvironmentVariableW(L"FH2MP_NO_EOROUTES", env, 8) == 0) {
                 patch_eo_routes();
+            }
+            if (GetEnvironmentVariableW(L"FH2MP_NO_TUNEGATE", env, 8) == 0) {
+                patch_tune_gate();
             }
         }
         {
@@ -5742,6 +5820,8 @@ static DWORD WINAPI late_init(LPVOID unused)
                 patch_traffic_request_ownership();
             }
         }
+        patch_copy_path();
+        patch_contact_forecast();
     }
 #ifdef FH2MP_DEBUG_BUILD
     install_trace();
@@ -5750,6 +5830,52 @@ static DWORD WINAPI late_init(LPVOID unused)
     /* Always run: it re-applies the Winsock patch and serves on-demand trace arming even when
      * no NetSessionDirectIp argument is given (its option patching is gated on the argument). */
     return option_monitor(NULL);
+}
+
+/*
+ * Offline runs (FH2MP_OFFLINE): fh2mod_init returns before late_init, so none of its patches are made. The game-bug guards below need no
+ * session, server or other player, and offline players hit the same crashes (#412 drivetrain converter, #487/#491 placement texture stop,
+ * the garage rating family): this thread waits for the game's code as late_init does and makes only those, with late_init's switches and
+ * order. The GameplayLog, remote prediction and network string guards stay online-only: what they guard comes from the LSP or other players.
+ * A guard added to late_init that needs nothing online belongs here too.
+ */
+static DWORD WINAPI offline_guards(LPVOID unused)
+{
+    wchar_t env[8];
+    unsigned tried = 0, made = 0;
+    (void)unused;
+    if (!g_api->wait_for_code(0xFFFFFFFFu)) {
+        log_begin();
+        log_raw("offline: the platform returned no game base from wait_for_code; the crash guards are tried anyway\n");
+    }
+    wait_for_executable_game();
+    if (!find_fh2_image()) {
+        log_begin();
+        log_raw("offline: game image not found or not FH2 1.0.0.64, no crash guards made\n");
+        return 0;
+    }
+#define OFFLINE_GUARD(off_switch, call) \
+    if (GetEnvironmentVariableW(off_switch, env, 8) == 0) { ++tried; made += (call) ? 1u : 0u; }
+    OFFLINE_GUARD(L"FH2MP_NO_HOOKGUARD", patch_hook_guard())
+    OFFLINE_GUARD(L"FH2MP_NO_MODELGUARD", patch_model_unload_guard())
+    OFFLINE_GUARD(L"FH2MP_NO_DTCONVGUARD", patch_dtconv_guard())
+    OFFLINE_GUARD(L"FH2MP_NO_CAMGUARD", patch_camanim_guard())
+    OFFLINE_GUARD(L"FH2MP_NO_COMPGUARD", patch_component_lookup_guard())
+    OFFLINE_GUARD(L"FH2MP_NO_NULLTORQUE", patch_null_torque_curve())
+    OFFLINE_GUARD(L"FH2MP_NO_NULLTORQUE", patch_null_torque_scale())
+    OFFLINE_GUARD(L"FH2MP_NO_TORQUELOAD", patch_torque_load())
+    OFFLINE_GUARD(L"FH2MP_NO_GARAGERATING", patch_garage_rating_guard())
+    OFFLINE_GUARD(L"FH2MP_NO_CINEMATICS", patch_missing_cinematics())
+    OFFLINE_GUARD(L"FH2MP_NO_PLACEMENTFIX", patch_placement_fallback())
+#undef OFFLINE_GUARD
+    log_begin();
+    log_raw("offline: ");
+    log_dec(made);
+    log_raw(" of ");
+    log_dec(tried);
+    log_raw(" crash guards made");
+    log_raw(made == tried ? "\n" : " (the lines above name the ones that were not)\n");
+    return 0;
 }
 
 #include "session_age.inc"
@@ -6258,6 +6384,8 @@ static int patch_identity(void)
     return (int)(follows + fixed);
 }
 
+#include "zipmanifest_guard.inc"
+
 #ifndef FH2MOD_PLATFORM_VERSION
 #define FH2MOD_PLATFORM_VERSION "2.7.1"
 #endif
@@ -6370,6 +6498,13 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
         log_raw(utc);
     }
     log_raw("\n");
+    {
+        /* now, offline too: the game reads zipmanifest.xml ~90 ms after it is mapped, before any hook of ours (zipmanifest_guard.inc) */
+        wchar_t zg_env[8];
+        if (GetEnvironmentVariableW(L"FH2MP_NO_ZIPGUARD", zg_env, 8) == 0) {
+            zipmanifest_check();
+        }
+    }
 
     /* Solo play keeps the same XboxUserId/save, without session loading, network hooks or worker threads. */
     {
@@ -6379,7 +6514,19 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
             patch_identity();
             gamedb_put_back();    /* restore the player's database before the platform builds its offline overrides */
             log_begin();
-            log_raw("offline: FH2MP_OFFLINE is set, account save profile active; online hooks, session and network patches skipped\n");
+            log_raw("offline: FH2MP_OFFLINE is set, account save profile active; online hooks, session and network patches skipped, "
+                    "crash guards follow once the game's code is ready\n");
+            {
+                HANDLE t = CreateThread(NULL, 0, offline_guards, NULL, 0, NULL);
+                if (t) {
+                    CloseHandle(t);
+                } else {
+                    log_begin();
+                    log_raw("offline: no crash guards, the thread could not start (CreateThread error ");
+                    log_dec(GetLastError());
+                    log_raw(")\n");
+                }
+            }
             return 0;
         }
     }

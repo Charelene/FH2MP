@@ -24,7 +24,7 @@ static void carsel_request(unsigned char out[CARSEL_REQUEST], const unsigned cha
     hmac_sha256(key,32,out,CARSEL_BASE,out+CARSEL_BASE);
 }
 /* Client report (type 3, client -> server, never answered): why this game sits where it sits (a long wait for cars, a stall). Same header, xuid, seq and epoch
- * as a request; code u8 @52 (1 cars-loaded wait, 2 car cache wait, 3 stall trace snapshot, 4 stall trace end, 5 other), reserved @53 = 0, u32 LE detail @54 (what
+ * as a request; code u8 @52 (1 cars-loaded wait, 2 car cache wait, 3 stall trace snapshot, 4 stall trace end, 5 other, 6 race wait detail), reserved @53 = 0, u32 LE detail @54 (what
  * the code says it is, e.g. milliseconds waited), plain printable ASCII text from @58 up to CARSEL_REPORT_TEXT, then the HMAC-SHA256 over everything before it. The length
  * field @9 is the whole datagram. A server without reports ignores it (it only accepts the 90-byte request). */
 #define CARSEL_REPORT_TEXT 200u

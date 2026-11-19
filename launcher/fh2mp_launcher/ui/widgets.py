@@ -849,6 +849,7 @@ class NewsCard(QFrame):
         sp.setRetainSizeWhenHidden(True)
         self.setSizePolicy(sp)
         self.setFixedHeight(self.HEIGHT)                 # every page the same height: no jumping when the page changes
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # reachable with Tab and the gamepad
 
     def set(self, c, pix):
         self.c = c
@@ -897,6 +898,20 @@ class NewsCard(QFrame):
         if self.url and e.button() == Qt.MouseButton.LeftButton and self.rect().contains(e.position().toPoint()):
             self.clicked.emit(self.c)
         super().mouseReleaseEvent(e)
+
+    def keyPressEvent(self, e):                # keyboard and gamepad (A sends Return)
+        if self.url and e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.clicked.emit(self.c)
+        else:
+            super().keyPressEvent(e)
+
+    def focusInEvent(self, e):
+        self.h.to(1)
+        super().focusInEvent(e)
+
+    def focusOutEvent(self, e):
+        self.h.to(0)
+        super().focusOutEvent(e)
 
 
 class Dots(QWidget):
@@ -1188,6 +1203,7 @@ class DetailSheet(QWidget):
     def __init__(self, parent):
         super().__init__(parent)
         self.setObjectName("clear")
+        self.setProperty("padScope", True)             # the gamepad's focus moves stay inside the open sheet (gamepad.py)
         self.url, self.act = "", ""
         self.panel = QFrame(self)
         self.panel.setObjectName("clear")              # the sheet paints the panel (rounded) behind it
@@ -1302,6 +1318,12 @@ class DetailSheet(QWidget):
 
     def close_sheet(self):
         self.hide()
+
+    def keyPressEvent(self, e):                       # the gamepad's B sends Escape as a key event, which shortcuts do not see
+        if e.key() == Qt.Key.Key_Escape:
+            self.close_sheet()
+        else:
+            super().keyPressEvent(e)
 
     def mousePressEvent(self, e):
         if not self.panel.geometry().contains(e.position().toPoint()):

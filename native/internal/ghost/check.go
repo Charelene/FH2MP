@@ -35,6 +35,16 @@ type limit struct {
 var hardLimits = []limit{{"speed", MaxSpeed}, {"acceleration", 30.0}, {"climb", 30.0}, {"power", 1000.0}}
 var flagLimits = map[string]float64{"speed": 120.0, "acceleration": 20.0, "power": 700.0}
 
+// Limits gives a rule's flag and hard limit (speed m/s, acceleration m/s^2, climb m/s, power W/kg); flag is 0 for a rule without one.
+func Limits(rule string) (flag, hard float64) {
+	for _, l := range hardLimits {
+		if l.rule == rule {
+			return flagLimits[rule], l.v
+		}
+	}
+	return 0, 0
+}
+
 // Measures are the numbers the rules read.
 type Measures struct {
 	Frames      int

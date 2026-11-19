@@ -71,6 +71,27 @@ static void completed(void *p, int zone)
 }
 static void trap(void *p, void *player) { assert(player == (void *)123); completed(p, 0); }
 static void zone(void *p) { if (!*((unsigned char *)p + 0x3b8)) completed(p, 1); }
+
+/* #509: the zone handler's real prologue (game+0x6B76B0: mov rax,rsp; push rbp; push rdi; push r12; push r14; push r15), then an
+ * aligned store that faults unless all five pushes happened (the game's getter faulted the same way), then zone() and the epilogue.
+ * The trampoline is what MinHook makes of that prologue: its first 5 bytes, then on at +5. */
+static unsigned char *fake_handler, *fake_trampoline;
+static void build_fake_zone(void)
+{
+    static const unsigned char head[] = {0x48,0x8b,0xc4, 0x55, 0x57, 0x41,0x54, 0x41,0x56, 0x41,0x57,
+                                         0x48,0x83,0xec,0x20, 0x0f,0x29,0x34,0x24, 0x48,0xb8};
+    static const unsigned char tail[] = {0xff,0xd0, 0x48,0x83,0xc4,0x20, 0x41,0x5f, 0x41,0x5e, 0x41,0x5c, 0x5f, 0x5d, 0xc3};
+    void *body = (void *)zone, *resume;
+    unsigned char *p = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    assert(p);
+    fake_handler = p;
+    memcpy(p, head, sizeof head); memcpy(p + sizeof head, &body, 8); memcpy(p + sizeof head + 8, tail, sizeof tail);
+    fake_trampoline = p + 256;
+    memcpy(fake_trampoline, "\x48\x8b\xc4\x55\x57\xff\x25\x00\x00\x00\x00", 11);
+    resume = fake_handler + 5;
+    memcpy(fake_trampoline + 11, &resume, 8);
+    FlushInstructionCache(GetCurrentProcess(), p, 4096);
+}
 static void setup(fixture *f, float saved, float speed, double online, int is_zone)
 {
     memset(f, 0, sizeof *f);
@@ -165,7 +186,24 @@ int main(void)
     clear_entries();
     for (unsigned i = 0; i <= SPEED_PB_SLOTS; ++i) assert(many[i].controls[2].weak == 1);
     free(many);
+    /* #509: the handler behind the platform's trampoline, intact and then with push r12 overwritten by another mod's nops. */
+    build_fake_zone();
+    g_speed_pb_zone = (speed_pb_zone_fn)(void *)fake_trampoline;
+    g_speed_pb_zone_tail = fake_handler + 5; g_speed_pb_zone_cont = fake_handler + 7;
+    clear_entries(); setup(a, 50, 60, 0, 1);
+    speed_pb_zone(a->trigger);
+    check(a, 50, 1); assert(*(float *)a->saved == 60 && !g_speed_pb_head_used);
+    fake_handler[5] = fake_handler[6] = 0x90;
+    FlushInstructionCache(GetCurrentProcess(), fake_handler, 16);
+    clear_entries(); setup(a, 50, 70, 0, 1);
+    speed_pb_zone(a->trigger);
+    check(a, 50, 1); assert(*(float *)a->saved == 70 && g_speed_pb_head_used == (0x9090 | 0x10000));
+    clear_entries(); setup(a, 50, 40, 0, 1); a->trigger[0x3b8] = 1;
+    speed_pb_zone(a->trigger); /* a zone the handler skips still runs it once */
+    assert(a->controls[2].weak == 1 && *(float *)a->saved == 50);
+    VirtualFree(fake_handler, 0, MEM_RELEASE);
     TlsFree(g_speed_pb_tls); free(a); free(b);
-    puts("speed_pb: old-behavior control, trap/zone PBs, ties, stale online rows, async/nested/threaded comparisons and weak lifetime pass");
+    puts("speed_pb: old-behavior control, trap/zone PBs, ties, stale online rows, async/nested/threaded comparisons, weak lifetime and"
+         " a zone handler patched over the trampoline's return pass");
     return 0;
 }

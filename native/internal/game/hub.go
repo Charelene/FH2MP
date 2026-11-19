@@ -73,24 +73,27 @@ type HubConfig struct {
 
 // Hub is one UDP port, many worlds (= fh2mp_server.Hub). It is driven from one goroutine: Handle, ControlText, Step.
 type Hub struct {
-	cfg            HubConfig
-	Clk            Clock
-	Rng            Rand
-	Sock           PacketConn
-	Out            *LogOut
-	Events         *eventlog.Log
-	Sinks          *Sinks
-	catalogPtr     atomic.Pointer[catalog.Catalog]
-	catalogMu      sync.Mutex
-	authMu         sync.Mutex
-	deferMu        sync.Mutex
-	deferred       []func()
-	workers        []*Worker
-	manual         bool
-	syncer         *catalog.Syncer
-	CtlSend        func(data []byte, to Addr)
-	DefaultType    int
-	Assign         map[uint64]string
+	cfg         HubConfig
+	Clk         Clock
+	Rng         Rand
+	Sock        PacketConn
+	Out         *LogOut
+	Events      *eventlog.Log
+	Sinks       *Sinks
+	catalogPtr  atomic.Pointer[catalog.Catalog]
+	catalogMu   sync.Mutex
+	authMu      sync.Mutex
+	deferMu     sync.Mutex
+	deferred    []func()
+	workers     []*Worker
+	manual      bool
+	syncer      *catalog.Syncer
+	CtlSend     func(data []byte, to Addr)
+	DefaultType int
+	Assign      map[uint64]string
+	// Follow: players assigned to a private game ("assign <xuid> <name> follow"): they go to the world of that name that has players, whatever
+	// lobby type their game asks for (an invite accepted in a Car Meet joins the host's private Free Roam as a Car Meet, dev 2026-11-12)
+	Follow         map[uint64]bool
 	Standins       map[uint64]map[int64]int64 // a car-pack player's custom car -> the stock car the others see (control "standins")
 	CustomCars     map[uint64]map[int64]bool  // every custom car a player's launcher listed (control "standins"), with or without a stand-in
 	Runs           map[uint64]string
@@ -99,6 +102,9 @@ type Hub struct {
 	FlagsError     string
 	FlagsReleased  int // entries of a restricted-tools report dropped by loadFlags (NitroSystem stopped being one 2026-11-07)
 	FlagFile       string
+	Trusted        map[uint64]float64 // operator-trusted accounts -> unix seconds since (trusted.go)
+	TrustFile      string
+	TrustError     string
 	Revoked        map[uint64]float64
 	UDPAuth        string
 	Keys           map[uint64]map[string]float64
@@ -115,6 +121,7 @@ type Hub struct {
 	LightingRoutes map[uint64]Addr
 	HonkRoutes     map[uint64]Addr
 	CarselRoutes   map[uint64]Addr
+	ModsRoutes     map[uint64]Addr
 	probeSeen      map[Addr]probeEnt
 	autoWorlds     int
 	lastSweep      float64
@@ -136,10 +143,10 @@ func NewHub(cfg HubConfig) (*Hub, error) {
 		return nil, err
 	}
 	h := &Hub{cfg: cfg, Clk: cfg.Clock, Rng: cfg.Rng, Sock: cfg.Sock, Out: cfg.Out, Sinks: cfg.Sinks, CtlSend: cfg.CtlSend,
-		Assign: map[uint64]string{}, Standins: map[uint64]map[int64]int64{}, CustomCars: map[uint64]map[int64]bool{}, Runs: map[uint64]string{}, Authed: map[uint64]authEnt{}, Flagged: omap.New[uint64, flagEnt](), Revoked: map[uint64]float64{},
+		Assign: map[uint64]string{}, Follow: map[uint64]bool{}, Standins: map[uint64]map[int64]int64{}, CustomCars: map[uint64]map[int64]bool{}, Runs: map[uint64]string{}, Authed: map[uint64]authEnt{}, Flagged: omap.New[uint64, flagEnt](), Trusted: map[uint64]float64{}, Revoked: map[uint64]float64{},
 		Keys: map[uint64]map[string]float64{}, TicketEpochs: map[Addr][]byte{}, Bound: map[Addr]boundEnt{}, Nonces: omap.New[nonceKey, float64](), NonceCount: map[uint64]int{},
 		AuthLog: map[any]float64{}, Worlds: omap.New[WorldKey, *World](), Route: omap.New[Addr, *World](), EmptySince: map[WorldKey]float64{},
-		LightingRoutes: map[uint64]Addr{}, HonkRoutes: map[uint64]Addr{}, CarselRoutes: map[uint64]Addr{}, probeSeen: map[Addr]probeEnt{}, nxt: math.Inf(1)}
+		LightingRoutes: map[uint64]Addr{}, HonkRoutes: map[uint64]Addr{}, CarselRoutes: map[uint64]Addr{}, ModsRoutes: map[uint64]Addr{}, probeSeen: map[Addr]probeEnt{}, nxt: math.Inf(1)}
 	h.catalogPtr.Store(cfg.Catalog)
 	h.DefaultType = 2
 	h.PickRng = func() Rand { return pyrand.New(entropySeed()) }
@@ -153,8 +160,10 @@ func NewHub(cfg HubConfig) (*Hub, error) {
 		dir := filepath.Dir(cfg.LogPath)
 		h.Events = eventlog.Open(filepath.Join(dir, "events.jsonl"))
 		h.FlagFile = filepath.Join(dir, "cheaters.json")
+		h.TrustFile = filepath.Join(dir, "trusted.json")
 	}
 	h.loadFlags()
+	h.loadTrusted()
 	h.UDPAuth = envStr("FH2MP_UDP_AUTH", "off")
 	okMode := false
 	for _, m := range UDPAuthModes {
@@ -179,6 +188,9 @@ func NewHub(cfg HubConfig) (*Hub, error) {
 	}
 	if h.FlagsError != "" {
 		idle.Warnf("cheater pool file %s not read (%s): the pool starts empty", h.FlagFile, h.FlagsError)
+	}
+	if h.TrustError != "" {
+		idle.Warnf("trusted players file %s not read (%s): nobody is trusted until it is fixed or rewritten by a trust message", h.TrustFile, h.TrustError)
 	}
 	if h.FlagsReleased > 0 {
 		h.saveFlags()
@@ -278,7 +290,7 @@ func parseHex(s string) (uint64, error) {
 	return strconv.ParseUint(s, 16, 64)
 }
 
-// ControlText handles one control message: assign, auth, logout, revoke, allow, unflag, run, tools, pop, lobbies, positions, bots.
+// ControlText handles one control message: assign, auth, logout, revoke, allow, unflag, flags, trust, untrust, trusted, run, tools, pop, lobbies, positions, telemetry, bots.
 func (h *Hub) ControlText(text string, replyTo *Addr) {
 	parts := strings.Fields(text)
 	n := len(parts)
@@ -291,6 +303,23 @@ func (h *Hub) ControlText(text string, replyTo *Addr) {
 		h.ctlReply(replyTo, "bots", []byte(h.botsCommand(parts)))
 	case n == 1 && parts[0] == "positions":
 		h.ctlReply(replyTo, "positions", []byte(jsonDumps(h.mapStatus())))
+	case n == 4 && parts[0] == "telemetry":
+		h.ctlReply(replyTo, "telemetry", []byte(jsonDumps(h.telemetryCommand(parts))))
+	case n == 1 && parts[0] == "flags":
+		h.ctlReply(replyTo, "flags", []byte(jsonDumps(h.flagStatus())))
+	case n == 1 && parts[0] == "trusted":
+		h.ctlReply(replyTo, "trusted", []byte(jsonDumps(h.trustStatus())))
+	case n == 2 && (parts[0] == "trust" || parts[0] == "untrust"):
+		xuid, err := parseHex(parts[1])
+		if err != nil || xuid == 0 {
+			h.ctlIgnored(parts, fmt.Sprintf("%s message unreadable (xuid %q)", parts[0], parts[1]))
+			return
+		}
+		if parts[0] == "trust" {
+			h.Trust(xuid)
+		} else {
+			h.Untrust(xuid)
+		}
 	case n == 3 && parts[0] == "tools":
 		tools := map[string]bool{}
 		for _, t := range strings.Split(parts[2], ",") {
@@ -459,14 +488,20 @@ func (h *Hub) ControlText(text string, replyTo *Addr) {
 		}
 		h.CustomCars[xuid] = owned
 		h.Log(fmt.Sprintf("control: stand-ins for %s: %s", parts[1], strings.Join(notes, "; ")))
-	case n == 3 && parts[0] == "assign":
+	case (n == 3 || n == 4 && parts[3] == "follow") && parts[0] == "assign":
 		xuid, err := parseHex(parts[1])
 		if err != nil {
 			h.ctlIgnored(parts, fmt.Sprintf("assign message unreadable (%v)", err))
 			return
 		}
 		h.Assign[xuid] = parts[2]
-		h.Log(fmt.Sprintf("control: player %s assigned to lobby %s", parts[1], parts[2]))
+		if n == 4 {
+			h.Follow[xuid] = true
+			h.Log(fmt.Sprintf("control: player %s assigned to lobby %s, a private game: it joins that lobby's world with players in it, whatever lobby type its game asks for", parts[1], parts[2]))
+		} else {
+			delete(h.Follow, xuid)
+			h.Log(fmt.Sprintf("control: player %s assigned to lobby %s", parts[1], parts[2]))
+		}
 	default:
 		h.ctlIgnored(parts, fmt.Sprintf("unknown or malformed control message (%d field(s))", n))
 	}
@@ -534,6 +569,13 @@ func (h *Hub) lobbyStatus() pyjson.Obj {
 			obj = append(obj, pyjson.Pair{K: "status", V: st}, pyjson.Pair{K: "event", V: world.RtIdx + 1}, pyjson.Pair{K: "events", V: 4})
 		} else {
 			obj = append(obj, pyjson.Pair{K: "status", V: "Free roaming"})
+		}
+		if world.Private {
+			// a private game: the players' Guides show it as their party, with its leader
+			obj = append(obj, pyjson.Pair{K: "private", V: true})
+			if world.Leader != nil && world.Leader.Xuid != 0 {
+				obj = append(obj, pyjson.Pair{K: "leader", V: fmt.Sprintf("%x", world.Leader.Xuid)})
+			}
 		}
 		out = append(out, row{id, kind, len(peers), obj})
 	}
@@ -641,7 +683,28 @@ func (h *Hub) populationsText() string {
 		}
 		b.WriteString(" !flagged=" + strings.Join(parts, ","))
 	}
+	if fr := h.freeRoamLobbies(); PopFreeRoam && len(fr) > 0 {
+		b.WriteString(" !freeroam=" + strings.Join(fr, ","))
+	}
 	return b.String()
+}
+
+// freeRoamLobbies are the lobby names that have a Free Roam world (type 2) with a connected player, in world order.
+func (h *Hub) freeRoamLobbies() []string {
+	var out []string
+	for _, key := range h.Worlds.Keys() {
+		if key.Type != LobbyTypeFreeRoam || key.Name == "" {
+			continue
+		}
+		world, _ := h.Worlds.Get(key)
+		for _, p := range world.Peers.Values() {
+			if p.Connected {
+				out = append(out, key.Name)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // ---- cheater pool ----
@@ -713,9 +776,24 @@ func (h *Hub) Flag(xuid uint64, reason string) {
 	if CheaterPoolHours <= 0 || xuid == 0 {
 		return
 	}
+	if h.IsTrusted(xuid) {
+		h.Log(fmt.Sprintf("control: %#x not put in the cheater pool (%s): the account is trusted", xuid, reason))
+		return
+	}
 	h.Flagged.Set(xuid, flagEnt{h.Clk.Wall() + CheaterPoolHours*3600.0, reason})
 	h.saveFlags()
 	h.Log(fmt.Sprintf("control: %#x flagged for %s h (%s): matched only with other flagged players", xuid, pyfmt.FmtG(CheaterPoolHours), reason))
+}
+
+// flagStatus is the cheater pool for the operator panel: who is flagged, why and until when (unix seconds). The empty "lobbies" list is there because
+// the control client's JSON query only accepts a reply that carries one.
+func (h *Hub) flagStatus() pyjson.Obj {
+	list := []any{}
+	for _, x := range h.FlaggedNow() {
+		e, _ := h.Flagged.Get(x)
+		list = append(list, pyjson.Obj{{K: "xuid", V: fmt.Sprintf("%x", x)}, {K: "reason", V: e.reason}, {K: "until", V: e.until}})
+	}
+	return pyjson.Obj{{K: "lobbies", V: []any{}}, {K: "flagged", V: list}}
 }
 
 // FlaggedNow lists the flagged xuids, dropping expired ones.
@@ -792,6 +870,7 @@ func (h *Hub) revokeTables(xuid uint64) {
 		}
 	}
 	delete(h.Assign, xuid)
+	delete(h.Follow, xuid)
 	h.Revoked[xuid] = h.Clk.Mono() + 86400.0
 }
 
@@ -934,6 +1013,10 @@ func (h *Hub) Handle(data []byte, addr Addr) {
 		h.carselHandle(data, addr, nil)
 		return
 	}
+	if len(data) >= 19 && string(data[11:19]) == modsMagic {
+		h.modsHandle(data, addr, nil)
+		return
+	}
 	if h.probeHandle(data, addr) {
 		return
 	}
@@ -963,7 +1046,11 @@ func (h *Hub) Handle(data []byte, addr Addr) {
 		name, assigned := h.Assign[player]
 		var target *World
 		if assigned && name != "" {
-			target = h.WorldFor(ltype, name)
+			target = h.WorldFor(h.followType(player, ltype, name, addr), name)
+			if h.Follow[player] && !target.Private && !target.Roadtrip && !target.Carmeet {
+				target.Private = true
+				target.Logf("private game: this world is invite-only (its first member is %#x): its players are told PrivacyMode = InviteOnly and it keeps a leader", player)
+			}
 		} else {
 			target = h.openWorldFor(ltype, player, &addr)
 		}
@@ -1134,6 +1221,27 @@ func (h *Hub) ownerRoom(w *World, addr *Addr) bool {
 		}
 	}
 	return RelayOwnerLast-len(w.OwnerIDsTaken())-waiting >= 1
+}
+
+// followType is the lobby type of the world a player assigned to `name` goes to: the one its game asks for, except for a private game's
+// member (Follow) when that world has nobody else and another world of that name has players: then that one's (the host's private Free Roam
+// or Road Trip). The world tells the game its lobby type at the handshake.
+func (h *Hub) followType(player uint64, ltype int, name string, addr Addr) int {
+	if !h.Follow[player] {
+		return ltype
+	}
+	if w, ok := h.Worlds.Get(WorldKey{ltype, name}); ok && h.worldLoad(w, &addr) > 0 {
+		return ltype
+	}
+	for _, k := range h.Worlds.Keys() {
+		if k.Name == name && k.Type != ltype {
+			if w, _ := h.Worlds.Get(k); w != nil && h.worldLoad(w, &addr) > 0 {
+				h.Log(fmt.Sprintf("%#x asks for lobby type %d in %.8s, where only the lobby type %d world has players (a private game): it goes there", player, ltype, name, k.Type))
+				return k.Type
+			}
+		}
+	}
+	return ltype
 }
 
 // openWorldFor: a player with no lobby assignment goes to the busiest world of that type that has room.

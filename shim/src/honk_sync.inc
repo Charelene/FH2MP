@@ -1,6 +1,8 @@
-/* Horns of other players (issue 293). HonkHonk (suderek22, fh2-mods\HonkHonk.dll 0.4.0 pinned, 0.3.4 still known, a required add-on) plays the local
- * horn through the game's own FMOD; this file reads which horn the player is holding out of HonkHonk's memory, tells the server (a side channel like
+/* Horns of other players (issue 293). HonkHonk (suderek22, fh2-mods\HonkHonk.dll 1.0.0 pinned, 0.4.0 and 0.3.4 still known, a required add-on) plays the
+ * local horn through the game's own FMOD; this file reads which horn the player is holding out of HonkHonk's memory, tells the server (a side channel like
  * lighting, native/internal/game/side.go, its own magic FH2MPHN1) and plays the horns the server lists at those cars with the same FMOD calls and the same bank.
+ * A horn crosses the network as its id (honk_wire.h: the sound's place in 1.0.0's bank), found by the sample's name in the bank each player has, so 0.4.0's
+ * 31 sound bank and 1.0.0's 47 sound bank play the same sound for the same horn, and a sound a player's bank lacks is not played.
  * HonkHonk itself is not changed on disk; the addresses in honk_builds are per known DLL build and are checked byte for byte, another build is left alone.
  *
  * Controls: HonkHonk honks on the left stick (L3, button bit 0x40, one `test byte [rsp+disp8], 0x40` in its input loop). Forza honks on the right
@@ -11,8 +13,9 @@
  *
  * Remote voices run on the game's audio update (AudioEngineFmod::vfunc_5, 0x10140d0: Studio::System::update(*(this+0x7f0)), the call HonkHonk hooks
  * one level down), so every FMOD call is made on the thread HonkHonk's own calls use. Three limits keep a voice from sticking: the server's 0.5 s
- * lease (a horn nobody refreshes is gone from the list), 10 s per press (server and here), and a voice whose owner is missing from the list for 0.3 s
- * stops. The network thread never touches FMOD or a car. Needs the lighting hooks (the server address, ticket epoch and car id are theirs). */
+ * lease (a horn nobody refreshes is gone from the list), 60 s per press (server and here; a released v1 shim stops at 10 s), and a voice whose owner is
+ * missing from the list for 0.3 s stops. The network thread never touches FMOD or a car. Needs the lighting hooks (the server address, ticket epoch and
+ * car id are theirs). */
 #include "honk_wire.h"
 
 #define HH_SYSTEM_RVA 0x10140d0u      /* AudioEngineFmod::vfunc_5 */
@@ -20,6 +23,9 @@
 #define HH_VOICES 8
 #define HH_SILENT_MS 300u
 #define HH_SNAPSHOT_MS 600u
+#define HH_BANK_MAX 64u               /* samples read from a bank */
+#define HH_V2_TRIES 30u               /* v2 polls without any reply before v1 (a server before horn v2) */
+#define HH_V2_PROBE 50u               /* in v1, every 50th poll is v2 again */
 
 typedef struct {
     int (*get_low_level)(void *studio, void **core);
@@ -41,14 +47,17 @@ static volatile LONG g_honk_enabled;
 static struct { honk_record records[HONK_MAX]; unsigned count; ULONGLONG response_at; } g_honk;
 static honk_fmod g_honk_fmod;
 static void *g_honk_core;
-static void *g_honk_sounds[HONK_HORNS];
-static unsigned g_honk_sound_failed;                 /* bit per horn whose createSound failed (said once) */
+static void *g_honk_sounds[HH_BANK_MAX];             /* per bank sample */
+static ULONGLONG g_honk_sound_failed;                /* bit per bank sample whose createSound failed (said once) */
 static honk_voice g_honk_voices[HH_VOICES];
 static unsigned short g_honk_capped[256];            /* per owner: the press that hit the cap */
 static unsigned char g_honk_capped_set[256];
 static unsigned char *g_honk_bank;
 static DWORD g_honk_bank_size;
-static honk_sample g_honk_samples[HONK_HORNS];
+static honk_sample g_honk_samples[HH_BANK_MAX];
+static unsigned g_honk_bank_count;
+static unsigned char g_honk_bank_id[HH_BANK_MAX];    /* bank sample -> horn id, HONK_OFF: a sound without one */
+static unsigned char g_honk_id_sample[HONK_IDS];     /* horn id -> bank sample, HONK_OFF: not in this bank */
 static volatile LONG g_honk_bank_ok;
 static float g_honk_volume = 0.7f;
 static volatile LONG g_honk_started, g_honk_positions_car, g_honk_positions_server;
@@ -67,16 +76,17 @@ static float honk_parse_float(const wchar_t *s)
     return v/scale;
 }
 
-/* ---- the bank: HonkHonk's own FSB5 (mono PCM16, 31 samples), read exactly the way HonkHonk reads it ---- */
-static int honk_parse_bank(const unsigned char *f, DWORD size, honk_sample out[HONK_HORNS])
+/* ---- the bank: HonkHonk's own FSB5 (mono PCM16 44.1 kHz; 31 samples in 0.4.0, 47 in 1.0.0), read the way HonkHonk reads it, and its name table ----
+ * -> 1 and per sample its place, length, loop and horn id (by name, HONK_OFF for a name honk_names lacks) */
+static int honk_parse_bank(const unsigned char *f, DWORD size, honk_sample out[HH_BANK_MAX], unsigned char ids[HH_BANK_MAX], unsigned *count)
 {
     unsigned h[6], i; unsigned long long p=60, limit;
     if(size<60 || f[0]!='F' || f[1]!='S' || f[2]!='B' || f[3]!='5') return 0;
     honk_copy(h,f+4,sizeof h);
     /* h: version, samples, sample header bytes, name table bytes, data bytes, mode (2 = PCM16) */
     limit=60ull+h[2];
-    if(h[5]!=2 || h[1]!=HONK_HORNS || limit+h[3]+h[4]>size) return 0;
-    for(i=0;i<HONK_HORNS;i++) {
+    if(h[5]!=2 || !h[1] || h[1]>HH_BANK_MAX || limit+h[3]+h[4]>size || h[3]<h[1]*4ull) return 0;
+    for(i=0;i<h[1];i++) {
         unsigned long long v, off, frames; unsigned more;
         if(p+8>limit) return 0;
         honk_copy(&v,f+p,8); p+=8;
@@ -95,14 +105,42 @@ static int honk_parse_bank(const unsigned char *f, DWORD size, honk_sample out[H
         if(out[i].loop_end>frames) out[i].loop_end=0;
         out[i].off=(unsigned)(60u+h[2]+h[3]+off); out[i].bytes=(unsigned)(frames*2);
     }
+    /* the name table: one u32 offset per sample from the table's start, then the NUL-ended names */
+    for(i=0;i<h[1];i++) {
+        unsigned off, e, k; const unsigned char *name;
+        honk_copy(&off,f+limit+4ull*i,4);
+        if(off>=h[3]) return 0;
+        name=f+limit+off;
+        for(e=0;off+e<h[3] && name[e];e++) {}
+        if(off+e>=h[3]) return 0;
+        ids[i]=HONK_OFF;
+        for(k=0;k<HONK_KNOWN && ids[i]==HONK_OFF;k++) {
+            const char *want=honk_names[k]; unsigned j;
+            for(j=0;j<e && want[j] && want[j]==(char)name[j];j++) {}
+            if(j==e && !want[j]) ids[i]=(unsigned char)k;
+        }
+    }
+    *count=h[1];
     return 1;
+}
+/* The bank's id -> sample table (the first sample of a name counts). */
+static void honk_bank_index(const unsigned char ids[HH_BANK_MAX], unsigned count)
+{
+    unsigned i;
+    for(i=0;i<HONK_IDS;i++) g_honk_id_sample[i]=HONK_OFF;
+    for(i=0;i<HH_BANK_MAX;i++) g_honk_bank_id[i]=HONK_OFF;
+    for(i=0;i<count && i<HH_BANK_MAX;i++) {
+        g_honk_bank_id[i]=ids[i];
+        if(ids[i]<HONK_IDS && g_honk_id_sample[ids[i]]==HONK_OFF) g_honk_id_sample[ids[i]]=(unsigned char)i;
+    }
+    g_honk_bank_count=count;
 }
 /* The sample as a WAV in memory (what FMOD's createSound is given): 44 byte header + PCM16 mono 44100 Hz, like HonkHonk. */
 static unsigned char *honk_wav(unsigned index, DWORD *length)
 {
     const honk_sample *s=g_honk_samples+index; unsigned char *w; unsigned riff, rate=44100, byte_rate=88200, i;
     static const unsigned char tail[]={'d','a','t','a'};
-    if(!g_honk_bank_ok || index>=HONK_HORNS || !s->bytes) return NULL;
+    if(!g_honk_bank_ok || index>=g_honk_bank_count || !s->bytes) return NULL;
     w=HeapAlloc(GetProcessHeap(),0,44u+s->bytes);
     if(!w) return NULL;
     riff=36u+s->bytes;
@@ -117,7 +155,7 @@ static unsigned char *honk_wav(unsigned index, DWORD *length)
 static void *honk_sound(unsigned index)
 {
     unsigned char info[0xd8]; unsigned char *wav; DWORD length=0; void *sound=NULL; int r;
-    if(index>=HONK_HORNS) return NULL;
+    if(index>=g_honk_bank_count || index>=HH_BANK_MAX) return NULL;
     if(g_honk_sounds[index]) return g_honk_sounds[index];
     if((g_honk_sound_failed>>index) & 1) return NULL;
     wav=honk_wav(index,&length);
@@ -136,7 +174,7 @@ static void *honk_sound(unsigned index)
     } else {
         log_begin();log_raw("honk: could not build horn ");log_dec(index);log_raw(" from the bank\n");
     }
-    g_honk_sound_failed|=1u<<index;
+    g_honk_sound_failed|=1ull<<index;
     return NULL;
 }
 
@@ -204,9 +242,10 @@ static void honk_voices_step(ULONGLONG now)
             continue;
         }
         if(!free_slot || r->age>=HONK_CAP_MS || (g_honk_capped_set[r->owner] && g_honk_capped[r->owner]==r->press)) continue;
+        if(r->horn>=HONK_IDS || g_honk_id_sample[r->horn]==HONK_OFF) continue;      /* a sound this player's bank does not have */
         if(!honk_voice_position(r,pos)) continue;
         {
-            void *sound=honk_sound(r->horn), *channel=NULL;
+            void *sound=honk_sound(g_honk_id_sample[r->horn]), *channel=NULL;
             if(!sound) continue;
             if(g_honk_fmod.play_sound(g_honk_core,sound,NULL,1,&channel)!=0 || !channel) continue;
             g_honk_fmod.set_3d(channel,pos,lv,NULL);
@@ -259,9 +298,11 @@ static void honk_audio_update(void *engine)
 }
 
 /* ---- HonkHonk.dll: the horn it holds, its button, its bank ----
- * One entry per known build, recognised by its request setter. request: fmodhorn::request(int), `mov [rip+disp32], ecx ; ret` (the horn index or -1;
- * both builds store to RVA 0xe044). button: the left stick test of the input loop, its immediate (+4) is 0x40 and becomes 0x80 for the right stick.
- * xinput_redirect: the build polls XInputGetState itself (0.3.4 only; 0.4.0 reads the game's active controller, its PR #1). */
+ * One entry per known build, recognised by its request setter. request: fmodhorn::request(int), `mov [rip+disp32], ecx ; ret` (the bank sample index
+ * or -1; 0.4.0 and 0.3.4 store to RVA 0xe044, 1.0.0 to 0x11044, read by its FMOD update at +0x7376 against the sound vector's size). button: the left
+ * stick test of the input loop, its immediate (+4) is 0x40 and becomes 0x80 for the right stick. xinput_redirect: the build polls XInputGetState itself
+ * (0.3.4 only; 0.4.0 and 1.0.0 read the game's active controller and import no XInput). 1.0.0 is HonkHonk_v1.0.0.zip of 2026-11-18, DLL sha256
+ * 143371b4...49b13a1 (MSVC build, objdump of the release DLL). */
 typedef struct {
     const char *version;
     unsigned request_rva; unsigned char request_code[7];
@@ -269,6 +310,7 @@ typedef struct {
     int xinput_redirect;
 } honk_build;
 static const honk_build honk_builds[]={
+    {"1.0.0",0x6d50u,{0x89,0x0d,0xee,0xa2,0x00,0x00,0xc3},0x2b22u,{0xf6,0x44,0x24,0x50,0x40,0x74,0x5e},0},   /* sha256 143371b4..., test [rsp+0x50] ; je */
     {"0.4.0",0x68c0u,{0x89,0x0d,0x7e,0x77,0x00,0x00,0xc3},0x2267u,{0xf6,0x44,0x24,0x60,0x40,0x74,0x5e},0},   /* sha256 b42484b7..., test [rsp+0x60] ; je */
     {"0.3.4",0x6840u,{0x89,0x0d,0xfe,0x77,0x00,0x00,0xc3},0x222du,{0xf6,0x44,0x24,0x2c,0x40,0x75,0x05},1},   /* sha256 4ed6ba03..., test [rsp+0x2c] ; jne */
 };
@@ -413,7 +455,7 @@ static int honk_place_button(unsigned char *hh, const honk_build *b)
     if(!b || !honk_button_is(hh,b,0x40)) {
         unsigned char now[7];
         log_begin();
-        if(!b) log_raw("honk: the horn button stays on the left stick, HonkHonk.dll is not a known build (0.4.0, 0.3.4)");
+        if(!b) log_raw("honk: the horn button stays on the left stick, HonkHonk.dll is not a known build (1.0.0, 0.4.0, 0.3.4)");
         else {
             log_raw("honk: the horn button stays on the left stick, HonkHonk.dll ");log_raw(b->version);log_raw(" has other bytes at +0x");log_hex(b->button_rva,4);
             log_raw(": ");
@@ -457,7 +499,7 @@ static int honk_attach(void)
         if(!told_other) {
             unsigned char now[7];
             told_other=1;
-            log_begin();log_raw("honk: unexpected HonkHonk.dll (known builds: 0.4.0, 0.3.4), its horn is not shared; at the 0.4.0 request setter +0x");
+            log_begin();log_raw("honk: unexpected HonkHonk.dll (known builds: 1.0.0, 0.4.0, 0.3.4), its horn is not shared; at the 1.0.0 request setter +0x");
             log_hex(honk_builds[0].request_rva,4);log_raw(" found ");
             if(read_game_memory(hh+honk_builds[0].request_rva,now,7)) log_hexbytes(now,7); else log_raw("(unreadable)");
             log_raw("\n");
@@ -476,15 +518,18 @@ static int honk_attach(void)
         lstrcpyW(path,dir); lstrcatW(path,L"HonkHonk\\HZ2_SFX_HonkHonk.bank");
         f=CreateFileW(path,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
         if(f!=INVALID_HANDLE_VALUE) {
-            DWORD size=GetFileSize(f,NULL), got=0; unsigned char *buf=NULL;
+            DWORD size=GetFileSize(f,NULL), got=0; unsigned char *buf=NULL; unsigned char ids[HH_BANK_MAX]; unsigned count=0;
             if(size!=INVALID_FILE_SIZE && size>60 && size<=64u*1024*1024) buf=HeapAlloc(GetProcessHeap(),0,size);
-            if(buf && ReadFile(f,buf,size,&got,NULL) && got==size && honk_parse_bank(buf,size,g_honk_samples)) {
+            if(buf && ReadFile(f,buf,size,&got,NULL) && got==size && honk_parse_bank(buf,size,g_honk_samples,ids,&count)) {
+                unsigned k, shared=0;
+                for(k=0;k<count;k++) if(ids[k]!=HONK_OFF) shared++;
+                honk_bank_index(ids,count);
                 g_honk_bank=buf; g_honk_bank_size=size;
                 InterlockedExchange(&g_honk_bank_ok,1);
-                log_begin();log_raw("honk: the horn bank is loaded (");log_dec(HONK_HORNS);log_raw(" sounds)\n");
+                log_begin();log_raw("honk: the horn bank is loaded (");log_dec(count);log_raw(" sounds, ");log_dec(shared);log_raw(" of them shared by name)\n");
             } else {
                 if(buf) HeapFree(GetProcessHeap(),0,buf);
-                log_begin();log_raw("honk: could not read HonkHonk's horn bank (HZ2_SFX_HonkHonk.bank is not the 31 sound bank); other players' horns are not played\n");
+                log_begin();log_raw("honk: could not read HonkHonk's horn bank (HZ2_SFX_HonkHonk.bank is not a PCM16 FSB5 of 1-64 named sounds); horns are not shared\n");
             }
             CloseHandle(f);
         } else {
@@ -498,11 +543,13 @@ static int honk_attach(void)
     }
     return 1;
 }
+/* The horn id the player holds (HonkHonk's request is a sample of its bank), -1: none, or a sound without an id */
 static int honk_local_horn(void)
 {
     int v=-1;
-    if(!g_honk_request || !read_game_memory(g_honk_request,&v,4) || v<0 || (unsigned)v>=HONK_HORNS) return -1;
-    return v;
+    if(!g_honk_request || !g_honk_bank_ok || !read_game_memory(g_honk_request,&v,4) || v<0 || (unsigned)v>=g_honk_bank_count ||
+       g_honk_bank_id[v]==HONK_OFF) return -1;
+    return g_honk_bank_id[v];
 }
 
 static DWORD WINAPI honk_worker(void *unused)
@@ -514,7 +561,7 @@ static DWORD WINAPI honk_worker(void *unused)
     int (WSAAPI *receive)(SOCKET,char *,int,int,struct sockaddr *,int *);
     int (WSAAPI *option)(SOCKET,int,int,const char *,int);
     int (WSAAPI *close_socket)(SOCKET);
-    u_long nb=1; int v6only=0, sent_horn=-2, previous=-1, socket_told=0, silent_told=0; unsigned short press=0, sent_press=0; unsigned rejected=0;
+    u_long nb=1; int v6only=0, sent_horn=-2, previous=-1, socket_told=0, silent_told=0, v2=1, v1_told=0; unsigned short press=0, sent_press=0; unsigned rejected=0;
     (void)unused;
     if(!g_honk_enabled) {                            /* horns are not shared: only the button is placed */
         while(honk_attach()==0) Sleep(500);
@@ -544,7 +591,7 @@ static DWORD WINAPI honk_worker(void *unused)
         ReleaseSRWLockShared(&g_light_lock);
         if(generation!=current_generation) {
             if(s!=INVALID_SOCKET) close_socket(s);
-            s=INVALID_SOCKET; received=0; generation=current_generation; polls=0; rejected=0; silent_told=0; sent_horn=-2;
+            s=INVALID_SOCKET; received=0; generation=current_generation; polls=0; rejected=0; silent_told=0; sent_horn=-2; v2=1;
             AcquireSRWLockExclusive(&g_honk_lock);
             g_honk.count=0; g_honk.response_at=0;
             ReleaseSRWLockExclusive(&g_honk_lock);
@@ -564,8 +611,10 @@ static DWORD WINAPI honk_worker(void *unused)
             socket_told=0;
         }
         for(drained=0;drained<32 && (n=receive(s,(char *)packet,sizeof packet,0,NULL,NULL))>0;drained++) {
-            if(honk_response(packet,(unsigned)n,g_ticket_key,g_xuid,seq,received,epoch,records,&count)) {
+            int version=honk_response(packet,(unsigned)n,g_ticket_key,g_xuid,seq,received,epoch,records,&count);
+            if(version) {
                 unsigned k; int first=!received;
+                if(version==2 && !v2) {v2=1; log_begin();log_raw("honk: the server answers v2 horn polls, sending v2 again (every HonkHonk sound is shared)\n");}
                 AcquireSRWLockExclusive(&g_honk_lock);
                 if(g_light.generation==generation) {
                     for(k=0;k<count;k++) g_honk.records[k]=records[k];
@@ -585,7 +634,12 @@ static DWORD WINAPI honk_worker(void *unused)
             gap=busy?50:100;
             if((horn!=sent_horn || press!=sent_press) ? now-last_send>=35 : now-last_send>=gap) {
                 WSABUF b; DWORD sent=0;
-                honk_request(packet,g_ticket_key,g_xuid,++seq,epoch,car,horn<0?HONK_OFF:(unsigned char)horn,press);
+                if(v2 && !received && polls>=HH_V2_TRIES) {
+                    /* 3 s of v2 polls without one valid reply: a server before horn v2. v1 shares the 31 sounds of the old bank; every 50th poll asks v2 again. */
+                    v2=0;
+                    if(!v1_told) {v1_told=1;log_begin();log_raw("honk: the server does not answer v2 horn polls, using v1: only the 31 sounds of HonkHonk 0.4.0 are shared\n");}
+                }
+                honk_request(packet,g_ticket_key,g_xuid,++seq,epoch,car,horn<0?HONK_OFF:(unsigned char)horn,press,v2 || polls%HH_V2_PROBE==HH_V2_PROBE-1);
                 b.len=HONK_REQUEST; b.buf=(char *)packet;
                 g_r_wsasendto(s,&b,1,&sent,0,address,length,NULL,NULL);
                 last_send=now; sent_horn=horn; sent_press=press;

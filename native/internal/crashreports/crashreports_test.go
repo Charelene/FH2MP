@@ -560,3 +560,64 @@ func norm(v any) any {
 	}
 	return v
 }
+
+// Launcher 1.4.1 sends the memory watch's summary as the optional field memory; an older launcher does not, and its issue reads as before.
+func TestOptionalMemoryField(t *testing.T) {
+	base := `{"v": 1, "fields": {"date": "2026-11-13 17:21 UTC", "gpu": "NVIDIA GeForce RTX 2050"%s}, "files": {"azimuth.log": "x"}}`
+	mem := "game peak 11.9 GB of 15.7 GB RAM, system commit peak 99% of 23.7 GB, free RAM low 0.1 GB"
+	with, err := parseReport(t, fmt.Sprintf(base, `, "memory": "`+mem+`"`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	without, err := parseReport(t, fmt.Sprintf(base, `, "memory": ""`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := parseReport(t, fmt.Sprintf(base, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if with.field("memory") != mem || without.field("memory") != "" || len(without.Fields) != len(old.Fields) {
+		t.Fatalf("fields: with %v, empty %v, old %v", with.Fields, without.Fields, old.Fields)
+	}
+	const rid = "0123456789abcdef"
+	row := "| Memory | `" + mem + "` |"
+	if c := CommentBody(rid, with, LinkBase); !strings.Contains(c, row) || strings.Index(c, row) > strings.Index(c, "| Report id |") {
+		t.Fatalf("comment has no memory row before the id:\n%s", c)
+	}
+	if s := SummaryTable(rid, with, "STOPPED out of memory"); !strings.Contains(s, "| Memory |") {
+		t.Fatalf("summary has no memory row:\n%s", s)
+	}
+	if CommentBody(rid, old, LinkBase) != CommentBody(rid, without, LinkBase) || strings.Contains(CommentBody(rid, old, LinkBase), "Memory") {
+		t.Fatal("a report without memory must read as before")
+	}
+}
+
+// Encore's Forza Horizon 3 reports carry the game and its shim; they keep them, and a crash at the same exception and address as one of
+// Forza Horizon 2's opens its own issue, named for the game. Reports without the field read and group as before.
+func TestAnotherGamesCrashHasIssuesOfItsOwn(t *testing.T) {
+	base := `{"v": 1, "fields": {"date": "2026-11-17 20:00 UTC"%s}, "files": {"azimuth.log": "x"}}`
+	fh3, err := parseReport(t, fmt.Sprintf(base, `, "game": "Forza Horizon 3", "shim": "24"`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fh2, err := parseReport(t, fmt.Sprintf(base, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fh3.field("game") != "Forza Horizon 3" || fh3.field("shim") != "24" || fh2.field("game") != "" {
+		t.Fatalf("fields: fh3 %v, fh2 %v", fh3.Fields, fh2.Fields)
+	}
+	line := "[+12.3] CRASHED exception 0xc0000005 at game+0x125d9e8"
+	k2, t2 := IssueKey(fh2, line)
+	k3, t3 := IssueKey(fh3, line)
+	if k2b, t2b := Signature(line); k2 != k2b || t2 != t2b {
+		t.Fatalf("an FH2 report groups as before: %q %q", k2, t2)
+	}
+	if k3 == k2 || !strings.HasPrefix(t3, "Forza Horizon 3: ") {
+		t.Fatalf("the FH3 crash joined the FH2 issue: %q %q", k3, t3)
+	}
+	if !strings.Contains(CommentBody("0123456789abcdef", fh3, LinkBase), "| Game | `Forza Horizon 3` |") {
+		t.Fatal("the comment names the game")
+	}
+}

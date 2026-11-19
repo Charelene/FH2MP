@@ -25,6 +25,7 @@ static void log_raw(const char *s)
     }
 }
 static void log_dec(unsigned long v) { char b[16]; sprintf(b, "%lu", v); log_raw(b); }
+static void log_hex(unsigned long long v, int digits) { char b[17]; int i; for (i = digits - 1; i >= 0; i--) { b[i] = "0123456789abcdef"[v & 0xf]; v >>= 4; } b[digits] = 0; log_raw(b); }
 static volatile LONG g_place_logged = 3;
 
 #define HEALTH_SUMMARY_S 2u

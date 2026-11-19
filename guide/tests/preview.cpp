@@ -4,7 +4,7 @@
 // Scenes: home (the Guide, the player's blade), games, settings, down; friends, friends-nogame, party, players, messages; message,
 // message-invite, message-request; profile, profile-nogame, profile-personal, profile-request, profile-sent, profile-here; create,
 // exit-session; create-nogame; pick, pick-many, compose, compose-invite, discard, keyboard, keyboard-caps, add-friend; box-accept, box-gone;
-// own-profile, edit-profile, edit-motto; toast-sent, toast-invite, toast-request, toast-message, toast-online. Sample players, not real ones.
+// own-profile, edit-profile, edit-motto; toast-sent, toast-invite, toast-request, toast-message, toast-online, toast-memory. Sample players, not real ones.
 // seconds: time since the Guide opened or the toast started (default 1.5 and 3.0).
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -23,6 +23,7 @@
 #include "backends/imgui_impl_dx12.h"
 #include "gfx.h"
 #include "guide.h"
+#include "ui.h"
 #include "imgui.h"
 
 namespace {
@@ -338,6 +339,8 @@ int main(int argc, char** argv) {
         nr.op = NetOp::Received, nr.ok = true, nr.xuid = 3, nr.name = "NightRunR", nr.id = 9;
         g.on_result(nr, assets, t0 - 2);
         g.toggle(t0);  // the Guide button while the invite's toast plays
+    } else if (scene == "toast-memory") {
+        g.toast(ToastKind::Warning, "Memory almost full", "Restart the game soon", ui::I_MEMORY, 0, t0);  // overlay.cpp memory_notice
     } else if (is_toast) {
         nr.ok = true, nr.xuid = 2, nr.name = "DebugWolf";
         nr.op = scene == "toast-sent" ? NetOp::Invite : scene == "toast-invite" ? NetOp::Received : scene == "toast-request" ? NetOp::GotRequest

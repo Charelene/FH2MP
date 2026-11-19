@@ -426,6 +426,47 @@ func (w *World) rtVoters() []*Peer {
 	return out
 }
 
+// RtTripClass is the class of the Road Trip location the vote chose (the class its car select offered), or -1 before a vote closed.
+func (w *World) RtTripClass() int {
+	if !w.Roadtrip || w.RtWinner < 0 || w.RtCandidates == nil || w.RtWinner >= len(w.RtCandidates.Classes) {
+		return -1
+	}
+	return w.RtCandidates.Classes[w.RtWinner]
+}
+
+// RtClassAbove says whether a Road Trip player's car is above the trip's class after car select, and the trip's class. A higher class can only
+// come from a car or tune changed mid-trip (shim 1.3.5 closes FH2 ANNA's Tune Car path; this is the server's side). Each case is logged at most
+// once per owner and class every 5 min; whether it is also refused is RtClassMode's. That the vote's class index counts like PlayerChoices.CarClass
+// (0 D, 1 C, 2 B, 3 A, 4 S1, 5 S2) is inferred, not seen: hence "log" by default until prod logs confirm it.
+func (w *World) RtClassAbove(peer *Peer) (bool, int) {
+	trip := w.RtTripClass()
+	if RtClassMode == "off" || trip < 0 || w.RtState < RTDriveToEvent || peer.Choices == nil || !peer.Choices.HasClass ||
+		peer.Choices.Class <= int64(trip) || peer.Choices.Class >= RentalClassID {
+		return false, trip
+	}
+	pi, car := "unknown", int64(-1)
+	if !math.IsNaN(peer.Choices.PI) {
+		pi = strconv.Itoa(int(peer.Choices.PI*1000 + 0.5))
+	}
+	if peer.ModelID != nil {
+		car = *peer.ModelID
+	}
+	what := "logged only (FH2MP_RT_CLASS=log)"
+	if RtClassMode == "enforce" {
+		what = "refused for events (FH2MP_RT_CLASS=enforce)"
+	}
+	w.LogEvery([3]any{"rt-class", peer.Owner, peer.Choices.Class}, 300.0,
+		fmt.Sprintf("road trip class: owner %d xuid %#x car %d is class %s PI %s, above the trip's class %s (vote location index %d, state %d); %s",
+			peer.Owner, peer.Xuid, car, classLetter(uint64(peer.Choices.Class)), pi, classLetter(uint64(trip)), w.RtWinner, w.RtState, what), diag.Warn)
+	return true, trip
+}
+
+// rtClassNotice is the Message Center text for a Road Trip car refused for its class.
+func rtClassNotice(trip int) string {
+	return fmt.Sprintf("FH2MP: your car is above this Road Trip's class %s, so it can't race in its events. Switch back to a class %s car or tune.",
+		classLetter(uint64(trip)), classLetter(uint64(trip)))
+}
+
 // RtCarPicked: a client's car pick during CarSelect shows up as a large update of its player object (router 1).
 func (w *World) RtCarPicked(peer *Peer) {
 	if w.RtState != RTCarSelect {

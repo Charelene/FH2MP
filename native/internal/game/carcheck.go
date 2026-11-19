@@ -273,13 +273,16 @@ func (w *World) TrackSpeed(peer *Peer, pos [3]float64, stamp *uint64, scene *int
 	}
 	if peer.ClimbS >= FlightSeconds && !peer.Flagged("flight") {
 		peer.Flag("flight")
+		trusted := w.trusted(peer.Xuid)
 		tail := ""
-		if SpeedPolicy == "kick" {
+		if SpeedPolicy == "kick" && trusted {
+			tail = ": trusted account, not kicked"
+		} else if SpeedPolicy == "kick" {
 			tail = ": ending the connection"
 		}
 		w.Logf("FLIGHT: owner %d xuid %#x car %s climbing at %.0f km/h for %.0f s, now at height %.0f%s",
 			peer.Owner, peer.Xuid, modelStr(peer), climb, peer.ClimbS, pos[1], tail)
-		if SpeedPolicy == "kick" && peer.KickReason == nil {
+		if SpeedPolicy == "kick" && !trusted && peer.KickReason == nil {
 			r := fmt.Sprintf("flying (%.0f km/h climb)", climb)
 			peer.leaving(&r)
 		}
@@ -308,12 +311,15 @@ func (w *World) TrackSpeed(peer *Peer, pos [3]float64, stamp *uint64, scene *int
 	}
 	if peer.HardS >= SpeedSeconds && !peer.Flagged("hard") {
 		peer.Flag("hard")
+		trusted := w.trusted(peer.Xuid)
 		tail := ""
-		if SpeedPolicy == "kick" {
+		if SpeedPolicy == "kick" && trusted {
+			tail = ": trusted account, not kicked"
+		} else if SpeedPolicy == "kick" {
 			tail = ": ending the connection"
 		}
 		w.Logf("SPEED: owner %d xuid %#x car %s drove %.0f km/h for %.0f s (hard cap %.0f)%s", peer.Owner, peer.Xuid, modelStr(peer), kmh, peer.HardS, HardCapKmh, tail)
-		if SpeedPolicy == "kick" && peer.KickReason == nil {
+		if SpeedPolicy == "kick" && !trusted && peer.KickReason == nil {
 			r := fmt.Sprintf("speed %.0f km/h", kmh)
 			peer.leaving(&r)
 		}
@@ -452,9 +458,9 @@ func (w *World) CheckParts(peer *Peer, size int, payload bits.Int, oid int) (boo
 			bad, hide, np := w.UnknownCar(peer, payload, decoded[playersetup.Parts].Offset, words)
 			if !hide && UnknownCarPolicy == "standin" {
 				w.standinApplied = true
-				// a stand-in the launcher named is a real car: it gets a complete stock setup. The default stand-in is the game's placeholder car,
-				// which draws whatever the setup says (the recorded traces keep that path)
-				if w.standinFor(peer, car) != StandinCar {
+				// a stand-in gets a complete stock setup: the launcher's own and, with StandinStock, the default placeholder car (the recorded
+				// traces keep the old path, where the placeholder draws whatever the setup says, tune included)
+				if StandinStock || w.standinFor(peer, car) != StandinCar {
 					if n2, p2, ok := w.standinSetup(peer, car, values); ok {
 						return bad, hide, n2, p2
 					}
@@ -636,6 +642,46 @@ type CarRow struct {
 	PI    float64
 }
 
+// NotePlayerChoices records the class and PI of a player object that the last CheckParts let through and returns the payload to relay (sentSize/sent:
+// the object as the owner's game sent it; size/payload: as CheckParts passes it on to the others).
+//
+// A stand-in setup (a custom car shown to the others as a game car) carries the stand-in's catalog class and PI, but the owner's game is never told
+// about the stand-in: it keeps its own car's values and later sends only the fields that change. peer.Choices, which the event rules check, keeps
+// what the owner's game holds. Recording the stand-in's class kept it after a change to a game car of the same class in the owner's game, whose
+// setup carried only the new PI (prod 2026-11-17: a class A car, PI 748, refused by every class A event as class C, the placeholder car's class).
+func (w *World) NotePlayerChoices(peer *Peer, sentSize int, sent bits.Int, size int, payload bits.Int) bits.Int {
+	prev := peer.Choices
+	if size >= 240 {
+		payload = w.NoteChoices(peer, size, payload)
+	} else if size == 40 || size == 80 {
+		payload = w.ShortRentalChoices(peer, size, payload)
+	}
+	payload = w.NoteTypedChoices(peer, size, payload)
+	if w.standinApplied {
+		w.keepOwnChoices(peer, prev, sentSize, sent)
+	}
+	return payload
+}
+
+// keepOwnChoices sets peer.Choices to prev with the class and PI fields of the setup as the owner's game sent it (fields it did not send keep prev's).
+func (w *World) keepOwnChoices(peer *Peer, prev *Choices, size int, payload bits.Int) {
+	values, err := playersetup.Fields(size, payload)
+	if err != nil { // CheckParts withholds a setup it cannot decode, so a stand-in was never made from one
+		return
+	}
+	own := Choices{PI: math.NaN()}
+	if prev != nil {
+		own = *prev
+	}
+	if f, ok := values[81]; ok {
+		own.HasClass, own.Class = true, int64(f.Value.Uint64())
+	}
+	if f, ok := values[82]; ok {
+		own.PI = float64(math.Float32frombits(uint32(f.Value.Uint64())))
+	}
+	peer.Choices = &own
+}
+
 // NoteTypedChoices tracks independently dirty class/PI fields in every legal player delta.
 func (w *World) NoteTypedChoices(peer *Peer, size int, payload bits.Int) bits.Int {
 	values, err := playersetup.Fields(size, payload)
@@ -676,6 +722,9 @@ func (w *World) NoteTypedChoices(peer *Peer, size int, payload bits.Int) bits.In
 		}
 		peer.Choices = &Choices{true, int64(want.Class), want.PI}
 	}
+	if w.Roadtrip {
+		w.RtClassAbove(peer)
+	}
 	return payload
 }
 
@@ -705,6 +754,9 @@ func (w *World) NoteChoices(peer *Peer, size int, payload bits.Int) bits.Int {
 			peer.Addr.Port, peer.Owner, *peer.RentalCar, cur.Class, pyfmt.F(pi), want.Class, want.PI)
 		payload = parts.WriteChoices(payload, found, want.Class, float32(want.PI))
 		peer.Choices = &Choices{true, int64(want.Class), want.PI}
+	}
+	if w.Roadtrip {
+		w.RtClassAbove(peer)
 	}
 	return payload
 }
@@ -749,6 +801,9 @@ func (w *World) ShortRentalChoices(peer *Peer, size int, payload bits.Int) bits.
 		next.PI = *piP
 	}
 	peer.Choices = &next
+	if w.Roadtrip {
+		w.RtClassAbove(peer)
+	}
 	return payload
 }
 

@@ -99,8 +99,40 @@ bool starts_with(const unsigned char* at, const unsigned char* want, size_t n) {
 typedef void** (*PropFn)(void* entity, void** out);
 PropFn o_meet_prop;
 unsigned char g_zero_prop[0x100];
+
+// A pointer-sized read that cannot fault (ReadProcessMemory refuses an unreadable page instead).
+bool read_ptr(const void* at, void** out) {
+    SIZE_T n = 0;
+    return ReadProcessMemory(GetCurrentProcess(), at, out, sizeof *out, &n) && n == sizeof *out;
+}
+
+// Before that read the same function takes the meet's entity as the first element of a std::map in its component (game+0x19073d0:
+// &(*(component+0xa0))->_Left + 0x30, the call at game+0x813c5a) without checking that the map has one. After the player left a Car Meet
+// the map is empty and begin() is the map's own head node, whose value is whatever the allocator left there: #482/#483 (2026-11-14, dump
+// 263192cb0448ef3f) read 0x330030 out of a head node at 0x60254e6ce40 whose links all point at itself, then faulted on entity+0x68 in
+// hk_meet_prop 13 s after CarMeetExited. An empty map now gives no entity, so the status read below takes its zeroed stand-in.
+typedef void** (*FirstFn)(void* component);
+FirstFn o_meet_first;
+void* g_no_entity;
+void** hk_meet_first(void* component) {
+    void *head = nullptr, *first = nullptr;
+    if (!component || !read_ptr((unsigned char*)component + 0xa0, &head) || !head || !read_ptr(head, &first) || first == head) {
+        static bool told;
+        if (!told) {
+            told = true;
+            logf("guide: matchmaking ended in a Car Meet with no entity left in its component (component %p, map head %p): its online status "
+                 "uses 0 instead of reading the map's head node (game+0x813c5a)",
+                 component, head);
+        }
+        g_no_entity = nullptr;
+        return &g_no_entity;
+    }
+    return o_meet_first(component);
+}
+
 void** hk_meet_prop(void* entity, void** out) {
-    if (!entity || !*(void**)((unsigned char*)entity + 0x68)) {
+    void* props = nullptr;
+    if (!entity || !read_ptr((unsigned char*)entity + 0x68, &props) || !props) {
         static bool told;
         if (!told) {
             told = true;
@@ -135,6 +167,17 @@ bool join_install(const FH2ModApi* api, FH2Mod* mod, unsigned char* base, void (
     if (!h || !api->enable_hooks(mod, h)) {
         logf("guide: the matchmaking module's update could not be hooked: an accepted invite holds the seat, the player goes online by hand");
         return false;
+    }
+    // the call at game+0x813c5a must be `call game+0x19073d0`, and that function `mov rax,[rcx+0xa0]; mov rax,[rax]; add rax,0x30; ret`
+    static const unsigned char first[] = {0x48, 0x8b, 0x81, 0xa0, 0x00, 0x00, 0x00, 0x48, 0x8b, 0x00, 0x48, 0x83, 0xc0, 0x30, 0xc3};
+    unsigned char* fsite = base + 0x813c5a;
+    if (fsite[0] == 0xe8 && fsite + 5 + *(int32_t*)(fsite + 1) == base + 0x19073d0 && starts_with(base + 0x19073d0, first, sizeof first)) {
+        FH2Hook* g = api->hook_call(mod, "guide: the Car Meet entity taken when matchmaking ends (game+0x813c5a)", fsite, (void*)hk_meet_first,
+                                    (void**)&o_meet_first);
+        if (!g || !api->enable_hooks(mod, g))
+            logf("guide: the Car Meet entity taken when matchmaking ends could not be guarded: leaving a Car Meet may stop the game");
+    } else {
+        logf("guide: game+0x813c5a is not the Car Meet entity read this Guide knows: leaving a Car Meet may stop the game");
     }
     // the call at game+0x813c66 must be `call game+0x52b6c0` (E8 rel32)
     unsigned char* site = base + 0x813c66;

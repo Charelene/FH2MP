@@ -77,7 +77,9 @@ func (w *World) EndEvent(why string, keepLeader bool) {
 		if former == nil {
 			former = w.GameOptionsOwner
 		}
-		w.SetLeader(nil, "event over: "+why)
+		if !w.Private { // a private game's leader stays its leader between events
+			w.SetLeader(nil, "event over: "+why)
+		}
 		w.ReleaseOptions(former, "event over: "+why)
 	}
 	w.RefreshCarPhasing()
@@ -91,6 +93,7 @@ func (w *World) EndEvent(why string, keepLeader bool) {
 	if w.Roadtrip {
 		w.RtNextEvent()
 	}
+	w.showdownRaceOver(why)
 }
 
 // ---- tag modes ----
@@ -363,6 +366,10 @@ func (w *World) ReportEvent(why string) {
 		seconds = math.RoundToEven((now-ev.RacingSince)*10) / 10
 	}
 	detail := pyjson.Obj{{K: "players", V: players}, {K: "end", V: why}, {K: "roadtrip", V: w.Roadtrip}, {K: "seconds", V: seconds}}
+	if w.Carmeet {
+		// a Car Meet Showdown; its mode stays "race", the one the LSP's /admin/result stores for a race
+		detail = append(detail, pyjson.Pair{K: "showdown", V: true})
+	}
 	mode := ""
 	if tag := ev.Tag; tag != nil {
 		w.TagAccount(tag, now)
@@ -428,6 +435,14 @@ func (w *World) ReportEvent(why string) {
 	}
 }
 
+// refusedOnClass says whether an invitee answered the pending invite with a Ready that was refused only because its car is outside the event's
+// rule (not a custom or traffic car, which never race). Such an invitee is let into the event like an ineligible leader: its game opens the event
+// car select, ValidateEventCars drops it after that if its car still does not fit. Left out at the start it never got a car select at all (S2 race
+// with a class C car, dev 2026-11-12: "never ever did i get car to pick even").
+func (w *World) refusedOnClass(q *Peer) bool {
+	return !w.Roadtrip && q.ReadyRetry != nil && *q.ReadyRetry == w.RaceRequestedAt && !w.NotForEvents(q)
+}
+
 // RetryRefusedReady: an invitee whose Ready was refused on its old car and who has since changed to one that fits is ready after all.
 func (w *World) RetryRefusedReady(peer *Peer) {
 	if peer.ReadyRetry == nil {
@@ -488,7 +503,7 @@ func (w *World) RefuseEventReady(peer *Peer, why string) {
 func (w *World) CheckInviteesReady() {
 	waiting := 0
 	for _, q := range w.Others(w.PendingRace.Leader) {
-		if q.Connected && q.Entered && !q.ConsoleVars[4] {
+		if q.Connected && q.Entered && !q.ConsoleVars[4] && !w.refusedOnClass(q) {
 			waiting++
 		}
 	}
@@ -598,6 +613,9 @@ func (w *World) loadState(q *Peer, now float64) string {
 		loaded = fmt.Sprint(boolInt(v))
 	}
 	s += fmt.Sprintf("HasLoadedCars=%s, car %s", loaded, modelStr(q))
+	if EventCarLook {
+		s += ", " + q.Look.String()
+	}
 	if q.CarDoubtAt != 0 {
 		s += fmt.Sprintf(" (failed a check %.0f s ago)", now-q.CarDoubtAt)
 	}
@@ -613,32 +631,42 @@ func boolInt(b bool) int {
 }
 
 // loadRelease is when the group's car select is over for the shim's cars-loaded wait: every connected participant has left it, or the group's
-// deadline plus the hold's grace has passed, whichever is first (the same two conditions as CarselAnswer).
-func (ev *Event) loadRelease() float64 {
+// deadline plus the hold's grace has passed, whichever is first (the same two conditions as CarselAnswer). With CarselLateRelease a participant that
+// is still choosing, or chose, after the hold's end moves it to when it leaves, CarselLateReleaseSeconds at most: no game reports its cars loaded
+// before every participant has picked one.
+func (ev *Event) loadRelease(now float64) float64 {
 	limit := ev.carselDeadline() + CarselHoldGraceSeconds
+	if CarselLateRelease {
+		limit += CarselLateReleaseSeconds
+	}
 	latest := ev.Started
 	for _, q := range ev.People {
 		if q.Connected {
-			latest = math.Max(latest, ev.carDoneAt(q))
+			latest = math.Max(latest, ev.carDoneAt(q, now))
 		}
 	}
 	return math.Min(latest, limit)
 }
 
-// carDoneAt is when this participant left the car select (PreRace); one that has not is counted at the end of the hold.
-func (ev *Event) carDoneAt(q *Peer) float64 {
+// carDoneAt is when this participant left the car select (PreRace); one that has not is counted at the end of the hold, or, with CarselLateRelease,
+// at `now` while its game still says CarSelect after the hold's end.
+func (ev *Event) carDoneAt(q *Peer, now float64) float64 {
 	if ev.PickedAfter != nil {
 		if t, ok := ev.PickedAfter.Get(q); ok {
 			return ev.Started + t
 		}
 	}
-	return ev.carselDeadline() + CarselHoldGraceSeconds
+	end := ev.carselDeadline() + CarselHoldGraceSeconds
+	if CarselLateRelease && q.Connected && q.HasPlayerStatus && q.PlayerStatus == PlayerStatusCarSelect && now > end {
+		return math.Min(now, end+CarselLateReleaseSeconds)
+	}
+	return end
 }
 
 // loadStart is when this participant's car load could begin (monotonic): after the group's car select, after its own, after it (re)connected to
 // the event, and after the last restart of the clocks (a suspect was dropped). The car select time never counts against EventLoadTimeout.
-func (ev *Event) loadStart(q *Peer, release float64) float64 {
-	return math.Max(math.Max(release, ev.carDoneAt(q)), math.Max(q.ConnectedAt, ev.LoadRestart))
+func (ev *Event) loadStart(q *Peer, release, now float64) float64 {
+	return math.Max(math.Max(release, ev.carDoneAt(q, now)), math.Max(q.ConnectedAt, ev.LoadRestart))
 }
 
 // DropUnloaded runs on every tick while an event loads, after EventLoadTimeout has passed since it started. Each participant that has not reported
@@ -647,14 +675,14 @@ func (ev *Event) loadStart(q *Peer, release float64) float64 {
 // group that still has not loaded 2 x EventLoadTimeout after its clocks started ends the event in one step instead).
 func (w *World) DropUnloaded(now float64) {
 	ev := w.Event
-	release := ev.loadRelease()
+	release := ev.loadRelease(now)
 	var overdue, waiting []*Peer
 	loaded := 0
 	for _, q := range ev.People {
 		switch {
 		case q.Connected && q.ConsoleVars[ConsoleVarHasLoadedCars]:
 			loaded++
-		case now-ev.loadStart(q, release) > EventLoadTimeout:
+		case now-ev.loadStart(q, release, now) > EventLoadTimeout:
 			overdue = append(overdue, q)
 		default:
 			waiting = append(waiting, q)
@@ -679,7 +707,7 @@ func (w *World) DropUnloaded(now float64) {
 	states := func(l []*Peer) string {
 		parts := make([]string, len(l))
 		for i, q := range l {
-			parts[i] = fmt.Sprintf("%s, load could begin %.0f s ago", w.loadState(q, now), now-ev.loadStart(q, release))
+			parts[i] = fmt.Sprintf("%s, load could begin %.0f s ago", w.loadState(q, now), now-ev.loadStart(q, release, now))
 		}
 		return strings.Join(parts, "; ")
 	}
@@ -719,7 +747,7 @@ func (w *World) DropUnloaded(now float64) {
 			EventLoadTimeout, suspect.Owner, now-suspect.CarSeenAt, failed, len(ev.People)-1, EventLoadTimeout, 2*EventLoadTimeout, now-ev.Started, states(overdue))
 	} else {
 		for _, q := range ev.People {
-			if now-ev.loadStart(q, release) <= 2*EventLoadTimeout {
+			if now-ev.loadStart(q, release, now) <= 2*EventLoadTimeout {
 				return // the last players are not removed one by one: the whole event is ended once the long limit is reached
 			}
 		}
@@ -748,22 +776,61 @@ func (w *World) DropUnloaded(now float64) {
 	}
 }
 
-// EligibleForEvent says whether a peer's car meets the event's class/PI rule.
+// EligibleForEvent says whether a peer's car meets the event's class/PI rule; a refused player gets the Message Center notice. Call it only where the
+// refusal is final (the player stays out of the event or leaves it); where the game's car select can still change the car, use carFitsEvent.
 func (w *World) EligibleForEvent(peer *Peer, rule *gameopts.Rule) bool {
+	ok, notice := w.carFitsEvent(peer, rule)
+	if !ok {
+		w.noticeRefused(peer, notice)
+	}
+	return ok
+}
+
+// noticeRefused sends the refusal notice; "" (the event's own options are unreadable, nothing the player can fix) sends nothing.
+func (w *World) noticeRefused(peer *Peer, notice string) {
+	if notice != "" {
+		w.NotifyPlayer(peer, "refused", NoticeRefusedSeconds, notice)
+	}
+}
+
+const (
+	customCarNotice  = "Custom cars can't race in online events or Road Trip. Pick a car from the game."
+	trafficCarNotice = "Traffic cars and other cars you can't buy can't race in online events or Road Trip. Pick another car."
+)
+
+// refusalNotice is the notice for the peer's current car against the stored event rule, without a log line ("" = it fits, or the rule is unreadable).
+func (w *World) refusalNotice(peer *Peer) string {
+	if w.CustomCar(peer) {
+		return customCarNotice
+	}
+	if w.BlockedCar(peer) {
+		return trafficCarNotice
+	}
+	r, err := gameopts.CarRule(w.GameOptions)
+	if err != nil || gameopts.AcceptsCar(r, optsChoices(peer.Choices)) {
+		return ""
+	}
+	return refusalText(r, peer.Choices)
+}
+
+// carFitsEvent is EligibleForEvent without the notice: (fits, the notice text for a refusal). The "not eligible" line is logged either way.
+func (w *World) carFitsEvent(peer *Peer, rule *gameopts.Rule) (bool, string) {
 	if w.CustomCar(peer) {
 		w.ev("not_eligible", kv("xuid", fmt.Sprintf("%#x", peer.Xuid)), kv("car", *peer.ModelID), kv("custom", true), kv("roadtrip", w.Roadtrip))
 		w.Logf("%d not eligible: owner %d car %d is not in the game data (a car pack's own car); custom cars do not race in events or Road Trip", peer.Addr.Port, peer.Owner, *peer.ModelID)
-		w.NotifyPlayer(peer, "refused", NoticeRefusedSeconds, "Custom cars can't race in online events or Road Trip. Pick a car from the game.")
-		return false
+		return false, customCarNotice
 	}
 	if w.BlockedCar(peer) {
 		w.ev("not_eligible", kv("xuid", fmt.Sprintf("%#x", peer.Xuid)), kv("car", *peer.ModelID), kv("blocked", true), kv("roadtrip", w.Roadtrip))
 		w.Logf("%d not eligible: owner %d car %d is one players cannot get (a traffic car); such cars do not race in events or Road Trip", peer.Addr.Port, peer.Owner, *peer.ModelID)
-		w.NotifyPlayer(peer, "refused", NoticeRefusedSeconds, "Traffic cars and other cars you can't buy can't race in online events or Road Trip. Pick another car.")
-		return false
+		return false, trafficCarNotice
 	}
 	if w.Roadtrip {
-		return true
+		if above, trip := w.RtClassAbove(peer); above && RtClassMode == "enforce" {
+			w.ev("not_eligible", kv("xuid", fmt.Sprintf("%#x", peer.Xuid)), kv("class", peer.Choices.Class), kv("trip_class", trip), kv("roadtrip", true))
+			return false, rtClassNotice(trip)
+		}
+		return true, ""
 	}
 	var r gameopts.Rule
 	if rule == nil {
@@ -775,13 +842,13 @@ func (w *World) EligibleForEvent(peer *Peer, rule *gameopts.Rule) bool {
 				stored = fmt.Sprintf("%d bits stored", w.GameOptions.Size)
 			}
 			w.Warnf("event admission refused for owner %d: invalid GameOptions (%v; %s)", peer.Owner, err, stored)
-			return false
+			return false, ""
 		}
 	} else {
 		r = *rule
 	}
 	if gameopts.AcceptsCar(r, optsChoices(peer.Choices)) {
-		return true
+		return true, ""
 	}
 	cls := "None"
 	pi := math.NaN()
@@ -813,8 +880,7 @@ func (w *World) EligibleForEvent(peer *Peer, rule *gameopts.Rule) bool {
 		msg += fmt.Sprintf(", repaired to stock car %d", *peer.PartsRepairCar)
 	}
 	w.Log(msg)
-	w.NotifyPlayer(peer, "refused", NoticeRefusedSeconds, refusalText(r, peer.Choices))
-	return false
+	return false, refusalText(r, peer.Choices)
 }
 
 // ValidateEventCars: a participant whose car does not meet the event's rule (or, in Road Trip, which has no rule, drives a custom or traffic car) leaves the
@@ -838,6 +904,9 @@ func (w *World) ValidateEventCars() bool {
 		if q.Connected {
 			w.SetConsoleBool(q, ConsoleVarParticipatingInRace, 0, "car does not meet the event restrictions")
 			q.ConsoleVars[ConsoleVarParticipatingInRace] = false
+			if !w.Roadtrip {
+				w.noticeRefused(q, w.refusalNotice(q)) // it had the car select and still has a car that does not fit
+			}
 		}
 	}
 	w.Warnf("event: %s out of the event (car does not meet the restrictions, see the 'not eligible' line above); %d participant(s) remain %s", owners(wrong), len(ev.People), owners(ev.People))
@@ -854,7 +923,11 @@ func (w *World) ValidateEventCars() bool {
 }
 
 // StartEvent: participants = the leader plus every client that reported Console.Ready.
-func (w *World) StartEvent(leader *Peer) {
+func (w *World) StartEvent(leader *Peer) { w.StartEventWith(leader, nil) }
+
+// StartEventWith starts the event with participants chosen elsewhere (a Car Meet Showdown's racers, the leader first); nil = StartEvent's
+// choice.
+func (w *World) StartEventWith(leader *Peer, chosen []*Peer) {
 	if !w.Roadtrip {
 		opt := w.GameOptions
 		if opt == nil {
@@ -876,36 +949,57 @@ func (w *World) StartEvent(leader *Peer) {
 			}
 		}
 	}
-	if !w.EligibleForEvent(leader, nil) {
+	if fits, _ := w.carFitsEvent(leader, nil); !fits {
 		w.Logf("event start: leader owner %d's car does not meet the restrictions yet; it is selected and gets the event car select, its car is checked again when every participant has loaded", leader.Owner)
 	}
 	people := []*Peer{leader}
 	excluded := map[*Peer]string{}
-	for _, q := range w.Peers.Values() {
-		if q == leader || !q.Connected || !q.ConsoleVars[4] {
-			if q != leader {
-				if !q.Connected {
-					excluded[q] = "handshake not finished"
-				} else {
-					excluded[q] = "never answered the invite with Ready"
-				}
+	if chosen != nil {
+		people = append([]*Peer(nil), chosen...)
+		for _, q := range w.Peers.Values() {
+			if !inList(people, q) {
+				excluded[q] = "not in the Showdown"
 			}
-			continue
 		}
-		if !w.EligibleForEvent(q, nil) {
-			excluded[q] = "car does not meet the event restrictions (see the 'not eligible' line above)"
-			w.SetConsoleBool(q, 4, 0, "car does not meet the event restrictions")
-			q.ConsoleVars[4] = false
-			w.SetConsoleBool(q, ConsoleVarParticipatingInRace, 0, "ineligible car")
-			q.ConsoleVars[ConsoleVarParticipatingInRace] = false
-		} else if len(people) >= capacity.ClientLimit {
-			excluded[q] = fmt.Sprintf("the event holds %d players", capacity.ClientLimit)
-			w.SetConsoleBool(q, 4, 0, "event full")
-			q.ConsoleVars[4] = false
-			w.SetConsoleBool(q, ConsoleVarParticipatingInRace, 0, "event full")
-			q.ConsoleVars[ConsoleVarParticipatingInRace] = false
-		} else {
-			people = append(people, q)
+	} else {
+		for _, q := range w.Peers.Values() {
+			if q != leader && q.Connected && !q.ConsoleVars[4] && w.refusedOnClass(q) && len(people) < capacity.ClientLimit {
+				w.Logf("event start: owner %d's Ready was refused on its car (it does not meet the restrictions yet); it is selected and gets the event car select, its car is checked again when every participant has loaded", q.Owner)
+				q.ReadyRetry = nil
+				w.SetConsoleBool(q, 4, 1, "selected: its Ready was refused on its car, the event car select follows")
+				q.ConsoleVars[4] = true
+				people = append(people, q)
+				continue
+			}
+			if q == leader || !q.Connected || !q.ConsoleVars[4] {
+				if q != leader {
+					if !q.Connected {
+						excluded[q] = "handshake not finished"
+					} else {
+						excluded[q] = "never answered the invite with Ready"
+						if !w.Roadtrip && q.ReadyRetry != nil && *q.ReadyRetry == w.RaceRequestedAt {
+							// Its Ready was refused on its car and no car that fits followed: now the refusal is final.
+							w.noticeRefused(q, w.refusalNotice(q))
+						}
+					}
+				}
+				continue
+			}
+			if !w.EligibleForEvent(q, nil) {
+				excluded[q] = "car does not meet the event restrictions (see the 'not eligible' line above)"
+				w.SetConsoleBool(q, 4, 0, "car does not meet the event restrictions")
+				q.ConsoleVars[4] = false
+				w.SetConsoleBool(q, ConsoleVarParticipatingInRace, 0, "ineligible car")
+				q.ConsoleVars[ConsoleVarParticipatingInRace] = false
+			} else if len(people) >= capacity.ClientLimit {
+				excluded[q] = fmt.Sprintf("the event holds %d players", capacity.ClientLimit)
+				w.SetConsoleBool(q, 4, 0, "event full")
+				q.ConsoleVars[4] = false
+				w.SetConsoleBool(q, ConsoleVarParticipatingInRace, 0, "event full")
+				q.ConsoleVars[ConsoleVarParticipatingInRace] = false
+			} else {
+				people = append(people, q)
+			}
 		}
 	}
 	invite := ""
@@ -1004,6 +1098,71 @@ func (w *World) StartEvent(leader *Peer) {
 	}
 	w.SetSessionHostBool(SHRaceParticipantsSelected, 1, "participants selected")
 	w.RefreshCarPhasing()
+	if !w.Roadtrip {
+		w.notePickedBeforeStart(ev)
+	}
+	if EventCarLook {
+		parts := make([]string, len(people))
+		for i, q := range people {
+			parts[i] = fmt.Sprintf("owner%d car %s %s", q.Owner, modelStr(q), q.Look)
+		}
+		w.Logf("event cars at the start: %s", strings.Join(parts, "; "))
+	}
+}
+
+// notePickedBeforeStart counts the participants whose game wrote PlayerStatus PreRace between the race request and the event start as done with their
+// car select (CarselPickedBeforeStart): NotePlayerStatus only sees the CarSelect -> PreRace changes after the start.
+func (w *World) notePickedBeforeStart(ev *Event) {
+	if !CarselPickedBeforeStart || w.RaceRequestedAt == 0 {
+		return
+	}
+	var early []*Peer
+	for _, q := range ev.People {
+		if q.HasPlayerStatus && q.PlayerStatus == PlayerStatusPreRace && q.PlayerStatusAt >= w.RaceRequestedAt {
+			if ev.PickedAfter == nil {
+				ev.PickedAfter = omap.New[*Peer, float64]()
+			}
+			ev.PickedAfter.Set(q, 0)
+			early = append(early, q)
+		}
+	}
+	if len(early) > 0 {
+		w.Logf("event car select: %s left it before the start (PlayerStatus PreRace since the race request), %d/%d participant(s) done", owners(early), len(early), len(ev.People))
+	}
+}
+
+// NoteCarLook keeps the livery and tune fields of a player object (vars 1, 2, 93, 94; EventCarLook) and logs a change made while an event this player
+// is in still loads.
+func (w *World) NoteCarLook(peer *Peer, size int, payload bits.Int) {
+	if !EventCarLook {
+		return
+	}
+	fields, err := playersetupFields(size, payload)
+	if err != nil {
+		return
+	}
+	old := peer.Look
+	for k, vid := range [...]int{PlayerVarHasLivery, PlayerVarIsNewLivery, PlayerVarLiveryID, PlayerVarTuneID} {
+		f, ok := fields[vid]
+		if !ok {
+			continue
+		}
+		v := f.Value.Uint64()
+		switch k {
+		case 0:
+			peer.Look.HasLivery = v != 0
+		case 1:
+			peer.Look.NewLivery = v != 0
+		case 2:
+			peer.Look.LiveryID = int64(v)
+		case 3:
+			peer.Look.TuneID = int64(v)
+		}
+		peer.Look.Seen |= 1 << k
+	}
+	if ev := w.Event; old != peer.Look && ev != nil && !ev.Begun && ev.has(peer) {
+		w.Logf("%d owner %d changed its car's livery or tune while the event loads: %s (was %s)", peer.Addr.Port, peer.Owner, peer.Look, old)
+	}
 }
 
 func consoleVarsRepr(m map[int]bool) string {
@@ -1058,6 +1217,9 @@ func (w *World) NotePlayerStatus(peer *Peer, size int, payload bits.Int) {
 	}
 	before, had := peer.PlayerStatus, peer.HasPlayerStatus
 	peer.PlayerStatus, peer.HasPlayerStatus = int(f.Value.Uint64()), true
+	if !had || before != peer.PlayerStatus {
+		peer.PlayerStatusAt = w.Mono()
+	}
 	ev := w.Event
 	if had && before == peer.PlayerStatus || w.Roadtrip || ev == nil || ev.Begun || !ev.has(peer) {
 		return
@@ -1138,6 +1300,9 @@ func (w *World) MaybeBeginRace() {
 		la = strings.Join(loaded, " ")
 	}
 	w.Logf("all %d participant(s) loaded cars -> starting grid; loaded after %s", len(ev.People), la)
+	if w.Carmeet {
+		w.showdownGridOrder(ev)
+	}
 	var order []*Peer
 	for _, q := range ev.Order {
 		if ev.has(q) {
@@ -1147,6 +1312,9 @@ func (w *World) MaybeBeginRace() {
 	if len(order) != len(ev.People) {
 		order = append([]*Peer(nil), ev.People...)
 		shuffle(w.Rng, order)
+	}
+	if w.Carmeet {
+		w.showdownHeadStarts(order)
 	}
 	for _, q := range ev.People {
 		entries := make([]netv2.GridEntry, len(order))
@@ -1363,6 +1531,7 @@ func (w *World) CheckRaceEnd(now float64) {
 		w.EndRace("every participant left during the race")
 		return
 	}
+	w.StartResendTick(now)
 	if ev.Tag != nil {
 		var people []*Peer
 		for _, q := range ev.People {
@@ -1401,9 +1570,13 @@ func (w *World) CheckRaceEnd(now float64) {
 			all = false
 		}
 	}
+	limit := RaceLastFinisherSecs
+	if w.Carmeet {
+		limit = w.showdownEndLimit(ev)
+	}
 	if all {
 		w.EndRace("everybody finished")
-	} else if have && now >= first+RaceLastFinisherSecs {
+	} else if have && now >= first+limit {
 		w.EndRace("time limit after the first finisher")
 	}
 }
@@ -1545,8 +1718,43 @@ func (w *World) GoRace(why string) {
 		goMs = 1
 	}
 	w.SetRaceClock(goMs, "race begun")
+	ev.GoMs = uint64(goMs)
+	ev.RaceHeard = map[*Peer]bool{}
+	ev.StartResends = 0
 	for _, q := range ev.People {
 		w.Send(q, false, netv2.StartRace(uint64(goMs)))
+	}
+}
+
+// NoteRaceHeard records that a participant sent a score message after the start, so it has the start message.
+func (w *World) NoteRaceHeard(peer *Peer) {
+	if ev := w.Event; ev != nil && ev.Racing && ev.RaceHeard != nil {
+		ev.RaceHeard[peer] = true
+	}
+}
+
+// StartResendTick sends MsgStartRace again, with the same start time, to every connected participant that has sent no score message by the next
+// StartResendSeconds round. One lost start datagram otherwise left that player on the grid for the whole race. Tag modes send no score messages and are skipped.
+func (w *World) StartResendTick(now float64) {
+	ev := w.Event
+	if !StartResend || ev == nil || !ev.Racing || ev.Over || ev.Tag != nil || ev.GoMs == 0 || ev.RaceHeard == nil ||
+		ev.StartResends >= len(StartResendSeconds) || now-ev.RacingSince < StartResendSeconds[ev.StartResends] {
+		return
+	}
+	ev.StartResends++
+	var missing []*Peer
+	for _, q := range ev.People {
+		if q.Connected && !ev.RaceHeard[q] && !ev.Finished.Has(q) && !ev.Quit[q] {
+			missing = append(missing, q)
+		}
+	}
+	if len(missing) == 0 {
+		return
+	}
+	w.Logf("race start resent (round %d, %.1f s after the start message) to owner(s) %s: no score message from them since the start; same start time %d",
+		ev.StartResends, now-ev.RacingSince, owners(missing), ev.GoMs)
+	for _, q := range missing {
+		w.Send(q, false, netv2.StartRace(ev.GoMs))
 	}
 }
 

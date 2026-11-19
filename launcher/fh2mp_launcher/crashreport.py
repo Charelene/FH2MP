@@ -2,7 +2,8 @@
 
 What counts as a crash: Azimuth's own log (data\\logs\\azimuth.log) says `CRASHED` (an exception) or `STOPPED` (it refused to go on, for
 example a graphics call it cannot do) in its last session, or it wrote a minidump (data\\logs\\*.dmp) since `since`. The graphics-check stop
-(CreateDXGIFactory2, GitHub #10) has its own advice and is not reported.
+(CreateDXGIFactory2, GitHub #10) has its own advice and is not reported, and neither is a crash of another game started by the same Azimuth
+(its session's game folder holds Forza Horizon 3, #470).
 """
 import base64
 import datetime
@@ -12,7 +13,7 @@ import platform
 import re
 import time
 
-from . import azimuth, paths, shim
+from . import azimuth, logs, paths, shim
 from .version import __version__
 
 MAX_FILE = 2 << 20
@@ -25,6 +26,8 @@ MAX_DUMP = 32 << 20    # combined Azimuth and matching Mod Platform dumps
 _FAIL_RE = re.compile(r"\b(CRASHED|STOPPED)\b")
 _BEGAN_RE = re.compile(r"\bsession \S+ began \d{4}-\d\d-\d\d [\d:]+ UTC: (.*)$")
 _GPU_RE = re.compile(r"\bgraphics adapter (.+?) \(vendor 0x[0-9a-fA-F]+, device 0x[0-9a-fA-F]+\), driver ([^;\s]+)")
+# Azimuth's settings line names the game folder it starts: "...; game folder S:\Games\ForzaHorizon2, from its title's section in ..."
+_GAME_FOLDER_RE = re.compile(r"\bsettings: .*; game folder (.+?), from its title's section\b")
 
 # The player's account name on the computer is in file paths (Z:\home\<name>\..., C:\Users\<name>\..., /home/<name>/...) and a session
 # token is never meant to leave the machine: both are blanked before anything is shown or sent.
@@ -73,8 +76,10 @@ _SECRETS = [
 class Crash:
     """What was found: the failure line from azimuth.log (may be ''), the newest dump (may be None) and when it happened (epoch seconds)."""
 
-    def __init__(self, folder, line, dump, when, seen=None, mod_crash=None):
+    def __init__(self, folder, line, dump, when, seen=None, mod_crash=None, game=""):
         self.folder, self.line, self.dump, self.when = folder, line, dump, when
+        self.game = game                    # the game folder the crashed session started (Azimuth's settings line), '' when not logged
+        self.memory = None                  # the memory watch's summary of the game that crashed (game_memory), set by build()
         self.mod_crash = mod_crash          # the FH2 Mod Platform's own crash report (fh2-mods/crashes/crash-*.txt: call stack, hooks), or None
         self.seen = seen or when            # newest file time of the evidence: once handled, nothing older is offered again
 
@@ -193,7 +198,17 @@ def find_crash(folder, since):
         log_t = max(log_t, guard_t) if line else log_t
     if not dump and not line and not mod_crash:
         return None
-    return Crash(folder, line, dump, dump_t or log_t or mod_t, max(dump_t, mod_t, log_t if line else 0.0), mod_crash)
+    return Crash(folder, line, dump, dump_t or log_t or mod_t, max(dump_t, mod_t, log_t if line else 0.0), mod_crash, _session_game(session))
+
+
+def _session_game(lines):
+    """The game folder a session started (its last settings line), '' when the session does not say."""
+    found = ""
+    for ln in lines:
+        m = _GAME_FOLDER_RE.search(ln)
+        if m:
+            found = m.group(1).strip()
+    return found
 
 
 def _session_info(log_text):
@@ -207,6 +222,55 @@ def _session_info(log_text):
         if m:
             gpu, driver = m.group(1), m.group(2)
     return system, gpu, driver
+
+
+# Windows' display adapter class: one numbered key per installed adapter driver, with DriverDesc and DriverVersion.
+_DISPLAY_CLASS = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+_NOT_A_GPU = ("Microsoft Basic", "Microsoft Remote", "Remote Display", "Virtual Display", "Parsec", "Meta Virtual", "IddSample")
+
+
+def system_gpu():
+    """-> (adapter names, driver versions) from the installed display drivers, each joined with ' + ' when there are several (a laptop's
+    two chips); ('', '') when unknown. Windows: the display adapter class in the registry. Linux: PCI ids and kernel driver, no version."""
+    names, versions = [], []
+    try:
+        if os.name == "nt":
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _DISPLAY_CLASS) as cls:
+                for i in range(64):
+                    try:
+                        sub = winreg.EnumKey(cls, i)
+                    except OSError:
+                        break
+                    if not sub.isdigit():
+                        continue
+                    try:
+                        with winreg.OpenKey(cls, sub) as k:
+                            name = str(winreg.QueryValueEx(k, "DriverDesc")[0]).strip()
+                            version = str(winreg.QueryValueEx(k, "DriverVersion")[0]).strip()
+                    except OSError:
+                        continue
+                    if name and not name.startswith(_NOT_A_GPU) and name not in names:
+                        names.append(name)
+                        versions.append(version)
+        else:
+            for dev in sorted(glob.glob("/sys/bus/pci/devices/*")):
+                try:
+                    with open(os.path.join(dev, "class")) as f:
+                        if not f.read().strip().startswith("0x03"):
+                            continue
+                    with open(os.path.join(dev, "vendor")) as f:
+                        vendor = f.read().strip()
+                    with open(os.path.join(dev, "device")) as f:
+                        device = f.read().strip()
+                except OSError:
+                    continue
+                drv = os.path.join(dev, "driver")
+                drv = os.path.basename(os.path.realpath(drv)) if os.path.exists(drv) else ""
+                names.append(f"PCI {vendor}:{device}" + (f" ({drv})" if drv else ""))
+    except OSError as e:
+        logs.swallowed("crash", "crash.gpu_unreadable", e, effect="the report says unknown")
+    return " + ".join(names), " + ".join(v for v in versions if v)
 
 
 def check(settings, now=None):
@@ -223,12 +287,116 @@ def check(settings, now=None):
     latest = _last_session(_read_tail(os.path.join(logs_dir(folder), "azimuth.log"), LIMITS["azimuth.log"]))
     start = _session_start(latest)
     since = max(settings["crash_handled"], start or 0)
-    return find_crash(folder, since)
+    crash = find_crash(folder, since)
+    other = azimuth.other_game_name(crash.game) if crash and crash.game else ""
+    if other:                   # Azimuth started another game (#470: 14 reports of FH3's own asserts): not a report for FH2MP
+        logs.info("crash", "crash.other_game", game=other, line=crash.line[:160], then="not offered")
+        handled(settings, crash)
+        return None
+    return crash
 
 
 def handled(settings, crash):
     settings["crash_handled"] = max(settings["crash_handled"], crash.seen)
     settings.save()
+
+
+# Causes outside FH2MP that a crash report can name by itself: (where to look, patterns that must all match there, what to tell the player).
+# Where: "crash" = the failure line and the mod platform's report, "stack" = only the call stack frames of that report, "log" = the last
+# session of azimuth.log. The first rule that matches wins, so the ones that name the faulting code come before the circumstantial ones.
+_STACK_FRAME = re.compile(r"^\s*\d+\s+(\S+)", re.M)
+KNOWN_CAUSES = (
+    # RivaTuner's on-screen display hooks the game's Direct3D calls and crashed it at start (#124, #453).
+    ("crash", (r"RTSSHooks64\.dll",),
+     "RivaTuner Statistics Server (the on-screen display of MSI Afterburner) crashed the game. Turn it off for azimuth.exe: "
+     "in RivaTuner, add azimuth.exe and set its Application detection level to None, then play again."),
+    # A 1.0.4 azimuth.exe copied over another build's data\bin (#450).
+    ("crash", (r"avcodec-62\.dll is not the one this Azimuth ships",),
+     "Azimuth's own files in this folder come from different Azimuth versions. Run the launcher's setup and install Azimuth into this "
+     "folder again: your settings, saves and mods stay."),
+    # A third-party wheel mod's DLL writes into the game's code from its own thread a few seconds after start (#436, #457).
+    ("crash", (r"fh2wheels\.dll",),
+     "The wheel mod that installs fh2wheels.dll crashed the game. Remove that mod or update it, then play again."),
+    # The torque-curve constructor (game+0x12E0A50) underflows on a curve with no samples while the save load rates a garage car
+    # (CarPerformance_BuildSnapshotForGarageCar game+0x2D0160..0x2D0610 on the stack): every start ends the same way (heap corruption
+    # family, report 2cb2ec5004c023d3). Usually a car pack car whose data is gone.
+    ("stack", (r"^game\+0x12E0[A-F][0-9A-F]{2}$", r"^game\+0x2D0[1-6][0-9A-F]{2}$"),
+     "A car in your garage has no engine data, so the game crashes while it loads your save. This happens when a car pack is removed "
+     "after you bought one of its cars. Put that car pack back, then play again."),
+    # Azimuth stops at start when the Direct3D 12 adapter's resource binding tier is under 3 (#467: every start, 2-13 s in). Tier 3 is
+    # every AMD GCN card, NVIDIA from Maxwell 2 (a GTX 960 runs, #468) and Intel from Skylake (UHD 620 runs, #474); a laptop can also
+    # hand Azimuth its older integrated chip.
+    ("crash", (r"resource binding tier is below 3",),
+     "Your graphics card or its driver doesn't support Direct3D 12 resource binding tier 3, which Azimuth needs. Update the graphics "
+     "driver. On a laptop with two graphics chips, set azimuth.exe to High performance in Windows Settings > System > Display > Graphics. "
+     "Older graphics cards can't run the game."),
+    # Azimuth stops when Direct3D 12 loses the graphics device: a driver reset or a GPU hang (#458, #462).
+    ("crash", (r"\bD3D12 device removed\b",),
+     "The graphics driver reset while the game ran. Update the graphics driver, remove any GPU overclock and close overlays and "
+     "other heavy programs, then play again."),
+    # Windows error 112 (ERROR_DISK_FULL) on saves and caches; a crash in the CRT's memcpy followed (#463, #464).
+    ("log", (r"\berror 112\b",),
+     "The drive with Azimuth or the game is full, so saves and caches could not be written. Free some space on it, then play again."),
+)
+
+
+# Out of memory: Azimuth's stop, the D3D12 arena's 0x8007000e, and the AV the game makes in the same second when an allocation failed
+# (game+0x125d9e8, writing 0x1; catalog family memory-growth-oom, #91 / #468 / #477).
+_OOM_RE = re.compile(r"out of memory|0x8007000e|game\+0x125d9e8", re.I)
+COMMIT_FULL_PCT = 95                       # the system's commit charge share the watch saw (1 s samples): its limit was reached
+
+
+def game_memory(settings, crash):
+    """The memory watch's summary of the game that crashed (settings last_game_memory), or None when the last watched game ended more than
+    2 min before or 30 min after the crash (another game, or a report sent later)."""
+    mem = settings["last_game_memory"] if "last_game_memory" in settings.data else None
+    if not isinstance(mem, dict) or not mem.get("ended"):
+        return None
+    return mem if -120 <= mem["ended"] - crash.when <= 1800 else None
+
+
+def memory_text(mem):
+    """The report's Memory field."""
+    if not mem:
+        return "not measured"
+    gb = lambda mb: f"{mb / 1024:.1f} GB" if mb is not None else "?"          # noqa: E731
+    out = f"game peak {gb(mem.get('peak_mb'))} of {gb(mem.get('ram_mb'))} RAM"
+    if mem.get("sys_commit_pct") is not None:
+        out += f", system commit peak {mem['sys_commit_pct']}% of {gb(mem.get('commit_limit_mb'))}"
+    if mem.get("min_free_mb") is not None:
+        out += f", free RAM low {gb(mem['min_free_mb'])}"
+    return out
+
+
+def commit_full(crash):
+    """True when the crash is an out-of-memory one and the watch saw the system's commit charge at its limit."""
+    mem = crash.memory or {}
+    pct = mem.get("sys_commit_pct")
+    return pct is not None and pct >= COMMIT_FULL_PCT and bool(_OOM_RE.search(crash.line or ""))
+
+
+def _frames(mod_text):
+    i = mod_text.find("call stack:")
+    return [] if i < 0 else _STACK_FRAME.findall(mod_text[i:])
+
+
+def known_cause(crash):
+    """What to tell the player when the crash names a known cause outside FH2MP, else ''."""
+    if commit_full(crash):
+        limit = (crash.memory or {}).get("commit_limit_mb")
+        size = f" ({limit / 1024:.0f} GB: RAM plus the page file)" if limit else ""
+        return (f"Windows ran out of memory for programs{size}. Close other programs while you play, and make the page file larger: "
+                "Windows Settings > System > About > Advanced system settings > Performance Settings > Advanced > Virtual memory: "
+                "System managed size, on a drive with at least 20 GB free.")
+    mod_text = _read_tail(crash.mod_crash, 64_000) if crash.mod_crash else ""
+    texts = {"crash": "\n".join((crash.line or "", mod_text)), "stack": "\n".join(_frames(mod_text))}
+    for where, patterns, advice in KNOWN_CAUSES:
+        if where == "log" and "log" not in texts:
+            texts["log"] = "\n".join(_last_session(_read_tail(os.path.join(logs_dir(crash.folder), "azimuth.log"), LIMITS["azimuth.log"])))
+        flags = re.I | (re.M if where == "stack" else 0)
+        if all(re.search(p, texts[where], flags) for p in patterns):
+            return advice
+    return ""
 
 
 class Report:
@@ -240,6 +408,7 @@ class Report:
         self.dump_note = dump_note
         self.attachments = attachments       # [(name, local path, bytes)] for matching secondary dumps
         self.notes = notes
+        self.hint = ""                       # known_cause(): what the player can do about it, shown above the question
 
     def sizes(self, preview_dir=None):
         """[(label, path, bytes sent)] for the player's list of files. With `preview_dir` the text files are written there exactly as they
@@ -267,7 +436,7 @@ class Report:
 
     def payload(self):
         names = {"Date": "date", "System": "system", "GPU": "gpu", "Driver's version": "driver", "Launcher version": "launcher",
-                 "Azimuth version": "azimuth", "FH2 Extra Options version": "extraOptions", "Your FH2MP name": "name"}
+                 "Azimuth version": "azimuth", "FH2 Extra Options version": "extraOptions", "Your FH2MP name": "name", "Memory": "memory"}
         body = {"v": 1, "fields": {names[k]: v for k, v in self.fields}, "files": {n: t for n, _p, t in self.files if t}}
         if self.dump is not None:
             body["dump"] = base64.b64encode(self.dump).decode()
@@ -314,7 +483,11 @@ def build(lc, crash):
     folder = crash.folder
     az_path = os.path.join(logs_dir(folder), "azimuth.log")
     full = scrub(_read_tail(az_path, 4_000_000))                     # the session line is far from the end in a long session
+    crash.memory = game_memory(lc.settings, crash)
     system, gpu, driver = _session_info(full)
+    if not gpu:                 # Azimuth stopped before it named the adapter (#467: the binding tier check): ask the system
+        gpu, sys_driver = system_gpu()
+        driver = driver or sys_driver
     az = _cut(full, LIMITS["azimuth.log"])
     info = azimuth.inspect(folder, lc.builds())
     eo_installed, eo_version, _t = shim.extra_options_installed(folder)
@@ -325,6 +498,7 @@ def build(lc, crash):
         ("System", system or f"{platform.system()} {platform.release()}"),
         ("GPU", gpu or "unknown"),
         ("Driver's version", driver or "unknown"),
+        ("Memory", memory_text(crash.memory)),
         ("Launcher version", launcher),
         ("Azimuth version", info.version or "unknown"),
         ("FH2 Extra Options version", (eo_version or "unknown") if eo_installed else "not installed"),
@@ -375,7 +549,9 @@ def build(lc, crash):
                         attachments.append(("mod-crash.dmp", path, data))
             except OSError:
                 notes.append("Mod Platform dump could not be read")
-    return Report(fields, files, dump, crash.dump, dump_note if dump is None else "", attachments, notes)
+    report = Report(fields, files, dump, crash.dump, dump_note if dump is None else "", attachments, notes)
+    report.hint = known_cause(crash)
+    return report
 
 
 def human_size(n):

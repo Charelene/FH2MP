@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"fh2mp/internal/bits"
 	"fh2mp/internal/gameopts"
 )
 
@@ -119,6 +120,79 @@ func TestRefusalAndDropNotices(t *testing.T) {
 	}
 }
 
+// An invitee whose Ready was refused on its car gets no notice while its game's car select can still switch cars; only the one still in a car
+// that does not fit when the event starts gets it. The leader's car is checked again after loading, so the start sends the leader nothing.
+// (2026-11-10: a player refused in a B 618 A45 AMG switched to a class A car 10 s later and raced, yet read "you were not let into the event".)
+func TestRefusedReadyNoticeWaitsForTheStart(t *testing.T) {
+	r := newLoadRig(t, 3)
+	var mu sync.Mutex
+	got := map[uint64][]string{}
+	arrived := make(chan struct{}, 8)
+	r.w.Sinks.Notice = func(xuid uint64, text string, log func(string)) {
+		mu.Lock()
+		got[xuid] = append(got[xuid], text)
+		mu.Unlock()
+		arrived <- struct{}{}
+	}
+	size, payload, err := gameopts.EncodeFields(map[int]gameopts.Field{30: {Width: 8, Value: bits.FromUint64(3)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.w.GameOptions = &gameopts.Options{Size: size, Payload: payload}
+	r.w.Event = nil
+	leader, fixed, stuck := r.peers[0], r.peers[1], r.peers[2]
+	for _, p := range r.peers {
+		p.Choices = &Choices{true, 2, 0.6178034543991089}
+	}
+	r.w.RaceRequestedAt = r.clk.t
+	r.w.PendingRace = &PendingRace{Deadline: r.clk.t + RaceInviteSeconds, Leader: leader}
+	for _, p := range []*Peer{fixed, stuck} {
+		if fits, notice := r.w.carFitsEvent(p, nil); fits || !strings.Contains(notice, "your car is class B 618, the event needs class A") {
+			t.Fatalf("B 618 against a class A rule: fits=%v notice %q", fits, notice)
+		}
+		at := r.w.RaceRequestedAt
+		p.ReadyRetry = &at // a refused invite Ready (handle.go)
+	}
+	fixed.Choices = &Choices{true, 3, 0.8}
+	r.w.RetryRefusedReady(fixed)
+	if !fixed.ConsoleVars[4] || fixed.ReadyRetry != nil {
+		t.Fatalf("the car change did not count the refused Ready: %q", r.log)
+	}
+	r.w.PendingRace = nil
+	r.w.StartEvent(leader)
+	// An invitee refused on its car is in the event like an ineligible leader, so its game opens the event car select (S2 race with a class C car,
+	// dev 2026-11-12: it was left out and never got a pick). Nothing is said to it yet.
+	if !r.in(leader) || !r.in(fixed) || !r.in(stuck) {
+		t.Fatalf("participants %s", owners(r.w.Event.People))
+	}
+	if stuck.ReadyRetry != nil || !stuck.ConsoleVars[4] {
+		t.Fatalf("the selected invitee's refusal is not settled: retry %v ready %v", stuck.ReadyRetry, stuck.ConsoleVars[4])
+	}
+	mu.Lock()
+	early := len(got)
+	mu.Unlock()
+	if early != 0 {
+		t.Fatalf("a notice before the car select: %v", got)
+	}
+	// the cars are checked again when everybody has loaded: the leader switched to a car that fits, the invitee still has none
+	leader.Choices = &Choices{true, 3, 0.8}
+	r.w.ValidateEventCars()
+	if !r.in(leader) || !r.in(fixed) || r.in(stuck) {
+		t.Fatalf("participants after the car select %s", owners(r.w.Event.People))
+	}
+	select {
+	case <-arrived:
+	case <-time.After(time.Second):
+		t.Fatal("the invitee still in a car that does not fit got no notice")
+	}
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1 || len(got[stuck.Xuid]) != 1 || !strings.Contains(got[stuck.Xuid][0], "your car is class B 618, the event needs class A") {
+		t.Fatalf("notices %v, want one for owner %d only", got, stuck.Owner)
+	}
+}
+
 // The side-channel request of the shim is parsed and checked before anything is logged.
 func TestCarselReportMalformed(t *testing.T) {
 	h := &Hub{}
@@ -142,5 +216,35 @@ func TestCarselReportMalformed(t *testing.T) {
 		// With no clock and no tables the handler must stop at the shape check (a nil Clk would panic if it went further).
 		h.carselReport(b, Addr{"127.0.0.1", 1}, nil)
 		_ = name
+	}
+}
+
+// A Ready refused on the car is an answer: the event does not wait out the invite grace for that invitee (dev 2026-11-12: 45 s of "accepted the
+// invite but no Ready yet"). A custom car's refusal stays no answer, as that player is left out at the start.
+func TestRefusedOnClassInviteeDoesNotHoldTheStart(t *testing.T) {
+	r := newLoadRig(t, 2)
+	size, payload, err := gameopts.EncodeFields(map[int]gameopts.Field{30: {Width: 8, Value: bits.FromUint64(3)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.w.GameOptions = &gameopts.Options{Size: size, Payload: payload}
+	r.w.Event = nil
+	leader, invitee := r.peers[0], r.peers[1]
+	for _, p := range r.peers {
+		p.Entered = true
+		p.Choices = &Choices{true, 2, 0.6178034543991089}
+	}
+	r.w.RaceRequestedAt = r.clk.t
+	deadline := r.clk.t + RaceInviteSeconds
+	r.w.PendingRace = &PendingRace{Deadline: deadline, Leader: leader}
+	r.w.CheckInviteesReady()
+	if r.w.PendingRace.Deadline != deadline {
+		t.Fatal("the start did not wait for an invitee that has not answered")
+	}
+	at := r.w.RaceRequestedAt
+	invitee.ReadyRetry = &at
+	r.w.CheckInviteesReady()
+	if r.w.PendingRace.Deadline >= deadline {
+		t.Fatalf("a refused answer still held the start: deadline %.1f, was %.1f", r.w.PendingRace.Deadline, deadline)
 	}
 }

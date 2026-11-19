@@ -721,6 +721,8 @@ void Guide::page_motion(double now, float op, float* slide, float* pop, float* t
 
 bool Guide::draw(ImDrawList* dl, const GuideAssets& a, float w, float h, double now) {
     float s = std::min(w / 1280.0f, h / 720.0f);
+    // under 320 x 180 the smallest text (11 units) would round to 0 px, which Dear ImGui asserts on (font_px_ok in ui.h)
+    if (s < 0.25f) return busy(now);
     ImVec2 origin(w * 0.5f - 640 * s, h * 0.5f - 360 * s);
     if (open) {
         float k = ease_guide(std::clamp(float((now - opened_) / 0.26), 0.0f, 1.0f));
@@ -909,11 +911,11 @@ void Guide::draw_toast(ImDrawList* dl, const GuideAssets& a, float s, ImVec2 ori
         dl->PushClipRect(p0, p1, true);
         float x = at(bx + 64 + 22, 0).x;
         if (toast_.detail.empty()) {
-            dl->AddText(bf, 17 * s, ImVec2(x, css_top(a.bold_m, 17 * s, at(0, by + 32).y)), kc, toast_.title.c_str());
+            add_text(dl, bf, 17 * s, ImVec2(x, css_top(a.bold_m, 17 * s, at(0, by + 32).y)), kc, toast_.title.c_str());
         } else {
             // two 22-unit lines centred in the 64-unit panel: their line boxes are centred on by + 21 and by + 43
-            dl->AddText(bf, 17 * s, ImVec2(x, css_top(a.bold_m, 17 * s, at(0, by + 21).y)), kc, toast_.title.c_str());
-            dl->AddText(a.text, 17 * s, ImVec2(x, css_top(a.text_m, 17 * s, at(0, by + 43).y)), WHITE, toast_.detail.c_str());
+            add_text(dl, bf, 17 * s, ImVec2(x, css_top(a.bold_m, 17 * s, at(0, by + 21).y)), kc, toast_.title.c_str());
+            add_text(dl, a.text, 17 * s, ImVec2(x, css_top(a.text_m, 17 * s, at(0, by + 43).y)), WHITE, toast_.detail.c_str());
         }
         dl->PopClipRect();
     }

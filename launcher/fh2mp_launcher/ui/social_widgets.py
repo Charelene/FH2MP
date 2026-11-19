@@ -204,6 +204,7 @@ class Overlay(QFrame):
         self.setObjectName('socialOverlay')
         self.setStyleSheet('QFrame#socialOverlay {background:transparent;}')
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setProperty('padScope', True)                  # the gamepad's focus moves stay inside an open panel (gamepad.py)
         self._shadow_key = None
         self._shadow_pixmap = None
         self._transition_pixmap = None

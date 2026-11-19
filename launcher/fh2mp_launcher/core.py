@@ -2,6 +2,7 @@
 import os
 import platform
 import re
+import shutil
 import time
 import threading
 
@@ -13,12 +14,29 @@ from .settings import Settings
 from .version import __version__
 
 
+def azimuth_files_text(info):
+    """What to tell a player whose Azimuth folder mixes versions (azimuth.inspect runtime_bad)."""
+    names = ", ".join(os.path.basename(p) for p in info.runtime_bad)
+    return (f"Azimuth's own files in {info.folder} come from a different Azimuth version ({names}), so Azimuth would stop at start. "
+            f"Run setup and install Azimuth {AZIMUTH_VERSION} into this folder: your settings, saves and mods stay.")
+
+
 class PlayBlocked(Exception):
     """Something the player has to fix first; the message says what."""
 
     def __init__(self, message, code=""):
         super().__init__(message)
         self.code = code
+
+
+def no_game_blocked(folder):
+    """The PlayBlocked for an Azimuth that has no FH2 folder to start: the folder set for FH2 holds another game (#470), or none is set."""
+    own = azimuth.fh2_title(azimuth.read_ini(folder)).get("folder", "") if folder else ""
+    other = azimuth.other_game_name(own) if own else ""
+    if other:
+        return PlayBlocked(f"The game folder set for Forza Horizon 2 holds {other}. Pick your Forza Horizon 2 folder in Azimuth setup.",
+                           "other_game")
+    return PlayBlocked("Couldn't find your Forza Horizon 2 files.", "no_game")
 
 
 FRIENDLY = {
@@ -60,6 +78,29 @@ def game_port_env(game):
     if traffic == 1 and not isinstance(traffic, bool):
         env["FH2MP_NET_TRAFFIC"] = "1"
     return env
+
+
+DISK_LOW_BYTES = 2 << 30      # under this much free space Azimuth's saves and caches fail with error 112 (#463, #464)
+
+
+def low_disk(folders, floor=DISK_LOW_BYTES):
+    """[(drive, free bytes)] for each drive holding one of `folders` that has less than `floor` free, one entry per drive. Folders that do
+    not exist here (a Windows path read on Linux) or cannot be measured are left out."""
+    seen, low = set(), []
+    for folder in folders:
+        if not folder or not os.path.isdir(folder):
+            continue
+        try:
+            dev = os.stat(folder).st_dev
+            free = shutil.disk_usage(folder).free
+        except OSError:
+            continue
+        if dev in seen:
+            continue
+        seen.add(dev)
+        if free < floor:
+            low.append((os.path.splitdrive(os.path.abspath(folder))[0] or folder, free))
+    return low
 
 
 def read_shim_zip(path):
@@ -600,7 +641,8 @@ class Launcher:
         if not info.found:
             raise PlayBlocked("azimuth.exe not found.", "no_azimuth")
         if not info.supported:
-            raise PlayBlocked(f"This launcher requires Azimuth {AZIMUTH_VERSION}. Run setup to install the supported combination.", "azimuth_unsupported")
+            raise PlayBlocked(azimuth_files_text(info) if info.runtime_bad else
+                              f"This launcher requires Azimuth {AZIMUTH_VERSION}. Run setup to install the supported combination.", "azimuth_unsupported")
         kind, _v = self.shim_state()
         self.apply_hotfix(_v if kind == "ours" else "")
         if kind == "old":
@@ -658,6 +700,12 @@ class Launcher:
         except Exception as e:  # noqa: BLE001       # not worth stopping a game over: this game then has no achievements
             from .api import log_failure
             log_failure("PLAY", "achievements", e, str(e))
+        for what, ensure in (("nitro_system", self.ensure_nitro_system), ("underglow", self.ensure_underglow)):
+            try:
+                ensure()
+            except Exception as e:  # noqa: BLE001   # optional add-ons: the game starts without them
+                from .api import log_failure
+                log_failure("PLAY", what, e, str(e))
         try:
             self.ensure_ach_toast()
         except Exception as e:  # noqa: BLE001       # not worth stopping a game over: the Guide's toast is then drawn without them
@@ -674,10 +722,15 @@ class Launcher:
             from .api import log_failure
             log_failure("PLAY", "eo_aero", e, str(e))
             self._aero_note = ""
+        try:
+            self.ensure_nitro_online()
+        except shim.ShimError as e:                  # not worth stopping a game over: NitroSystem then loads or not as the MODS tab last had it
+            from .api import log_failure
+            log_failure("PLAY", "nitro_online", e, str(e))
         logs.step("mods")
         self.ensure_game()
         if require_game and not azimuth.has_game_configured(s["azimuth_dir"]):
-            raise PlayBlocked("Couldn't find your Forza Horizon 2 files.", "no_game")
+            raise no_game_blocked(s["azimuth_dir"])
         if (self.server or {}).get("maintenance"):
             raise PlayBlocked(self.server["maintenance"], "maintenance")
         logs.info("auth", "auth.sign_in_needed", why="play")
@@ -920,6 +973,10 @@ class Launcher:
                 self.game_started_at = time.monotonic()
                 return None, ["offline mode: online features and progress sync are off"]
             acct, notes = self.prepare_play(require_game=not azimuth_window)
+            if self.check_disk():
+                notes.append(self.disk_warning)
+            if self.check_memory():
+                notes.append(self.memory_warning)
             try:
                 self.process = launch.start(self.settings, self.settings["azimuth_dir"], skip_launcher=not azimuth_window,
                                             extra_env=getattr(self, "game_env", None))
@@ -947,6 +1004,8 @@ class Launcher:
             seen = guard.summary()
             if seen:
                 logs.info("game", "game.memory_peak", **seen)
+                self.settings["last_game_memory"] = dict(seen, ended=time.time())     # crashreport puts it in the report of this game
+                self.settings.save()
         return stopped
 
     def play_offline(self, azimuth_window=False):
@@ -959,14 +1018,15 @@ class Launcher:
         if not info.found:
             raise PlayBlocked("azimuth.exe not found.", "no_azimuth")
         if not info.supported:
-            raise PlayBlocked(f"This launcher requires Azimuth {AZIMUTH_VERSION}. Run setup to install the supported combination.", "azimuth_unsupported")
+            raise PlayBlocked(azimuth_files_text(info) if info.runtime_bad else
+                              f"This launcher requires Azimuth {AZIMUTH_VERSION}. Run setup to install the supported combination.", "azimuth_unsupported")
         try:
             self.repair_tls_helper()
         except shim.ShimError as e:
             raise PlayBlocked(str(e), "tls_helper") from None
         self.ensure_game()
         if not azimuth_window and not azimuth.has_game_configured(d):
-            raise PlayBlocked("Couldn't find your Forza Horizon 2 files.", "no_game")
+            raise no_game_blocked(d)
         xuid = s["xuid"]
         use_identity = bool(xuid or os.path.isfile(os.path.join(shim.bin_dir(d), "fh2mp-identity.txt")))
         if use_identity and (self.shim_state()[0] != "ours" or not shim.supports_offline(d)):
@@ -986,6 +1046,8 @@ class Launcher:
         self._offline_enabled = shim.enable(d) if use_identity else False
         self._offline_disabled = shim.disable(d) if not use_identity else False
         self.offline_run = True
+        self.check_disk()
+        self.check_memory()
         try:
             self.process = launch.start(s, d, skip_launcher=not azimuth_window, extra_env=self.game_env)
         except Exception:
@@ -997,21 +1059,57 @@ class Launcher:
                 shim.disable(d)
             raise
 
+    def check_memory(self):
+        """Windows: whether the system can still commit what a game takes to load (memguard.BOOT_NEED). -> what to show the player when it
+        cannot, else ''. #477 (2026-11-13): two boots in a row stopped "out of memory" 20-35 s in on a laptop whose earlier games ran. Never
+        blocks playing."""
+        room = memguard.commit_room()
+        self.memory_warning = ""
+        if room is None:
+            return ""
+        low = room["room_mb"] < memguard.BOOT_NEED // memguard.MB
+        logs.event("WARN" if low else "INFO", "play", "game.commit_room", **room, need_mb=memguard.BOOT_NEED // memguard.MB)
+        if low:
+            self.memory_warning = (f"Windows can give the game only {room['room_mb'] / 1024:.1f} GB more memory and it needs about "
+                                   f"{memguard.BOOT_NEED / memguard.GB:.0f} GB to load. Close other programs, or make the page file larger.")
+        return self.memory_warning
+
+    def start_warnings(self):
+        """The warnings of the last Play (disk, memory), joined for the status line."""
+        return " ".join(filter(None, (getattr(self, "disk_warning", ""), getattr(self, "memory_warning", ""))))
+
+    def check_disk(self):
+        """Looks at the free space of the drives with Azimuth (its saves and caches) and the game. -> what to show the player when one is
+        nearly full, else ''. Never blocks playing."""
+        d = self.settings["azimuth_dir"]
+        game = azimuth.fh2_title(azimuth.read_ini(d)).get("folder", "") if d and os.path.isdir(d) else ""
+        low = low_disk([d, game])
+        for drive, free in low:
+            logs.warn("play", "game.disk_low", drive=drive, free_mb=free >> 20, floor_mb=DISK_LOW_BYTES >> 20)
+        self.disk_warning = (f"Drive {low[0][0]} has only {low[0][1] / (1 << 30):.1f} GB free, so the game may fail to save." if low else "")
+        return self.disk_warning
+
     def ensure_game(self):
         """If Azimuth does not know the game folder yet, find the install and write it into Azimuth's settings. -> path set, or ''. """
         d = self.settings["azimuth_dir"]
         if not d or not os.path.isdir(d) or azimuth.has_game_configured(d):
             return ""
         # A different title may be selected in a shared Azimuth installation.
-        # Reuse FH2's own configured folder before searching for another copy.
+        # Reuse FH2's own configured folder before searching for another copy, unless that folder holds another game (FH3's package has
+        # the same exe name, #470): then an FH2 install found on this computer replaces it.
         own = azimuth.fh2_title(azimuth.read_ini(d)).get("folder", "")
-        if own:
+        other = azimuth.other_game_name(own) if own else ""
+        if own and not other:
             azimuth.configure_game(d, own, preserve_content=True)
             return own
         found = azimuth.find_game_installs()
         if not found:
+            if other:
+                logs.warn("play", "game.folder_other_game", folder=own, game=other, then="no FH2 install found to put in its place")
             return ""
         host, win = found[0]
+        if other:
+            logs.warn("play", "game.folder_other_game", folder=own, game=other, then=f"replaced by {win}")
         azimuth.configure_game(d, win)
         return host
 
@@ -1068,6 +1166,24 @@ class Launcher:
             raise updater.UpdateError(str(e)) from None
         return shim.install_honk(d, files)
 
+    # ---- NitroSystem (optional): loaded for online play only when it has its off switch (shim.nitro_online); the shim keeps its NOS to Free Roam
+    def ensure_nitro_online(self):
+        """Every online Play. -> the note logged ("" when nothing changed)."""
+        d = self.settings["azimuth_dir"]
+        if not d or not os.path.isdir(d):
+            return ""
+        written, note = shim.nitro_online(d, self.settings["nitro_online_written"])
+        if written != self.settings["nitro_online_written"]:
+            self.settings["nitro_online_written"] = written
+            self.settings.save()
+        hud = shim.nitro_hud_default(d)
+        if hud:
+            note = (note + "; " if note else "") + hud
+        if note:
+            from .api import log_note
+            log_note("PLAY " + note)
+        return note
+
     # ---- FH2 ANNA (required: the in-car menu whose lights and doors other players see)
     def anna_state(self):
         """-> (the pinned FH2 ANNA is in place, version)."""
@@ -1099,6 +1215,29 @@ class Launcher:
         except upstream.UpstreamError as e:
             raise updater.UpdateError(str(e)) from None
         return shim.install_achievements(d, files)
+
+    # ---- NitroSystem and Underglow (optional, off until ticked in Settings)
+    def ensure_nitro_system(self, progress=None, cancelled=lambda: False):
+        """Install the pinned NitroSystem when the player wants it (Settings) and has none, or one without its off switch. -> list of things done."""
+        d = self.settings["azimuth_dir"]
+        if not self.settings["nitro_system"] or not d or not os.path.isdir(d) or shim.nitro_installed(d)[0] == "switch":
+            return []
+        try:
+            files = upstream.fetch("nitroSystem", updater.Updater(channel=self.settings["channel"]), progress, cancelled)
+        except upstream.UpstreamError as e:
+            raise updater.UpdateError(str(e)) from None
+        return shim.install_nitro(d, files)
+
+    def ensure_underglow(self, progress=None, cancelled=lambda: False):
+        """Install the pinned Underglow when the player wants it (Settings) and has no Underglow.dll; one they have stays. -> list of things done."""
+        d = self.settings["azimuth_dir"]
+        if not self.settings["underglow"] or not d or not os.path.isdir(d) or shim.underglow_installed(d)[0]:
+            return []
+        try:
+            files = upstream.fetch("underglow", updater.Updater(channel=self.settings["channel"]), progress, cancelled)
+        except upstream.UpstreamError as e:
+            raise updater.UpdateError(str(e)) from None
+        return shim.install_underglow(d, files)
 
     def ensure_ach_toast(self, progress=None, cancelled=lambda: False):
         """The achievement toast's sounds and pictures (constants.ACH_TOAST) from the FH2MP mirror, each checked by size and SHA-256, where
@@ -1203,7 +1342,22 @@ class Launcher:
         return launch.start(self.settings, self.settings["azimuth_dir"], skip_launcher=False)
 
     def game_running(self):
-        return self.process is not None and self.process.poll() is None
+        """The game of the current Play runs: the process Play started, or, once that one ended, any azimuth.exe of this Azimuth folder (the Mod
+        Platform's Restart now and Azimuth's own window carry on in a new process). The Play's session lives exactly as long as this."""
+        if self.process is None:
+            return False
+        return self.process.poll() is None or bool(launch.game_processes(self.settings["azimuth_dir"]))
+
+    def touch_session(self):
+        """Keeps the session file fresh while the game runs: the shim takes one older than 30 minutes for a leftover of an earlier Play, and a
+        game that restarts itself reads it again."""
+        d = self.settings["azimuth_dir"]
+        path = os.path.join(shim.bin_dir(d), shim.SESSION_FILE) if d else ""
+        try:
+            if path and os.path.isfile(path):
+                os.utime(path, None)
+        except OSError as e:
+            logs.swallowed("game", "game.session_touch_failed", e)
 
     def status_lines(self):
         """The player's setup as (component, what is installed, what this launcher needs, ok: True / False / None for "nothing to judge").
@@ -1230,6 +1384,12 @@ class Launcher:
         out.append(("HonkHonk", hh_ver if hh_ok else "not installed", shim.honk_version(), shim.honk_complete(d)))
         an_ok, an_ver = shim.anna_installed(d)
         out.append(("FH2 ANNA", an_ver if an_ok else "not installed", shim.anna_version(), shim.anna_complete(d)))
+        nk, nv = shim.nitro_installed(d)
+        if nk != "none":
+            out.append(("NitroSystem", (nv or "installed") + ("" if nk == "switch" else " (off online)"), "2.0.0 or newer", nk == "switch"))
+        uk, uv = shim.underglow_installed(d)
+        if uk:
+            out.append(("Underglow", uv or "installed", "-", None))
         ac_ok, ac_ver = shim.achievements_installed(d)   # optional: neither missing nor another build is a fault
         out.append(("Achievements", ac_ver if ac_ok else "not installed", shim.achievements_version(), True if ac_ok else None))
         session = os.path.exists(os.path.join(shim.bin_dir(d), shim.SESSION_FILE))

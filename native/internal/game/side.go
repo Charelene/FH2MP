@@ -32,14 +32,18 @@ const (
 	lightingLogEvery = 60.0
 	rejectLogSeconds = 60.0
 
-	honkBase        = 57
-	honkRequest     = honkBase + sideMacSize
-	honkRecordSize  = 20
-	honkMaxRecs     = 12
-	honkOff         = 0xFF
-	honkHorns       = 31
+	honkBase       = 57
+	honkRequest    = honkBase + sideMacSize
+	honkRecordSize = 20
+	honkMaxRecs    = 12
+	honkOff        = 0xFF
+	// v1 (request type 1, reply type 2) numbers a horn by its place in HonkHonk 0.3.4/0.4.0's 31 sound bank; v2 (request type 3, reply type 4,
+	// otherwise the same bytes) by its place in HonkHonk 1.0.0's 47 sound bank, up to 63 for sounds a later build appends. The server keeps v2
+	// numbers and converts at the wire (honkV1ToID, honkIDToV1), so a released v1 shim and a v2 shim hear each other's horns as the same sound.
+	honkV1Horns     = 31
+	honkIDs         = 64
 	honkLease       = 0.5
-	honkCap         = 10.0
+	honkCap         = 60.0 // HonkHonk 1.0.0's longest sound is 14 s (Firetruck) and sirens are held on loop; the age field (u16 ms) ends at 65.5 s
 	honkCooldown    = 2.0
 	honkMinInterval = 0.03
 	honkMaxDistance = 400.0
@@ -58,6 +62,7 @@ var (
 	lightLog  = diag.Get("lighting")
 	honkLog   = diag.Get("honk")
 	probeLog  = diag.Get("probe")
+	modsLog   = diag.Get("mods")
 	probeRate = diag.NewRateLimit(nil, 0)
 )
 
@@ -159,6 +164,8 @@ func (h *Hub) sideForged(kind jobKind, xuid uint64) {
 		lg, name = honkLog, "horn"
 	case jobCarsel:
 		lg, name = carselLog, "car select"
+	case jobMods:
+		lg, name = modsLog, "mod state"
 	}
 	if ok, skipped := sideRate.Allow([2]any{"side-forged", xuid}, rejectLogSeconds); ok {
 		extra := ""
@@ -332,6 +339,30 @@ func (h *Hub) lightingHandle(data []byte, addr Addr, only *World) {
 	h.Sock.SendTo(signed(reply, key), addr)
 }
 
+// honkV1ToID is the v2 number of a v1 horn: HonkHonk 1.0.0 put Police2, Police3, Martinshorn and Firetruck (8-11) after Police (7), so the v1
+// sounds from Boat (v1 8) to Wow (v1 30) moved up by four; the names in both banks (HZ2_SFX_HonkHonk.bank of 0.4.0 and 1.0.0) are otherwise the same.
+// -1: not a v1 horn.
+func honkV1ToID(horn int) int {
+	switch {
+	case horn < 0 || horn >= honkV1Horns:
+		return -1
+	case horn < 8:
+		return horn
+	}
+	return horn + 4
+}
+
+// honkIDToV1 is the v1 number of a horn, false for a sound the 31 sound bank does not have.
+func honkIDToV1(id int) (int, bool) {
+	switch {
+	case id >= 0 && id < 8:
+		return id, true
+	case id >= 12 && id < honkV1Horns+4:
+		return id - 4, true
+	}
+	return 0, false
+}
+
 func (h *Hub) honkStateLive(other *Peer, now float64) bool {
 	st := other.Honk
 	binding, ok := h.Bound[other.Addr]
@@ -381,14 +412,19 @@ func (h *Hub) honkHandle(data []byte, addr Addr, only *World) {
 		return
 	}
 	lenField := int(binary.LittleEndian.Uint16(data[9:11]))
-	if lenField != len(data) || data[19] != 1 || data[54] != 0 || data[52] > 127 || (data[53] != honkOff && data[53] >= honkHorns) {
+	v2 := data[19] == 3
+	horns := honkV1Horns
+	if v2 {
+		horns = honkIDs
+	}
+	if lenField != len(data) || (data[19] != 1 && !v2) || data[54] != 0 || data[52] > 127 || (data[53] != honkOff && int(data[53]) >= horns) {
 		if ok, skipped := sideRate.Allow("hn-malformed", rejectLogSeconds); ok {
 			extra := ""
 			if skipped > 0 {
 				extra = fmt.Sprintf(" (+%d more since the last line)", skipped)
 			}
-			honkLog.Warn(fmt.Sprintf("request with the horn magic is malformed and ignored: length field %d of %d bytes, type %d (expected 1), reserved byte %d (expected 0), car %d (max 127), horn %d (max %d or %d)%s",
-				lenField, len(data), data[19], data[54], data[52], data[53], honkHorns-1, honkOff, extra))
+			honkLog.Warn(fmt.Sprintf("request with the horn magic is malformed and ignored: length field %d of %d bytes, type %d (expected 1 or 3), reserved byte %d (expected 0), car %d (max 127), horn %d (max %d or %d)%s",
+				lenField, len(data), data[19], data[54], data[52], data[53], horns-1, honkOff, extra))
 		}
 		return
 	}
@@ -425,7 +461,11 @@ func (h *Hub) honkHandle(data []byte, addr Addr, only *World) {
 	if peer.CarID != nil {
 		carID = *peer.CarID
 	}
-	nw := honkStep(old, epoch, seq, now, int(data[53]), press, carID)
+	horn := int(data[53])
+	if horn != honkOff && !v2 {
+		horn = honkV1ToID(horn)
+	}
+	nw := honkStep(old, epoch, seq, now, horn, press, carID)
 	peer.Honk = nw
 	startedNow := nw.Horn != nil && !(old != nil && bytes.Equal(old.Epoch, epoch) && old.Horn != nil && old.Press == press)
 	if startedNow && (now-peer.HonkLoggedAt >= honkLogEvery || peer.HonkLoggedAt == 0) {
@@ -450,12 +490,20 @@ func (h *Hub) honkHandle(data []byte, addr Addr, only *World) {
 		if known && peer.Pos != nil && allFinite(*peer.Pos) && dist3(pos, *peer.Pos) > honkMaxDistance {
 			continue
 		}
+		wire := *st.Horn
+		if !v2 {
+			v1, ok := honkIDToV1(wire)
+			if !ok {
+				continue // a released shim has no such sound and would refuse the whole list
+			}
+			wire = v1
+		}
 		age := 0
 		if st.Started != nil {
 			age = int(math.Min(0xFFFF, float64(int((now-*st.Started)*1000))))
 		}
 		rec := make([]byte, honkRecordSize)
-		rec[0], rec[1], rec[2] = byte(other.Owner), byte(st.Car), byte(*st.Horn)
+		rec[0], rec[1], rec[2] = byte(other.Owner), byte(st.Car), byte(wire)
 		if known {
 			rec[3] = 1
 		}
@@ -475,7 +523,7 @@ func (h *Hub) honkHandle(data []byte, addr Addr, only *World) {
 		}
 	}
 	reply := append([]byte(nil), data[:honkBase]...)
-	reply[19], reply[54] = 2, byte(n)
+	reply[19], reply[54] = data[19]+1, byte(n)
 	reply = append(reply, records...)
 	binary.LittleEndian.PutUint16(reply[9:], uint16(len(reply)+sideMacSize))
 	h.Sock.SendTo(signed(reply, key), addr)

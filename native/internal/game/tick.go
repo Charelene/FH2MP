@@ -55,7 +55,8 @@ func (w *World) dropPeer(peer *Peer, why string, quiet bool) {
 	if w.GameOptionsOwner == peer {
 		w.GameOptionsOwner = nil
 	}
-	if w.Leader == peer {
+	wasLeader := w.Leader == peer
+	if wasLeader {
 		w.Leader = nil
 	}
 	w.Peers.Delete(peer.Addr)
@@ -120,6 +121,9 @@ func (w *World) dropPeer(peer *Peer, why string, quiet bool) {
 				}
 			}
 		}
+	}
+	if wasLeader {
+		w.KeepPrivateLeader(fmt.Sprintf("the leader, owner %d, left", peer.Owner))
 	}
 }
 
@@ -309,7 +313,7 @@ func (w *World) Tick() {
 		}
 	}
 	w.CheckRaceEnd(now)
-	if w.Leader != nil && w.Event == nil && w.PendingRace == nil && now-w.LeaderSince > LeaderSetupSeconds {
+	if w.Leader != nil && !w.Private && w.Event == nil && w.PendingRace == nil && now-w.LeaderSince > LeaderSetupSeconds {
 		former := w.Leader
 		w.SetLeader(nil, "setup abandoned")
 		w.ReleaseOptions(former, "setup abandoned")

@@ -212,6 +212,7 @@ loop:
 				if whole {
 					w.TrackSpin(peer, rest)
 					w.TrackPush(peer, rest, *pos, *stamp, *scene)
+					w.TrackTelem(peer, rest, *pos, *stamp)
 				}
 			}
 			if peer.CarsRelayed%20 == 1 && pos != nil {
@@ -268,6 +269,11 @@ loop:
 			peer.ClientCounter = counter
 			peer.Xuid = playerID
 			switch {
+			case (a == 1 || a == 2 || a == 3) && w.HubKey != nil && w.HubKey.Type >= 1 && w.HubKey.Type <= 3 && w.HubKey.Type != int(a):
+				// the hub sent a private game's member here although its game asked for another lobby type (followType): this world's
+				// type is what the handshake tells it
+				peer.LobbyType, peer.ClaimedLobbyType = w.HubKey.Type, int(a)
+				w.Logf("%d OpenConnection asks for lobby type %d; this world is lobby type %d, which the handshake tells the game", addr.Port, a, w.HubKey.Type)
 			case a == 1 || a == 2 || a == 3:
 				peer.LobbyType = int(a)
 			case w.Carmeet:
@@ -328,18 +334,7 @@ loop:
 					w.RelayHeldObjects(peer)
 				}
 				replies = append(replies, netv2.TimeSync(0, uint64(w.NowMs())), netv2.ConnectionSyncDone(w.ServerCounter))
-				if w.Roadtrip || peer.LobbyType == LobbyTypeCarMeet {
-					lobby := uint64(LobbyTypeCarMeet)
-					if w.Roadtrip {
-						lobby = LobbyTypeRoadTrip
-					}
-					replies = append(replies, netv2.SessionHostCreate(1, func(b *bits.Writer) {
-						b.Bits(0, netv2.SessionHostVarBits)
-						b.Bits(lobby, 3)
-					}))
-				} else {
-					replies = append(replies, netv2.SessionHostCreate(1, nil))
-				}
+				replies = append(replies, netv2.SessionHostCreate(1, w.sessionHostCreateVars(peer)))
 				replies = append(replies, netv2.WeatherCreate(uint64(peer.WxSeq), w.Wx))
 				if !w.Roadtrip && peer.LobbyType != LobbyTypeCarMeet {
 					peer.BlSlotSeq = 1
@@ -407,6 +402,7 @@ loop:
 				w.SendGameOptions(peer, nil)
 				w.Traffic.Join(peer, false)
 				w.AssignPrivateUniverse(peer)
+				w.KeepPrivateLeader("the private game's first player")
 				if peer.VipHidden != nil {
 					w.SendPlayerVar(peer, PlayerVarFlags, peer.VipHidden.Width, uint64(peer.VipHidden.Value), false)
 					peer.VipHidden = nil
@@ -470,6 +466,11 @@ loop:
 				parts += fmt.Sprintf("%srequest of owner %d pending, %.0f s ago", sep, pr.Leader.Owner, w.Mono()-w.RaceRequestedAt)
 			}
 			w.Logf("%d MsgRequestRace (owner %d) ignored: an event is already being set up or running in this lobby (%s)", addr.Port, peer.Owner, parts)
+		case mtype == netv2.MsgRequestRace && w.Private && w.Leader != nil && w.Leader != peer && w.Leader.Connected:
+			if !w.admit(peer, mtype) {
+				continue
+			}
+			w.Logf("%d MsgRequestRace (owner %d) ignored: this is a private game and only its leader (owner %d) starts events", addr.Port, peer.Owner, w.Leader.Owner)
 		case mtype == netv2.MsgRequestRace:
 			if !w.admit(peer, mtype) {
 				continue
@@ -508,7 +509,10 @@ loop:
 			if !w.admit(peer, mtype) {
 				continue
 			}
-			accepted := ready == 0 || w.EligibleForEvent(peer, nil)
+			accepted, notice := true, ""
+			if ready != 0 {
+				accepted, notice = w.carFitsEvent(peer, nil)
+			}
 			full := accepted && ready != 0 && w.PendingRace != nil && peer != w.PendingRace.Leader && w.Event == nil && w.EventSeatsFull(peer)
 			tail := ""
 			if !accepted {
@@ -528,8 +532,12 @@ loop:
 				w.SetConsoleBool(peer, 4, 0, "car does not meet the event restrictions")
 				peer.ConsoleVars[4] = false
 				if ready != 0 && w.PendingRace != nil && peer != w.PendingRace.Leader {
+					// An invitee: its game's car select can still switch to a car that fits (RetryRefusedReady). The notice waits for StartEvent.
 					t := w.RaceRequestedAt
 					peer.ReadyRetry = &t
+					w.CheckInviteesReady() // a refused answer is still an answer: the event need not wait out the invite grace for it
+				} else {
+					w.noticeRefused(peer, notice)
 				}
 				continue
 			}
@@ -636,6 +644,7 @@ loop:
 			}
 			br.Pos = start
 			rest := r.intv(end - start)
+			w.NoteRaceHeard(peer)
 			w.Relay(peer, netv2.RelayScore(uint64(mtype), cid, uint64(peer.Owner), rest, end-start), true)
 			switch mtype {
 			case netv2.MsgLapScore:
@@ -687,7 +696,11 @@ loop:
 			}
 			w.CmSessionReady(peer, name, template)
 		case mtype == netv2.MsgCarMeetConfiguredWager:
-			w.Logf("%d CarMeet ConfiguredGameOptionsForWagerRace value=%#x", addr.Port, r.bits(32))
+			value := r.bits(32)
+			if !w.admit(peer, mtype) {
+				continue
+			}
+			w.ShowdownConfigured(peer, value)
 		case mtype == bucketlist.MsgSync:
 			slot, challenge := bucketlist.S32(r.bits(32)), bucketlist.S32(r.bits(32))
 			if !w.admit(peer, mtype) {
@@ -720,11 +733,41 @@ loop:
 			}
 			w.blApply(peer, fmt.Sprintf("ChallengeEnded ok=%d", ok), out, "partner "+partner)
 			w.ev("bucketlist_end", kv("owner", peer.Owner), kv("ok", ok != 0), kv("partner", partnerV))
+		case mtype == netv2.MsgVoteToKick && w.Private:
+			if err := netv2.SkipKey(br, netv2.RouterBits[netv2.RouterLobby][0]); err != nil {
+				panic(err)
+			}
+			target := r.bits(32) | r.bits(32)<<32
+			if !w.admit(peer, mtype) {
+				continue
+			}
+			w.KickFromPrivate(peer, target)
+		case mtype == netv2.MsgRequestLeaderChange && w.Private:
+			kind, _, owner, err := netv2.ReadCarKey(br)
+			if err != nil {
+				panic(err)
+			}
+			if !w.admit(peer, mtype) {
+				continue
+			}
+			w.RequestLeaderChange(peer, kind, int(owner))
+		case mtype == netv2.MsgSetGroupSatNav:
+			if err := netv2.SkipKey(br, netv2.RouterBits[netv2.RouterLobby][0]); err != nil {
+				panic(err)
+			}
+			node := int32(uint32(r.bits(32)))
+			if !w.admit(peer, mtype) {
+				continue
+			}
+			w.SetGroupSatNav(peer, node)
 		case mtype == netv2.MsgDropLeadership:
 			if !w.admit(peer, mtype) {
 				continue
 			}
-			if w.Leader == peer && w.Event == nil {
+			if w.Leader == peer && w.Event == nil && w.Private {
+				w.ReleaseOptions(peer, "the leader cancelled the event setup")
+				w.Logf("%d DropLeadership (owner %d): the event options are taken back; a private game's leader stays its leader", addr.Port, peer.Owner)
+			} else if w.Leader == peer && w.Event == nil {
 				w.SetLeader(nil, "dropped leadership")
 				w.ReleaseOptions(peer, "dropped leadership")
 			} else {
@@ -751,6 +794,9 @@ loop:
 			broke = true
 			break loop
 		}
+	}
+	if !broke && peer.State != PeerRemoved {
+		w.relayVoice(peer, br)
 	}
 	if !broke {
 		left := br.Size - br.Pos
