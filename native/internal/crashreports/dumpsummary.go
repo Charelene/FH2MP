@@ -71,3 +71,20 @@ func reportDump(r *Report) []byte {
 	}
 	return nil
 }
+
+// dumpKey groups a report whose azimuth.log has no failure line by the fault its minidump records: "dump:<code>@<module+offset>" and a title
+// that says so. "" when the dump has no exception inside a module (an address outside every module changes from run to run).
+func dumpKey(dump []byte) (string, string) {
+	if len(dump) == 0 {
+		return "", ""
+	}
+	d, err := minidump.Parse(dump)
+	if err != nil || d.Exception == nil {
+		return "", ""
+	}
+	where, ok := d.Locate(d.Exception.Address)
+	if !ok {
+		return "", ""
+	}
+	return strings.ToLower(fmt.Sprintf("dump:%08x@%s", d.Exception.Code, where)), fmt.Sprintf("Crash 0x%08X at %s (read from the dump)", d.Exception.Code, where)
+}
