@@ -374,6 +374,9 @@ static void slice_watch_finish(const char *why, unsigned long long commit)
     static slice_watch_table t;
     unsigned top[SLICE_WATCH_TOP], n, i, resources = 0;
 
+    if (!g_sw_on) {
+        return;                         /* this window ran without it (another Azimuth build): nothing to say */
+    }
     InterlockedExchange(&g_sw_on, 0);
     AcquireSRWLockExclusive(&g_sw_lock);
     t = g_sw;

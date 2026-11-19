@@ -606,6 +606,20 @@ static void health_census(const health_mem_now *s)
 
 #ifdef HEALTH_SLICE_WATCH
 #include "slice_watch.inc"
+#include "heap_watch.inc"
+
+/* Both watches start together (each one that can) and end together; -> 1 when at least one runs. */
+static int health_watches_start(void)
+{
+    int a = slice_watch_start(), b = heap_watch_start();
+    return a || b;
+}
+
+static void health_watches_finish(const char *why, unsigned long long commit)
+{
+    slice_watch_finish(why, commit);
+    heap_watch_finish();
+}
 #endif
 
 static void health_counts(const char *label, int cls)
@@ -658,20 +672,20 @@ static DWORD WINAPI health_thread(LPVOID unused)
         if (health_mem_read(&s)) {
 #ifdef HEALTH_SLICE_WATCH
             if (sw_left && --sw_left == 0) {
-                slice_watch_finish(sw_why, s.commit);
+                health_watches_finish(sw_why, s.commit);
             }
 #endif
             if (health_census_due(s.commit, s.total, &census_stage)) {
                 health_census(&s);
 #ifdef HEALTH_SLICE_WATCH
-                if (!sw_left && slice_watch_start()) {
+                if (!sw_left && health_watches_start()) {
                     sw_left = SLICE_WATCH_S;
                     sw_why = census_stage == 1 ? "commit over 1.25 x RAM" : "commit over 2.5 x RAM";
                 }
 #endif
             }
 #ifdef HEALTH_SLICE_WATCH
-            if (sw_at && secs == sw_at && !sw_left && slice_watch_start()) {
+            if (sw_at && secs == sw_at && !sw_left && health_watches_start()) {
                 sw_left = SLICE_WATCH_S;
                 sw_why = "FH2MP_SLICEWATCH_AT";
             }

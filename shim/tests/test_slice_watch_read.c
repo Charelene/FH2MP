@@ -97,7 +97,6 @@ int main(void)
     discard_from_here(g_owner, g_res);
     discard_from_here(g_owner, g_res);
     discard_from_here(g_owner, g_res2);
-    InterlockedExchange(&g_sw_on, 0);
 
     CHECK(g_sw.discards == 3);
     CHECK(g_sw.passed == 777);
