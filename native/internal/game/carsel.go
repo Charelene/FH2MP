@@ -79,7 +79,7 @@ func (h *Hub) carselHandle(data []byte, addr Addr, only *World) {
 	if seq == 0 || h.isRevoked(xuid) {
 		return
 	}
-	world, peer, key := h.findAuthedCar(only, h.carselRoutes(only), xuid, data, now, false)
+	world, peer, key := h.sideAuthed(only, h.carselRoutes(only), xuid, data, now, false, addr)
 	if world == nil {
 		if ok, skipped := sideRate.Allow([2]any{"cs-unmatched", xuid}, rejectLogSeconds); ok {
 			extra := ""
@@ -281,7 +281,7 @@ func (h *Hub) carselReport(data []byte, addr Addr, only *World) {
 	if seq == 0 || h.isRevoked(xuid) {
 		return
 	}
-	world, peer, _ := h.findAuthedCar(only, h.carselRoutes(only), xuid, data, now, false)
+	world, peer, _ := h.sideAuthed(only, h.carselRoutes(only), xuid, data, now, false, addr)
 	if world == nil {
 		if ok, skipped := sideRate.Allow([2]any{"csr-unmatched", xuid}, rejectLogSeconds); ok {
 			extra := ""

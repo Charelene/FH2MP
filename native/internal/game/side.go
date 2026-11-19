@@ -176,6 +176,19 @@ func (h *Hub) sideForged(kind jobKind, xuid uint64) {
 	}
 }
 
+// sideAuthed is findAuthedCar for a request that came from addr. On a match it also tells the TCP carrier that addr carries this player's signed
+// side-channel traffic: with the TCP fallback the shim's horn (and other side-channel) socket is a tunnel of its own, which never opens a game
+// connection, and the carrier closed it every helloSeconds (42,149 such closes on prod, 2026-11-13..19).
+func (h *Hub) sideAuthed(only *World, routes map[uint64]Addr, xuid uint64, data []byte, now float64, checkCar bool, from Addr) (*World, *Peer, []byte) {
+	w, p, k := h.findAuthedCar(only, routes, xuid, data, now, checkCar)
+	if w != nil {
+		if keep, ok := h.Tunnel.(SideKeeper); ok {
+			keep.KeepSide(from)
+		}
+	}
+	return w, p, k
+}
+
 // findAuthed matches a side-channel request to the live, ticket-bound game connection of its xuid.
 func (h *Hub) findAuthed(only *World, routes map[uint64]Addr, xuid uint64, data []byte, now float64) (*World, *Peer, []byte) {
 	return h.findAuthedCar(only, routes, xuid, data, now, true)
@@ -267,7 +280,7 @@ func (h *Hub) lightingHandle(data []byte, addr Addr, only *World) {
 	if seq == 0 || h.isRevoked(xuid) {
 		return
 	}
-	world, peer, key := h.findAuthed(only, h.routesFor(only, false), xuid, data, now)
+	world, peer, key := h.sideAuthed(only, h.routesFor(only, false), xuid, data, now, true, addr)
 	if world == nil {
 		if ok, skipped := sideRate.Allow([2]any{"lt-unmatched", xuid}, rejectLogSeconds); ok {
 			why, expected := h.whyUnmatched(xuid, data, now)
@@ -434,7 +447,7 @@ func (h *Hub) honkHandle(data []byte, addr Addr, only *World) {
 	if seq == 0 || h.isRevoked(xuid) {
 		return
 	}
-	world, peer, key := h.findAuthed(only, h.routesFor(only, true), xuid, data, now)
+	world, peer, key := h.sideAuthed(only, h.routesFor(only, true), xuid, data, now, true, addr)
 	if world == nil {
 		if ok, skipped := sideRate.Allow([2]any{"hn-unmatched", xuid}, rejectLogSeconds); ok {
 			why, expected := h.whyUnmatched(xuid, data, now)
