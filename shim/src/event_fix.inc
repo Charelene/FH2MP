@@ -1,0 +1,708 @@
+/* FH2 1.0.0.64, online events: a car whose engine, gearbox or another part belongs to a different car, engine or drivetrain (FH2 Extra Options by
+ * RokkuDayo lets a player install any engine or transmission; the PI the game computes from those parts moves the car into another class) is judged, listed and raced
+ * with only those parts back to the car's own stock ones and the tune values that belong to them back to stock (user decisions 2026-11-19: drop a
+ * car the fix moves out of the event's class from the event's car list, not even a tile; an any-class event lists it; it always races fixed).
+ *
+ * Where [C: decompile of the Ghidra export, ghidra/export-named; bytes checked against the 1.0.0.64 exe]:
+ * - The rule (which parts, which stock parts, which tune values): event_fix_rule.inc, from the game database's List_Upgrade tables, loaded once per
+ *   game (one query per part table, about 32,000 rows) at the first event car list.
+ * - The class and PI of the fixed car come from the game's own simulation: CarPerformance_BuildSnapshotForGarageCar (+2d0160; out buffer, car id, the
+ *   45-word part block: -1, WheelStyle, the 43 part ids) reads the car's Data_Car row and stock brakes, builds the car setup from those parts
+ *   (CarSetup_BuildFromDatabase) and runs CarPerformance_SimulateAndComputeRatings into the ratings block [[+365d700]], which
+ *   CCarInGarage::UpdatePerformanceColumns (+2cfa50) reads right after: PI at [0x17] (-> the car's +0x260), class at [0x1d] (-> +0x2cc). This saves the
+ *   first 0x900 bytes of that block, calls the function on a copy of the block with the fixed parts, reads both values and puts the block back. The
+ *   garage car, its row and the save are never written. One answer per (car, part ids), cached; only cars with a foreign part are simulated.
+ * - The event car list: a car collection runs its list query through +140c3f0 (collection, sql, &database, ?; the text is copied at once).
+ *   GarageCarCollection::vfunc_16 (+c2ec60) builds "SELECT Garage.* , 0 AS IsOwned ... FROM <garage table> AS Garage ... WHERE <filter> ..." with the
+ *   event's class and PI terms in <filter> (Garage.ClassId, Garage.PerformanceIndex; CarFilter_BuildGarageWhereClause +984850,
+ *   CarCollection_AppendPerfRatingRestriction +c16500). In a network session such a query (one with those terms) is run with each of them replaced by
+ *   the fixed values of the garage's cars that have one (event_fix_rule.inc ef_rewrite_sql), so the list takes or drops them by the fixed car. The
+ *   garage's part ids come from one query of the garage table, by the columns CCarInGarage's constructor (+2be790) reads: CarId, WheelStyle and the
+ *   43 short names of CarPartSlotTable (+2e797f0, 32-byte entries, +8 the name).
+ * - The car's details while the event car select runs: QueryCarAttributes (picker_pi.inc) gives the fixed class and PI (ef_attrs), so the game's
+ *   own "may this car enter" test (+996240) and the details agree with the list.
+ * - The race: event_stock.inc's commit hook (ForzaPlayerChoices slot 59, +28d9a0) puts the fixed parts, the stock tune values and the fixed class and
+ *   PI into the pending block before the game commits it to the synced PlayerChoices (ef_commit), which is what the other players and the server get.
+ * Safe by default: each function's first bytes are checked before it is called or hooked; anything unexpected (a table or the garage cannot be read,
+ * the simulation gives an unusable class or PI, a car cannot be fixed) leaves the car as the player built it, with one line saying which.
+ * Evidence: the data flow is confirmed from the decompile; that the list, the details and the commit behave as described in a running game, and the
+ * time the rescoring takes, are NOT verified (every list and commit logs it). FH2MP_NO_EVENTFIX=1 turns it off. */
+#include "event_fix_rule.inc"
+
+#define EF_SNAPSHOT_RVA 0x2d0160u
+#define EF_RATINGS_RVA 0x365d700u
+#define EF_RATINGS_PI 0x5cu
+#define EF_RATINGS_CLASS 0x74u
+#define EF_RATINGS_SAVE 0x900u
+#define EF_SNAPSHOT_OUT 0x4000u        /* the snapshot copies 14,548 bytes out (UpdatePerformanceColumns gives it 14,544 + the dword after) */
+#define EF_QUERY_RVA 0x140c3f0u
+#define EF_SLOT_TABLE_RVA 0x2e797f0u
+#define EF_ROW_INT_AT 0xa0u            /* record set: int (row set, row index, column name, default) [C: the row loops at +21xxxx, the constructor] */
+#define EF_CACHE 512
+#define EF_SQL_MAX (256u * 1024u)
+#define EF_SELECT_MS 3000u
+
+typedef void *(*ef_snapshot_fn)(void *out, unsigned car, const unsigned *block);
+typedef void (*ef_query_fn)(void *collection, const char *sql, void *database, void *extra);
+
+typedef struct { unsigned id, owner, installs; unsigned char stock; } ef_own;
+typedef struct { unsigned owner, id, order; } ef_stk;
+typedef struct { ef_own *rows; unsigned n; ef_stk *stock; unsigned ns; } ef_table;
+typedef struct { unsigned car, hash, kind, klass; float pi; unsigned long long changed; unsigned fixed[EF_SLOTS]; } ef_verdict;
+
+static ef_table g_ef_tab[EF_SLOTS];
+static volatile LONG g_ef_state;                /* 0 not loaded, 1 loaded, -1 the tables could not be read (off for this game) */
+static int g_ef_on;
+static ef_snapshot_fn g_ef_snapshot;
+static ef_query_fn g_ef_query_orig;
+static char g_ef_short[EF_SLOTS][40];           /* the garage table's part columns */
+static int g_ef_short_ok;
+static ef_verdict g_ef_cache[EF_CACHE];
+static unsigned g_ef_cache_n, g_ef_cache_next;
+static SRWLOCK g_ef_lock = SRWLOCK_INIT;
+static volatile DWORD g_ef_holder;              /* the thread inside the lock: a call from the game back into us on it is skipped, not a deadlock */
+static unsigned char *g_ef_snap_out;
+static unsigned char g_ef_save[EF_RATINGS_SAVE];
+static volatile LONG g_ef_declined, g_ef_lists, g_ef_commits;
+
+static int ef_lock(void)
+{
+    if (g_ef_holder == GetCurrentThreadId()) {
+        return 0;
+    }
+    AcquireSRWLockExclusive(&g_ef_lock);
+    g_ef_holder = GetCurrentThreadId();
+    return 1;
+}
+
+static void ef_unlock(void)
+{
+    g_ef_holder = 0;
+    ReleaseSRWLockExclusive(&g_ef_lock);
+}
+
+static void ef_cat_dec(char *d, unsigned cap, unsigned v)
+{
+    char r[12], s[12];
+    unsigned n = 0, i;
+    do { r[n++] = (char)('0' + v % 10); v /= 10; } while (v);
+    for (i = 0; i < n; i++) s[i] = r[n - 1 - i];
+    s[n] = 0;
+    {
+        unsigned len = 0;
+        while (d[len]) len++;
+        for (i = 0; s[i] && len + 1 < cap; i++) d[len++] = s[i];
+        d[len] = 0;
+    }
+}
+
+static void ef_log_decline(const char *what, unsigned car)
+{
+    LONG n = InterlockedIncrement(&g_ef_declined);
+    if (n > 10 && n % 100) {
+        return;
+    }
+    log_begin();
+    log_raw("eventfix: ");
+    if (car) {
+        log_raw("car ");
+        log_dec(car);
+        log_raw(" left as the player built it: ");
+    }
+    log_raw(what);
+    log_raw(" (#");
+    log_dec((unsigned long)n);
+    log_raw(")\n");
+}
+
+static double ef_ms(LARGE_INTEGER a, LARGE_INTEGER b)
+{
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    return f.QuadPart ? (double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)f.QuadPart : 0;
+}
+
+/* ---- the part tables ---- */
+static void ef_sort_rows(ef_own *a, unsigned n)
+{
+    unsigned gap, i, j;
+    for (gap = n / 2; gap; gap /= 2) {
+        for (i = gap; i < n; i++) {
+            ef_own t = a[i];
+            for (j = i; j >= gap && a[j - gap].id > t.id; j -= gap) a[j] = a[j - gap];
+            a[j] = t;
+        }
+    }
+}
+
+/* by owner, then by table order, so the first stock row of an owner is the one the server takes (syncdb.go keeps the first) */
+static void ef_sort_stock(ef_stk *a, unsigned n)
+{
+    unsigned gap, i, j;
+    for (gap = n / 2; gap; gap /= 2) {
+        for (i = gap; i < n; i++) {
+            ef_stk t = a[i];
+            for (j = i; j >= gap && (a[j - gap].owner > t.owner || (a[j - gap].owner == t.owner && a[j - gap].order > t.order)); j -= gap) a[j] = a[j - gap];
+            a[j] = t;
+        }
+    }
+}
+
+static int ef_row_int(void *row, int index, const char *column, int *out)
+{
+    void *fn = ppi_method(row, EF_ROW_INT_AT);
+    ppi_key key = ppi_key_for(column);
+    *out = -1;
+    if (!fn) {
+        return 0;
+    }
+    *out = ((int (*)(void *, int, const ppi_key *, int))fn)(row, index, &key, -1);
+    return 1;
+}
+
+static void ef_cat(char *d, unsigned cap, const char *s)
+{
+    unsigned n = 0;
+    while (d[n]) n++;
+    while (*s && n + 1 < cap) d[n++] = *s++;
+    d[n] = 0;
+}
+
+static int ef_load_table(void *db, int k)
+{
+    static const char *const owner_col[] = {NULL, "Ordinal", "CarBodyID / 1000", "EngineID", "DrivetrainID"};
+    static const char *const installs_col[3] = {"EngineID", "DrivetrainID", "CarBodyID / 1000"};
+    char sql[256];
+    void *row;
+    int n, i, v;
+    ef_table *t = &g_ef_tab[k];
+
+    sql[0] = 0;
+    ef_cat(sql, sizeof sql, "SELECT Id AS a, ");
+    ef_cat(sql, sizeof sql, owner_col[g_ef_owner[k]]);
+    ef_cat(sql, sizeof sql, " AS b, IsStock AS c");
+    if (k <= 2) {
+        ef_cat(sql, sizeof sql, ", ");
+        ef_cat(sql, sizeof sql, installs_col[k]);
+        ef_cat(sql, sizeof sql, " AS d");
+    }
+    ef_cat(sql, sizeof sql, " FROM List_Upgrade");
+    ef_cat(sql, sizeof sql, g_ppi_table[k]);
+    row = ppi_query(db, sql);
+    if (!row) {
+        return 0;
+    }
+    n = ppi_rows(row);
+    if (n < 0) {
+        ppi_release(row);
+        return 0;
+    }
+    t->rows = n ? (ef_own *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)n * sizeof *t->rows) : NULL;
+    t->stock = n ? (ef_stk *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)n * sizeof *t->stock) : NULL;
+    if (n && (!t->rows || !t->stock)) {
+        ppi_release(row);
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        ef_own *o = &t->rows[t->n];
+        if (!ef_row_int(row, i, "a", &v)) {
+            ppi_release(row);
+            return 0;
+        }
+        o->id = (unsigned)v;
+        ef_row_int(row, i, "b", &v);
+        o->owner = (unsigned)v;
+        ef_row_int(row, i, "c", &v);
+        o->stock = v > 0;
+        o->installs = EF_NONE;
+        if (k <= 2) {
+            ef_row_int(row, i, "d", &v);
+            o->installs = (unsigned)v;
+        }
+        if (o->stock) {
+            t->stock[t->ns].owner = o->owner;
+            t->stock[t->ns].id = o->id;
+            t->stock[t->ns].order = (unsigned)i;
+            t->ns++;
+        }
+        t->n++;
+    }
+    ppi_release(row);
+    ef_sort_rows(t->rows, t->n);
+    ef_sort_stock(t->stock, t->ns);
+    return 1;
+}
+
+static void *ef_database(void)
+{
+    void *holder = NULL, *db = NULL;
+    if (!g_ppi_img || !read_game_memory(g_ppi_img + PPI_HOLDER_RVA, &holder, sizeof holder) || !holder ||
+        !read_game_memory((const unsigned char *)holder + PPI_HOLDER_DB_OFFSET, &db, sizeof db)) {
+        return NULL;
+    }
+    return db;
+}
+
+/* the part tables and the garage's part columns, once per game -> 1 when ready (call under g_ef_lock) */
+static int ef_ready(void)
+{
+    LARGE_INTEGER t0, t1;
+    void *db;
+    unsigned rows = 0;
+    int k;
+
+    if (g_ef_state) {
+        return g_ef_state > 0;
+    }
+    db = ef_database();
+    if (!db) {
+        return 0;               /* not yet: asked again at the next list */
+    }
+    QueryPerformanceCounter(&t0);
+    for (k = 0; k < EF_SLOTS; k++) {
+        const char *name = NULL;
+        unsigned i;
+        if (!read_game_memory(g_ppi_img + EF_SLOT_TABLE_RVA + 32u * (unsigned)k + 8u, &name, sizeof name) || !name ||
+            !read_game_memory(name, g_ef_short[k], sizeof g_ef_short[k] - 1)) {
+            break;
+        }
+        g_ef_short[k][sizeof g_ef_short[k] - 1] = 0;
+        for (i = 0; g_ef_short[k][i]; i++) {
+            if (!ef_word_char(g_ef_short[k][i])) break;
+        }
+        if (!i || g_ef_short[k][i]) break;
+    }
+    g_ef_short_ok = k == EF_SLOTS && lstrcmpA(g_ef_short[0], "Engine") == 0;
+    for (k = 0; k < EF_SLOTS; k++) {
+        if (g_ef_owner[k] == EF_NO_OWNER || !g_ppi_table[k]) {
+            continue;
+        }
+        if (!ef_load_table(db, k)) {
+            g_ef_state = -1;
+            log_begin();
+            log_raw("eventfix: the part table List_Upgrade");
+            log_raw(g_ppi_table[k]);
+            log_raw(" cannot be read from the game database, so cars with parts of other cars race as built in this game\n");
+            return 0;
+        }
+        rows += g_ef_tab[k].n;
+    }
+    QueryPerformanceCounter(&t1);
+    g_ef_state = 1;
+    log_begin();
+    log_raw("eventfix: ");
+    log_dec(rows);
+    log_raw(" part rows of the game database loaded in ");
+    log_dec((unsigned long)ef_ms(t0, t1));
+    log_raw(" ms; the garage's part columns are ");
+    log_raw(g_ef_short_ok ? "known" : "NOT known (the event car lists stay as the game builds them)");
+    log_raw("\n");
+    return 1;
+}
+
+static const ef_own *ef_find(int k, unsigned id)
+{
+    const ef_table *t = &g_ef_tab[k];
+    unsigned lo = 0, hi = t->n;
+    while (lo < hi) {
+        unsigned mid = lo + (hi - lo) / 2;
+        if (t->rows[mid].id < id) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo < t->n && t->rows[lo].id == id ? &t->rows[lo] : NULL;
+}
+
+static int ef_op_owner(void *ctx, int k, unsigned id, unsigned *owner)
+{
+    const ef_own *o = ef_find(k, id);
+    (void)ctx;
+    if (!o) return 0;
+    *owner = o->owner;
+    return 1;
+}
+
+static int ef_op_stock(void *ctx, int k, unsigned owner, unsigned *id)
+{
+    const ef_table *t = &g_ef_tab[k];
+    unsigned lo = 0, hi = t->ns;
+    (void)ctx;
+    while (lo < hi) {
+        unsigned mid = lo + (hi - lo) / 2;
+        if (t->stock[mid].owner < owner) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo >= t->ns || t->stock[lo].owner != owner) return 0;
+    *id = t->stock[lo].id;
+    return 1;
+}
+
+static int ef_op_installs(void *ctx, int k, unsigned id, unsigned *what)
+{
+    const ef_own *o = k <= 2 ? ef_find(k, id) : NULL;
+    (void)ctx;
+    if (!o || o->installs == EF_NONE) return 0;
+    *what = o->installs;
+    return 1;
+}
+
+/* ---- the fixed car's class and PI, from the game's simulation ---- */
+static int ef_writable(const void *p, SIZE_T n)
+{
+    MEMORY_BASIC_INFORMATION m;
+    if (!p || !VirtualQuery(p, &m, sizeof m) || m.State != MEM_COMMIT ||
+        !(m.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY)) || (m.Protect & PAGE_GUARD)) {
+        return 0;
+    }
+    return (const unsigned char *)p + n <= (const unsigned char *)m.BaseAddress + m.RegionSize;
+}
+
+static int ef_rescore(unsigned car, const unsigned block[2 + EF_SLOTS], unsigned *klass, float *pi)
+{
+    unsigned char *ratings = NULL;
+    unsigned k = 0;
+    float p = 0;
+
+    if (!g_ef_snapshot || !g_ef_snap_out || !read_game_memory(g_ppi_img + EF_RATINGS_RVA, &ratings, sizeof ratings) || !ratings ||
+        !ef_writable(ratings, EF_RATINGS_SAVE) || !read_game_memory(ratings, g_ef_save, sizeof g_ef_save)) {
+        return 0;
+    }
+    g_ef_snapshot(g_ef_snap_out, car, block);
+    memcpy(&p, ratings + EF_RATINGS_PI, sizeof p);
+    memcpy(&k, ratings + EF_RATINGS_CLASS, sizeof k);
+    memcpy(ratings, g_ef_save, sizeof g_ef_save);
+    if (k > 15 || !ppi_pi_usable((double)p)) {
+        return 0;
+    }
+    *klass = k;
+    *pi = p;
+    return 1;
+}
+
+/* The verdict on car `car` with WheelStyle `wheel` and parts `parts` (call under g_ef_lock, after ef_ready) */
+static const ef_verdict *ef_judge(unsigned car, unsigned wheel, const unsigned parts[EF_SLOTS], double *ms)
+{
+    ef_ops ops = {ef_op_owner, ef_op_stock, ef_op_installs, NULL};
+    unsigned hash = 2166136261u ^ wheel, i, block[2 + EF_SLOTS];
+    ef_verdict *v;
+    LARGE_INTEGER t0, t1;
+
+    for (i = 0; i < EF_SLOTS; i++) {
+        hash = (hash ^ parts[i]) * 16777619u;
+    }
+    for (i = 0; i < g_ef_cache_n; i++) {
+        if (g_ef_cache[i].car == car && g_ef_cache[i].hash == hash) {
+            return &g_ef_cache[i];
+        }
+    }
+    v = &g_ef_cache[g_ef_cache_next];
+    g_ef_cache_next = (g_ef_cache_next + 1) % EF_CACHE;
+    if (g_ef_cache_n < EF_CACHE) g_ef_cache_n++;
+    v->car = car;
+    v->hash = hash;
+    v->kind = (unsigned)ef_fix(car, parts, &ops, v->fixed, &v->changed);
+    if (v->kind == EF_FIXED) {
+        block[0] = EF_NONE;
+        block[1] = wheel;
+        memcpy(block + 2, v->fixed, sizeof v->fixed);
+        QueryPerformanceCounter(&t0);
+        if (!ef_rescore(car, block, &v->klass, &v->pi)) {
+            v->kind = EF_CANNOT;
+            ef_log_decline("the game's performance simulation gave no usable class and PI for the fixed parts", car);
+        }
+        QueryPerformanceCounter(&t1);
+        if (ms) *ms += ef_ms(t0, t1);
+    } else if (v->kind == EF_CANNOT) {
+        ef_log_decline("its engine, drivetrain, body or tires belong to another car and the car's own have no stock row", car);
+    }
+    return v;
+}
+
+/* ---- the event car list ---- */
+static volatile LONG64 g_ef_list_at;            /* tick of the last event car list (a garage list with class or PI terms, in a session) */
+static volatile LONG g_ef_first_list;
+
+/* an online event car select runs: its countdown hook ran within 3 s, or an event car list was built within 2 minutes (the list can come before the
+ * countdown's first frame, and the car's details must agree with it) */
+static int ef_in_select(void)
+{
+    ULONGLONG now = GetTickCount64(), armed = (ULONGLONG)g_cs_count_armed_at, listed = (ULONGLONG)g_ef_list_at;
+    return (armed && now - armed <= EF_SELECT_MS) || (listed && now - listed <= 120000u);
+}
+
+/* the garage list query `sql` with the fixed values in place, in a HeapAlloc'd buffer the caller frees, or NULL to run it as it is (call under
+ * g_ef_lock) */
+static char *ef_list_query(const char *sql)
+{
+    char table[128], scan[2048], *text = NULL;
+    void *db, *row;
+    ef_row *rows;
+    int n, i, k, v, replaced;
+    unsigned fixed = 0, cannot = 0, foreign_cars = 0;
+    double sim_ms = 0;
+    LARGE_INTEGER t0, t1;
+
+    if (!ef_garage_query(sql, table, sizeof table)) {
+        return NULL;
+    }
+    g_ef_list_at = (LONG64)GetTickCount64();
+    if (!ef_ready() || !g_ef_short_ok || !(db = ef_database())) {
+        return NULL;
+    }
+    QueryPerformanceCounter(&t0);
+    scan[0] = 0;
+    ef_cat(scan, sizeof scan, "SELECT Id AS gi, CarId AS gc, WheelStyle AS gw");
+    for (k = 0; k < EF_SLOTS; k++) {
+        ef_cat(scan, sizeof scan, ", ");
+        ef_cat(scan, sizeof scan, g_ef_short[k]);
+        ef_cat(scan, sizeof scan, " AS gp");
+        ef_cat_dec(scan, sizeof scan, (unsigned)k);
+    }
+    ef_cat(scan, sizeof scan, " FROM ");
+    ef_cat(scan, sizeof scan, table);
+    row = ppi_query(db, scan);
+    if (!row) {
+        ef_log_decline("the garage table cannot be read, so this event car list is the game's", 0);
+        return NULL;
+    }
+    n = ppi_rows(row);
+    rows = n > 0 ? (ef_row *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)n * sizeof *rows) : NULL;
+    if (n > 0 && !rows) {
+        ppi_release(row);
+        return NULL;
+    }
+    for (i = 0; i < n; i++) {
+        unsigned parts[EF_SLOTS], car, wheel, gid;
+        const ef_verdict *vd;
+        ef_row_int(row, i, "gi", &v);
+        gid = (unsigned)v;
+        ef_row_int(row, i, "gc", &v);
+        car = (unsigned)v;
+        ef_row_int(row, i, "gw", &v);
+        wheel = (unsigned)v;
+        for (k = 0; k < EF_SLOTS; k++) {
+            char col[8] = "gp";
+            ef_cat_dec(col, sizeof col, (unsigned)k);
+            ef_row_int(row, i, col, &v);
+            parts[k] = (unsigned)v;
+        }
+        vd = ef_judge(car, wheel, parts, &sim_ms);
+        if (vd->kind == EF_FIXED) {
+            rows[fixed].garage_id = gid;
+            rows[fixed].klass = vd->klass;
+            rows[fixed].pi = vd->pi;
+            fixed++;
+            foreign_cars++;
+        } else if (vd->kind == EF_CANNOT) {
+            cannot++;
+            foreign_cars++;
+        }
+    }
+    ppi_release(row);
+    replaced = 0;
+    if (fixed) {
+        text = (char *)HeapAlloc(GetProcessHeap(), 0, EF_SQL_MAX);
+        replaced = text ? ef_rewrite_sql(sql, rows, fixed, text, EF_SQL_MAX) : -1;
+        if (replaced <= 0 && text) {
+            HeapFree(GetProcessHeap(), 0, text);
+            text = NULL;
+        }
+    }
+    if (rows) HeapFree(GetProcessHeap(), 0, rows);
+    QueryPerformanceCounter(&t1);
+    if (!foreign_cars && InterlockedExchange(&g_ef_first_list, 1) == 0) {
+        log_begin();
+        log_raw("eventfix: first event car list of this game: ");
+        log_dec((unsigned long)(n > 0 ? n : 0));
+        log_raw(" garage cars, none with parts of other cars; took ");
+        log_dec((unsigned long)ef_ms(t0, t1));
+        log_raw(" ms\n");
+    }
+    if (foreign_cars) {
+        LONG nl = InterlockedIncrement(&g_ef_lists);
+        g_ef_first_list = 1;
+        if (nl <= 20 || nl % 50 == 0) {
+            log_begin();
+            log_raw("eventfix: event car list: ");
+            log_dec((unsigned long)(n > 0 ? n : 0));
+            log_raw(" garage cars, ");
+            log_dec(foreign_cars);
+            log_raw(" with parts of other cars (");
+            log_dec(fixed);
+            log_raw(" judged by their fixed class and PI, ");
+            log_dec(cannot);
+            log_raw(" left as built); ");
+            if (replaced < 0) {
+                log_raw("the rewritten query does not fit, so the list is the game's; ");
+            }
+            log_raw("took ");
+            log_dec((unsigned long)ef_ms(t0, t1));
+            log_raw(" ms, of it simulation ");
+            log_dec((unsigned long)sim_ms);
+            log_raw(" ms (#");
+            log_dec((unsigned long)nl);
+            log_raw(")\n");
+        }
+    }
+    return text;
+}
+
+static void ef_query_hook(void *collection, const char *sql, void *database, void *extra)
+{
+    char *use = NULL;
+    if (g_ef_on && sql && ppi_in_session(g_ppi_img) && ef_lock()) {
+        use = ef_list_query(sql);
+        ef_unlock();
+    }
+    g_ef_query_orig(collection, use ? use : sql, database, extra);
+    if (use) {
+        HeapFree(GetProcessHeap(), 0, use);
+    }
+}
+
+/* ---- the car's details (QueryCarAttributes, picker_pi.inc) ---- */
+/* While an online event car select runs: the attribute block of garage car `car` (CCarInGarage) gets the fixed class and PI. -> 1 when changed. */
+static int ef_attrs(void *car, unsigned char *out)
+{
+    unsigned id = 0, wheel = 0, parts[EF_SLOTS];
+    const ef_verdict *v;
+    double dpi;
+    int changed = 0;
+
+    if (!g_ef_on || !ef_in_select() || !ppi_in_session(g_ppi_img) ||
+        !read_game_memory((const unsigned char *)car + PPI_CAR_ID, &id, sizeof id) ||
+        !read_game_memory((const unsigned char *)car + PPI_CAR_PARTS - 4, &wheel, sizeof wheel) ||
+        !read_game_memory((const unsigned char *)car + PPI_CAR_PARTS, parts, sizeof parts)) {
+        return 0;
+    }
+    if (!ef_lock()) {
+        return 0;
+    }
+    if (ef_ready()) {
+        v = ef_judge(id, wheel, parts, NULL);
+        if (v->kind == EF_FIXED) {
+            dpi = (double)v->pi;
+            memcpy(out + PPI_OUT_PI, &dpi, sizeof dpi);
+            out[PPI_OUT_CLASS] = (unsigned char)v->klass;
+            changed = 1;
+        }
+    }
+    ef_unlock();
+    return changed;
+}
+
+/* ---- the race (event_stock.inc's commit hook) ---- */
+/* The pending block `self` of the online choices (ES_* offsets): a car with parts of other cars gets the fixed parts, the stock tune values that belong
+ * to them and the fixed class and PI before the game commits it. -> 1 when changed. */
+static int ef_commit(unsigned char *self, unsigned car_at, unsigned wheel_at, unsigned parts_at, unsigned tune_at, unsigned attrs_at)
+{
+    unsigned car, wheel, parts[EF_SLOTS], before_class, i, nslots = 0, ntune = 0;
+    unsigned long long tune;
+    short attr_id;
+    double before_pi = 0, dpi;
+    const ef_verdict *v;
+    ef_verdict copy;
+    LONG n;
+
+    if (!g_ef_on) {
+        return 0;
+    }
+    memcpy(&car, self + car_at, sizeof car);
+    memcpy(&wheel, self + wheel_at, sizeof wheel);
+    memcpy(parts, self + parts_at, sizeof parts);
+    memcpy(&attr_id, self + attrs_at + PPI_OUT_ID, sizeof attr_id);
+    if (!ef_lock()) {
+        return 0;
+    }
+    if (!ef_ready()) {
+        ef_unlock();
+        return 0;
+    }
+    v = ef_judge(car, wheel, parts, NULL);
+    copy = *v;
+    ef_unlock();
+    if (copy.kind != EF_FIXED) {
+        return 0;
+    }
+    if (attr_id != (short)car) {
+        ef_log_decline("the attribute block does not carry this car, so its layout is not as expected", car);
+        return 0;
+    }
+    before_class = self[attrs_at + PPI_OUT_CLASS];
+    memcpy(&before_pi, self + attrs_at + PPI_OUT_PI, sizeof before_pi);
+    for (i = 0; i < EF_SLOTS; i++) {
+        if (copy.changed & (1ull << i)) {
+            memcpy(self + parts_at + 4 * i, &copy.fixed[i], 4);
+            nslots++;
+        }
+    }
+    tune = ef_tune_mask(copy.changed);
+    for (i = 0; i < EF_TUNE; i++) {
+        if (tune & (1ull << i)) {
+            unsigned t = 0xbf800000u;      /* -1.0f: the car's default */
+            memcpy(self + tune_at + 4 * i, &t, sizeof t);
+            ntune++;
+        }
+    }
+    self[attrs_at + PPI_OUT_CLASS] = (unsigned char)copy.klass;
+    dpi = (double)copy.pi;
+    memcpy(self + attrs_at + PPI_OUT_PI, &dpi, sizeof dpi);
+    n = InterlockedIncrement(&g_ef_commits);
+    if (n <= 20 || n % 50 == 0) {
+        log_begin();
+        log_raw("eventfix: car ");
+        log_dec(car);
+        log_raw(" races in this online event with ");
+        log_dec(nslots);
+        log_raw(" part(s) of other cars back to its own stock ones (slots");
+        for (i = 0; i < EF_SLOTS; i++) {
+            if (copy.changed & (1ull << i)) {
+                log_raw(" ");
+                log_dec(i);
+                log_raw(":");
+                log_dec(parts[i]);
+                log_raw("->");
+                if (copy.fixed[i] == EF_NONE) log_raw("none");
+                else log_dec(copy.fixed[i]);
+            }
+        }
+        log_raw("), ");
+        log_dec(ntune);
+        log_raw(" tune value(s) back to stock; class ");
+        log_dec(before_class);
+        log_raw(" PI ");
+        ppi_log_pi(before_pi);
+        log_raw(" -> class ");
+        log_dec(copy.klass);
+        log_raw(" PI ");
+        ppi_log_pi((double)copy.pi);
+        log_raw("; the garage car is unchanged (#");
+        log_dec((unsigned long)n);
+        log_raw(")\n");
+    }
+    return 1;
+}
+
+static int patch_event_fix(void)
+{
+    static const unsigned char snap[16] = {0x40, 0x55, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8d, 0xac, 0x24, 0xd0, 0xc1, 0xff, 0xff};
+    static const unsigned char query[16] = {0x40, 0x57, 0x48, 0x83, 0xec, 0x60, 0x48, 0xc7, 0x44, 0x24, 0x20, 0xfe, 0xff, 0xff, 0xff, 0x48};
+    unsigned char *img = find_fh2_image();
+
+    if (!img || !g_ppi_img || !code_is("eventfix", "CarPerformance_BuildSnapshotForGarageCar", img, EF_SNAPSHOT_RVA, snap, sizeof snap)) {
+        return 0;
+    }
+    g_ef_snap_out = (unsigned char *)VirtualAlloc(NULL, EF_SNAPSHOT_OUT, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!g_ef_snap_out) {
+        return 0;
+    }
+    g_ef_snapshot = (ef_snapshot_fn)(img + EF_SNAPSHOT_RVA);
+    g_ef_on = 1;
+    if (code_is("eventfix", "the car collection's list query", img, EF_QUERY_RVA, query, sizeof query) &&
+        plat_hook("eventfix: event car lists by the fixed class and PI", img + EF_QUERY_RVA, (void *)ef_query_hook, (void **)&g_ef_query_orig)) {
+        log_begin();
+        log_raw("hook: eventfix: online, an event car list takes a car with parts of other cars by its class and PI with its own stock parts (game+0x140c3f0)\n");
+    }
+    log_begin();
+    log_raw("hook: eventfix: online, a car with parts of other cars races an event with those parts and their tune values back to stock (car details, commit)\n");
+    return 1;
+}

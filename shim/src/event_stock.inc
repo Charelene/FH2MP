@@ -137,27 +137,33 @@ static int es_game_stock_parts(void *ctx, unsigned car, unsigned stock[45])
     return 1;
 }
 
+static int g_es_stock_on;          /* the stock swap above runs (a game that keeps its own car packs, FH2MP_NO_EVENTSTOCK unset) */
+
 static void es_hook(void *self)
 {
     unsigned char *s = (unsigned char *)self;
     ULONGLONG now = GetTickCount64(), armed = (ULONGLONG)g_cs_count_armed_at;
     unsigned char probe;
 
-    if (s && g_ppi_base_ready && armed && now - armed <= ES_SELECT_MS && read_game_memory(s + ES_ATTRS + PPI_OUT_SIZE - 1, &probe, 1)) {
+    if (s && armed && now - armed <= ES_SELECT_MS && read_game_memory(s + ES_ATTRS + PPI_OUT_SIZE - 1, &probe, 1)) {
         ppi_ops ops = {ppi_base_exists, ppi_base_stock, NULL};
         es_ops es = {es_game_stock_parts, NULL};
-        es_stock_pending(s, &es, &ops);
+        if (!(g_es_stock_on && g_ppi_base_ready && es_stock_pending(s, &es, &ops))) {
+            ef_commit(s, ES_CAR, ES_WHEEL, ES_PARTS, ES_TUNE, ES_ATTRS);   /* event_fix.inc: parts of other cars back to the car's own stock ones */
+        }
     }
     g_es_orig(self);
 }
 
-static int patch_event_stock(void)
+/* stock_on: the stock swap for a game that keeps its own car packs; the hook goes in for it or for event_fix.inc (g_ef_on) */
+static int patch_event_stock(int stock_on)
 {
     static const unsigned char prologue[16] = {0x40, 0x53, 0x48, 0x83, 0xec, 0x20, 0x48, 0x8d, 0x51, 0x08, 0x48, 0x8b, 0xd9, 0x48, 0x81, 0xc1};
     unsigned char *img = find_fh2_image();
 
-    if (!g_ppi_base_ready) {
-        return 0;               /* the server's database is in place (or offline): every part is the server's */
+    g_es_stock_on = stock_on && g_ppi_base_ready;    /* without its own car packs the server's database is in place: every part is the server's */
+    if (!g_es_stock_on && !g_ef_on) {
+        return 0;
     }
     if (!img || !code_is("eventstock", "ForzaPlayerChoices commit (slot 59)", img, ES_COMMIT_RVA, prologue, sizeof prologue)) {
         return 0;
@@ -165,7 +171,9 @@ static int patch_event_stock(void)
     if (!plat_hook("eventstock: online car commit", img + ES_COMMIT_RVA, (void *)es_hook, (void **)&g_es_orig)) {
         return 0;
     }
-    log_begin();
-    log_raw("hook: eventstock: in an online event car select, a car with parts the server's database does not have races as the stock car (game+0x28d9a0)\n");
+    if (g_es_stock_on) {
+        log_begin();
+        log_raw("hook: eventstock: in an online event car select, a car with parts the server's database does not have races as the stock car (game+0x28d9a0)\n");
+    }
     return 1;
 }

@@ -3232,6 +3232,7 @@ static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *
 #include "nos_flames.inc"
 #include "ug_remote.inc"
 #include "race_wait.inc"
+#include "event_fix.inc"
 #include "event_stock.inc"
 #include "stall_trace.inc"
 
@@ -5721,9 +5722,10 @@ static DWORD WINAPI late_init(LPVOID unused)
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_PICKERPI", env, 8) == 0) {
                 patch_picker_pi();
-                if (GetEnvironmentVariableW(L"FH2MP_NO_EVENTSTOCK", env, 8) == 0) {
-                    patch_event_stock();
+                if (GetEnvironmentVariableW(L"FH2MP_NO_EVENTFIX", env, 8) == 0) {
+                    patch_event_fix();
                 }
+                patch_event_stock(GetEnvironmentVariableW(L"FH2MP_NO_EVENTSTOCK", env, 8) == 0);
             }
             if (GetEnvironmentVariableW(L"FH2MP_NO_AUTODRIVE_RULE", env, 8) == 0) {
                 patch_autodrive_rule();
