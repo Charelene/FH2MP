@@ -248,6 +248,9 @@ static int heap_watch_hook(void)
         log_raw("), the watch does not run\n");
         return 0;
     }
+    if (g_api->api_version >= 9 && g_api->add_dump_memory) {
+        g_api->add_dump_memory(g_mod, g_hw, sizeof *g_hw);      /* a game that stops inside the window still leaves the table in its crash dump */
+    }
     g_hw_heap = GetProcessHeap();
     heap_watch_skip_module(L"ntdll.dll");
     heap_watch_skip_module(L"KERNELBASE.dll");
