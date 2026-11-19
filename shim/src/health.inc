@@ -604,6 +604,10 @@ static void health_census(const health_mem_now *s)
     log_raw("\n");
 }
 
+#ifdef HEALTH_SLICE_WATCH
+#include "slice_watch.inc"
+#endif
+
 static void health_counts(const char *label, int cls)
 {
     LONG ok = InterlockedExchange(&g_xhr_ok[cls], 0), bad = InterlockedExchange(&g_xhr_bad[cls], 0);
@@ -630,6 +634,16 @@ static DWORD WINAPI health_thread(LPVOID unused)
     unsigned ticks = 0, lines = 0, secs = 0;
     int census_stage = 0;
     unsigned long long mem_last_commit = 0, mem_last_gpu = HEALTH_MEM_UNKNOWN;
+#ifdef HEALTH_SLICE_WATCH
+    unsigned sw_left = 0, sw_at = 0;
+    const char *sw_why = "";
+    wchar_t sw_env[12];
+    DWORD sw_n = GetEnvironmentVariableW(L"FH2MP_SLICEWATCH_AT", sw_env, 12), sw_i;
+
+    for (sw_i = 0; sw_n && sw_n < 12 && sw_i < sw_n && sw_env[sw_i] >= L'0' && sw_env[sw_i] <= L'9'; sw_i++) {
+        sw_at = sw_at * 10 + (unsigned)(sw_env[sw_i] - L'0');      /* a test rig's baseline: seconds into the game */
+    }
+#endif
 
     (void)unused;
     for (;;) {
@@ -642,9 +656,26 @@ static DWORD WINAPI health_thread(LPVOID unused)
             health_gpu_open();
         }
         if (health_mem_read(&s)) {
+#ifdef HEALTH_SLICE_WATCH
+            if (sw_left && --sw_left == 0) {
+                slice_watch_finish(sw_why, s.commit);
+            }
+#endif
             if (health_census_due(s.commit, s.total, &census_stage)) {
                 health_census(&s);
+#ifdef HEALTH_SLICE_WATCH
+                if (!sw_left && slice_watch_start()) {
+                    sw_left = SLICE_WATCH_S;
+                    sw_why = census_stage == 1 ? "commit over 1.25 x RAM" : "commit over 2.5 x RAM";
+                }
+#endif
             }
+#ifdef HEALTH_SLICE_WATCH
+            if (sw_at && secs == sw_at && !sw_left && slice_watch_start()) {
+                sw_left = SLICE_WATCH_S;
+                sw_why = "FH2MP_SLICEWATCH_AT";
+            }
+#endif
             jump = health_memory_step(&mem, s.commit, s.avail, s.gpu_shared, d, &write);
             if (jump && write) {
                 log_begin();
