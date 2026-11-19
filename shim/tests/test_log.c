@@ -88,6 +88,9 @@ int main(int argc, char **argv)
             "garagerating: garage car 5 (save row 2, engine part 3, camshaft part 4) is not rated (#1): x, value 0; it stays in the garage with empty performance numbers\n",
             "cinematics: the game's media/Cinematics directory query returned null (game+0x21f44d); its optional registration is skipped\n",
             "placement: Azimuth would stop the game for this texture, created it as an ordinary texture instead:\n",
+            /* and the probes and fallbacks that report what the game did: a lost server connection, a car wait let through */
+            "netwatch: the game closed its connection to the game server (close #1, connection state 6): reason 0x80600008, nothing arrived from the server within the time limit\n",
+            "carwait: the wait for every player's car is let through after 41 s: nothing in the car cache changed for 20 s (free slots 0, cars waiting for a slot 2, loading 0, loaded 9)\n",
             0};
         wchar_t path[MAX_PATH];
         char buf[8192];
@@ -109,7 +112,7 @@ int main(int argc, char **argv)
             char head[24];
             lstrcpynA(head, hits[i], sizeof head);
             if (!strstr(buf, head)) {
-                printf("FAIL: a guard's hit line is dropped by the release log: %s", hits[i]);
+                printf("FAIL: a line the release log must keep is dropped: %s", hits[i]);
                 failed = 1;
             }
         }
