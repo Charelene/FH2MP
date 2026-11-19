@@ -2325,6 +2325,7 @@ static int patch_online_meet(void)
 #include "camanim_guard.inc"
 #include "component_lookup_guard.inc"
 #include "travelxp_guard.inc"
+#include "carlist_room.inc"
 #include "picker_pi.inc"
 #include "autodrive_rule.inc"
 #include "tune_gate.inc"
@@ -5656,7 +5657,7 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_STALLTRACE", env, 8) == 0) patch_stall_trace();
         }
 #endif
-        {   /* the game-bug guards here and below (hook, model, dtconv, cam, comp, travelxp, nulltorque, torqueload, garagerating, cinematics,
+        {   /* the game-bug guards here and below (hook, model, dtconv, cam, comp, travelxp, carroom, nulltorque, torqueload, garagerating, cinematics,
              * placement) are also made in offline runs, by offline_guards */
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_PARTYHUD", env, 8) == 0) patch_party_hud();
@@ -5669,6 +5670,7 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_CAMGUARD", env, 8) == 0) patch_camanim_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_COMPGUARD", env, 8) == 0) patch_component_lookup_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_TRAVELXPGUARD", env, 8) == 0) patch_travelxp_guard();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_CARROOM", env, 8) == 0) patch_carlist_room();
         }
         {   /* online only: an offline run sends no share anywhere */
             wchar_t env[8];
@@ -5864,6 +5866,7 @@ static DWORD WINAPI offline_guards(LPVOID unused)
     OFFLINE_GUARD(L"FH2MP_NO_CAMGUARD", patch_camanim_guard())
     OFFLINE_GUARD(L"FH2MP_NO_COMPGUARD", patch_component_lookup_guard())
     OFFLINE_GUARD(L"FH2MP_NO_TRAVELXPGUARD", patch_travelxp_guard())
+    OFFLINE_GUARD(L"FH2MP_NO_CARROOM", patch_carlist_room())
     OFFLINE_GUARD(L"FH2MP_NO_NULLTORQUE", patch_null_torque_curve())
     OFFLINE_GUARD(L"FH2MP_NO_NULLTORQUE", patch_null_torque_scale())
     OFFLINE_GUARD(L"FH2MP_NO_TORQUELOAD", patch_torque_load())

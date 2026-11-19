@@ -74,6 +74,7 @@ lane_unit() {
     run "shim health" shim/tests/test_health.sh
     run "shim eo timelock" shim/tests/test_eo_timelock.sh
     run "shim eo routes" shim/tests/test_eo_routes.sh
+    run "shim car list room" shim/tests/test_carlist_room.sh
     run "shim identity scope" shim/tests/test_identity_scope.sh
     run "shim tune gate" shim/tests/test_tune_gate.sh
     run "shim travel xp guard" shim/tests/test_travelxp_guard.sh
