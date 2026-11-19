@@ -182,43 +182,45 @@ func (h *Hub) findAuthed(only *World, routes map[uint64]Addr, xuid uint64, data 
 }
 
 // findAuthedCar is findAuthed; checkCar says whether byte 52 of the request is the player's car id (lighting, horn) or something else.
+//
+// The address that verified this xuid's last request is tried first and, when it verifies again (nearly every request: a horn poll comes every 50-100 ms,
+// a lighting update with the car), nothing else is looked at. Only when it does not, every route of the hub is tried in order. The answer is the one a
+// scan of [last, every route] gives, without copying the whole route table for each side-channel datagram.
 func (h *Hub) findAuthedCar(only *World, routes map[uint64]Addr, xuid uint64, data []byte, now float64, checkCar bool) (*World, *Peer, []byte) {
-	last, hasLast := routes[xuid]
-	type cand struct {
-		addr Addr
-		w    *World
-	}
-	var cands []cand
-	if hasLast {
-		if w, ok := h.Route.Get(last); ok {
-			cands = append(cands, cand{last, w})
+	try := func(a Addr, w *World) (*Peer, []byte, bool) {
+		if only != nil && w != only {
+			return nil, nil, false
 		}
-	}
-	for _, a := range h.Route.Keys() {
-		w, _ := h.Route.Get(a)
-		cands = append(cands, cand{a, w})
-	}
-	for _, c := range cands {
-		if only != nil && c.w != only {
-			continue
-		}
-		binding, ok := h.Bound[c.addr]
-		peer, _ := c.w.Peers.Get(c.addr)
+		binding, ok := h.Bound[a]
+		peer, _ := w.Peers.Get(a)
 		if !ok || binding.xuid != xuid || peer == nil || !peer.Connected || !peer.Entered || peer.Xuid != xuid || checkCar && (peer.CarID == nil || *peer.CarID != int(data[52])) ||
 			!(1 <= peer.Owner && peer.Owner <= 254) {
-			continue
+			return nil, nil, false
 		}
 		key := []byte(binding.key)
-		if h.Keys[xuid][binding.key] <= now || !bytes.Equal(h.TicketEpochs[c.addr], data[36:52]) {
-			continue
+		if h.Keys[xuid][binding.key] <= now || !bytes.Equal(h.TicketEpochs[a], data[36:52]) {
+			return nil, nil, false
 		}
 		m := hmac.New(sha256.New, key)
 		m.Write(data[:len(data)-sideMacSize])
 		if !hmac.Equal(m.Sum(nil), data[len(data)-sideMacSize:]) {
-			continue
+			return nil, nil, false
 		}
-		routes[xuid] = c.addr
-		return c.w, peer, key
+		return peer, key, true
+	}
+	if last, hasLast := routes[xuid]; hasLast {
+		if w, ok := h.Route.Get(last); ok {
+			if peer, key, ok := try(last, w); ok {
+				return w, peer, key
+			}
+		}
+	}
+	for _, a := range h.Route.Keys() {
+		w, _ := h.Route.Get(a)
+		if peer, key, ok := try(a, w); ok {
+			routes[xuid] = a
+			return w, peer, key
+		}
 	}
 	delete(routes, xuid)
 	return nil, nil, nil
