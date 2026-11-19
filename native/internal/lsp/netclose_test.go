@@ -50,8 +50,8 @@ func TestNetCloseLogLines(t *testing.T) {
 	var lines []string
 	c := &Core{Out: func(l string) { lines = append(lines, l) }, rate: diag.NewRateLimit(nil, 0), Verbosity: diag.Verbosity{Base: diag.Info}}
 	r := &Req{Run: "ab12cd34.7"}
-	c.noteNetClose(r, "v1 seq=1 reason=80600006 msg=32 result=80600006 bits=88/600")
-	c.noteNetClose(&Req{Run: "ab12cd34.8"}, "v1 seq=1 reason=80600006 msg=32 result=80600006 bits=88/600") // the same close again
+	c.noteNetClose(r, "v1 seq=1 reason=80600006 msg=32 result=80600006 bits=88/600", "192.0.2.1")
+	c.noteNetClose(&Req{Run: "ab12cd34.8"}, "v1 seq=1 reason=80600006 msg=32 result=80600006 bits=88/600", "192.0.2.1") // the same close again
 	if len(lines) != 1 {
 		t.Fatalf("lines %q", lines)
 	}
@@ -62,13 +62,13 @@ func TestNetCloseLogLines(t *testing.T) {
 		}
 	}
 	lines = nil
-	c.noteNetClose(&Req{Run: "ffff0000.2"}, "v1 seq=2 reason=80600008")
+	c.noteNetClose(&Req{Run: "ffff0000.2"}, "v1 seq=2 reason=80600008", "192.0.2.1")
 	if len(lines) != 1 || strings.Contains(lines[0], "WARN") || !strings.Contains(lines[0], "game run ffff0000 closed its connection to the game server (close #2 of that game): reason 0x80600008") ||
 		strings.Contains(lines[0], "refused") {
 		t.Fatalf("lines %q", lines)
 	}
 	lines = nil
-	c.noteNetClose(&Req{Run: "ffff0000.3"}, "v1 seq=3 reason=80600008\r\nforged")
+	c.noteNetClose(&Req{Run: "ffff0000.3"}, "v1 seq=3 reason=80600008\r\nforged", "192.0.2.1")
 	if len(lines) != 1 || !strings.Contains(lines[0], `X-FH2MP-Net header not understood, ignored: "v1 seq=3 reason=80600008\r\nforged"`) {
 		t.Fatalf("lines %q", lines)
 	}

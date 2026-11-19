@@ -24,9 +24,23 @@ func TestGuardCountsHeader(t *testing.T) {
 func TestGuardCountsLogLine(t *testing.T) {
 	var lines []string
 	c := &Core{Out: func(l string) { lines = append(lines, l) }, rate: diag.NewRateLimit(nil, 0), Verbosity: diag.Verbosity{Base: diag.Info}}
-	c.noteGuardCounts(&Req{Run: "ab12cd34.5"}, "v1 camanim=3 dtconv=1")
-	c.noteGuardCounts(&Req{Run: "ab12cd34.6"}, "v1 camanim=4 dtconv=1") // within the minute: counted, not written
+	c.noteGuardCounts(&Req{Run: "ab12cd34.5"}, "v1 camanim=3 dtconv=1", "192.0.2.1")
+	c.noteGuardCounts(&Req{Run: "ab12cd34.6"}, "v1 camanim=4 dtconv=1", "192.0.2.1") // within the minute: counted, not written
 	if len(lines) != 1 || !strings.Contains(lines[0], "guards: game run ab12cd34: crashes turned away so far by camanim 3, dtconv 1") || strings.Contains(lines[0], "WARN") {
+		t.Fatalf("lines %q", lines)
+	}
+}
+
+// Games without the launcher's session have no run id; their lines are kept apart by address, not merged into one.
+func TestRunLessGamesAreKeptApartByAddress(t *testing.T) {
+	var lines []string
+	c := &Core{Out: func(l string) { lines = append(lines, l) }, rate: diag.NewRateLimit(nil, 0), Verbosity: diag.Verbosity{Base: diag.Info}}
+	c.noteGuardCounts(&Req{}, "v1 camanim=1", "192.0.2.1")
+	c.noteGuardCounts(&Req{}, "v1 dtconv=2", "192.0.2.2")
+	c.noteNetClose(&Req{}, "v1 seq=1 reason=80600008", "192.0.2.1")
+	c.noteNetClose(&Req{}, "v1 seq=1 reason=80600008", "192.0.2.2")
+	if len(lines) != 4 || !strings.Contains(lines[0], "game run unknown: crashes turned away so far by camanim 1") ||
+		!strings.Contains(lines[3], "game run unknown closed its connection") {
 		t.Fatalf("lines %q", lines)
 	}
 }

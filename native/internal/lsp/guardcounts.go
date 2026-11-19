@@ -40,11 +40,15 @@ func parseGuardCounts(v string) ([]guardCount, bool) {
 }
 
 // noteGuardCounts logs a game's guard counts, at most once a minute per game (counts only grow, and the next change carries them all again).
-func (c *Core) noteGuardCounts(r *Req, v string) {
+func (c *Core) noteGuardCounts(r *Req, v, from string) {
 	game, _, _ := strings.Cut(r.Run, ".")
+	key := game
+	if key == "" {
+		key = "addr:" + from // as in noteNetClose
+	}
 	counts, ok := parseGuardCounts(v)
 	if !ok {
-		c.LogEvery(r, "guards-bad/"+game, 300, fmt.Sprintf("  guards: X-FH2MP-Guards header not understood, ignored: %q", cut(v, 120)), diag.Warn, "")
+		c.LogEvery(r, "guards-bad/"+key, 300, fmt.Sprintf("  guards: X-FH2MP-Guards header not understood, ignored: %q", cut(v, 120)), diag.Warn, "")
 		return
 	}
 	if game == "" {
@@ -54,5 +58,5 @@ func (c *Core) noteGuardCounts(r *Req, v string) {
 	for i, g := range counts {
 		parts[i] = fmt.Sprintf("%s %d", g.Name, g.Count)
 	}
-	c.LogEvery(r, "guards/"+game, 60, fmt.Sprintf("  guards: game run %s: crashes turned away so far by %s", game, strings.Join(parts, ", ")), diag.Info, "")
+	c.LogEvery(r, "guards/"+key, 60, fmt.Sprintf("  guards: game run %s: crashes turned away so far by %s", game, strings.Join(parts, ", ")), diag.Info, "")
 }

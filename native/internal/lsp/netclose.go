@@ -106,16 +106,20 @@ func netCloseLine(game string, nc netClose) string {
 // noteNetClose logs a game's X-FH2MP-Net header: a close after a refused message as WARN (a player lost the session to a message), any
 // other close as INFO, at most one line per game per 10 s (a real game closes far less often; a resent header is not logged twice); a header
 // that is not the shim's shape once per 5 minutes per game.
-func (c *Core) noteNetClose(r *Req, v string) {
+func (c *Core) noteNetClose(r *Req, v, from string) {
 	game, _, _ := strings.Cut(r.Run, ".")
+	key := game
+	if key == "" {
+		key = "addr:" + from // a game without the launcher's session has no run id: one key per address keeps such games apart
+	}
 	nc, ok := parseNetClose(v)
 	if !ok {
-		c.LogEvery(r, "netclose-bad/"+game, 300, fmt.Sprintf("  netwatch: X-FH2MP-Net header not understood, ignored: %q", cut(v, 120)), diag.Warn, "")
+		c.LogEvery(r, "netclose-bad/"+key, 300, fmt.Sprintf("  netwatch: X-FH2MP-Net header not understood, ignored: %q", cut(v, 120)), diag.Warn, "")
 		return
 	}
 	level := diag.Info
 	if nc.Msg >= 0 {
 		level = diag.Warn
 	}
-	c.LogEvery(r, "netclose/"+game, 10, netCloseLine(game, nc), level, "")
+	c.LogEvery(r, "netclose/"+key, 10, netCloseLine(game, nc), level, "")
 }
