@@ -2326,6 +2326,7 @@ static int patch_online_meet(void)
 #include "component_lookup_guard.inc"
 #include "travelxp_guard.inc"
 #include "carlist_room.inc"
+#include "net_watch.inc"
 #include "picker_pi.inc"
 #include "autodrive_rule.inc"
 #include "tune_gate.inc"
@@ -5646,6 +5647,7 @@ static DWORD WINAPI late_init(LPVOID unused)
         {
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_NETSTRINGS", env, 8) == 0) patch_net_string_receivers();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_NETWATCH", env, 8) == 0) patch_net_watch();    /* log only */
         }
         {
             wchar_t env[8];

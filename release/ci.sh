@@ -74,6 +74,7 @@ lane_unit() {
     run "shim health" shim/tests/test_health.sh
     run "shim slice watch" shim/tests/test_slice_watch.sh
     run "shim heap watch" shim/tests/test_heap_watch.sh
+    run "shim net watch" shim/tests/test_net_watch.sh
     run "shim eo timelock" shim/tests/test_eo_timelock.sh
     run "shim eo routes" shim/tests/test_eo_routes.sh
     run "shim car list room" shim/tests/test_carlist_room.sh
@@ -122,7 +123,7 @@ lane_shim() {
     logs=$(dirname "$tpl")
     declare -A pids
     t0=$(date +%s)
-    for t in gamedb_files game_image game_memory title_scope xhr_config health_thread session_log torque_scale net_strings torque_load speed_pb restricted_tools lighting honk mods diag party_hud car_pool crash_guards offline_guards slot_put picker_pi event_stock race_wait heap_census slice_watch_read heap_watch_read online_gate zipmanifest_files log; do
+    for t in gamedb_files game_image game_memory title_scope xhr_config health_thread session_log torque_scale net_strings torque_load speed_pb restricted_tools lighting honk mods diag party_hud car_pool crash_guards offline_guards slot_put picker_pi event_stock race_wait heap_census slice_watch_read heap_watch_read online_gate zipmanifest_files log net_watch_read; do
         "shim/tests/test_$t.sh" > "$logs/$t.log" 2>&1 &
         pids[$t]=$!
     done

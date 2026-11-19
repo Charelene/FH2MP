@@ -52,7 +52,7 @@ static int line_wanted(const char *l, int n)
                                        "refus", "crash", "xsbody", "xstoken", "mmtimeout", "mmtoast", "online-setup", "bindfix", "gamedb:", "timelock:", "rivalsleave", "bucketcars", "matchpoll", "sample", "carprobe", "probe:", "lighting:", "honk:", "grid:", "mods:", "nitro:", "underglow:",
                                        "xhr:", "winsock:", "placement:", "netstrings:", "torqueload:", "nulltorque", "speedpb:", "cinematics:",
                                        "festivalgrid:", "invitetype:", "ticket:", "tools:", "offline:", "rebound", "redirect:", "serverport:", "secureip:", "hook:", "perf:", "health:", "diag:", "partyhud:", "carpool:", "racewait:", "zipguard:",
-                                       "camanim:", "complookup:", "dtconv:", "garagerating:", "modelguard:", "travelxp:", "carroom:", 0};
+                                       "camanim:", "complookup:", "dtconv:", "garagerating:", "modelguard:", "travelxp:", "carroom:", "netwatch:", 0};
     int i;
     const char *word;
     for (i = 0; keep[i]; i++) {
