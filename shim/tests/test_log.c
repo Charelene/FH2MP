@@ -86,6 +86,7 @@ int main(int argc, char **argv)
             "nulltorque: skipped a car's torque curve scale\n",
             "torqueload: a car's engine curve is not usable; the native fallback is used\n",
             "garagerating: garage car 5 (save row 2, engine part 3, camshaft part 4) is not rated (#1): x, value 0; it stays in the garage with empty performance numbers\n",
+            "carphysics: car 2479 from game+0x346e1e (the upgrade parts preview) has physics data the game cannot build (#1, engine part 2479000, camshaft part 3919000): x, value 0; built from its own stock parts with the default tune instead\n",
             "cinematics: the game's media/Cinematics directory query returned null (game+0x21f44d); its optional registration is skipped\n",
             "placement: Azimuth would stop the game for this texture, created it as an ordinary texture instead:\n",
             /* and the probes and fallbacks that report what the game did: a lost server connection, a car wait let through */

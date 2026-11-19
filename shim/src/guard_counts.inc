@@ -53,7 +53,7 @@ static int guard_counts_changed(const guard_count *c, unsigned n, long *sent)
 
 #ifndef GUARD_COUNTS_LOGIC_ONLY
 
-#define GUARD_COUNTS_N 12
+#define GUARD_COUNTS_N 13
 
 /* The guards' own counters, read as they are (a racy read only delays a count to the next request). */
 static unsigned guard_counts_read(guard_count *c)
@@ -64,6 +64,7 @@ static unsigned guard_counts_read(guard_count *c)
     c[n].name = "dtconv", c[n++].count = g_dtc_hits;
     c[n].name = "modelguard", c[n++].count = g_mu_hits;
     c[n].name = "garagerating", c[n++].count = g_gr_hits;
+    c[n].name = "carphysics", c[n++].count = g_pg_hits;
     c[n].name = "travelxp", c[n++].count = g_txg_hits;
     c[n].name = "predguard", c[n++].count = g_rp_hits;
     c[n].name = "logguard", c[n++].count = g_gl_dropped;

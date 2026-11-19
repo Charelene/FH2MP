@@ -2374,6 +2374,7 @@ static int patch_torque_load(void)
 }
 
 #include "garage_rating_guard.inc"
+#include "car_physics_guard.inc"
 
 static int patch_net_string_receivers(void)
 {
@@ -5661,8 +5662,8 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_STALLTRACE", env, 8) == 0) patch_stall_trace();
         }
 #endif
-        {   /* the game-bug guards here and below (hook, model, dtconv, cam, comp, travelxp, carroom, nulltorque, torqueload, garagerating, cinematics,
-             * placement) are also made in offline runs, by offline_guards */
+        {   /* the game-bug guards here and below (hook, model, dtconv, cam, comp, travelxp, carroom, nulltorque, torqueload, garagerating, carphysics,
+             * cinematics, placement) are also made in offline runs, by offline_guards */
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_PARTYHUD", env, 8) == 0) patch_party_hud();
             if (GetEnvironmentVariableW(L"FH2MP_NO_RACETOAST", env, 8) == 0) patch_race_toast();
@@ -5723,6 +5724,9 @@ static DWORD WINAPI late_init(LPVOID unused)
             }
             if (GetEnvironmentVariableW(L"FH2MP_NO_GARAGERATING", env, 8) == 0) {
                 patch_garage_rating_guard();
+            }
+            if (GetEnvironmentVariableW(L"FH2MP_NO_CARPHYSICS", env, 8) == 0) {
+                patch_car_physics();
             }
         }
         {
@@ -5875,6 +5879,7 @@ static DWORD WINAPI offline_guards(LPVOID unused)
     OFFLINE_GUARD(L"FH2MP_NO_NULLTORQUE", patch_null_torque_scale())
     OFFLINE_GUARD(L"FH2MP_NO_TORQUELOAD", patch_torque_load())
     OFFLINE_GUARD(L"FH2MP_NO_GARAGERATING", patch_garage_rating_guard())
+    OFFLINE_GUARD(L"FH2MP_NO_CARPHYSICS", patch_car_physics())
     OFFLINE_GUARD(L"FH2MP_NO_CINEMATICS", patch_missing_cinematics())
     OFFLINE_GUARD(L"FH2MP_NO_PLACEMENTFIX", patch_placement_fallback())
 #undef OFFLINE_GUARD
