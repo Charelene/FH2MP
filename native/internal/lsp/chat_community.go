@@ -116,6 +116,10 @@ func (c chatCommunity) RemoveFriend(me, other int64) error {
 	return err
 }
 
+func (c chatCommunity) AreFriends(a, b int64) (bool, error) { return c.l.C.Social.AreFriends(a, b) }
+
+func (c chatCommunity) FriendIDs(me int64) ([]int64, error) { return c.l.C.Social.Friends(me) }
+
 // myClub checks that club is the caller's club.
 func (c chatCommunity) myClub(me, club int64) error {
 	row, err := c.l.C.DB.One("SELECT club_id FROM club_members WHERE xuid=?", me)
@@ -231,6 +235,13 @@ func (l *Launcher) pushClubMessage(me int64, p *posted, skip int64) {
 func (l *Launcher) friendsChanged(a, b int64) {
 	if l.C.Chat != nil {
 		l.C.Chat.PushShort([]int64{a, b}, &tl.UpdateFriends{})
+	}
+}
+
+// friendshipEnded discards the two players' secret chats (end-to-end DMs need the friendship).
+func (c *Core) friendshipEnded(a, b int64) {
+	if c.Chat != nil {
+		c.Chat.FriendshipEnded(a, b)
 	}
 }
 

@@ -401,6 +401,7 @@ func (l *Launcher) remove(me, target int64) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	l.C.friendshipEnded(me, target)
 	l.friendsChanged(me, target)
 	return ok1(), nil
 }

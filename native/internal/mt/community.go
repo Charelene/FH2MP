@@ -17,7 +17,12 @@ type Community interface {
 	Friends(me int64) (*tl.FriendsList, error)
 	AddFriend(me int64, query string) error
 	Respond(me, other int64, accept bool) error
+	// RemoveFriend ends a friendship; the implementation calls Server.FriendshipEnded so the two players' secret chats are discarded.
 	RemoveFriend(me, other int64) error
+	// AreFriends says whether two players are friends (secret chats need it at request time).
+	AreFriends(a, b int64) (bool, error)
+	// FriendIDs lists a player's friends (told with updateChatDevice when the player's chat device changes).
+	FriendIDs(me int64) ([]int64, error)
 	ClubHistory(me, club, after int64, limit int) (*tl.ClubsHistory, error)
 	// SendClub posts in the caller's club; the message reaches the other members through PushShort from the implementation.
 	SendClub(me, club int64, text string) (*tl.ClubMessage, error)
@@ -188,7 +193,11 @@ func (s *Server) PushShort(xuids []int64, u tl.UpdateClass) {
 	for _, x := range xuids {
 		s.mu.Lock()
 		k := s.byXuid[x]
+		l := s.locals[x]
 		s.mu.Unlock()
+		if l != nil {
+			l.short(u)
+		}
 		if k == nil {
 			continue
 		}

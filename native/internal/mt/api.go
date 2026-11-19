@@ -102,7 +102,7 @@ func (s *Server) registerAPI() {
 			}
 			return nil, re
 		}
-		s.bind(c.k, xuid, tag, r.DeviceID)
+		s.bind(c.k, xuid, tag, r.DeviceID, r.Pubkey)
 		c.ss.mu.Lock()
 		app, platform := c.ss.appVersion, c.ss.platform
 		c.ss.mu.Unlock()
