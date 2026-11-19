@@ -218,8 +218,13 @@ var (
 	// slow loader had already used 18 of its 30 s). FH2MP_CARSEL_LATE_RELEASE=0 turns it off.
 	CarselLateRelease        = envStr("FH2MP_CARSEL_LATE_RELEASE", "1") != "0"
 	CarselLateReleaseSeconds = 30.0
-	LspURL                   = envStr("FH2MP_LSP", "http://127.0.0.1:5080")
-	TracePackets             = Verbosity.Enabled(diag.Trace, "packet")
+	// RaceFlagClear: the end of an event sets ParticipatingInRace to 0 for the finishers who left its results screen too, and an event start sets it
+	// to 0 for every connected player outside the event that still has it (prod 2026-11-09..19: finishers kept the flag, the next event's games
+	// counted them as racers whose car choice was pending, and 121 of the 123 events that ended "nobody loaded" had such a player outside them).
+	// FH2MP_RACEFLAG_CLEAR=0 turns it off.
+	RaceFlagClear = envStr("FH2MP_RACEFLAG_CLEAR", "1") != "0"
+	LspURL        = envStr("FH2MP_LSP", "http://127.0.0.1:5080")
+	TracePackets  = Verbosity.Enabled(diag.Trace, "packet")
 )
 
 // ValidatePolicies is the start-up check Python does at import time.

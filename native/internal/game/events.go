@@ -70,6 +70,14 @@ func (w *World) EndEvent(why string, keepLeader bool) {
 			}
 		}
 	}
+	// A finisher who left the results screen kept its flag (ParticipantLeft: it is part of the result) and is no longer in People. Left at 1, the
+	// next event's games count it as a racer whose car choice is pending and none of them loads (RaceFlagClear).
+	for _, q := range w.Peers.Values() {
+		if RaceFlagClear && q.Connected && q.RaceFlag {
+			w.SetConsoleBool(q, ConsoleVarParticipatingInRace, 0, why+"; it had finished and left the results screen")
+			q.ConsoleVars[ConsoleVarParticipatingInRace] = false
+		}
+	}
 	w.Event = nil
 	w.PendingRace = nil
 	if !keepLeader {
@@ -1089,6 +1097,13 @@ func (w *World) StartEventWith(leader *Peer, chosen []*Peer) {
 			def = " (the mode's default)"
 		}
 		w.Logf("tag: event %s is %s, time limit %s s%s", where, tm.Name, pyfmt.FmtG(seconds), def)
+	}
+	// Every game counts each console with ParticipatingInRace = 1 as a racer of this event: a player outside it must not carry the flag.
+	for _, q := range w.Peers.Values() {
+		if RaceFlagClear && q.Connected && q.RaceFlag && !inList(people, q) {
+			w.SetConsoleBool(q, ConsoleVarParticipatingInRace, 0, "left over from an earlier event; not a participant of this one")
+			q.ConsoleVars[ConsoleVarParticipatingInRace] = false
+		}
 	}
 	for _, q := range people {
 		for _, stale := range []int{ConsoleVarHasLoadedCars, ConsoleVarHasGrid, ConsoleVarRenderReady} {
