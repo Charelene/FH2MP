@@ -829,6 +829,10 @@ func (w *World) FlushPeer(peer *Peer) {
 			size += out[j].N
 			j++
 		}
+		if n := netv2.HeaderBits/8 + (size+7)/8; n > GameMaxDatagramBytes { // only a single message can get there (MaxPacketBytes is below it)
+			w.LogEvery([2]any{"oversize-datagram", peer.Addr}, 60, fmt.Sprintf("%d a datagram of %d bytes (%d message(s), the first of type %d and %d bits) goes to owner %d xuid %#x; the game disconnects on more than %d (reason 0x80600007, Connection::ReadPacketHeader game+0x17672b0); sent as it is",
+				peer.Addr.Port, n, j-i, out[i].Type(), out[i].N, peer.Owner, peer.Xuid, GameMaxDatagramBytes), diag.Warn)
+		}
 		pid := uint16(netv2.UnreliableID)
 		if reliableNow {
 			pid = peer.Window.Stamp(out[i:j], now)
