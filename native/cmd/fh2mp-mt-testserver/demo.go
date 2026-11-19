@@ -6,6 +6,8 @@ package main
 //	say <friend> <text>            the friend posts in the club (pushed to everyone signed in)
 //	presence <friend> <state>      offline | online | freeroam | roadtrip
 //	request <friend>               the friend sends a friend request
+//	dm DebugFox <text>             DebugFox (the friend with a chat device) starts a secret chat with the signed-in account and sends
+//	                               the text; it also accepts every secret chat request and answers each message with "echo: <text>"
 
 import (
 	"crypto/ed25519"
@@ -38,6 +40,7 @@ type demo struct {
 	club     tl.Club
 	posts    []tl.ClubMessage
 	reads    map[int64]int64
+	peer     *peer // the friend with a chat device (peer.go)
 }
 
 func newDemo(realm string) *demo {
@@ -253,6 +256,11 @@ func (d *demo) command(line string) (string, bool) {
 		d.mu.Unlock()
 		d.s.PushShort(d.s.SignedIn(), &tl.UpdateFriends{})
 		return fmt.Sprintf("%s sent a friend request", fr.tag), true
+	case "dm":
+		if fr == nil || len(f) < 3 {
+			return "usage: dm <friend> <text>", true
+		}
+		return d.dmCommand(fr, f[2]), true
 	}
 	return "", false
 }
