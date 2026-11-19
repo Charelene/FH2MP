@@ -9,10 +9,11 @@
  * looks. Hooks: Dispatch remembers the last refused message of its thread; Disconnect logs the reason and, when the reason is that refusal,
  * the message (id, where it starts, its first bytes).
  *
- * The newest close also rides the game's next request to the LSP once, as "X-FH2MP-Net" (xhr2.inc), so the server log has it without a
- * crash report (native/internal/lsp front.go). */
+ * The newest close that the game did not make itself also rides the game's next request to the LSP once, as "X-FH2MP-Net" (xhr2.inc), so the
+ * server log has it without a crash report (native/internal/lsp netclose.go). */
 
 #define NW_SKIPPED_OBJECT 0x8060000eu /* keyed event for an unknown object: the handler skipped its body, the datagram goes on */
+#define NW_GAME_CLOSED 0x8060000fu    /* the game closed the connection itself (Connection::Close, or Update while closing) */
 
 enum { NW_OK, NW_SKIPPED, NW_DATAGRAM_DROPPED, NW_DISCONNECT };
 
@@ -213,10 +214,12 @@ static void nw_disconnect(void *connection, unsigned reason)
             }
             log_raw("\n");
         }
-        while (InterlockedCompareExchange(&g_nw_text_lock, 1, 0) != 0) SwitchToThread();
-        net_watch_header_text(g_nw_text, sizeof g_nw_text, &c);
-        InterlockedExchange(&g_nw_text_lock, 0);
-        InterlockedIncrement(&g_nw_text_seq);
+        if (reason != NW_GAME_CLOSED) { /* the game's own close of a session it leaves is routine: only the log has it */
+            while (InterlockedCompareExchange(&g_nw_text_lock, 1, 0) != 0) SwitchToThread();
+            net_watch_header_text(g_nw_text, sizeof g_nw_text, &c);
+            InterlockedExchange(&g_nw_text_lock, 0);
+            InterlockedIncrement(&g_nw_text_seq);
+        }
     }
     g_nw_disconnect_orig(connection, reason);
 }

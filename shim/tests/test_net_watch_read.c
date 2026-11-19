@@ -121,6 +121,13 @@ int main(void)
     nw_disconnect(g_conn, 0x8060000fu);
     CHECK(g_disconnects == 3 && g_lines[0] == 0 && net_watch_header(line) == 0);
 
+    /* the game's own close of a session it leaves: in the log, not sent to the server (routine) */
+    conn_state(5);
+    nw_disconnect(g_conn, 0x8060000fu);
+    CHECK(g_disconnects == 4);
+    CHECK(strstr(g_lines, "(close #3, connection state 5): reason 0x8060000f, the game closed it\n") != NULL);
+    CHECK(net_watch_header(line) == 0);
+
     /* before the connection is up a refusal only drops the rest of the datagram, and says so */
     g_result = (int)0x8060000au;
     g_data[11] = 9;
