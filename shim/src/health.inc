@@ -184,6 +184,19 @@ static int health_census_due(unsigned long long commit, unsigned long long total
     return 0;
 }
 
+/* The slice and heap watches hook Azimuth's and ntdll's calls (a thread pause of ~50 ms each) and follow allocations for 5 s, so they wait for a runaway
+ * no normal game reaches: commit over 1.25 x RAM (stage 0) or 2.5 x RAM (stage 1), and in both cases over HEALTH_WATCH_MIN_COMMIT. A normal boot takes
+ * up to about 12 GB (8 GB PCs reach 1.25 x RAM in a normal boot), and the runaways run to 20-60 GB. -> 1 when a window is due; the caller moves *stage on
+ * only when a window really started. */
+#define HEALTH_WATCH_MIN_COMMIT (14ull << 30)
+static int health_watch_due(unsigned long long commit, unsigned long long total, int stage)
+{
+    if (!total || commit < HEALTH_WATCH_MIN_COMMIT) {
+        return 0;
+    }
+    return stage == 0 ? commit / 5 >= total / 4 : stage == 1 ? commit / 5 >= total / 2 : 0;
+}
+
 /* The first 0x40 bytes of a private allocation at base: an NT heap segment (_HEAP_SEGMENT: SegmentSignature 0xffeeffee at +0x10, Heap at +0x28, BaseAddress
  * at +0x30). -> its heap, or 0. */
 static unsigned long long health_heap_segment(const unsigned char *hdr, unsigned long long base)
@@ -650,6 +663,7 @@ static DWORD WINAPI health_thread(LPVOID unused)
     unsigned long long mem_last_commit = 0, mem_last_gpu = HEALTH_MEM_UNKNOWN;
 #ifdef HEALTH_SLICE_WATCH
     unsigned sw_left = 0, sw_at = 0;
+    int sw_stage = 0;
     const char *sw_why = "";
     wchar_t sw_env[12];
     DWORD sw_n = GetEnvironmentVariableW(L"FH2MP_SLICEWATCH_AT", sw_env, 12), sw_i;
@@ -677,14 +691,13 @@ static DWORD WINAPI health_thread(LPVOID unused)
 #endif
             if (health_census_due(s.commit, s.total, &census_stage)) {
                 health_census(&s);
-#ifdef HEALTH_SLICE_WATCH
-                if (!sw_left && health_watches_start()) {
-                    sw_left = SLICE_WATCH_S;
-                    sw_why = census_stage == 1 ? "commit over 1.25 x RAM" : "commit over 2.5 x RAM";
-                }
-#endif
             }
 #ifdef HEALTH_SLICE_WATCH
+            if (!sw_left && health_watch_due(s.commit, s.total, sw_stage) && health_watches_start()) {
+                sw_left = SLICE_WATCH_S;
+                sw_why = sw_stage == 0 ? "commit over 1.25 x RAM and 14 GB" : "commit over 2.5 x RAM";
+                sw_stage++;
+            }
             if (sw_at && secs == sw_at && !sw_left && health_watches_start()) {
                 sw_left = SLICE_WATCH_S;
                 sw_why = "FH2MP_SLICEWATCH_AT";

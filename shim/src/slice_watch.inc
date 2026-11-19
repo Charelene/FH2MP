@@ -18,8 +18,8 @@
  * window (BufferArena::allocate, azimuth+0x1ced10(arena, out, size, alignment); called from +0x1c60b7, +0x1c654d (a buffer's new slice), +0x1c8ea1,
  * +0x1c8f7d, +0x1c92e0 and +0x55fce1 [C]), with the bytes asked for, by its Azimuth call site and by the game function on the stack: what allocates the
  * 1 GB every 3 s of a runaway shows there even when no buffer queue grows.
- * It runs SLICE_WATCH_S seconds when the heap census does (commit over 1.25 x and 2.5 x RAM, a runaway) and, for a baseline on a test rig only, once at
- * FH2MP_SLICEWATCH_AT=<seconds> into the game. FH2MP_NO_SLICEWATCH (or switches=NO_SLICEWATCH from the hotfix document) turns it off.
+ * It runs SLICE_WATCH_S seconds in a runaway (commit over 1.25 x RAM and over 14 GB, and again over 2.5 x RAM: health_watch_due) and, for a baseline on a
+ * test rig only, once at FH2MP_SLICEWATCH_AT=<seconds> into the game. FH2MP_NO_SLICEWATCH (or switches=NO_SLICEWATCH from the hotfix document) turns it off.
  *
  * The part above the #ifndef has no Windows calls: shim/tests/test_slice_watch.sh runs it natively. */
 #define SLICE_WATCH_S 5u
