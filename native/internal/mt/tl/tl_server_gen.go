@@ -335,3 +335,168 @@ func (s *ServerDispatcher) OnUsersGetGamerpic(f func(ctx context.Context, userid
 
 	s.handlers[UsersGetGamerpicRequestTypeID] = handler
 }
+
+func (s *ServerDispatcher) OnAccountRegisterDevice(f func(ctx context.Context, request *AccountRegisterDeviceRequest) (*ChatDevice, error)) {
+	handler := func(ctx context.Context, b *bin.Buffer) (bin.Encoder, error) {
+		var request AccountRegisterDeviceRequest
+		if err := request.Decode(b); err != nil {
+			return nil, err
+		}
+
+		response, err := f(ctx, &request)
+		if err != nil {
+			return nil, err
+		}
+		return response, nil
+	}
+
+	s.handlers[AccountRegisterDeviceRequestTypeID] = handler
+}
+
+func (s *ServerDispatcher) OnUsersGetDevices(f func(ctx context.Context, userid int64) (*UsersDevices, error)) {
+	handler := func(ctx context.Context, b *bin.Buffer) (bin.Encoder, error) {
+		var request UsersGetDevicesRequest
+		if err := request.Decode(b); err != nil {
+			return nil, err
+		}
+
+		response, err := f(ctx, request.UserID)
+		if err != nil {
+			return nil, err
+		}
+		return response, nil
+	}
+
+	s.handlers[UsersGetDevicesRequestTypeID] = handler
+}
+
+func (s *ServerDispatcher) OnMessagesGetDhConfig(f func(ctx context.Context, request *MessagesGetDhConfigRequest) (MessagesDhConfigClass, error)) {
+	handler := func(ctx context.Context, b *bin.Buffer) (bin.Encoder, error) {
+		var request MessagesGetDhConfigRequest
+		if err := request.Decode(b); err != nil {
+			return nil, err
+		}
+
+		response, err := f(ctx, &request)
+		if err != nil {
+			return nil, err
+		}
+		return &MessagesDhConfigBox{DhConfig: response}, nil
+	}
+
+	s.handlers[MessagesGetDhConfigRequestTypeID] = handler
+}
+
+func (s *ServerDispatcher) OnMessagesRequestEncryption(f func(ctx context.Context, request *MessagesRequestEncryptionRequest) (EncryptedChatClass, error)) {
+	handler := func(ctx context.Context, b *bin.Buffer) (bin.Encoder, error) {
+		var request MessagesRequestEncryptionRequest
+		if err := request.Decode(b); err != nil {
+			return nil, err
+		}
+
+		response, err := f(ctx, &request)
+		if err != nil {
+			return nil, err
+		}
+		return &EncryptedChatBox{EncryptedChat: response}, nil
+	}
+
+	s.handlers[MessagesRequestEncryptionRequestTypeID] = handler
+}
+
+func (s *ServerDispatcher) OnMessagesAcceptEncryption(f func(ctx context.Context, request *MessagesAcceptEncryptionRequest) (EncryptedChatClass, error)) {
+	handler := func(ctx context.Context, b *bin.Buffer) (bin.Encoder, error) {
+		var request MessagesAcceptEncryptionRequest
+		if err := request.Decode(b); err != nil {
+			return nil, err
+		}
+
+		response, err := f(ctx, &request)
+		if err != nil {
+			return nil, err
+		}
+		return &EncryptedChatBox{EncryptedChat: response}, nil
+	}
+
+	s.handlers[MessagesAcceptEncryptionRequestTypeID] = handler
+}
+
+func (s *ServerDispatcher) OnMessagesDiscardEncryption(f func(ctx context.Context, chatid int) (bool, error)) {
+	handler := func(ctx context.Context, b *bin.Buffer) (bin.Encoder, error) {
+		var request MessagesDiscardEncryptionRequest
+		if err := request.Decode(b); err != nil {
+			return nil, err
+		}
+
+		response, err := f(ctx, request.ChatID)
+		if err != nil {
+			return nil, err
+		}
+		if response {
+			return &BoolBox{Bool: &BoolTrue{}}, nil
+		}
+
+		return &BoolBox{Bool: &BoolFalse{}}, nil
+	}
+
+	s.handlers[MessagesDiscardEncryptionRequestTypeID] = handler
+}
+
+func (s *ServerDispatcher) OnMessagesSendEncrypted(f func(ctx context.Context, request *MessagesSendEncryptedRequest) (*MessagesSentEncryptedMessage, error)) {
+	handler := func(ctx context.Context, b *bin.Buffer) (bin.Encoder, error) {
+		var request MessagesSendEncryptedRequest
+		if err := request.Decode(b); err != nil {
+			return nil, err
+		}
+
+		response, err := f(ctx, &request)
+		if err != nil {
+			return nil, err
+		}
+		return response, nil
+	}
+
+	s.handlers[MessagesSendEncryptedRequestTypeID] = handler
+}
+
+func (s *ServerDispatcher) OnMessagesAckEncrypted(f func(ctx context.Context, maxpts int) (bool, error)) {
+	handler := func(ctx context.Context, b *bin.Buffer) (bin.Encoder, error) {
+		var request MessagesAckEncryptedRequest
+		if err := request.Decode(b); err != nil {
+			return nil, err
+		}
+
+		response, err := f(ctx, request.MaxPts)
+		if err != nil {
+			return nil, err
+		}
+		if response {
+			return &BoolBox{Bool: &BoolTrue{}}, nil
+		}
+
+		return &BoolBox{Bool: &BoolFalse{}}, nil
+	}
+
+	s.handlers[MessagesAckEncryptedRequestTypeID] = handler
+}
+
+func (s *ServerDispatcher) OnMessagesReportEncrypted(f func(ctx context.Context, request *MessagesReportEncryptedRequest) (bool, error)) {
+	handler := func(ctx context.Context, b *bin.Buffer) (bin.Encoder, error) {
+		var request MessagesReportEncryptedRequest
+		if err := request.Decode(b); err != nil {
+			return nil, err
+		}
+
+		response, err := f(ctx, &request)
+		if err != nil {
+			return nil, err
+		}
+		if response {
+			return &BoolBox{Bool: &BoolTrue{}}, nil
+		}
+
+		return &BoolBox{Bool: &BoolFalse{}}, nil
+	}
+
+	s.handlers[MessagesReportEncryptedRequestTypeID] = handler
+}
