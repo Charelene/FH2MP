@@ -100,6 +100,7 @@ const (
 	TagKeyframeMinSecs = 20.0
 	TagGridAssignDelay = 1.5
 	TagResyncS         = 3.0
+	raceOverResendS    = 2.0 // a client still hitting in a finished tag event gets the race-over flag again at most this often
 
 	LobbyTypeRoadTrip = 1
 	LobbyTypeFreeRoam = 2

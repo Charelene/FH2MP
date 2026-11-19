@@ -228,7 +228,14 @@ func (w *World) TagCollision(peer *Peer, k1, k2 carKey, oldA, newA, oldB, newB i
 	tag := ev.Tag
 	if ev.Over {
 		secs := tag.Seconds
-		w.LogEvery([2]any{"tag-over", fmt.Sprintf("%p", ev)}, 60.0, fmt.Sprintf("tag: collision from owner %d ignored: the server ended the event (time limit %s s or all infected) but this client still plays it", peer.Owner, pyfmt.FmtG(secs)), diag.Info)
+		w.LogEvery([2]any{"tag-over", fmt.Sprintf("%p", ev)}, 60.0, fmt.Sprintf("tag: collision from owner %d ignored: the server ended the event (time limit %s s or all infected) but this client still plays it; the race-over flag is sent to it again every %s s while it does", peer.Owner, pyfmt.FmtG(secs), pyfmt.FmtG(raceOverResendS)), diag.Info)
+		// The race-over flag (SessionHost InRace = 0) goes out once, unreliably; a client that lost it plays on alone (world 14062880, 2026-11-17: one
+		// client hit for 2 min after a 240 s King had ended). Its own hits say it did not get it, so it gets the flag again, at most every raceOverResendS.
+		if now := w.Mono(); now-peer.RaceOverSentAt >= raceOverResendS {
+			if w.sessionHostBoolTo(peer, SHInRace, 0) {
+				peer.RaceOverSentAt = now
+			}
+		}
 		return
 	}
 	car := func(k carKey) *Peer {

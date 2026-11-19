@@ -564,17 +564,22 @@ func (w *World) sessionHostAudience() string {
 // SetSessionHostBool sets a SessionHost bool for every client sessionHostGets names.
 func (w *World) SetSessionHostBool(varID, value int, why string) {
 	for _, q := range w.Peers.Values() {
-		if !w.sessionHostGets(q) {
-			continue
-		}
-		vid, v := varID, value
-		w.Send(q, false, netv2.SessionHostUpdate(uint64(q.HostSeq), func(b *bits.Writer) {
-			b.Bits(uint64(vid), netv2.SessionHostVarBits)
-			b.Bits(uint64(v), 1)
-		}))
-		q.HostSeq = (q.HostSeq + 1) % 0xFF
+		w.sessionHostBoolTo(q, varID, value)
 	}
 	w.Logf("SessionHost var %d = %d sent to %s (%s)", varID, value, w.sessionHostAudience(), why)
+}
+
+// sessionHostBoolTo sends one SessionHost bool to q, if sessionHostGets names it; -> whether it was sent.
+func (w *World) sessionHostBoolTo(q *Peer, varID, value int) bool {
+	if !w.sessionHostGets(q) {
+		return false
+	}
+	w.Send(q, false, netv2.SessionHostUpdate(uint64(q.HostSeq), func(b *bits.Writer) {
+		b.Bits(uint64(varID), netv2.SessionHostVarBits)
+		b.Bits(uint64(value), 1)
+	}))
+	q.HostSeq = (q.HostSeq + 1) % 0xFF
+	return true
 }
 
 // SetRaceClock sets CountdownType + RaceStartTime in one update.
