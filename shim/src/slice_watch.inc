@@ -13,6 +13,11 @@
  * that buffer makes a new arena block (a guess at the runaway's mechanism, not seen yet). The watch measures it on the player's PC: while it runs it samples
  * the retire queue, the slice list, the front slice's fence and the GPU's passed fence of every buffer the game discards, with the game function that asked
  * (the first return address in the game's image), and logs the buffers with the longest queues. It reads only; Azimuth's calls run unchanged.
+ * The heap censuses of 7 runaway reports (prod, 2026-11-15..18) do not all lead with Slice: others lead with BufferArena::Block (azimuth+0x6f40f8), the NVIDIA
+ * driver's nvwgf2umx.dll+0x1d2980, BundlePlan or title_storage [C: the census lines]. So the watch also counts every arena block Azimuth allocates in the
+ * window (BufferArena::allocate, azimuth+0x1ced10(arena, out, size, alignment); called from +0x1c60b7, +0x1c654d (a buffer's new slice), +0x1c8ea1,
+ * +0x1c8f7d, +0x1c92e0 and +0x55fce1 [C]), with the bytes asked for, by its Azimuth call site and by the game function on the stack: what allocates the
+ * 1 GB every 3 s of a runaway shows there even when no buffer queue grows.
  * It runs SLICE_WATCH_S seconds when the heap census does (commit over 1.25 x and 2.5 x RAM, a runaway) and, for a baseline on a test rig only, once at
  * FH2MP_SLICEWATCH_AT=<seconds> into the game. FH2MP_NO_SLICEWATCH (or switches=NO_SLICEWATCH from the hotfix document) turns it off.
  *
@@ -32,11 +37,76 @@ typedef struct {
     int front_ok;                    /* front_fence was read (0: the queue was empty or not readable) */
 } slice_watch_res;
 
+#define SLICE_WATCH_SITES 128u
+
+/* Arena allocations by one key (an Azimuth call site or a game frame, as an offset from its module; 0 = free slot, SLICE_WATCH_UNKNOWN = no game frame). */
+typedef struct {
+    unsigned long long key, bytes;
+    unsigned long count;
+} slice_watch_site;
+
 typedef struct {
     slice_watch_res r[SLICE_WATCH_SLOTS];
     unsigned long long passed;       /* the GPU fence value Azimuth last saw passed */
     unsigned long discards, dropped; /* discards sampled; resources not counted because the table was full */
+    slice_watch_site by_site[SLICE_WATCH_SITES], by_game[SLICE_WATCH_SITES];
+    unsigned long long alloc_bytes;  /* arena bytes asked for in the window */
+    unsigned long allocs, alloc_dropped;
 } slice_watch_table;
+
+/* `bytes` more for `key` in t; a full table counts it in *dropped instead. */
+static void slice_watch_site_add(slice_watch_site *t, unsigned long long key, unsigned long long bytes, unsigned long *dropped)
+{
+    unsigned i = (unsigned)((key * 0x9e3779b97f4a7c15ull) >> 57) & (SLICE_WATCH_SITES - 1), n;
+
+    for (n = 0; n < SLICE_WATCH_SITES; n++, i = (i + 1) & (SLICE_WATCH_SITES - 1)) {
+        if (t[i].count && t[i].key == key) {
+            t[i].count++;
+            t[i].bytes += bytes;
+            return;
+        }
+        if (!t[i].count) {
+            t[i].key = key;
+            t[i].count = 1;
+            t[i].bytes = bytes;
+            return;
+        }
+    }
+    (*dropped)++;
+}
+
+/* One arena allocation of `bytes` from Azimuth call site `site` with game frame `game`; the totals grow even when a table is full. */
+static void slice_watch_alloc(slice_watch_table *t, unsigned long long site, unsigned long long game, unsigned long long bytes)
+{
+    t->allocs++;
+    t->alloc_bytes += bytes;
+    slice_watch_site_add(t->by_site, site, bytes, &t->alloc_dropped);
+    slice_watch_site_add(t->by_game, game, bytes, &t->alloc_dropped);
+}
+
+/* The n keys with the most bytes (ties: more allocations), most first, into out (their slots); -> how many. */
+static unsigned slice_watch_site_top(const slice_watch_site *t, unsigned n, unsigned *out)
+{
+    unsigned got = 0, i, k;
+
+    for (i = 0; i < SLICE_WATCH_SITES; i++) {
+        if (!t[i].count) {
+            continue;
+        }
+        for (k = got; k > 0 && (t[i].bytes > t[out[k - 1]].bytes || (t[i].bytes == t[out[k - 1]].bytes && t[i].count > t[out[k - 1]].count)); k--) {
+            if (k < n) {
+                out[k] = out[k - 1];
+            }
+        }
+        if (k < n) {
+            out[k] = i;
+            if (got < n) {
+                got++;
+            }
+        }
+    }
+    return got;
+}
 
 /* One sample, taken after Azimuth gave `res` its next slice. */
 static void slice_watch_note(slice_watch_table *t, unsigned long long res, unsigned long long caller, unsigned size, unsigned long long queue,
@@ -124,11 +194,14 @@ static int slice_watch_front_slot(unsigned long long map_size, unsigned long lon
 }
 
 #ifndef SLICE_WATCH_LOGIC_ONLY
-/* azimuth.exe 1.0.4: the two functions hooked, and the retire pass whose bytes fix the field offsets read above (its first 0x60 bytes carry +0x14c0, +0x130,
- * +0x128, +0x120 and +0x118). Every byte compared: a different Azimuth build is left alone. */
+/* azimuth.exe 1.0.4: the three functions hooked, and the retire pass whose bytes fix the field offsets read above (its first 0x60 bytes carry +0x14c0,
+ * +0x130, +0x128, +0x120 and +0x118). Every byte compared: a different Azimuth build is left alone. */
 #define SLICE_WATCH_RVA_RENAME 0x1c95c0u
 #define SLICE_WATCH_RVA_INSTALL 0x1c97f0u
 #define SLICE_WATCH_RVA_RETIRE 0x1c6780u
+#define SLICE_WATCH_RVA_ALLOCATE 0x1ced10u
+static const unsigned char g_sw_allocate_code[29] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x48, 0x89, 0x7c, 0x24, 0x18,
+                                                      0x55, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8d, 0x6c, 0x24, 0xc9};
 static const unsigned char g_sw_rename_code[24] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x18, 0x56, 0x57,
                                                     0x41, 0x56, 0x48, 0x83, 0xec, 0x30, 0x48, 0x8b, 0xfa, 0x4c, 0x8b, 0xf1};
 static const unsigned char g_sw_install_code[24] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x18, 0x48, 0x89,
@@ -141,8 +214,11 @@ static const unsigned char g_sw_retire_code[0x60] = {
 
 typedef void *(*slice_watch_rename_fn)(void *owner, void *res);
 typedef void *(*slice_watch_install_fn)(void *owner, void *res, void *recorded);
+typedef void *(*slice_watch_allocate_fn)(void *arena, void *out, unsigned long long size, unsigned alignment);
 static slice_watch_rename_fn g_sw_rename_orig;
 static slice_watch_install_fn g_sw_install_orig;
+static slice_watch_allocate_fn g_sw_allocate_orig;
+static unsigned long long g_sw_az_lo;
 static slice_watch_table g_sw;                 /* a global: the platform's crash dump carries it */
 static SRWLOCK g_sw_lock = SRWLOCK_INIT;
 static volatile LONG g_sw_on;
@@ -203,11 +279,23 @@ static void *slice_watch_install_hook(void *owner, void *res, void *recorded)
     return out;
 }
 
-/* Hooks the two functions once (the platform pauses the game's threads once for both). -> 1 when they are in place. */
+__attribute__((noinline)) static void *slice_watch_allocate_hook(void *arena, void *out, unsigned long long size, unsigned alignment)
+{
+    if (g_sw_on) {
+        unsigned long long site = (unsigned long long)(ULONG_PTR)__builtin_return_address(0) - g_sw_az_lo, game = slice_watch_caller();
+        AcquireSRWLockExclusive(&g_sw_lock);
+        slice_watch_alloc(&g_sw, site, game, size);
+        ReleaseSRWLockExclusive(&g_sw_lock);
+    }
+    return g_sw_allocate_orig(arena, out, size, alignment);
+}
+
+/* Hooks the three functions once, when the first window starts (the platform pauses the game's threads for each, about 50 ms, in a game that is already
+ * running away). -> 1 when they are in place. */
 static int slice_watch_hook(void)
 {
     unsigned char *az = (unsigned char *)GetModuleHandleW(NULL), *game = find_fh2_image();
-    FH2Hook *a, *b;
+    FH2Hook *a, *b, *c;
     wchar_t env[8];
 
     if (g_sw_state) {
@@ -220,26 +308,31 @@ static int slice_watch_hook(void)
     if (!game || !g_api || !g_mod || IsBadReadPtr(az + SLICE_WATCH_RVA_RETIRE, sizeof g_sw_retire_code) ||
         bytes_first_diff(az + SLICE_WATCH_RVA_RETIRE, g_sw_retire_code, sizeof g_sw_retire_code) >= 0 ||
         bytes_first_diff(az + SLICE_WATCH_RVA_RENAME, g_sw_rename_code, sizeof g_sw_rename_code) >= 0 ||
-        bytes_first_diff(az + SLICE_WATCH_RVA_INSTALL, g_sw_install_code, sizeof g_sw_install_code) >= 0) {
+        bytes_first_diff(az + SLICE_WATCH_RVA_INSTALL, g_sw_install_code, sizeof g_sw_install_code) >= 0 ||
+        bytes_first_diff(az + SLICE_WATCH_RVA_ALLOCATE, g_sw_allocate_code, sizeof g_sw_allocate_code) >= 0) {
         log_begin();
-        log_raw(game ? "health: slice watch: not azimuth.exe 1.0.4's buffer code at azimuth+0x1c95c0/0x1c97f0/0x1c6780 (another Azimuth build or another mod's hook), "
-                       "the watch does not run\n"
+        log_raw(game ? "health: slice watch: not azimuth.exe 1.0.4's buffer code at azimuth+0x1c95c0/0x1c97f0/0x1c6780/0x1ced10 (another Azimuth build or another "
+                       "mod's hook), the watch does not run\n"
                      : "health: slice watch: the game's image is not known, the watch does not run\n");
         return 0;
     }
     g_sw_game_lo = (unsigned long long)(ULONG_PTR)game;
     g_sw_game_hi = g_sw_game_lo + FH2_SIZE_OF_IMAGE;
+    g_sw_az_lo = (unsigned long long)(ULONG_PTR)az;
     a = g_api->hook_function(g_mod, plat_tag("slicewatch: Azimuth buffer discard"), az + SLICE_WATCH_RVA_RENAME, (void *)slice_watch_rename_hook,
                              (void **)&g_sw_rename_orig);
     b = a ? g_api->hook_function(g_mod, plat_tag("slicewatch: Azimuth command list buffer"), az + SLICE_WATCH_RVA_INSTALL, (void *)slice_watch_install_hook,
                                  (void **)&g_sw_install_orig)
           : NULL;
-    if (!a || !b) {
-        plat_failed("slicewatch: Azimuth buffer discard", az + (a ? SLICE_WATCH_RVA_INSTALL : SLICE_WATCH_RVA_RENAME),
+    c = b ? g_api->hook_function(g_mod, plat_tag("slicewatch: Azimuth buffer arena allocate"), az + SLICE_WATCH_RVA_ALLOCATE, (void *)slice_watch_allocate_hook,
+                                 (void **)&g_sw_allocate_orig)
+          : NULL;
+    if (!a || !b || !c) {
+        plat_failed("slicewatch: Azimuth buffer code", az + (!a ? SLICE_WATCH_RVA_RENAME : !b ? SLICE_WATCH_RVA_INSTALL : SLICE_WATCH_RVA_ALLOCATE),
                     "refused (overlaps another hook, or the code is not hookable)");
         return 0;
     }
-    if (!g_api->enable_hooks(g_mod, a) || !g_api->enable_hooks(g_mod, b)) {
+    if (!g_api->enable_hooks(g_mod, a) || !g_api->enable_hooks(g_mod, b) || !g_api->enable_hooks(g_mod, c)) {
         plat_failed("slicewatch: Azimuth buffer discard", az + SLICE_WATCH_RVA_RENAME, "created but could not be switched on");
         return 0;
     }
@@ -343,5 +436,50 @@ static void slice_watch_finish(const char *why, unsigned long long commit)
     if (n) {
         log_raw("\n");
     }
+    /* the arena: who asked for blocks in the same window */
+    log_begin();
+    log_raw("health: slice watch: ");
+    slice_watch_u64(t.allocs);
+    log_raw(" buffer arena blocks, ");
+    health_mb(t.alloc_bytes);
+    log_raw(" asked for");
+    if (t.alloc_dropped) {
+        log_raw(" (");
+        log_dec(t.alloc_dropped);
+        log_raw(" not placed in the tables)");
+    }
+    if (!t.allocs) {
+        log_raw("\n");
+        return;
+    }
+    log_raw("; by Azimuth call:");
+    n = slice_watch_site_top(t.by_site, SLICE_WATCH_TOP, top);
+    for (i = 0; i < n; i++) {
+        log_raw(i ? ", " : " ");
+        log_raw("azimuth+0x");
+        health_hex(t.by_site[top[i]].key);
+        log_raw(" (");
+        slice_watch_u64(t.by_site[top[i]].count);
+        log_raw(" blocks, ");
+        slice_watch_u64(t.by_site[top[i]].bytes >> 10);
+        log_raw(" KB)");
+    }
+    log_raw("; by game call:");
+    n = slice_watch_site_top(t.by_game, SLICE_WATCH_TOP, top);
+    for (i = 0; i < n; i++) {
+        log_raw(i ? ", " : " ");
+        if (t.by_game[top[i]].key == SLICE_WATCH_UNKNOWN) {
+            log_raw("no game frame");
+        } else {
+            log_raw("game+0x");
+            health_hex(t.by_game[top[i]].key);
+        }
+        log_raw(" (");
+        slice_watch_u64(t.by_game[top[i]].count);
+        log_raw(" blocks, ");
+        slice_watch_u64(t.by_game[top[i]].bytes >> 10);
+        log_raw(" KB)");
+    }
+    log_raw("\n");
 }
 #endif

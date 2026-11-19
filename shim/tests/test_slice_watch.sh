@@ -62,6 +62,31 @@ int main(void)
     CHECK(slice_watch_front_slot(1, 3, &block, &place) && block == 0 && place == 1);
     CHECK(!slice_watch_front_slot(6, 5, &block, &place));     /* not a power of two: not a deque map, nothing read */
     CHECK(!slice_watch_front_slot(0, 0, &block, &place));
+    /* arena allocations: the call that asks for the most bytes comes first, even with fewer blocks; the game frame is counted separately */
+    memset(&t, 0, sizeof t);
+    for (i = 0; i < 100; i++) {
+        slice_watch_alloc(&t, 0x1c654d, 0x5b0b70, 4096);              /* a buffer's new slice, 100 x 4 KB */
+    }
+    for (i = 0; i < 10; i++) {
+        slice_watch_alloc(&t, 0x1c8ea6, 0x10c8974, 4u << 20);         /* another path, 10 x 4 MB */
+    }
+    slice_watch_alloc(&t, 0x55fce6, SLICE_WATCH_UNKNOWN, 256);
+    CHECK(t.allocs == 111);
+    CHECK(t.alloc_bytes == 100ull * 4096 + 10ull * (4u << 20) + 256);
+    n = slice_watch_site_top(t.by_site, SLICE_WATCH_TOP, top);
+    CHECK(n == 3);
+    CHECK(t.by_site[top[0]].key == 0x1c8ea6 && t.by_site[top[0]].count == 10 && t.by_site[top[0]].bytes == 10ull * (4u << 20));
+    CHECK(t.by_site[top[1]].key == 0x1c654d && t.by_site[top[1]].count == 100);
+    CHECK(t.by_site[top[2]].key == 0x55fce6);
+    n = slice_watch_site_top(t.by_game, SLICE_WATCH_TOP, top);
+    CHECK(n == 3 && t.by_game[top[0]].key == 0x10c8974 && t.by_game[top[2]].key == SLICE_WATCH_UNKNOWN);
+    /* a full site table: the totals still count, the overflow is said */
+    memset(&t, 0, sizeof t);
+    for (i = 0; i < SLICE_WATCH_SITES + 3; i++) {
+        slice_watch_alloc(&t, 0x100000 + i, 0x200, 16);
+    }
+    CHECK(t.allocs == SLICE_WATCH_SITES + 3 && t.alloc_bytes == 16ull * (SLICE_WATCH_SITES + 3));
+    CHECK(t.alloc_dropped == 3);
     if (failed) {
         return 1;
     }

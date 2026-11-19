@@ -113,11 +113,18 @@ int main(void)
     CHECK(r->caller != SLICE_WATCH_UNKNOWN && r->caller < 0x1000000);       /* a return address inside this exe */
     r = &g_sw.r[top[1]];
     CHECK(r->res == (unsigned long long)(ULONG_PTR)g_res2 && r->queue_max == 2 && !r->front_ok);
-    /* the line */
+    /* arena blocks in the same window: 3 x 1 MB from a buffer's new slice, 1 x 8 MB from another call, no game frame for that one */
+    slice_watch_alloc(&g_sw, 0x1c6552, 0x5b0b70, 1u << 20);
+    slice_watch_alloc(&g_sw, 0x1c6552, 0x5b0b70, 1u << 20);
+    slice_watch_alloc(&g_sw, 0x1c6552, 0x5b0b70, 1u << 20);
+    slice_watch_alloc(&g_sw, 0x1c8ea6, SLICE_WATCH_UNKNOWN, 8u << 20);
+    /* the lines */
     slice_watch_finish("test", 21ull << 30);
     CHECK(strstr(g_lines, "health: slice watch (test) over 5 s at commit 21504 MB: 3 buffer discards on 2 buffers, GPU fence passed 777;") != NULL);
     CHECK(strstr(g_lines, "(4096 bytes) queue 3, 5 slices held, front fence unset, 2 discards from game+0x") != NULL);
     CHECK(strstr(g_lines, "(0 bytes) queue 2, 0 slices held, front fence -, 1 discards from game+0x") != NULL);
+    CHECK(strstr(g_lines, "health: slice watch: 4 buffer arena blocks, 11 MB asked for; by Azimuth call: azimuth+0x1c8ea6 (1 blocks, 8192 KB), "
+                          "azimuth+0x1c6552 (3 blocks, 3072 KB); by game call: no game frame (1 blocks, 8192 KB), game+0x5b0b70 (3 blocks, 3072 KB)\n") != NULL);
     if (!g_failed) {
         puts("slice watch read: all checks pass");
     }
