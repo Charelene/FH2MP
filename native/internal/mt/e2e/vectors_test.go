@@ -20,7 +20,8 @@ package e2e
 //	  public                  g_a / g_b = 2^secret mod p
 //	key                     the chat key g_b^a = g_a^b mod p (256 bytes)
 //	key_fingerprint         i64 from the last 8 bytes of SHA1(key), little-endian; key_fingerprint_le those 8 bytes
-//	request                 contract 2.3: random_id (int32), req_msg, g_a_sig (the admin's device key over req_msg)
+//	request                 contract 2.3 (amended): random_id (int32, the messages.requestEncryption it goes with; not in req_msg),
+//	                        req_msg, g_a_sig (the admin's device key over req_msg)
 //	accept                  contract 2.3: chat_id (int32), acc_msg, g_b_sig (the participant's device key over acc_msg)
 //	messages[]              contract 2.4 and 2.7, one sealed by each side:
 //	  sender, x               admin (x = 0) or participant (x = 8)
@@ -213,7 +214,7 @@ func makeVectors(t *testing.T) vectorFile {
 	v.KeyFingerprintLE = h(binary.LittleEndian.AppendUint64(nil, uint64(fp)))
 	e := Ends{Admin: adminID, AdminDevice: adminDevice, Participant: participantID, ParticipantDevice: participantDevice}
 	const randomID, chatID = int32(-559038737), int32(4242)
-	req := RequestMessage(e, randomID, gA)
+	req := RequestMessage(e, gA)
 	v.Request = requestVec{RandomID: randomID, ReqMsg: h(req), GASig: h(ed25519.Sign(adminDev, req))}
 	acc := AcceptMessage(chatID, e, gA, gB, fp)
 	v.Accept = acceptVec{ChatID: chatID, AccMsg: h(acc), GBSig: h(ed25519.Sign(partDev, acc))}

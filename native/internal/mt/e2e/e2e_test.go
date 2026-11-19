@@ -140,14 +140,14 @@ func TestHandshake(t *testing.T) {
 	adminDev, partDev := seeded("admin-dev"), seeded("part-dev")
 	adminPub, partPub := adminDev.Public().(ed25519.PublicKey), partDev.Public().(ed25519.PublicKey)
 	e := Ends{Admin: 10, AdminDevice: 11, Participant: 20, ParticipantDevice: 21}
-	req, err := MakeRequest(adminDev, e, 77, randBytes(256), randBytes(64))
+	req, err := MakeRequest(adminDev, e, randBytes(256), randBytes(64))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(req.GA) != 256 || CheckPublic(req.GA) != nil {
 		t.Fatal("g_a out of range")
 	}
-	acc, err := AcceptRequest(partDev, adminPub, 5, e, 77, req.GA, req.Sig, randBytes(256), nil)
+	acc, err := AcceptRequest(partDev, adminPub, 5, e, req.GA, req.Sig, randBytes(256), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,21 +158,23 @@ func TestHandshake(t *testing.T) {
 	if !bytes.Equal(key, acc.Key) || len(key) != 256 || Fingerprint(key) != acc.Fingerprint {
 		t.Fatal("the two sides made different keys")
 	}
-	// Tampering: another random_id, a flipped g_a, the wrong device key, another chat id, a wrong fingerprint.
-	if _, err := AcceptRequest(partDev, adminPub, 5, e, 78, req.GA, req.Sig, randBytes(256), nil); err == nil {
-		t.Error("g_a_sig taken for another random_id")
+	// Tampering: another admin device, a flipped g_a, the wrong device key, another participant device, another chat id, a wrong fingerprint.
+	e1 := e
+	e1.AdminDevice = 12
+	if _, err := AcceptRequest(partDev, adminPub, 5, e1, req.GA, req.Sig, randBytes(256), nil); err == nil {
+		t.Error("g_a_sig taken for another admin device")
 	}
 	ga := append([]byte(nil), req.GA...)
 	ga[100] ^= 1
-	if _, err := AcceptRequest(partDev, adminPub, 5, e, 77, ga, req.Sig, randBytes(256), nil); err == nil {
+	if _, err := AcceptRequest(partDev, adminPub, 5, e, ga, req.Sig, randBytes(256), nil); err == nil {
 		t.Error("tampered g_a taken")
 	}
-	if _, err := AcceptRequest(partDev, partPub, 5, e, 77, req.GA, req.Sig, randBytes(256), nil); err == nil {
+	if _, err := AcceptRequest(partDev, partPub, 5, e, req.GA, req.Sig, randBytes(256), nil); err == nil {
 		t.Error("g_a_sig taken against the wrong device key")
 	}
 	e2 := e
 	e2.ParticipantDevice = 22
-	if _, err := AcceptRequest(partDev, adminPub, 5, e2, 77, req.GA, req.Sig, randBytes(256), nil); err == nil {
+	if _, err := AcceptRequest(partDev, adminPub, 5, e2, req.GA, req.Sig, randBytes(256), nil); err == nil {
 		t.Error("g_a_sig taken for another participant device")
 	}
 	if _, err := FinishRequest(req, partPub, 6, e, acc.GB, acc.Fingerprint, acc.Sig); err == nil {
@@ -198,9 +200,9 @@ func TestHandshake(t *testing.T) {
 func TestRequestAcceptLayout(t *testing.T) {
 	e := Ends{Admin: 1, AdminDevice: 2, Participant: 3, ParticipantDevice: 4}
 	ga, gb := bytes.Repeat([]byte{0xa1}, 256), bytes.Repeat([]byte{0xb2}, 256)
-	req := RequestMessage(e, -2, ga)
-	if string(req[:25]) != "FH2MP-CHAT-DH-v1\x00request\x00" || len(req) != 25+32+4+256 || req[25] != 1 || req[33] != 2 || req[41] != 3 || req[49] != 4 ||
-		!bytes.Equal(req[57:61], []byte{0xfe, 0xff, 0xff, 0xff}) || req[61] != 0xa1 {
+	req := RequestMessage(e, ga)
+	if string(req[:25]) != "FH2MP-CHAT-DH-v1\x00request\x00" || len(req) != 25+32+256 || req[25] != 1 || req[33] != 2 || req[41] != 3 || req[49] != 4 ||
+		req[56] != 0 || req[57] != 0xa1 || req[len(req)-1] != 0xa1 {
 		t.Fatalf("req_msg %x", req[:64])
 	}
 	acc := AcceptMessage(9, e, ga, gb, 0x0807060504030201)

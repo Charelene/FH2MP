@@ -118,12 +118,12 @@ func (e Ends) append(m []byte) []byte {
 	return binary.LittleEndian.AppendUint64(m, uint64(e.ParticipantDevice))
 }
 
-// RequestMessage is what the admin's device key signs for messages.requestEncryption (contract 2.3):
-// tag || u64LE(admin_id) || u64LE(admin_device) || u64LE(participant_id) || u64LE(participant_device) || i32LE(random_id) || g_a(256).
-func RequestMessage(e Ends, randomID int32, gA []byte) []byte {
+// RequestMessage is what the admin's device key signs for messages.requestEncryption (contract 2.3, as amended):
+// tag || u64LE(admin_id) || u64LE(admin_device) || u64LE(participant_id) || u64LE(participant_device) || g_a(256). There is no random_id in
+// it: the participant only receives encryptedChatRequested, which does not carry one, and must be able to rebuild the message.
+func RequestMessage(e Ends, gA []byte) []byte {
 	m := append([]byte(nil), requestTag...)
 	m = e.append(m)
-	m = binary.LittleEndian.AppendUint32(m, uint32(randomID))
 	return append(m, gA...)
 }
 
@@ -139,8 +139,8 @@ func AcceptMessage(chatID int32, e Ends, gA, gB []byte, fingerprint int64) []byt
 }
 
 // VerifyRequest checks g_a_sig against the admin's device key.
-func VerifyRequest(adminDevicePub []byte, e Ends, randomID int32, gA, sig []byte) bool {
-	return verify(adminDevicePub, RequestMessage(e, randomID, gA), sig)
+func VerifyRequest(adminDevicePub []byte, e Ends, gA, sig []byte) bool {
+	return verify(adminDevicePub, RequestMessage(e, gA), sig)
 }
 
 // VerifyAccept checks g_b_sig against the participant's device key.

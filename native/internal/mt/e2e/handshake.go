@@ -13,7 +13,7 @@ type Request struct {
 }
 
 // MakeRequest makes a from 256 fresh random bytes and the server's random (messages.getDhConfig), and signs g_a with the admin's device key.
-func MakeRequest(adminDevice ed25519.PrivateKey, e Ends, randomID int32, fresh, serverRandom []byte) (*Request, error) {
+func MakeRequest(adminDevice ed25519.PrivateKey, e Ends, fresh, serverRandom []byte) (*Request, error) {
 	a, err := Secret(fresh, serverRandom)
 	if err != nil {
 		return nil, err
@@ -22,7 +22,7 @@ func MakeRequest(adminDevice ed25519.PrivateKey, e Ends, randomID int32, fresh, 
 	if err := CheckPublic(gA); err != nil {
 		return nil, err // a value this unlikely is made again by the caller with new random bytes
 	}
-	return &Request{A: a, GA: gA, Sig: ed25519.Sign(adminDevice, RequestMessage(e, randomID, gA))}, nil
+	return &Request{A: a, GA: gA, Sig: ed25519.Sign(adminDevice, RequestMessage(e, gA))}, nil
 }
 
 // Accept is the participant's half: b's public value, the chat key, its fingerprint and the signature (messages.acceptEncryption).
@@ -34,9 +34,9 @@ type Accept struct {
 }
 
 // AcceptRequest checks the admin's signature on g_a against the admin's pinned device key, makes b and the key, and signs the accept.
-func AcceptRequest(participantDevice ed25519.PrivateKey, adminDevicePub []byte, chatID int32, e Ends, randomID int32, gA, gASig, fresh,
+func AcceptRequest(participantDevice ed25519.PrivateKey, adminDevicePub []byte, chatID int32, e Ends, gA, gASig, fresh,
 	serverRandom []byte) (*Accept, error) {
-	if !VerifyRequest(adminDevicePub, e, randomID, gA, gASig) {
+	if !VerifyRequest(adminDevicePub, e, gA, gASig) {
 		return nil, refuse("g_a signature does not verify against the admin's device key")
 	}
 	b, err := Secret(fresh, serverRandom)
