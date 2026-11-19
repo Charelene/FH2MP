@@ -467,8 +467,14 @@ func Signature(line string) (string, string) {
 
 // IssueKey is Signature for the report's game: a crash of another game than Forza Horizon 2 (the "game" field Encore sends) never joins an
 // FH2 issue, even at the same exception and address, and its title names the game. A report without the field is Forza Horizon 2's.
+// A report whose azimuth.log has no failure line is grouped by the fault in its minidump (dumpKey), when it has one.
 func IssueKey(r *Report, line string) (string, string) {
 	key, title := Signature(line)
+	if key == "" {
+		if k, t := dumpKey(reportDump(r)); k != "" { // no failure line: the dump's fault groups the reports instead of one issue each
+			key, title = k, t
+		}
+	}
 	game := r.field("game")
 	if game == "" || game == "Forza Horizon 2" {
 		return key, title

@@ -114,3 +114,26 @@ func TestTheAttachedDumpIsUsedWithoutCrashDmp(t *testing.T) {
 		t.Fatalf("got %q", s)
 	}
 }
+
+// Reports without a failure line used to open one issue each; with a dump they group by its fault, per game, and a failure line still wins.
+func TestReportsWithoutAFailureLineGroupByTheirDump(t *testing.T) {
+	a := &Report{Dump: tinyDump(`C:\a\azimuth.exe`), HasDump: true}
+	b := &Report{Dump: tinyDump(`D:\other\folder\azimuth.exe`), HasDump: true}
+	ka, title := IssueKey(a, "")
+	kb, _ := IssueKey(b, "")
+	if ka != "dump:c0000005@azimuth+0x2d8ea4" || ka != kb || title != "Crash 0xC0000005 at azimuth+0x2d8ea4 (read from the dump)" {
+		t.Fatalf("keys %q %q, title %q", ka, kb, title)
+	}
+	fh3 := &Report{Dump: a.Dump, HasDump: true, Fields: pyjson.Obj{{K: "game", V: "Forza Horizon 3"}}}
+	if k, t3 := IssueKey(fh3, ""); k != "forza horizon 3|"+ka || !strings.HasPrefix(t3, "Forza Horizon 3: Crash 0xC0000005") {
+		t.Fatalf("fh3 key %q title %q", k, t3)
+	}
+	line := "[+12.3] CRASHED exception 0xc0000005 at game+0x2d8ea4"
+	want, _ := Signature(line)
+	if k, _ := IssueKey(a, line); k != want || k == ka {
+		t.Fatalf("with a failure line the key is %q, want %q", k, want)
+	}
+	if k, _ := IssueKey(&Report{}, ""); k != "" {
+		t.Fatalf("no line and no dump: %q", k)
+	}
+}
