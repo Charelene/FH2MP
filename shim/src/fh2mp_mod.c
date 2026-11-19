@@ -3497,6 +3497,7 @@ static void gamedb_hash(char out[65])
 }
 
 #include "restricted_tools.inc"
+#include "guard_counts.inc"
 #include "xhr2.inc"
 #define HEALTH_SLICE_WATCH
 #include "health.inc"
