@@ -100,6 +100,16 @@ func (w *Writer) grow(upto int) {
 	}
 }
 
+// Reserve makes room for nbits more bits, so the words are not grown one allocation at a time; what is written does not change.
+func (w *Writer) Reserve(nbits int) {
+	need := (w.Pos+nbits+63)/64 + 1
+	if cap(w.w) < need {
+		nw := make([]uint64, len(w.w), need)
+		copy(nw, w.w)
+		w.w = nw
+	}
+}
+
 // Bits appends the low n <= 64 bits of v.
 func (w *Writer) Bits(v uint64, n int) {
 	if n == 0 {
@@ -176,6 +186,19 @@ func (w *Writer) Value() Int {
 	out := make([]uint64, len(w.w))
 	copy(out, w.w)
 	return trim(out)
+}
+
+// AppendBytes is append(dst, w.Bytes()...) without the slice in between.
+func (w *Writer) AppendBytes(dst []byte) []byte {
+	n := (w.Pos + 7) / 8
+	for i := 0; i < n; i++ {
+		var b byte
+		if i>>3 < len(w.w) {
+			b = byte(w.w[i>>3] >> (uint(i&7) * 8))
+		}
+		dst = append(dst, b)
+	}
+	return dst
 }
 
 // Bytes is value.to_bytes((pos + 7) // 8, "little").

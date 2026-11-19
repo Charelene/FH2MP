@@ -225,6 +225,11 @@ func BuildPacket(msgs []Msg, ackID, remoteAck uint16, ackBits uint32) []byte {
 // PackMessages is pack_messages: build_packet for baked messages, same bytes.
 func PackMessages(baked []Baked, ackID, remoteAck uint16, ackBits uint32) []byte {
 	var body bits.Writer
+	total := 0
+	for _, b := range baked {
+		total += b.N
+	}
+	body.Reserve(total + 64) // a message may spill past its size (Raw); one more word covers it
 	for _, b := range baked {
 		body.Raw(b.V, b.N)
 	}
@@ -235,7 +240,7 @@ func PackMessages(baked []Baked, ackID, remoteAck uint16, ackBits uint32) []byte
 	binary.LittleEndian.PutUint32(out[4:], ackBits)
 	out[8] = byte(len(baked))
 	binary.LittleEndian.PutUint16(out[9:], uint16(HeaderBits/8+nbytes))
-	return append(out, body.Bytes()...)
+	return body.AppendBytes(out)
 }
 
 func f32(x float64) uint64 { return uint64(math.Float32bits(float32(x))) }
