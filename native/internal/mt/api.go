@@ -31,15 +31,32 @@ type Accounts interface {
 	SignIn(ip string, challenge, pubkey, signature []byte, fields ...[]byte) (xuid int64, gamertag string, err error)
 }
 
-// UpdateStore keeps each account's stored updates: one TL-encoded Update per pts, pts counting up from 1.
+// StoredUpdate is one stored update with its pts.
+type StoredUpdate struct {
+	Pts  int
+	Body []byte
+}
+
+// UpdateStore keeps each account's stored updates: one TL-encoded Update per pts, pts counting up from 1. The updates of secret chats
+// (AppendChat: updateEncryption, updateNewEncryptedMessage) outlive Ack, so a client that lost what it was pushed can fetch them again:
+// they go when messages.ackEncrypted covers them (AckChat), when their chat is discarded (sealed messages only, DropChat), or after UpdateTTL.
 type UpdateStore interface {
 	State(xuid int64) (pts int, err error)
 	// Append stores one update and returns its pts.
 	Append(xuid int64, body []byte) (pts int, err error)
-	// Since returns the stored updates with pts > after, oldest first, at most limit; first is the pts of the first one returned.
-	Since(xuid int64, after, limit int) (bodies [][]byte, first int, err error)
-	// Ack: the client has every update up to pts; the store may drop them.
+	// AppendChat stores an update of secret chat `chat`; message: an updateNewEncryptedMessage (a sealed message's bytes).
+	AppendChat(xuid int64, body []byte, chat int32, message bool) (pts int, err error)
+	// Since returns the stored updates with pts > after, oldest first, at most limit, and gone: the highest pts of a row dropped by Ack (a
+	// row of no secret chat) or by age. A client asking from below gone cannot be given everything it lacks.
+	Since(xuid int64, after, limit int) (rows []StoredUpdate, gone int, err error)
+	// Ack: the client has every update up to pts; the store drops them, except the rows of secret chats.
 	Ack(xuid int64, pts int) error
+	// AckChat: the client keeps every secret-chat update up to pts on its PC (messages.ackEncrypted); the store drops them.
+	AckChat(xuid int64, pts int) (dropped int64, err error)
+	// DropChat drops the sealed messages of a secret chat that still wait for their recipient (a discard).
+	DropChat(chat int32) (dropped int64, err error)
+	// Expire drops rows older than UpdateTTL.
+	Expire() (dropped int64, err error)
 }
 
 func (s *Server) registerAPI() {
@@ -132,30 +149,35 @@ func (s *Server) registerAPI() {
 		if limit <= 0 || limit > maxDifference {
 			limit = maxDifference
 		}
-		bodies, first, err := s.store.Since(x, r.Pts, limit)
+		rows, gone, err := s.store.Since(x, r.Pts, limit)
 		if err != nil {
 			return nil, s.internal(c, "updates.getDifference", err)
 		}
-		if len(bodies) == 0 || first != r.Pts+1 {
-			// Updates the client never got were dropped (older than the store keeps): it reloads its state instead.
+		if r.Pts < gone {
+			// Updates after the client's pts were dropped (it acked them before, or they were older than the store keeps): it reloads its
+			// state instead.
 			log.Info("mt.difference_too_long " + diag.KV(diag.KVP{K: "xuid", V: fmt.Sprintf("%#x", x)}, diag.KVP{K: "client_pts", V: r.Pts},
-				diag.KVP{K: "oldest_kept", V: first}, diag.KVP{K: "server_pts", V: cur}))
+				diag.KVP{K: "dropped_up_to", V: gone}, diag.KVP{K: "server_pts", V: cur}))
 			return &tl.UpdatesDifferenceTooLong{Pts: cur}, nil
 		}
 		_ = s.store.Ack(x, r.Pts)
-		upds := make([]tl.UpdateClass, 0, len(bodies))
-		for i, b := range bodies {
-			u, err := tl.DecodeUpdate(&bin.Buffer{Buf: b})
+		if len(rows) == 0 {
+			// Every row after the client's pts was a secret chat's that went (acked with messages.ackEncrypted, or its chat discarded).
+			return &tl.UpdatesDifferenceEmpty{Pts: cur, Date: now}, nil
+		}
+		upds := make([]tl.UpdateClass, 0, len(rows))
+		for _, row := range rows {
+			u, err := tl.DecodeUpdate(&bin.Buffer{Buf: row.Body})
 			if err != nil {
-				return nil, s.internal(c, "updates.getDifference", fmt.Errorf("stored update pts %d does not decode: %w", first+i, err))
+				return nil, s.internal(c, "updates.getDifference", fmt.Errorf("stored update pts %d does not decode: %w", row.Pts, err))
 			}
 			upds = append(upds, u)
 		}
-		last := first + len(bodies) - 1
-		if last < cur {
+		last := rows[len(rows)-1].Pts
+		if len(rows) == limit && last < cur {
 			return &tl.UpdatesDifferenceSlice{NewUpdates: upds, IntermediateState: tl.UpdatesState{Pts: last, Date: now}}, nil
 		}
-		return &tl.UpdatesDifference{NewUpdates: upds, State: tl.UpdatesState{Pts: cur, Date: now}}, nil
+		return &tl.UpdatesDifference{NewUpdates: upds, State: tl.UpdatesState{Pts: max(cur, last), Date: now}}, nil
 	})
 }
 
@@ -210,25 +232,34 @@ func xuidOrNil(x int64) any {
 	return fmt.Sprintf("%#x", x)
 }
 
-// MemStore is an UpdateStore in memory (tests, and the server with FH2MP_MT_STORE=memory).
+// MemStore is an UpdateStore in memory (tests, and the test server).
 type MemStore struct {
 	mu   sync.Mutex
 	accs map[int64]*memAcc
+	Now  func() time.Time
+}
+
+type memRow struct {
+	pts     int
+	body    []byte
+	chat    int32 // 0: no secret chat's
+	message bool
+	created time.Time
 }
 
 type memAcc struct {
-	pts   int
-	first int // pts of rows[0]
-	rows  [][]byte
+	pts  int
+	gone int
+	rows []memRow // pts order
 }
 
 // NewMemStore makes an empty store.
-func NewMemStore() *MemStore { return &MemStore{accs: map[int64]*memAcc{}} }
+func NewMemStore() *MemStore { return &MemStore{accs: map[int64]*memAcc{}, Now: time.Now} }
 
 func (m *MemStore) acc(x int64) *memAcc {
 	a := m.accs[x]
 	if a == nil {
-		a = &memAcc{first: 1}
+		a = &memAcc{}
 		m.accs[x] = a
 	}
 	return a
@@ -240,52 +271,88 @@ func (m *MemStore) State(x int64) (int, error) {
 	return m.acc(x).pts, nil
 }
 
-func (m *MemStore) Append(x int64, body []byte) (int, error) {
+func (m *MemStore) Append(x int64, body []byte) (int, error) { return m.AppendChat(x, body, 0, false) }
+
+func (m *MemStore) AppendChat(x int64, body []byte, chat int32, message bool) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	a := m.acc(x)
 	a.pts++
-	if len(a.rows) == 0 {
-		a.first = a.pts
-	}
-	a.rows = append(a.rows, append([]byte(nil), body...))
+	a.rows = append(a.rows, memRow{pts: a.pts, body: append([]byte(nil), body...), chat: chat, message: message && chat != 0, created: m.Now()})
 	return a.pts, nil
 }
 
-func (m *MemStore) Since(x int64, after, limit int) ([][]byte, int, error) {
+func (m *MemStore) Since(x int64, after, limit int) ([]StoredUpdate, int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	a := m.acc(x)
-	if len(a.rows) == 0 {
-		return nil, a.pts + 1, nil
+	var out []StoredUpdate
+	for _, r := range a.rows {
+		if r.pts > after && len(out) < limit {
+			out = append(out, StoredUpdate{Pts: r.pts, Body: append([]byte(nil), r.body...)})
+		}
 	}
-	i := after + 1 - a.first
-	first := after + 1
-	if i < 0 {
-		i, first = 0, a.first
+	return out, a.gone, nil
+}
+
+// keep rebuilds the account's rows with only those keep says yes to.
+func (a *memAcc) keep(keep func(r memRow) bool) int64 {
+	var n int64
+	rows := a.rows[:0]
+	for _, r := range a.rows {
+		if keep(r) {
+			rows = append(rows, r)
+		} else {
+			n++
+		}
 	}
-	if i >= len(a.rows) {
-		return nil, a.pts + 1, nil
-	}
-	j := i + limit
-	if j > len(a.rows) {
-		j = len(a.rows)
-	}
-	return append([][]byte(nil), a.rows[i:j]...), first, nil
+	a.rows = rows
+	return n
 }
 
 func (m *MemStore) Ack(x int64, pts int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	a := m.acc(x)
-	n := pts + 1 - a.first
-	if n <= 0 {
-		return nil
-	}
-	if n > len(a.rows) {
-		n = len(a.rows)
-	}
-	a.rows = a.rows[n:]
-	a.first += n
+	a.keep(func(r memRow) bool {
+		if r.pts <= pts && r.chat == 0 {
+			a.gone = max(a.gone, r.pts)
+			return false
+		}
+		return true
+	})
 	return nil
+}
+
+func (m *MemStore) AckChat(x int64, pts int) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.acc(x).keep(func(r memRow) bool { return r.pts > pts || r.chat == 0 }), nil
+}
+
+func (m *MemStore) DropChat(chat int32) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var n int64
+	for _, a := range m.accs {
+		n += a.keep(func(r memRow) bool { return r.chat != chat || !r.message })
+	}
+	return n, nil
+}
+
+func (m *MemStore) Expire() (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cut := m.Now().Add(-UpdateTTL)
+	var n int64
+	for _, a := range m.accs {
+		n += a.keep(func(r memRow) bool {
+			if r.created.Before(cut) {
+				a.gone = max(a.gone, r.pts)
+				return false
+			}
+			return true
+		})
+	}
+	return n, nil
 }
