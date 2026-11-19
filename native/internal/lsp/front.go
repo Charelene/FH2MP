@@ -253,6 +253,9 @@ func (c *Core) handle(rw respWriter, r *Req, req *http.Request) {
 	rawPath, _, _ := strings.Cut(path, "?")
 	short := cut(rawPath, 80)
 	r.Run = diag.RunID(h.Get("X-FH2MP-Run"))
+	if v := h.Get("X-FH2MP-Net"); v != "" { // the shim's net watch: the game's newest close of its game-server connection, once (netclose.go)
+		c.noteNetClose(r, v)
+	}
 	n := req.ContentLength
 	if n < 0 {
 		n = 0
