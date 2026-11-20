@@ -57,7 +57,7 @@ func TestCustomCarsDoNotRace(t *testing.T) {
 	if !r.w.EligibleForEvent(own, &anyCar) {
 		t.Fatal("a car from the game was refused by an open event")
 	}
-	if r.count("owner 1 car 987654 is not in the game data (a car pack's own car); custom cars do not race in events or Road Trip") != 1 {
+	if r.count("owner 1 car 987654 is not in the game data (a car pack's own car); custom cars do not race in Road Trip, nor in an event whose leader did not allow modded cars") != 1 {
 		t.Fatalf("no refusal line: %q", r.log)
 	}
 	deadline := time.Now().Add(time.Second)
@@ -71,7 +71,7 @@ func TestCustomCarsDoNotRace(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	mu.Lock()
-	if len(sent) != 1 || !strings.Contains(sent[0], "Custom cars can't race") {
+	if len(sent) != 1 || !strings.Contains(sent[0], "Modded cars can't race here") {
 		t.Fatalf("notices %q", sent)
 	}
 	mu.Unlock()

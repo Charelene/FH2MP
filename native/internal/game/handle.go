@@ -491,6 +491,10 @@ loop:
 				window = EventJoinSeconds
 			}
 			w.PendingRace = &PendingRace{w.Mono() + window, peer}
+			w.ModdedCars = false
+			if !w.Roadtrip {
+				w.SetModdedCars(peer.allowsModded(w.Mono()), peer, "its Event Options at the race request")
+			}
 			w.RaceRequestedAt = w.Mono()
 			if w.launchCountdownOn() {
 				for _, q := range w.Peers.Values() {

@@ -80,6 +80,7 @@ func (w *World) EndEvent(why string, keepLeader bool) {
 	}
 	w.Event = nil
 	w.PendingRace = nil
+	w.ModdedCars = false
 	if !keepLeader {
 		former := w.Leader
 		if former == nil {
@@ -809,13 +810,13 @@ func (w *World) noticeRefused(peer *Peer, notice string) {
 }
 
 const (
-	customCarNotice  = "Custom cars can't race in online events or Road Trip. Pick a car from the game."
+	customCarNotice  = "Modded cars can't race here: this event's leader didn't allow them, and Road Trip never does. Pick a car from the game."
 	trafficCarNotice = "Traffic cars and other cars you can't buy can't race in online events or Road Trip. Pick another car."
 )
 
 // refusalNotice is the notice for the peer's current car against the stored event rule, without a log line ("" = it fits, or the rule is unreadable).
 func (w *World) refusalNotice(peer *Peer) string {
-	if w.CustomCar(peer) {
+	if w.customCarRefused(peer) {
 		return customCarNotice
 	}
 	if w.BlockedCar(peer) {
@@ -830,9 +831,9 @@ func (w *World) refusalNotice(peer *Peer) string {
 
 // carFitsEvent is EligibleForEvent without the notice: (fits, the notice text for a refusal). The "not eligible" line is logged either way.
 func (w *World) carFitsEvent(peer *Peer, rule *gameopts.Rule) (bool, string) {
-	if w.CustomCar(peer) {
+	if w.customCarRefused(peer) {
 		w.ev("not_eligible", kv("xuid", fmt.Sprintf("%#x", peer.Xuid)), kv("car", *peer.ModelID), kv("custom", true), kv("roadtrip", w.Roadtrip))
-		w.Logf("%d not eligible: owner %d car %d is not in the game data (a car pack's own car); custom cars do not race in events or Road Trip", peer.Addr.Port, peer.Owner, *peer.ModelID)
+		w.Logf("%d not eligible: owner %d car %d is not in the game data (a car pack's own car); custom cars do not race in Road Trip, nor in an event whose leader did not allow modded cars", peer.Addr.Port, peer.Owner, *peer.ModelID)
 		return false, customCarNotice
 	}
 	if w.BlockedCar(peer) {

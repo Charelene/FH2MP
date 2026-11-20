@@ -79,12 +79,14 @@ lane_unit() {
     run "shim eo timelock" shim/tests/test_eo_timelock.sh
     run "shim eo routes" shim/tests/test_eo_routes.sh
     run "shim car list room" shim/tests/test_carlist_room.sh
+    run "shim event options" shim/tests/test_event_options.sh
     run "shim identity scope" shim/tests/test_identity_scope.sh
     run "shim tune gate" shim/tests/test_tune_gate.sh
     run "shim travel xp guard" shim/tests/test_travelxp_guard.sh
     run "shim event fix" shim/tests/test_event_fix.sh
     run "shim model unload guard" shim/tests/test_model_unload.sh
     run "shim zip manifest check" shim/tests/test_zipmanifest.sh
+    run "shim state machine guard" shim/tests/test_state_machine.sh
     run "shim dtconv guard" shim/tests/test_dtconv.sh
     run "shim blob limit" shim/tests/test_blob_limit.sh
     run "shim garage rating guard" shim/tests/test_garage_rating.sh
@@ -92,6 +94,7 @@ lane_unit() {
     run "shim online setup" shim/tests/test_online_setup.sh
     run "shim contact forecast" shim/tests/test_contact_forecast.sh
     run "shim copy path" shim/tests/test_copy_path.sh
+    run "shim dev badge" shim/tests/test_dev_badge.sh
 }
 
 pg_root=

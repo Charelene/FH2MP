@@ -213,7 +213,7 @@ func (w *World) BlockedCar(peer *Peer) bool {
 }
 
 // NotForEvents: the peer's car may drive in Free Roam but not race: a car pack's own car or a car players cannot get.
-func (w *World) NotForEvents(peer *Peer) bool { return w.CustomCar(peer) || w.BlockedCar(peer) }
+func (w *World) NotForEvents(peer *Peer) bool { return w.customCarRefused(peer) || w.BlockedCar(peer) }
 
 func dist3(a, b [3]float64) float64 {
 	dx, dy, dz := a[0]-b[0], a[1]-b[1], a[2]-b[2]
