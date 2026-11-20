@@ -2577,14 +2577,15 @@ static int patch_xsapi_token(void)
     }
     mem_copy(&rel, call + 7, 4);
     alloc = *(void *(**)(ULONGLONG))(call + 11 + rel);
-    if (!xs_find_import_slot(img, "WindowsCreateString")) {
-        log_begin();
-        log_raw("xstoken: not patched, WindowsCreateString is not in the XSAPI import table\n");
-        return 2;
-    }
-    mkstr = (LONG(*)(const WCHAR *, unsigned, void **))xs_find_import(img, "WindowsCreateString");
     {
         static DWORD since;
+        /* The file imports it (combase.dll, with its name list), so a miss is a moment while the import table is being filled in, not its
+         * absence: retried like an unbound import (win1 2026-11-20 00:39 UTC gave up at the first miss and its game stayed offline with
+         * "Unable to connect to the Live configuration servers"; the same files on win2 and win1's earlier sessions found it). */
+        if (!xs_find_import_slot(img, "WindowsCreateString")) {
+            return xs_unbound_wait("xstoken", "its WindowsCreateString import (not in the import table yet)", &since);
+        }
+        mkstr = (LONG(*)(const WCHAR *, unsigned, void **))xs_find_import(img, "WindowsCreateString");
         if (!xs_bound(img, (void *)alloc) || !xs_bound(img, (void *)mkstr)) {
             return xs_unbound_wait("xstoken", !xs_bound(img, (void *)alloc) ? "its allocator import" : "its WindowsCreateString import", &since);
         }
