@@ -636,10 +636,16 @@ func zipDir(out, dir string, files []string) (string, error) {
 			f.Close()
 			return "", fmt.Errorf("%s is not inside %s", name, dir)
 		}
-		src, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)))
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		src, err := os.ReadFile(p)
+		var st os.FileInfo
 		if err == nil {
+			st, err = os.Stat(p)
+		}
+		if err == nil {
+			// the file's own time, as Python's ZipFile.write kept it (a zero time is month 0 in the zip's DOS date, which some unpackers refuse)
 			var w io.Writer
-			if w, err = z.Create(name); err == nil {
+			if w, err = z.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Deflate, Modified: st.ModTime()}); err == nil {
 				_, err = w.Write(src)
 			}
 		}
