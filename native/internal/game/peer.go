@@ -98,6 +98,7 @@ type Peer struct {
 	SeqShift                              map[OwnerObj]int
 	CompactAt                             map[ObjKey]int
 	ConsoleVars                           map[int]bool
+	RaceFlag                              bool // the server last sent this console ParticipatingInRace = 1 (SetConsoleBool), so every other game counts it as a racer
 	GoptsSeq                              int
 	VipHidden                             *VipHidden
 	PlayerStatus                          int // latest LobbyPlayer.PlayerStatus this client wrote (PlayerVarStatus); valid when HasPlayerStatus

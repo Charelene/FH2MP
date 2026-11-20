@@ -703,6 +703,9 @@ func (w *World) SetConsoleBool(peer *Peer, varID, value int, why string) {
 	}
 	w.Send(peer, false, netv2.ServerUpdate(3, uint64(*peer.ConsoleOid), netv2.RouterBits[3][0], uint64(peer.ConsoleSeq), vars))
 	peer.ConsoleSeq = (peer.ConsoleSeq + 1) % 0xFF
+	if varID == ConsoleVarParticipatingInRace {
+		peer.RaceFlag = value == 1
+	}
 	var vb bits.Writer
 	vars(&vb)
 	w.RememberAndRelay(peer, netv2.MsgObjectUpdate, 3, *peer.ConsoleOid, nil, 0, vb.Pos, vb.Value())
