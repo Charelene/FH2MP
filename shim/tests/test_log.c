@@ -19,11 +19,11 @@ static DWORD WINAPI logger(void *arg)
     return 0;
 }
 
-/* -> 1 when a second thread could log a whole line within 2 s */
+/* -> 1 when a second thread could log a whole line within 10 s (a lock that is never released still fails; a CI runner with 34 Wine checks side by side can take longer than 2 s) */
 static int second_thread_logs(void)
 {
     HANDLE t = CreateThread(NULL, 0, logger, (void *)"second: thread line\n", 0, NULL);
-    DWORD rc = WaitForSingleObject(t, 2000);
+    DWORD rc = WaitForSingleObject(t, 10000);
     CloseHandle(t);
     return rc == WAIT_OBJECT_0;
 }
@@ -31,10 +31,11 @@ static int second_thread_logs(void)
 int main(int argc, char **argv)
 {
     (void)argc; (void)argv;
+    setvbuf(stdout, NULL, _IONBF, 0);   /* a FAIL line reaches the CI log even if the process is ended */
     /* no log file: the first thread's line must release the lock for the second thread */
     {
         HANDLE t = CreateThread(NULL, 0, logger, (void *)"first: no file line\n", 0, NULL);
-        CHECK(WaitForSingleObject(t, 2000) == WAIT_OBJECT_0);
+        CHECK(WaitForSingleObject(t, 10000) == WAIT_OBJECT_0);
         CloseHandle(t);
     }
     CHECK(second_thread_logs());
