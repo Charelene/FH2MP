@@ -85,8 +85,12 @@ static void grid_set_ready(void *console, unsigned value)
     g_grid_ready_orig(console, value);
 }
 
+/* tick of the last MsgStartRace (event_fix.inc: an event car select before it is over, so a later car commit is the player's own car again) */
+static volatile LONG64 g_race_start_msg_at;
+
 static unsigned grid_msg_start(void *a, void *b, void *c)
 {
+    InterlockedExchange64(&g_race_start_msg_at, (LONG64)GetTickCount64());
     if (g_grid_epoch) {
         char line[300];
         DWORD now = GetTickCount();

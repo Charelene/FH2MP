@@ -30,6 +30,12 @@ static torque_stock_fn g_torque_stock;
 static torque_parts_ctor_fn g_torque_parts_ctor;
 static void torque_stock_parts(void *db, unsigned car, unsigned parts[45]) { (void)db; (void)car; (void)parts; }
 static volatile LONG64 g_cs_count_armed_at;
+/* what picker_pi.inc and event_stock.inc take from event_fix.inc (tested by test_event_fix.sh) */
+static int g_ef_on;
+static int ef_attrs(void *car, unsigned char *out) { (void)car; (void)out; return 0; }
+static int ef_commit(unsigned char *s, unsigned a, unsigned b, unsigned c, unsigned d, unsigned e) { (void)s; (void)a; (void)b; (void)c; (void)d; (void)e; return 0; }
+static int ef_in_select(void) { return 0; }
+static void ef_commit_outside(const unsigned char *s, unsigned a, unsigned b, unsigned c) { (void)s; (void)a; (void)b; (void)c; }
 #include "src/event_stock.inc"
 
 #define CAR 1005

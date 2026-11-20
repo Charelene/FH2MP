@@ -677,6 +677,7 @@ static void ppi_base_load(const wchar_t *path)
 }
 
 /* ---- the hook ---- */
+static int ef_attrs(void *car, unsigned char *out);    /* event_fix.inc: the fixed class and PI of a car with parts of other cars */
 typedef unsigned char *(*ppi_query_fn)(void *car, unsigned char *out);
 static ppi_query_fn g_ppi_orig;
 static const unsigned char *g_ppi_img;
@@ -728,6 +729,8 @@ static unsigned char *ppi_hook(void *car, unsigned char *out)
     if (ppi_fixup(id, parts, klass, pi, attrs, &ops)) {
         memcpy(out + PPI_OUT_PI, attrs + PPI_OUT_PI, 8);
         out[PPI_OUT_CLASS] = attrs[PPI_OUT_CLASS];
+    } else {
+        ef_attrs(car, out);
     }
     return ret;
 }
