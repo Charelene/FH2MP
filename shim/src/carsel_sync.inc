@@ -515,6 +515,92 @@ static void carsel_invite_countdown(void *store, unsigned key, float seconds)
     g_cs_invite_set(store, key, seconds);
 }
 
+/* F/G  the join hold (user design 2026-11-20: nobody is in the car select before the join wait is over). An invitee that accepts runs
+ *    fast_travel_to_event_internal: NetworkSetFastTravelWithCurrentRaceStartLocation (Execute +8d16e0, F: arms the hold), ready_for_race,
+ *    then fast_travel_to_position_no_cutscene over the FMV loading screen, whose wait_for_fast_travel polls WaitForFastTravelStreaming's
+ *    OnUpdate (slot 14, +970410, shared with WaitForStreaming; its only way on is FUN_141925260, the onReady transition) [C: decompile and
+ *    vtables]. While the hold applies, G returns without running that update, so the invitee stays on the loading screen; the streaming goes
+ *    on. Every condition must hold for a frame to be held, otherwise the game's update runs: F ran under 30 s ago, this hold is under 20 s
+ *    old, the server's launch countdown is running ([manager+0x44] 0.2..60 s ahead of the network clock) and the local console is not yet
+ *    ParticipatingInRace (ConsoleSynced at [[+34af7a0]+0x18], vtable slot 24 = its getter, what NetworkWaitForParticipatingInRace +8e1180
+ *    reads). The event start sets that flag (the game server's StartEvent), which ends the hold at once; a Car Meet Showdown sets it before
+ *    its fast travel, so it is never held. */
+#define CS_JOIN_ARM_RVA 0x8d16e0u
+#define CS_JOIN_WAIT_RVA 0x970410u
+#define CS_CONSOLES_SLOT_RVA 0x34af7a0u
+#define CS_JOIN_ARMED_MS 30000u
+#define CS_JOIN_MAX_MS 20000u
+static void (*g_cs_join_arm_original)(void *, void *, void *, void *);
+static void (*g_cs_join_wait_original)(void *);
+static volatile LONG64 g_cs_join_armed_at;
+static ULONGLONG g_cs_join_since, g_cs_join_last;   /* game thread only: this hold's first held frame, the last held frame */
+static unsigned g_cs_join_frames;
+static int cs_local_racing(int *racing)
+{
+    unsigned char *mgr = NULL, *console = NULL; void **vtable = NULL; void *fn = NULL;
+    if (!g_cs_fn_lo || !read_game_memory(g_cs_fn_lo + CS_CONSOLES_SLOT_RVA, &mgr, sizeof mgr) || !mgr ||
+        !read_game_memory(mgr + 0x18, &console, sizeof console) || !console || !read_game_memory(console, &vtable, sizeof vtable) || !vtable ||
+        !read_game_memory((unsigned char *)vtable + 24 * sizeof(void *), &fn, sizeof fn) || !fn ||
+        (unsigned char *)fn < g_cs_fn_lo || (unsigned char *)fn >= g_cs_fn_hi) {
+        return 0;
+    }
+    *racing = ((char (*)(void *))fn)(console) != 0;
+    return 1;
+}
+static void carsel_join_arm(void *a, void *b, void *c, void *d)
+{
+    g_cs_join_arm_original(a, b, c, d);
+    InterlockedExchange64(&g_cs_join_armed_at, (LONG64)CARSEL_NOW());
+}
+static void carsel_join_release(ULONGLONG now, const char *why)
+{
+    log_begin(); log_raw("carsel: join hold over after "); log_dec((unsigned long)(now - g_cs_join_since)); log_raw(" ms (");
+    log_dec(g_cs_join_frames); log_raw(" frames held on the loading screen): "); log_raw(why); log_raw("\n");
+    g_cs_join_since = 0; g_cs_join_frames = 0;
+    InterlockedExchange64(&g_cs_join_armed_at, 0);
+}
+/* One frame of the join hold: NULL = hold it, otherwise why not. `since` is this hold's first held frame (0 = not holding yet); `left` the
+ * countdown's end minus the clock (u32), valid when read_ok; racing valid when console_ok. */
+static const char *carsel_join_verdict(ULONGLONG now, ULONGLONG since, int read_ok, unsigned left, int console_ok, int racing)
+{
+    if (!read_ok) return "the network clock or the countdown cannot be read";
+    if (left < 200u || left > 60000u) return "the join wait is over (the server's launch countdown has ended)";
+    if (!console_ok) return "the local console cannot be read";
+    if (racing) return "the event has started (this console is ParticipatingInRace)";
+    if (since && now - since >= CS_JOIN_MAX_MS) return "20 s limit";
+    return NULL;
+}
+static void carsel_join_wait(void *self)
+{
+    ULONGLONG now = CARSEL_NOW(), armed = (ULONGLONG)g_cs_join_armed_at;
+    unsigned clock = 0, end = 0, left = 0;
+    int racing = 1, read_ok, console_ok = 0;
+    const char *why = NULL;
+    if (armed && now - armed <= CS_JOIN_ARMED_MS) {
+        if (g_cs_join_since && now - g_cs_join_last > CS_NEW_WAIT_MS) {
+            g_cs_join_since = 0; g_cs_join_frames = 0;   /* a gap: another wait */
+        }
+        read_ok = carsel_clock(&clock) && carsel_read_end(CS_INVITE_END_OFFSET, &end);
+        left = end - clock;
+        if (read_ok && left >= 200u && left <= 60000u) console_ok = cs_local_racing(&racing);
+        why = carsel_join_verdict(now, g_cs_join_since, read_ok, left, console_ok, racing);
+        if (!why) {
+            if (!g_cs_join_since) {
+                g_cs_join_since = now;
+                log_begin(); log_raw("carsel: join hold: this invitee stays on the loading screen until the event starts ("); log_dec(left);
+                log_raw(" ms left of the server's launch countdown)\n");
+            }
+            g_cs_join_last = now;
+            g_cs_join_frames++;
+            return;
+        }
+        if (g_cs_join_since) carsel_join_release(now, why);
+    } else if (g_cs_join_since) {
+        carsel_join_release(now, "the hold was armed over 30 s ago");
+    }
+    g_cs_join_wait_original(self);
+}
+
 static void carsel_attach_deadline(unsigned char *img)
 {
     static const unsigned char countdown_code[9] = {0x40,0x57,0x48,0x83,0xec,0x20,0x48,0x8b,0xf9};
@@ -545,6 +631,20 @@ static void carsel_attach_deadline(unsigned char *img)
             log_begin(); log_raw("carsel: the event invite prompt keeps the state flow's 15 s (the call at game+0x921457 is not the expected call of game+0x2b3e40)\n");
         } else {
             log_begin(); log_raw("carsel: the event invite prompt counts the server's launch countdown (the call at game+0x921457)\n");
+        }
+    }
+    {
+        static const unsigned char arm_code[15] = {0x40,0x57,0x48,0x83,0xec,0x60,0x48,0xc7,0x44,0x24,0x20,0xfe,0xff,0xff,0xff};
+        static const unsigned char wait_code[9] = {0x40,0x53,0x48,0x83,0xec,0x20,0x48,0x8b,0xd9};
+        if (honk_hooked_by_mod(img, FH2_SIZE_OF_IMAGE, img + CS_JOIN_ARM_RVA) || honk_hooked_by_mod(img, FH2_SIZE_OF_IMAGE, img + CS_JOIN_WAIT_RVA) ||
+            !code_is("carsel", "the event fast travel setup", img, CS_JOIN_ARM_RVA, arm_code, sizeof arm_code) ||
+            !code_is("carsel", "the fast travel streaming wait", img, CS_JOIN_WAIT_RVA, wait_code, sizeof wait_code) ||
+            !plat_hook("carsel: event fast travel setup", img + CS_JOIN_ARM_RVA, (void *)carsel_join_arm, (void **)&g_cs_join_arm_original)) {
+            log_begin(); log_raw("carsel: an invitee that accepts goes on to the car select at once (the event fast travel at game+0x8d16e0 / +0x970410 could not be hooked)\n");
+        } else if (!plat_hook("carsel: fast travel streaming wait", img + CS_JOIN_WAIT_RVA, (void *)carsel_join_wait, (void **)&g_cs_join_wait_original)) {
+            log_begin(); log_raw("carsel: an invitee that accepts goes on to the car select at once (the streaming wait at game+0x970410 could not be hooked)\n");
+        } else {
+            log_begin(); log_raw("carsel: an invitee that accepts waits on its loading screen until the event starts (game+0x8d16e0, +0x970410)\n");
         }
     }
 }

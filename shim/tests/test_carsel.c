@@ -232,6 +232,19 @@ int main(int argc,char **argv)
         memset(&w,0,sizeof w);
         assert(!carsel_decide(&w,t,0,1,t-10,&event) && !carsel_decide(&w,t+16,0,1,t+6,&event) && event==CS_NONE);
     }
+    /* ---- the join hold (pure): an invitee that accepted stays on its loading screen until the event starts (user design 2026-11-20) ---- */
+    {
+        ULONGLONG t=500000;
+        assert(carsel_join_verdict(t,0,1,8000,1,0)==NULL);                       /* countdown running, not yet racing: held */
+        assert(carsel_join_verdict(t+5000,t,1,3000,1,0)==NULL);                  /* still within the wait */
+        assert(strstr(carsel_join_verdict(t,t-100,1,6000,1,1),"has started"));   /* the event start sets ParticipatingInRace: on at once */
+        assert(strstr(carsel_join_verdict(t,t-100,1,150,1,0),"is over"));        /* the countdown has run out */
+        assert(strstr(carsel_join_verdict(t,0,1,0xfffff000u,1,0),"is over"));    /* an end in the past (u32 wrap): no hold */
+        assert(strstr(carsel_join_verdict(t,0,1,90000,1,0),"is over"));          /* an end too far away is not believed */
+        assert(strstr(carsel_join_verdict(t,0,0,8000,1,0),"cannot be read"));    /* no clock: the game's update runs */
+        assert(strstr(carsel_join_verdict(t,0,1,8000,0,0),"console"));
+        assert(strstr(carsel_join_verdict(t+CS_JOIN_MAX_MS,t,1,8000,1,0),"20 s"));  /* never longer than the cap */
+    }
     /* ---- the group deadline rules (pure) ---- */
     {
         unsigned left=77,end=0;
