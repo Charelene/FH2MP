@@ -150,7 +150,7 @@ static void es_hook(void *self)
         es_ops es = {es_game_stock_parts, NULL};
         int swapped = g_es_stock_on && g_ppi_base_ready && armed && now - armed <= ES_SELECT_MS && es_stock_pending(s, &es, &ops);
         if (!swapped && ef_in_select() && ppi_in_session(g_ppi_img)) {
-            ef_commit(s, ES_CAR, ES_WHEEL, ES_PARTS, ES_TUNE, ES_ATTRS);   /* event_fix.inc: parts of other cars back to the car's own stock ones */
+            ef_commit(s, ES_CAR, ES_WHEEL, ES_PARTS, ES_TUNE, ES_ATTRS);   /* event_fix.inc: a swapped engine or gearbox back to the car's own stock one */
         } else {
             ef_commit_outside(s, ES_CAR, ES_WHEEL, ES_PARTS);              /* event_fix.inc: another car or build means no Free Roam restore is due */
         }

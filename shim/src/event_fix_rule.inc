@@ -1,6 +1,6 @@
-/* The pure decisions of event_fix.inc (tested natively by tests/test_event_fix.sh): which installed parts belong to another car, engine or drivetrain
- * than the car's own, the car with only those parts back to its own stock ones, which tune values go back to stock with them, and the garage list
- * query with the fixed class and PI in place of the garage row's. */
+/* The pure decisions of event_fix.inc (tested natively by tests/test_event_fix.sh): whether the installed engine or gearbox is swapped (another
+ * car's or drivetrain's, or one of Extra Options' swap rows), the car with only those (and a swapped engine's own parts) back to its own stock
+ * ones, which tune values go back to stock with them, and the garage list query with the fixed class and PI in place of the garage row's. */
 #define EF_SLOTS 43
 #define EF_NONE 0xffffffffu
 #define EF_TUNE 44
@@ -30,12 +30,24 @@ typedef struct {
 
 enum { EF_CLEAN, EF_FIXED, EF_CANNOT };
 
-/* A part row a mod added to the game's database at run time, not a row of the game's own [C: FH2 Extra Options 0.6.0 winmm.dll SQL]: with
- * AllEngineSwaps it inserts List_UpgradeEngine rows "1073741824 + S.Ordinal*32768 + E.EngineID AS Id, S.Ordinal AS Ordinal, ... E.EngineID" (the donor's
+/* The swap rows FH2 Extra Options (RokkuDayo) adds to the game's database at run time [C: FH2 Extra Options 0.6.0 winmm.dll SQL]: with
+ * AllEngineSwaps List_UpgradeEngine rows "1073741824 + S.Ordinal*32768 + E.EngineID AS Id, S.Ordinal AS Ordinal, ... E.EngineID" (the donor's
  * engine under the player's own car), with AllTransmissionSwaps List_UpgradeDrivetrainTransmission rows "536870912 + T.DrivetrainID*65536 + ..."
- * (a donor's gearbox under the player's own drivetrain), so by its owner such a row looks like the car's own. The game's own part ids end at 5,000,004
- * (the server's database of 2026-11-19, all 43 tables); anything from 0x20000000 up is a mod's row and goes back to stock like a foreign one. */
-#define EF_MOD_ROW_MIN 0x20000000u
+ * (a donor's gearbox under the player's own drivetrain), so by its owner such a row looks like the car's own; its id says what it is. The game's
+ * own part ids end at 5,000,004 (the server's database of 2026-11-19, all 43 tables). */
+#define EF_MOD_ROW_MIN 0x20000000u          /* the lowest id of a swap row; event_fix.inc reads no rows from here up */
+#define EF_EO_GEARBOX_MIN 0x20000000u       /* AllTransmissionSwaps: 536870912 + ... */
+#define EF_EO_ENGINE_MIN 0x40000000u        /* AllEngineSwaps: 1073741824 + ... */
+#define EF_ENGINE_SLOT 0
+#define EF_GEARBOX_SLOT 31
+
+/* 1 when slot k's part `id` is one of Extra Options' swap rows: an engine from 1073741824 up, a gearbox from 536870912 below that */
+static int ef_eo_swap_row(int k, unsigned id)
+{
+    if (k == EF_ENGINE_SLOT) return id >= EF_EO_ENGINE_MIN;
+    if (k == EF_GEARBOX_SLOT) return id >= EF_EO_GEARBOX_MIN && id < EF_EO_ENGINE_MIN;
+    return 0;
+}
 
 /* who a row of slot k must belong to on car `car` with the parts `parts` -> 1 and *who, 0 when it cannot be told */
 static int ef_expected(unsigned car, int k, const unsigned *parts, const ef_ops *ops, unsigned *who)
@@ -54,43 +66,64 @@ static int ef_expected(unsigned car, int k, const unsigned *parts, const ef_ops 
     return 0;
 }
 
-/* Car `car` with the part ids `in`: every part that belongs to another owner than the car's own (an engine row of another car, a gearbox of another
- * drivetrain, a camshaft of another engine, ...) becomes the stock part of the car's own owner; nothing else changes. The slots go in order, so the
- * engine, drivetrain and body (0-2) are the car's own before the parts that belong to them are judged: when a foreign engine goes back to stock,
- * the swapped engine's own parts are foreign to the stock engine and follow it. A part slot whose own owner has no stock row becomes empty (no turbo
- * on an engine that has none); the engine, drivetrain, body and tires cannot, so such a car is EF_CANNOT and left as it is. A mod's added row
- * (EF_MOD_ROW_MIN) is foreign whatever owner it claims; another part id that is no row of its slot's table is not judged here (picker_pi.inc,
- * event_stock.inc and the server handle those).
+/* Car `car` with the part ids `in`: only a swapped engine (slot 0) or gearbox (slot 31) goes back to stock, nothing else (the user, 2026-11-20:
+ * other mods' parts, such as extra upgrades and tires, stopped working in online events when every part of another owner went back to stock).
+ * A swap is an engine row of another car, a gearbox of another drivetrain than the car's own, or one of Extra Options' swap rows
+ * (ef_eo_swap_row), whatever owner it claims. A swapped engine goes back to the car's stock engine, and the parts that belong to an engine
+ * (slots 12-29: camshaft, turbo, ...) follow it when they are not the stock engine's: each becomes the stock engine's stock part, or empty
+ * when it has none (no turbo on an engine that has none); one whose owner cannot be read (a mod's row from EF_MOD_ROW_MIN up) follows too.
+ * A swapped gearbox goes back to the stock gearbox of the car's own drivetrain. An engine with no stock row to go back to makes the car
+ * EF_CANNOT, left as it is; a gearbox with none becomes empty. Another part id that is no row of its slot's table is not judged here
+ * (picker_pi.inc, event_stock.inc and the server handle those).
  * -> EF_CLEAN (out = in), EF_FIXED (out and *changed, one bit per slot replaced) or EF_CANNOT. */
 static int ef_fix(unsigned car, const unsigned in[EF_SLOTS], const ef_ops *ops, unsigned out[EF_SLOTS], unsigned long long *changed)
 {
-    int k;
+    static const int k_swaps[2] = {EF_ENGINE_SLOT, EF_GEARBOX_SLOT};
+    int i, k;
     unsigned have = 0, want = 0, stock = 0;
 
     *changed = 0;
     for (k = 0; k < EF_SLOTS; k++) {
         out[k] = in[k];
     }
-    for (k = 0; k < EF_SLOTS; k++) {
-        int added;
-        if (g_ef_owner[k] == EF_NO_OWNER || out[k] == EF_NONE) {
+    for (i = 0; i < 2; i++) {
+        int swap;
+        k = k_swaps[i];
+        if (out[k] == EF_NONE) {
             continue;
         }
-        added = out[k] >= EF_MOD_ROW_MIN;
-        if (!added && !ops->owner(ops->ctx, k, out[k], &have)) {
-            continue;
+        swap = ef_eo_swap_row(k, out[k]);
+        if (!swap && (out[k] >= EF_MOD_ROW_MIN || !ops->owner(ops->ctx, k, out[k], &have))) {
+            continue;           /* not a row event_fix.inc knows the owner of: not judged */
         }
-        if (!ef_expected(car, k, out, ops, &want) || (!added && have == want)) {
+        if (!ef_expected(car, k, out, ops, &want) || (!swap && have == want)) {
             continue;
         }
         if (ops->stock(ops->ctx, k, want, &stock)) {
             out[k] = stock;
-        } else if (k <= 2 || k == 8) {
+        } else if (k == EF_ENGINE_SLOT) {
             return EF_CANNOT;
         } else {
             out[k] = EF_NONE;
         }
         *changed |= 1ull << k;
+        if (k != EF_ENGINE_SLOT) {
+            continue;
+        }
+        /* the swapped engine's own parts follow it */
+        if (!ef_expected(car, 12, out, ops, &want)) {
+            continue;
+        }
+        for (k = 12; k <= 29; k++) {
+            if (g_ef_owner[k] != EF_ENGINE || out[k] == EF_NONE) {
+                continue;
+            }
+            if (out[k] < EF_MOD_ROW_MIN && (!ops->owner(ops->ctx, k, out[k], &have) || have == want)) {
+                continue;       /* the stock engine's own part, or no row of its table: stays */
+            }
+            out[k] = ops->stock(ops->ctx, k, want, &stock) ? stock : EF_NONE;
+            *changed |= 1ull << k;
+        }
     }
     return *changed ? EF_FIXED : EF_CLEAN;
 }

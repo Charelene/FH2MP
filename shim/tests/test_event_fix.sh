@@ -117,22 +117,57 @@ int main(void)
     in[31] = 536870912u + 61u * 65536u + 90u * 8u + 1u;
     CHECK(ef_fix(1005, in, &g_ops, out, &changed) == EF_FIXED && changed == (1ull << 31) && out[31] == 61031);
 
-    /* a bumper of another car's body goes back to the car's own body's stock bumper */
+    /* Only the engine and the gearbox are judged (the user, 2026-11-20: mods' extra upgrades and tires stopped working in online events). A bumper
+     * of another car's body, another car's tires, another drivetrain, a camshaft of another engine on the car's own engine and a mod's added rows
+     * (ids from 0x20000000 up) in any other slot all stay as built. */
     base(in);
     in[34] = 2000340;
-    CHECK(ef_fix(1005, in, &g_ops, out, &changed) == EF_FIXED && changed == (1ull << 34) && out[34] == 1005340);
+    CHECK(ef_fix(1005, in, &g_ops, out, &changed) == EF_CLEAN && same(in, out));
+    base(in);
+    in[8] = 2000080;
+    CHECK(ef_fix(1005, in, &g_ops, out, &changed) == EF_CLEAN && same(in, out));
+    base(in);
+    in[1] = 2000100; in[31] = 90031;          /* another car's drivetrain with that drivetrain's own gearbox */
+    CHECK(ef_fix(1005, in, &g_ops, out, &changed) == EF_CLEAN && same(in, out));
+    base(in);
+    in[12] = 90002;
+    CHECK(ef_fix(1005, in, &g_ops, out, &changed) == EF_CLEAN && same(in, out));
+    base(in);
+    in[8] = 0x20000000u + 8u; in[12] = 0x20000000u + 12u; in[24] = 0x30000000u; in[33] = 0x7fffffffu; in[34] = 0x40000000u + 34u;
+    CHECK(ef_fix(1005, in, &g_ops, out, &changed) == EF_CLEAN && same(in, out));
+
+    /* a gearbox id in the engine swap range, or an engine id in the gearbox swap range, is no Extra Options swap row: not judged */
+    base(in);
+    in[31] = 0x40000000u + 5u;
+    CHECK(ef_fix(1005, in, &g_ops, out, &changed) == EF_CLEAN && same(in, out));
+    base(in);
+    in[0] = 0x20000000u + 5u;
+    CHECK(ef_fix(1005, in, &g_ops, out, &changed) == EF_CLEAN && same(in, out));
+
+    /* with a swapped engine, a mod's added engine part (owner unknown) follows the engine back; a mod's tires stay */
+    base(in);
+    in[0] = 2000001; in[12] = 0x20000000u + 12u; in[8] = 0x20000000u + 8u;
+    base(want);
+    want[12] = 50100; want[8] = 0x20000000u + 8u;
+    CHECK(ef_fix(1005, in, &g_ops, out, &changed) == EF_FIXED && changed == ((1ull << 0) | (1ull << 12)) && same(out, want));
+
+    /* an engine swap and a gearbox swap together: both go back, the rest stays */
+    base(in);
+    in[0] = 1073741824u + 1005u * 32768u + 900u; in[12] = 90002; in[31] = 536870912u + 61u * 65536u + 90u * 8u + 1u; in[34] = 2000340;
+    base(want);
+    want[12] = 50100; want[31] = 61031; want[34] = 2000340;
+    CHECK(ef_fix(1005, in, &g_ops, out, &changed) == EF_FIXED && changed == ((1ull << 0) | (1ull << 12) | (1ull << 31)) && same(out, want));
 
     /* a part id that is no row of its table is not judged here (the unknown-part checks own it) */
     base(in);
     in[12] = 77777;
     CHECK(ef_fix(1005, in, &g_ops, out, &changed) == EF_CLEAN && same(in, out));
 
-    /* a car whose foreign tires or engine have no stock row of its own to go back to cannot be fixed: left as built */
+    /* foreign tires are not judged, so a car with no stock tires of its own is clean; a swapped engine with no stock engine to go back to cannot be
+     * fixed: left as built */
     base(in);
     in[0] = 3000001; in[1] = 3000100; in[2] = 3000000; in[8] = 2000080; in[12] = EF_NONE; in[31] = EF_NONE; in[34] = EF_NONE;
-    CHECK(ef_fix(3000, in, &g_ops, out, &changed) == EF_CANNOT);
-    in[8] = EF_NONE;
-    CHECK(ef_fix(3000, in, &g_ops, out, &changed) == EF_CLEAN);                    /* the same car without those tires is clean */
+    CHECK(ef_fix(3000, in, &g_ops, out, &changed) == EF_CLEAN && same(in, out));
     base(in);
     in[0] = 2000001;
     CHECK(ef_fix(4000, in, &g_ops, out, &changed) == EF_CANNOT);
