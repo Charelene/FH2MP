@@ -223,8 +223,16 @@ var (
 	// counted them as racers whose car choice was pending, and 121 of the 123 events that ended "nobody loaded" had such a player outside them).
 	// FH2MP_RACEFLAG_CLEAR=0 turns it off.
 	RaceFlagClear = envStr("FH2MP_RACEFLAG_CLEAR", "1") != "0"
-	LspURL        = envStr("FH2MP_LSP", "http://127.0.0.1:5080")
-	TracePackets  = Verbosity.Enabled(diag.Trace, "packet")
+	// EventFlowV2 (user design 2026-11-20, after dev tests where one invitee whose car was refused held everyone for the 45 s join grace): the join
+	// wait is EventJoinSeconds; at its end the event starts at once, an invitee whose Ready was refused on its car is a participant and gets the
+	// event car select like everybody (nobody joins after the wait); a participant whose picked car does not fit is out EventPickJudgeSeconds
+	// after it left the car select (its game's new car numbers have arrived by then), not when everybody has loaded. FH2MP_EVENT_FLOW=1 = the
+	// old flow (RaceInviteSeconds, the RaceJoinGraceSeconds hold, the check after loading only).
+	EventFlowV2           = envStr("FH2MP_EVENT_FLOW", "2") != "1"
+	EventJoinSeconds      = envFloat("FH2MP_EVENT_JOIN_SECONDS", 10)
+	EventPickJudgeSeconds = 3.0
+	LspURL                = envStr("FH2MP_LSP", "http://127.0.0.1:5080")
+	TracePackets          = Verbosity.Enabled(diag.Trace, "packet")
 )
 
 // ValidatePolicies is the start-up check Python does at import time.
