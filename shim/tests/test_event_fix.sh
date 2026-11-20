@@ -200,6 +200,30 @@ int main(void)
         /* whole words only */
         CHECK(ef_rewrite_sql("x Garage.PerformanceIndexes MyGarage.ClassId y", rows, 2, sql, sizeof sql) == 0);
     }
+    /* the copy of the garage view: the fixed car's numbers go into it, and the list reads it in place of the view (user report 2026-11-20: an
+     * S1 807 car, A 745 with its own gearbox, showed S1 807 in an A car select) */
+    {
+        ef_row r;
+        char q[1024], out[512];
+        unsigned i;
+        memset(&r, 0, sizeof r);
+        r.garage_id = 12; r.klass = 3; r.pi = 0.7457f;
+        for (i = 0; i < EF_NSTATS; i++) r.stat[i] = (float)(i + 1) * 0.5f;
+        r.stat[5] = 312500.0f;     /* SimPeakPower in watts: large values print whole */
+        r.stat[10] = -0.25f;       /* PeakIntakePSI can be negative (vacuum) */
+        CHECK(ef_update_sql("FH2MP_EventGarage1", &r, q, sizeof q));
+        CHECK(strncmp(q, "UPDATE FH2MP_EventGarage1 SET ClassID = 3, PerformanceIndex = 0.745700", 70) == 0);
+        CHECK(strstr(q, ", MaxUpgradeWizardPerfRating = 0.745700") != NULL);  /* not listed as upgradable into a higher class */
+        CHECK(strstr(q, ", SpeedRating = 0.500000000, AccelerationRating = 1.000000000,") != NULL);
+        CHECK(strstr(q, ", SimPeakPower = 312500.000000000,") != NULL);
+        CHECK(strstr(q, ", PeakIntakePSI = -0.250000000 WHERE Id = 12") != NULL);
+        CHECK(!ef_update_sql("FH2MP_EventGarage1", &r, q, 40));                   /* does not fit */
+        CHECK(ef_temp_list_sql("SELECT Garage.* , 0 AS IsOwned FROM View_P0_Career_Garage AS Garage  LEFT JOIN Data_Car ON Garage.ModelId=Data_Car.Id WHERE Garage.ClassId=3",
+                               "View_P0_Career_Garage", "FH2MP_EventGarage1", out, sizeof out));
+        CHECK(strcmp(out, "SELECT Garage.* , 0 AS IsOwned FROM FH2MP_EventGarage1 AS Garage  LEFT JOIN Data_Car ON Garage.ModelId=Data_Car.Id WHERE Garage.ClassId=3") == 0);
+        CHECK(!ef_temp_list_sql("SELECT Garage.* FROM Other AS Garage WHERE 1", "View_P0_Career_Garage", "C", out, sizeof out));   /* not that FROM */
+        CHECK(!ef_temp_list_sql("SELECT * FROM V AS Garage , (SELECT 1 FROM V AS Garage ) x", "V", "C", out, sizeof out));          /* twice */
+    }
     /* the event car select window: open for 2 minutes after its countdown or list, closed by the race start (win1 2026-11-20 04:05 UTC: the
      * Free Roam car committed 12 s after the race start was fixed like an event car) */
     {

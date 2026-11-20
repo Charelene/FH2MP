@@ -127,10 +127,21 @@ static unsigned long long ef_tune_mask(unsigned long long changed)
  * CarCollection_AppendPerfRatingRestriction (+c16500: Garage.PerformanceIndex ranges) [C: decompile]. Those are the only qualified uses of the two
  * columns in that query (the select list takes Garage.*, the order is by the unqualified PerformanceIndex), so each one becomes the fixed value for
  * the cars that have one: "(CASE Garage.Id WHEN <id> THEN <value> ... ELSE Garage.ClassId END)". A car the fix moves out of the event's class then
- * is not listed at all, one it moves into it is. */
+ * is not listed at all, one it moves into it is. That rewrite is the fallback: the list is first pointed at a copy of the garage view with the
+ * fixed numbers in it (ef_update_sql, ef_temp_list_sql), so the tiles and details show the class, PI and ratings the car races with (user
+ * report 2026-11-20: an S1 807 Mercedes, A 745 with its own gearbox, showed as S1 807 in an A car select). */
+#define EF_NSTATS 11
+/* the garage's other columns CCarInGarage::UpdatePerformanceColumns (+2cfa50) writes from the ratings block, as u32 word indices of that block
+ * (its "UPDATE %s SET ClassID = %u, PerformanceIndex = %.12f, SpeedRating = ..." and the +0x260.. copies before it) [C: decompile] */
+static const char *const k_ef_stat_col[EF_NSTATS] = {"SpeedRating", "AccelerationRating", "LaunchRating", "BrakingRating", "HandlingRating",
+                                                     "SimPeakPower", "SimPeakAngVel", "SimPeakTorque", "SimPeakTorqueAngVel", "SimRedlineAngVel",
+                                                     "PeakIntakePSI"};
+static const unsigned char k_ef_stat_word[EF_NSTATS] = {0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x00, 0x02, 0x07, 0x08, 0x0a, 0x0b};
+#define EF_TEMP_GARAGE "FH2MP_EventGarage"
 typedef struct {
     unsigned garage_id, klass;
     float pi;
+    float stat[EF_NSTATS];
 } ef_row;
 
 typedef struct {
@@ -254,6 +265,76 @@ static int ef_rewrite_sql(const char *sql, const ef_row *rows, unsigned n, char 
     }
     if (b.full) return -1;
     return replaced;
+}
+
+/* a float of any sign as a decimal with nine places (NaN as 0) */
+static void ef_putf(ef_buf *b, float f)
+{
+    double v = (double)f;
+    if (v != v) v = 0;
+    if (v < 0) {
+        ef_put(b, "-", 1);
+        v = -v;
+    }
+    if (v > 1e15) v = 1e15;
+    ef_putpi(b, (float)v);
+}
+
+/* "UPDATE <table> SET ClassID = .., PerformanceIndex = .., MaxUpgradeWizardPerfRating = <the PI>, <the EF_NSTATS columns> WHERE Id = .." for the
+ * copy of the garage view: the fixed car's numbers (MaxUpgradeWizardPerfRating gets its PI so it is not listed as a car that could be upgraded
+ * into the class: nothing is upgraded in an online event). -> 1, 0 when it does not fit out[cap]. */
+static int ef_update_sql(const char *table, const ef_row *r, char *out, unsigned cap)
+{
+    ef_buf b = {out, 0, cap, 0};
+    unsigned i;
+    if (!cap) return 0;
+    out[0] = 0;
+    ef_puts(&b, "UPDATE ");
+    ef_puts(&b, table);
+    ef_puts(&b, " SET ClassID = ");
+    ef_putu(&b, r->klass);
+    ef_puts(&b, ", PerformanceIndex = ");
+    ef_putpi(&b, r->pi);
+    ef_puts(&b, ", MaxUpgradeWizardPerfRating = ");
+    ef_putpi(&b, r->pi);
+    for (i = 0; i < EF_NSTATS; i++) {
+        ef_puts(&b, ", ");
+        ef_puts(&b, k_ef_stat_col[i]);
+        ef_puts(&b, " = ");
+        ef_putf(&b, r->stat[i]);
+    }
+    ef_puts(&b, " WHERE Id = ");
+    ef_putu(&b, r->garage_id);
+    return !b.full;
+}
+
+/* the list query `sql` with its " FROM <table> AS Garage " (ef_garage_query's table) reading the copy `copy` instead, into out[cap] ->
+ * 1, 0 when that FROM is not there exactly once or the result does not fit */
+static int ef_temp_list_sql(const char *sql, const char *table, const char *copy, char *out, unsigned cap)
+{
+    char from[200];
+    ef_buf f = {from, 0, sizeof from, 0}, b = {out, 0, cap, 0};
+    const char *s, *hit = NULL;
+    unsigned n, i;
+    ef_puts(&f, " FROM ");
+    ef_puts(&f, table);
+    ef_puts(&f, " AS Garage ");
+    if (f.full || !cap) return 0;
+    for (n = 0; from[n]; n++) {}
+    for (s = sql; *s; s++) {
+        for (i = 0; i < n && s[i] == from[i]; i++) {}
+        if (i < n) continue;
+        if (hit) return 0;
+        hit = s;
+    }
+    if (!hit) return 0;
+    out[0] = 0;
+    ef_put(&b, sql, (unsigned)(hit - sql));
+    ef_puts(&b, " FROM ");
+    ef_puts(&b, copy);
+    ef_puts(&b, " AS Garage ");
+    ef_puts(&b, hit + n);
+    return !b.full;
 }
 
 /* The table that holds the garage's part ids for the list's FROM name. The list reads the view CareerDb_CreateGarageView (+986240) makes,

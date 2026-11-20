@@ -47,7 +47,7 @@ typedef void (*ef_query_fn)(void *collection, const char *sql, void *database, v
 typedef struct { unsigned id, owner, installs; unsigned char stock; } ef_own;
 typedef struct { unsigned owner, id, order; } ef_stk;
 typedef struct { ef_own *rows; unsigned n; ef_stk *stock; unsigned ns; } ef_table;
-typedef struct { unsigned car, hash, kind, klass; float pi; unsigned long long changed; unsigned fixed[EF_SLOTS]; } ef_verdict;
+typedef struct { unsigned car, hash, kind, klass; float pi; float stat[EF_NSTATS]; unsigned long long changed; unsigned fixed[EF_SLOTS]; } ef_verdict;
 
 static ef_table g_ef_tab[EF_SLOTS];
 static volatile LONG g_ef_state;                /* 0 not loaded, 1 loaded, -1 the tables could not be read (off for this game) */
@@ -398,10 +398,10 @@ static int ef_writable(const void *p, SIZE_T n)
     return (const unsigned char *)p + n <= (const unsigned char *)m.BaseAddress + m.RegionSize;
 }
 
-static int ef_rescore(unsigned car, const unsigned block[2 + EF_SLOTS], unsigned *klass, float *pi)
+static int ef_rescore(unsigned car, const unsigned block[2 + EF_SLOTS], unsigned *klass, float *pi, float stat[EF_NSTATS])
 {
     unsigned char *ratings = NULL;
-    unsigned k = 0;
+    unsigned k = 0, i;
     float p = 0;
 
     if (!g_ef_snapshot || !g_ef_snap_out || !read_game_memory(g_ppi_img + EF_RATINGS_RVA, &ratings, sizeof ratings) || !ratings ||
@@ -411,6 +411,9 @@ static int ef_rescore(unsigned car, const unsigned block[2 + EF_SLOTS], unsigned
     g_ef_snapshot(g_ef_snap_out, car, block);
     memcpy(&p, ratings + EF_RATINGS_PI, sizeof p);
     memcpy(&k, ratings + EF_RATINGS_CLASS, sizeof k);
+    for (i = 0; i < EF_NSTATS; i++) {
+        memcpy(&stat[i], ratings + 4u * k_ef_stat_word[i], sizeof stat[i]);   /* the ratings, power and torque the garage row keeps */
+    }
     memcpy(ratings, g_ef_save, sizeof g_ef_save);
     if (k > 15 || !ppi_pi_usable((double)p)) {
         return 0;
@@ -439,7 +442,7 @@ static void ef_judge(unsigned car, unsigned wheel, const unsigned parts[EF_SLOTS
         block[1] = wheel;
         memcpy(block + 2, v->fixed, sizeof v->fixed);
         QueryPerformanceCounter(&t0);
-        if (!ef_rescore(car, block, &v->klass, &v->pi)) {
+        if (!ef_rescore(car, block, &v->klass, &v->pi, v->stat)) {
             v->kind = EF_CANNOT;
             ef_log_decline("the game's performance simulation gave no usable class and PI for the fixed parts", car);
         }
@@ -468,15 +471,77 @@ static int ef_in_select(void)
     return ef_select_open(GetTickCount64(), (ULONGLONG)g_cs_count_armed_at, (ULONGLONG)g_ef_list_at, (ULONGLONG)g_race_start_msg_at, EF_EVENT_WINDOW_MS);
 }
 
+/* ---- the copy of the garage view the event car list reads ----
+ * A temporary table of the list's own database connection (never saved): "CREATE TEMP TABLE <copy> AS SELECT * FROM <view>", then the fixed
+ * numbers of each fixed car (ef_update_sql). Four names in turn, so a list whose row set were still open never has its table dropped under it.
+ * The copy is only used once a read of it gives the first fixed car's class back. -> 1, else 0 and *why. */
+static LONG g_ef_copy_turn;
+static int ef_exec(void *db, const char *sql)
+{
+    void *r = ppi_query(db, sql);
+    if (r) ppi_release(r);
+    return r != NULL;
+}
+static int ef_temp_garage(void *db, const char *view, const ef_row *rows, unsigned n, char *copy, unsigned copy_cap, const char **why)
+{
+    char q[1024];
+    void *row;
+    ef_get_fn get;
+    ppi_key kk;
+    unsigned i;
+    int k = -1;
+
+    copy[0] = 0;
+    ef_cat(copy, copy_cap, EF_TEMP_GARAGE);
+    ef_cat_dec(copy, copy_cap, (unsigned)(InterlockedIncrement(&g_ef_copy_turn) & 3));
+    q[0] = 0;
+    ef_cat(q, sizeof q, "DROP TABLE IF EXISTS ");
+    ef_cat(q, sizeof q, copy);
+    ef_exec(db, q);
+    q[0] = 0;
+    ef_cat(q, sizeof q, "CREATE TEMP TABLE ");
+    ef_cat(q, sizeof q, copy);
+    ef_cat(q, sizeof q, " AS SELECT * FROM ");
+    ef_cat(q, sizeof q, view);
+    ef_exec(db, q);
+    for (i = 0; i < n; i++) {
+        if (!ef_update_sql(copy, &rows[i], q, sizeof q)) {
+            *why = "an update of the copy does not fit";
+            return 0;
+        }
+        ef_exec(db, q);
+    }
+    q[0] = 0;
+    ef_cat(q, sizeof q, "SELECT ClassID AS fk FROM ");
+    ef_cat(q, sizeof q, copy);
+    ef_cat(q, sizeof q, " WHERE Id = ");
+    ef_cat_dec(q, sizeof q, rows[0].garage_id);
+    row = ppi_query(db, q);
+    if (!row) {
+        *why = "the copy cannot be read (the temporary table was not made)";
+        return 0;
+    }
+    get = ef_getter(row);
+    kk = ppi_key_for("fk");
+    if (ppi_rows(row) == 1 && get) k = get(row, 0, &kk, -1);
+    ppi_release(row);
+    if (k != (int)rows[0].klass) {
+        *why = "the copy does not hold the fixed numbers";
+        return 0;
+    }
+    return 1;
+}
+
 /* the garage list query `sql` (an event car list of garage table `table`, ef_garage_query) with the fixed values in place, in a HeapAlloc'd buffer
- * the caller frees, or NULL to run it as it is (only with the work flag taken) */
-static char *ef_list_query(const char *sql, const char *table)
+ * the caller frees, or NULL to run it as it is (only with the work flag taken). `same_db`: the list runs on the game's database (ef_database), so it can read a copy made there. */
+static char *ef_list_query(const char *sql, const char *table, int same_db)
 {
     char scan[2048], base[128], *text = NULL;
     void *db, *row;
     ef_row *rows;
-    int n, i, k, replaced;
+    int n, i, k, replaced, shown = 0;
     unsigned fixed = 0, cannot = 0, foreign_cars = 0;
+    const char *copy_why = "no copy was tried";
     double sim_ms = 0;
     LARGE_INTEGER t0, t1;
     ef_get_fn get;
@@ -544,6 +609,7 @@ static char *ef_list_query(const char *sql, const char *table)
             rows[fixed].garage_id = gid;
             rows[fixed].klass = vd->klass;
             rows[fixed].pi = vd->pi;
+            memcpy(rows[fixed].stat, vd->stat, sizeof rows[fixed].stat);
             fixed++;
             foreign_cars++;
         } else if (vd->kind == EF_CANNOT) {
@@ -554,8 +620,22 @@ static char *ef_list_query(const char *sql, const char *table)
     ppi_release(row);
     replaced = 0;
     if (fixed) {
+        char copy[64];
         text = (char *)HeapAlloc(GetProcessHeap(), 0, EF_SQL_MAX);
-        replaced = text ? ef_rewrite_sql(sql, rows, fixed, text, EF_SQL_MAX) : -1;
+        if (!same_db) {
+            copy_why = "the list runs on another database than the game's";
+        } else if (text && ef_temp_garage(db, table, rows, fixed, copy, sizeof copy, &copy_why)) {
+            if (ef_temp_list_sql(sql, table, copy, text, EF_SQL_MAX)) {
+                shown = 1;
+                replaced = 1;
+            } else {
+                copy_why = "the list's FROM is not the expected one";
+            }
+        }
+        if (text && !shown) {
+            replaced = ef_rewrite_sql(sql, rows, fixed, text, EF_SQL_MAX);
+        }
+        if (!text) replaced = -1;
         if (replaced <= 0 && text) {
             HeapFree(GetProcessHeap(), 0, text);
             text = NULL;
@@ -582,7 +662,13 @@ static char *ef_list_query(const char *sql, const char *table)
             log_dec(foreign_cars);
             log_raw(" with parts of other cars (");
             log_dec(fixed);
-            log_raw(" judged by their fixed class and PI, ");
+            if (shown) {
+                log_raw(" listed and shown by their fixed class, PI and ratings (a copy of the garage view), ");
+            } else {
+                log_raw(" listed by their fixed class and PI, shown as built: ");
+                log_raw(copy_why);
+                log_raw(", ");
+            }
             log_dec(cannot);
             log_raw(" left as built); ");
             if (replaced < 0) {
@@ -606,7 +692,11 @@ static void ef_query_hook(void *collection, const char *sql, void *database, voi
     if (g_ef_on && sql && ef_garage_query(sql, table, sizeof table) && ppi_in_session(g_ppi_img)) {
         g_ef_list_at = (LONG64)GetTickCount64();
         if (ef_work_begin()) {
-            use = ef_list_query(sql, table);
+            /* the copy is made on the game's database (ef_database); the list must run on that one, or it would not see the copy. The hook's third
+             * argument is that database or points at it [I: decompile of +140c3f0's callers]: anything else, and the list is only rewritten. */
+            void *gdb = ef_database(), *pointed = NULL;
+            int same = gdb && (database == gdb || (database && read_game_memory(database, &pointed, sizeof pointed) && pointed == gdb));
+            use = ef_list_query(sql, table, same);
             ef_work_end();
         }
     }
