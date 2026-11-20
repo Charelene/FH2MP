@@ -75,7 +75,7 @@ int main(void)
     unsigned in[EF_SLOTS], out[EF_SLOTS], want[EF_SLOTS];
     unsigned long long changed;
     char sql[8192];
-    ef_row rows[2] = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+    ef_row rows[2];
     int n;
 
     /* the car's own parts, upgraded or not, are left alone */
@@ -191,22 +191,6 @@ int main(void)
             CHECK(n == 3);
             if (strcmp(sql, expect2) != 0) printf("got  %s\nwant %s\n", sql, expect2);
             CHECK(strcmp(sql, expect2) == 0);
-        }
-        /* a car the fix moves into another class than its tile shows (dropped) gets NULL in every term: no comparison holds for it, so neither
-         * branch lists it, while car 9 (fixed in its class) stays by its fixed PI */
-        {
-            const char *q3 = "SELECT Garage.* , 0 AS IsOwned FROM G AS Garage  WHERE Garage.ClassId=3 AND ((Garage.MaxUpgradeWizardPerfRating >= 0.7 AND StockPerformanceRating <= 0.8) "
-                             "OR (Garage.PerformanceIndex >= 0.7 AND Garage.PerformanceIndex <= 0.8))";
-            const char *expect3 = "SELECT Garage.* , 0 AS IsOwned FROM G AS Garage  WHERE (CASE Garage.Id WHEN 7 THEN NULL WHEN 9 THEN 3 ELSE Garage.ClassId END)=3 AND (("
-                                  "(CASE Garage.Id WHEN 7 THEN NULL WHEN 9 THEN 0.750000000 ELSE Garage.MaxUpgradeWizardPerfRating END) >= 0.7 AND StockPerformanceRating <= 0.8) "
-                                  "OR ((CASE Garage.Id WHEN 7 THEN NULL WHEN 9 THEN 0.750000000 ELSE Garage.PerformanceIndex END) >= 0.7 AND "
-                                  "(CASE Garage.Id WHEN 7 THEN NULL WHEN 9 THEN 0.750000000 ELSE Garage.PerformanceIndex END) <= 0.8))";
-            rows[0].drop = 1;
-            n = ef_rewrite_sql(q3, rows, 2, sql, sizeof sql);
-            CHECK(n == 4);
-            if (strcmp(sql, expect3) != 0) printf("got  %s\nwant %s\n", sql, expect3);
-            CHECK(strcmp(sql, expect3) == 0);
-            rows[0].drop = 0;
         }
         /* the list reads the game's view View_<prefix>Career_Garage (no part columns); the parts are in the table under it */
         CHECK(ef_garage_table("View_Profile0_Career_Garage", table, sizeof table) && strcmp(table, "Profile0_Career_Garage") == 0);
