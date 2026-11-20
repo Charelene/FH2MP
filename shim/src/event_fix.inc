@@ -728,6 +728,67 @@ static int ef_attrs(void *car, unsigned char *out)
     return 1;
 }
 
+/* ---- back in Free Roam: the player's own car again ----
+ * A car committed with fixed parts stays the player's car after the event: the game keeps the event car, it reloads nothing on the way back
+ * (dev 2026-11-20 04:40 UTC: win1 was refused for an S1 event in its Mercedes as A 748, the setup it had raced an A event with). On that way
+ * the state flow asks IsInGarageCar (return_to_free_roam; fade_and_exit_rental_car when it is left in Free Roam before the race; network.xml
+ * is_in_current_garage_car), whose vfunc_6 (+8a4880) compares the loaded car's garage id with the career's current car and fires InGarageCar
+ * (+0x28) or NotInGarageCar (+0x58) through FUN_141925260 [C: decompile + disassembly]. After a fixed commit the first check outside the event
+ * (not in its car select while this console races) answers NotInGarageCar, so the game's exit_rental_car unloads the car, selects the current
+ * garage car and loads it with its own parts and tune. A commit of another car or build first (the player changed car) clears it; the commit of
+ * that reload is left alone (15 s). The other askers (Free Roam entry and exit, Monthly Rivals from the pause menu) then reload once too. */
+#define EF_GARAGE_CHECK_RVA 0x8a4880u
+#define EF_FIRE_RVA 0x1925260u
+#define EF_RESTORE_GUARD_MS 15000u
+static int (*g_ef_garage_check_orig)(void *);
+static void (*g_ef_fire)(void *, void *);
+static volatile LONG g_ef_restore_due;
+static unsigned g_ef_restore_car, g_ef_restore_hash;
+static volatile LONG64 g_ef_restoring_at;
+
+/* this console is ParticipatingInRace: the local ConsoleSynced ([[+34af7a0]+0x18]) vtable slot 24, its getter (NetworkWaitForParticipatingInRace
+ * +8e1180 reads it) -> 1 and *racing, 0 when it cannot be read */
+static int ef_local_racing(int *racing)
+{
+    unsigned char *mgr = NULL, *console = NULL; void **vtable = NULL; void *fn = NULL;
+    if (!g_ppi_img || !read_game_memory(g_ppi_img + 0x34af7a0u, &mgr, sizeof mgr) || !mgr || !read_game_memory(mgr + 0x18, &console, sizeof console) ||
+        !console || !read_game_memory(console, &vtable, sizeof vtable) || !vtable || !read_game_memory((unsigned char *)vtable + 24 * sizeof(void *), &fn, sizeof fn) ||
+        !fn || (unsigned char *)fn < g_ppi_img || (unsigned char *)fn >= g_ppi_img + FH2_SIZE_OF_IMAGE) {
+        return 0;
+    }
+    *racing = ((char (*)(void *))fn)(console) != 0;
+    return 1;
+}
+
+static int ef_garage_check_hook(void *self)
+{
+    int racing = 0;
+    if (g_ef_restore_due && g_ef_fire && !(ef_in_select() && ef_local_racing(&racing) && racing) && ppi_in_session(g_ppi_img)) {
+        InterlockedExchange(&g_ef_restore_due, 0);
+        InterlockedExchange64(&g_ef_restoring_at, (LONG64)GetTickCount64());
+        log_begin();
+        log_raw("eventfix: back from the event in car ");
+        log_dec(g_ef_restore_car);
+        log_raw(" with its fixed parts: the game is told it is not in its garage car, so it loads the player's own car with its own parts and tune\n");
+        g_ef_fire(self, (unsigned char *)self + 0x58);
+        return 1;
+    }
+    return g_ef_garage_check_orig(self);
+}
+
+/* a commit outside an event's car select: another car or build than the fixed one means the restore is not due any more */
+static void ef_commit_outside(const unsigned char *self, unsigned car_at, unsigned wheel_at, unsigned parts_at)
+{
+    unsigned car, wheel, parts[EF_SLOTS];
+    if (!g_ef_restore_due || !self) return;
+    memcpy(&car, self + car_at, sizeof car);
+    memcpy(&wheel, self + wheel_at, sizeof wheel);
+    memcpy(parts, self + parts_at, sizeof parts);
+    if (car != g_ef_restore_car || ef_hash(wheel, parts) != g_ef_restore_hash) {
+        InterlockedExchange(&g_ef_restore_due, 0);
+    }
+}
+
 /* ---- the race (event_stock.inc's commit hook) ---- */
 /* The pending block `self` of the online choices (ES_* offsets): a car with parts of other cars gets the fixed parts, the stock tune values that belong
  * to them and the fixed class and PI before the game commits it. -> 1 when changed. */
@@ -742,6 +803,9 @@ static int ef_commit(unsigned char *self, unsigned car_at, unsigned wheel_at, un
 
     if (!g_ef_on) {
         return 0;
+    }
+    if (g_ef_restoring_at && GetTickCount64() - (ULONGLONG)g_ef_restoring_at < EF_RESTORE_GUARD_MS) {
+        return 0;   /* the reload of the player's own car after the event (ef_garage_check_hook): its parts stay */
     }
     memcpy(&car, self + car_at, sizeof car);
     memcpy(&wheel, self + wheel_at, sizeof wheel);
@@ -795,6 +859,9 @@ static int ef_commit(unsigned char *self, unsigned car_at, unsigned wheel_at, un
     dpi = (double)copy.pi;
     memcpy(self + attrs_at + PPI_OUT_PI, &dpi, sizeof dpi);
     g_ef_fixed_at = (LONG64)GetTickCount64();
+    g_ef_restore_car = car;
+    g_ef_restore_hash = ef_hash(wheel, copy.fixed);
+    InterlockedExchange(&g_ef_restore_due, 1);
     n = InterlockedIncrement(&g_ef_commits);
     if (n <= 20 || n % 50 == 0) {
         log_begin();
@@ -948,6 +1015,19 @@ static int patch_event_fix(void)
             if (plat_hook("eventfix: the fixed car's PI as raced", img + EF_TAMPER_RVA, (void *)ef_tamper_hook, (void **)&g_ef_tamper_orig)) {
                 log_begin();
                 log_raw("hook: eventfix: a fixed car the game's PI check flags reports the PI of the game's lap simulation of its race setup (game+0xf58a90)\n");
+            }
+        }
+    }
+    {
+        static const unsigned char check[13] = {0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xec, 0x20, 0x48, 0x8b, 0xf9};
+        static const unsigned char fire[5] = {0x48, 0x83, 0x7a, 0x10, 0x00};
+        if (code_is("eventfix", "IsInGarageCar", img, EF_GARAGE_CHECK_RVA, check, sizeof check) &&
+            code_is("eventfix", "the state transition", img, EF_FIRE_RVA, fire, sizeof fire)) {
+            g_ef_fire = (void (*)(void *, void *))(img + EF_FIRE_RVA);
+            if (plat_hook("eventfix: the player's own car back in Free Roam", img + EF_GARAGE_CHECK_RVA, (void *)ef_garage_check_hook,
+                          (void **)&g_ef_garage_check_orig)) {
+                log_begin();
+                log_raw("hook: eventfix: after an event raced with a fixed car, the way back to Free Roam loads the player's own car (game+0x8a4880)\n");
             }
         }
     }

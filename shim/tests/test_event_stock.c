@@ -34,6 +34,7 @@ static int g_ef_on;
 static int ef_attrs(void *car, unsigned char *out) { (void)car; (void)out; return 0; }
 static int ef_commit(unsigned char *s, unsigned a, unsigned b, unsigned c, unsigned d, unsigned e) { (void)s; (void)a; (void)b; (void)c; (void)d; (void)e; return 0; }
 static int ef_in_select(void) { return 0; }
+static void ef_commit_outside(const unsigned char *s, unsigned a, unsigned b, unsigned c) { (void)s; (void)a; (void)b; (void)c; }
 #include "src/event_stock.inc"
 
 #define CAR 1005
