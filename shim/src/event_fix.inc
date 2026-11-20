@@ -194,16 +194,13 @@ static void ef_sort_stock(ef_stk *a, unsigned n)
     }
 }
 
-static int ef_row_int(void *row, int index, const char *column, int *out)
+/* The record set's int getter (row set, row index, column name, default), looked up once per record set: ppi_method checks the method with
+ * VirtualQuery, which per value made a big load slow (2026-11-20). */
+typedef int (*ef_get_fn)(void *row, int index, const ppi_key *column, int def);
+
+static ef_get_fn ef_getter(void *row)
 {
-    void *fn = ppi_method(row, EF_ROW_INT_AT);
-    ppi_key key = ppi_key_for(column);
-    *out = -1;
-    if (!fn) {
-        return 0;
-    }
-    *out = ((int (*)(void *, int, const ppi_key *, int))fn)(row, index, &key, -1);
-    return 1;
+    return (ef_get_fn)ppi_method(row, EF_ROW_INT_AT);
 }
 
 static void ef_cat(char *d, unsigned cap, const char *s)
@@ -220,9 +217,14 @@ static int ef_load_table(void *db, int k)
     static const char *const installs_col[3] = {"EngineID", "DrivetrainID", "CarBodyID / 1000"};
     char sql[256];
     void *row;
-    int n, i, v;
+    int n, i;
     ef_table *t = &g_ef_tab[k];
+    ef_get_fn get;
+    ppi_key ka = ppi_key_for("a"), kb = ppi_key_for("b"), kc = ppi_key_for("c"), kd = ppi_key_for("d");
 
+    /* Only the game's own rows: Extra Options' swap switches add about 535,000 gearbox and 125,000 engine rows (its catalogs: 357 drivetrains x
+     * 1,500 gearboxes, 353 cars x 355 engines in the server's database), all from 0x20000000 up, which the rule judges by their id alone. Loading
+     * them all through the game's record set took the game thread long enough to look hung (win1, dev, 2026-11-20 01:06 UTC). */
     sql[0] = 0;
     ef_cat(sql, sizeof sql, "SELECT Id AS a, ");
     ef_cat(sql, sizeof sql, owner_col[g_ef_owner[k]]);
@@ -234,12 +236,14 @@ static int ef_load_table(void *db, int k)
     }
     ef_cat(sql, sizeof sql, " FROM List_Upgrade");
     ef_cat(sql, sizeof sql, g_ppi_table[k]);
+    ef_cat(sql, sizeof sql, " WHERE Id < 536870912");
     row = ppi_query(db, sql);
     if (!row) {
         return 0;
     }
     n = ppi_rows(row);
-    if (n < 0) {
+    get = ef_getter(row);
+    if (n < 0 || (n > 0 && !get)) {
         ppi_release(row);
         return 0;
     }
@@ -251,20 +255,10 @@ static int ef_load_table(void *db, int k)
     }
     for (i = 0; i < n; i++) {
         ef_own *o = &t->rows[t->n];
-        if (!ef_row_int(row, i, "a", &v)) {
-            ppi_release(row);
-            return 0;
-        }
-        o->id = (unsigned)v;
-        ef_row_int(row, i, "b", &v);
-        o->owner = (unsigned)v;
-        ef_row_int(row, i, "c", &v);
-        o->stock = v > 0;
-        o->installs = EF_NONE;
-        if (k <= 2) {
-            ef_row_int(row, i, "d", &v);
-            o->installs = (unsigned)v;
-        }
+        o->id = (unsigned)get(row, i, &ka, -1);
+        o->owner = (unsigned)get(row, i, &kb, -1);
+        o->stock = get(row, i, &kc, 0) > 0;
+        o->installs = k <= 2 ? (unsigned)get(row, i, &kd, -1) : EF_NONE;
         if (o->stock) {
             t->stock[t->ns].owner = o->owner;
             t->stock[t->ns].id = o->id;
@@ -476,10 +470,12 @@ static char *ef_list_query(const char *sql, const char *table)
     char scan[2048], *text = NULL;
     void *db, *row;
     ef_row *rows;
-    int n, i, k, v, replaced;
+    int n, i, k, replaced;
     unsigned fixed = 0, cannot = 0, foreign_cars = 0;
     double sim_ms = 0;
     LARGE_INTEGER t0, t1;
+    ef_get_fn get;
+    ppi_key kgi, kgc, kgw, kp[EF_SLOTS];
 
     if (!ef_ready() || !g_ef_short_ok || !(db = ef_database())) {
         return NULL;
@@ -501,25 +497,29 @@ static char *ef_list_query(const char *sql, const char *table)
         return NULL;
     }
     n = ppi_rows(row);
+    get = ef_getter(row);
     rows = n > 0 ? (ef_row *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)n * sizeof *rows) : NULL;
-    if (n > 0 && !rows) {
+    if ((n > 0 && !rows) || (n > 0 && !get)) {
+        if (rows) HeapFree(GetProcessHeap(), 0, rows);
         ppi_release(row);
         return NULL;
+    }
+    kgi = ppi_key_for("gi");
+    kgc = ppi_key_for("gc");
+    kgw = ppi_key_for("gw");
+    for (k = 0; k < EF_SLOTS; k++) {
+        char col[8] = "gp";
+        ef_cat_dec(col, sizeof col, (unsigned)k);
+        kp[k] = ppi_key_for(col);   /* short names are kept inside the key itself (under 16 bytes) */
     }
     for (i = 0; i < n; i++) {
         unsigned parts[EF_SLOTS], car, wheel, gid;
         ef_verdict verdict, *vd = &verdict;
-        ef_row_int(row, i, "gi", &v);
-        gid = (unsigned)v;
-        ef_row_int(row, i, "gc", &v);
-        car = (unsigned)v;
-        ef_row_int(row, i, "gw", &v);
-        wheel = (unsigned)v;
+        gid = (unsigned)get(row, i, &kgi, -1);
+        car = (unsigned)get(row, i, &kgc, -1);
+        wheel = (unsigned)get(row, i, &kgw, -1);
         for (k = 0; k < EF_SLOTS; k++) {
-            char col[8] = "gp";
-            ef_cat_dec(col, sizeof col, (unsigned)k);
-            ef_row_int(row, i, col, &v);
-            parts[k] = (unsigned)v;
+            parts[k] = (unsigned)get(row, i, &kp[k], -1);
         }
         ef_judge(car, wheel, parts, &sim_ms, vd);
         if (vd->kind == EF_FIXED) {
