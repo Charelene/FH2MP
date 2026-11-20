@@ -1,0 +1,7 @@
+{
+ "about": "The Azimuth builds the shim's byte signatures were checked against (azimuth.exe's SHA-256), and the newest one. ops/release-prod.sh puts them into the server's launcher config as latestAzimuth and supportedAzimuth (fh2mp-release compat). Was AZIMUTH_VERSION and BUILTIN_AZIMUTH_BUILDS in launcher/fh2mp_launcher/constants.py up to 1.4.8.",
+ "latestAzimuth": "1.0.4",
+ "supportedAzimuth": [
+  {"version": "1.0.4", "sha256": "56d2c9cb6ccf3ae1836dee9676b64285f3a247efa2d12cf02c6c742696b3b092"}
+ ]
+}

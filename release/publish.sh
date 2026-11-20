@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
 # Publishes a reviewed commit: pushes it, waits for its ci.yml checks, stores the signing key as a GitHub secret, tags, and lets the
-# workflow (.github/workflows/release.yml) build Windows + Linux, sign the manifest and create the GitHub release (pre-release if the tag has a '-').
+# workflow (.github/workflows/release.yml) build and sign the shim, take Encore's files (release/launcher.json), sign the manifest and create the
+# GitHub release (pre-release if the tag has a '-').
 #   release/publish.sh v1.0.0-rc1
 # A hotfix (release/versions.sh) is published from its hotfix/X.Y branch: ops/ship-hotfix.sh; a full release from develop: ops/ship.sh.
 # Requires a clean, already committed tree; never stages or commits files.
 # Asks once before anything leaves this machine (ship.sh forwards its tag confirmation).
-# Needs: gh (logged in), the signing key at ~/.config/fh2mp-release/signing.key.
+# Needs: gh (logged in), Go (native/cmd/fh2mp-release, release/reltool.sh), the signing key at ~/.config/fh2mp-release/signing.key.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+. release/reltool.sh
 tag=${1:?usage: release/publish.sh v1.0.0-rc1}
 key=${FH2MP_RELEASE_KEY_FILE:-$HOME/.config/fh2mp-release/signing.key}
 
 full=--full; [ -n "${FH2MP_PUBLISH_HOTFIX:-}" ] && full=
 release/versions.sh --tag "$tag" $full >/dev/null || exit 1
+# Encore's files are pinned with their hashes before anything leaves this machine (the release workflow checks them again)
+reltool launcher-pin check || exit 1
 [ -f "release/notes/$tag.md" ] || echo "note: no release/notes/$tag.md, GitHub will generate the notes"
 [ -f "$key" ] || { echo "signing key not found: $key"; exit 1; }
 gh auth status >/dev/null 2>&1 || { echo "gh is not logged in"; exit 1; }
@@ -21,10 +25,10 @@ git rev-parse "$tag" >/dev/null 2>&1 && { echo "tag $tag already exists"; exit 1
 echo "== personal data scan"
 [ -z "$(git status --porcelain)" ] || { echo 'Commit the reviewed release files first. Nothing was staged or committed.'; exit 1; }
 release_head=$(git rev-parse HEAD)
-hits=$( (git grep -l -I -E "/home/$(whoami)|\.local/share/Steam/steamapps/compatdata/[0-9]" HEAD -- launcher server shim ops release .github third_party 2>/dev/null || true) | wc -l)
+hits=$( (git grep -l -I -E "/home/$(whoami)|\.local/share/Steam/steamapps/compatdata/[0-9]" HEAD -- native shim proto release .github third_party 2>/dev/null || true) | wc -l)
 if [ "$hits" != 0 ]; then
   echo "personal paths/names found in $hits file(s), fix first:"
-  git grep -l -I -E "/home/$(whoami)|\.local/share/Steam/steamapps/compatdata/[0-9]" HEAD -- launcher server shim ops release .github third_party || true
+  git grep -l -I -E "/home/$(whoami)|\.local/share/Steam/steamapps/compatdata/[0-9]" HEAD -- native shim proto release .github third_party || true
   exit 1
 fi
 echo "reviewed commit $release_head"

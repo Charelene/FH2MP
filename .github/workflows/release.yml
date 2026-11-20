@@ -1,17 +1,20 @@
 name: release
 
-# Push a tag like v1.0.0 (it must equal shim/VERSION and launcher/fh2mp_launcher/version.py) to build everything and publish a GitHub release:
-# the shim, the launcher for Windows (installer + portable zip) and Linux (.deb + AppImage), and the signed manifest the launcher updates from.
-# A hotfix tag (release/versions.sh: a patch of the same X.Y line where only one version file equals the tag) builds that component only; the
-# other one's signed manifest entry and files are copied from the release of its version, so the new release holds every file it names.
-# Secrets: RELEASE_SIGNING_KEY = base64 Ed25519 seed from release/keygen.py (its public half is in launcher/fh2mp_launcher/constants.py).
+# Push a tag like v1.5.0 to build the shim and publish a GitHub release: the shim zip (fh2-mods/FH2MP.dll, signed), the launcher's files
+# and the signed manifest launchers update from. Since 1.5.0 the launcher is Encore: it is not built here, its files are taken from Encore's
+# own release as release/launcher.json pins them (repository, tag, file names, SHA-256 and sizes) and published again with this release,
+# because a 1.4.x FH2MP Launcher downloads its update from the manifest's own tag. The Guide (FH2MPGuide.dll) is Encore's too.
+# A tag whose shim/VERSION is another version (release/versions.sh) carries that shim: its signed manifest entry and zip are copied from the
+# release of its version, so the new release holds every file its manifest names.
+# Secrets: RELEASE_SIGNING_KEY = base64 Ed25519 seed (native/cmd/fh2mp-release keygen; its public half is release/release-key.pub, which
+# the 1.4.x launchers and Encore embed).
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
 
-# Read-only by default; only the publish job can write (create the release). Actions are pinned to reviewed commits (tag in the comment), the
-# build tools and Python packages to hashes (security audit 2026-10-25 F04/F15): bump them on purpose, never to a moving tag.
+# Read-only by default; only the publish job can write (create the release). Actions are pinned to reviewed commits (tag in the comment) and
+# the build tools to hashes (security audit 2026-10-25 F04/F15): bump them on purpose, never to a moving tag.
 permissions:
   contents: read
 
@@ -22,7 +25,6 @@ jobs:
       shim: ${{ steps.versions.outputs.shim }}
       launcher: ${{ steps.versions.outputs.launcher }}
       build_shim: ${{ steps.versions.outputs.build_shim }}
-      build_launcher: ${{ steps.versions.outputs.build_launcher }}
       kind: ${{ steps.versions.outputs.kind }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -31,10 +33,14 @@ jobs:
         run: |
           if [ "${GITHUB_EVENT_NAME}" = "push" ]; then set -- --tag "$GITHUB_REF_NAME"; else set --; fi
           release/versions.sh "$@" --github-output "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with: { go-version-file: native/go.mod, cache: false }
+      # the launcher pin is complete (every file with its SHA-256 and size) before anything is built
+      - run: . release/reltool.sh && reltool launcher-pin check
       # The same checks and image as ci.yml (release/ci.sh); publish.sh only tags commits whose ci.yml run passed, so this is the last word,
       # not the first.
       - uses: ./.github/actions/ci-image
-      - run: release/ci.sh --container go unit mutations
+      - run: release/ci.sh --container go unit
 
   shim:
     needs: check
@@ -49,12 +55,13 @@ jobs:
       # the runner image usually has mingw already; the apt mirror has hung here, so install only if missing, with timeouts
       - run: command -v x86_64-w64-mingw32-gcc || sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 install -y gcc-mingw-w64-x86-64
         timeout-minutes: 5
-      - run: release/build_shim_zip.sh                                # fh2-mods/FH2MP.dll (the launcher fetches the FH2 Mod Platform and Extra Options from their authors)
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with: { go-version-file: native/go.mod, cache: false }
+      - run: release/build_shim_zip.sh                                # fh2-mods/FH2MP.dll (Encore fetches the FH2 Mod Platform and Extra Options from their authors)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: shim-unsigned, path: dist/*.zip }
 
-  # FH2MP.dll is built with mingw on Linux; the signing action runs on Windows, so the zip is unpacked, signed and packed again here, with
-  # the Guide built and added.
+  # FH2MP.dll is built with mingw on Linux; the signing action runs on Windows, so the zip is unpacked, signed and packed again here.
   shim-sign:
     needs: shim
     runs-on: windows-2022
@@ -66,18 +73,10 @@ jobs:
       - name: unpack
         shell: pwsh
         run: Expand-Archive -Path (Get-Item in\*.zip).FullName -DestinationPath pkg
-      # The Guide (fh2-mods/FH2MPGuide.dll): C++ with Dear ImGui and libopus, built with the runner's MSYS2 mingw64 toolchain, the one it is
-      # developed with; pacman checks the packages' signatures. It joins the shim's files before they are signed and packed.
-      - name: build the Guide
-        shell: pwsh
-        run: |
-          C:\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-opus"
-          if ($LASTEXITCODE) { throw "pacman failed" }
-          $env:MSYSTEM = "MINGW64"; $env:CHERE_INVOKING = "1"
-          C:\msys64\usr\bin\bash.exe -lc "bash guide/build.sh"
-          if ($LASTEXITCODE) { throw "guide/build.sh failed" }
-          Copy-Item guide\build\FH2MPGuide.dll pkg\fh2-mods\
-      - name: sign FH2MP.dll and FH2MPGuide.dll
+      # Azure Artifact Signing, skipped while the secrets are not set. Secrets: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET (an app
+      # registration with the "Artifact Signing Certificate Profile Signer" role); variables: AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT,
+      # AZURE_SIGNING_PROFILE.
+      - name: sign FH2MP.dll
         if: env.AZURE_CLIENT_ID != ''
         uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
         with:
@@ -87,7 +86,7 @@ jobs:
           endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
           signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
-          files: ${{ github.workspace }}\pkg\fh2-mods\FH2MP.dll,${{ github.workspace }}\pkg\fh2-mods\FH2MPGuide.dll
+          files: ${{ github.workspace }}\pkg\fh2-mods\FH2MP.dll
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
@@ -100,109 +99,16 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: shim, path: out/*.zip }
 
-  launcher-windows:
-    needs: check
-    if: needs.check.outputs.build_launcher == 'true'
-    runs-on: windows-2022
-    defaults: { run: { working-directory: launcher } }
-    env: { AZURE_CLIENT_ID: "${{ secrets.AZURE_CLIENT_ID }}" }       # set = sign with Azure Artifact Signing (see "sign the launcher")
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with: { python-version: "3.12" }
-      # PyInstaller with a bootloader compiled here: the prebuilt one is shared with a lot of malware and gets the exe ML-flagged by Defender
-      - run: pip install --require-hashes --no-binary pyinstaller -r requirements-release.txt
-        env: { PYINSTALLER_COMPILE_BOOTLOADER: "1" }
-      - run: pip install --no-deps --no-build-isolation -e .
-      - run: pyinstaller --noconfirm --clean --distpath dist packaging/fh2mp.spec
-      - run: dist\fh2mp-launcher\fh2mp-launcher.exe --selftest
-      - run: python -m unittest discover -s tests
-        env: { FH2MP_NO_KEYRING: "1" }
-      - run: python -I ../release/check_test_mutations.py --area launcher
-      # Azure Artifact Signing, skipped while the secrets are not set. Secrets: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET (an app
-      # registration with the "Artifact Signing Certificate Profile Signer" role); variables: AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT,
-      # AZURE_SIGNING_PROFILE.
-      - name: sign the launcher
-        if: env.AZURE_CLIENT_ID != ''
-        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
-        with:
-          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
-          files: ${{ github.workspace }}\launcher\dist\fh2mp-launcher\fh2mp-launcher.exe
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-      - name: installer
-        shell: pwsh
-        run: |
-          choco install innosetup -y --no-progress
-          $v = (Select-String -Path fh2mp_launcher/version.py -Pattern '"(.+)"').Matches[0].Groups[1].Value
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" packaging\fh2mp.iss
-          Compress-Archive -Path dist\fh2mp-launcher\* -DestinationPath "dist\FH2MP-Launcher-$v-windows-x64-portable.zip"
-      - name: sign the installer
-        if: env.AZURE_CLIENT_ID != ''
-        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
-        with:
-          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
-          files-folder: ${{ github.workspace }}\launcher\dist
-          files-folder-filter: exe
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with: { name: windows, path: "launcher/dist/*.exe\nlauncher/dist/*.zip" }
-
-  launcher-linux:
-    needs: check
-    if: needs.check.outputs.build_launcher == 'true'
-    runs-on: ubuntu-22.04
-    defaults: { run: { working-directory: launcher } }
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with: { python-version: "3.12" }
-      - run: sudo apt-get update && sudo apt-get install -y libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0 libegl1 fuse zsync
-      - run: pip install --require-hashes -r requirements-release.txt
-      - run: pip install --no-deps --no-build-isolation -e .
-      - run: pyinstaller --noconfirm --clean --distpath dist packaging/fh2mp.spec
-      - run: QT_QPA_PLATFORM=offscreen dist/fh2mp-launcher/fh2mp-launcher --selftest
-      - run: python -m unittest discover -s tests
-        env: { FH2MP_NO_KEYRING: "1", QT_QPA_PLATFORM: offscreen }
-      - run: python -I ../release/check_test_mutations.py --area launcher
-      - run: packaging/build_deb.sh
-      # appimagetool and the AppImage runtime it embeds: fixed releases, checked against reviewed hashes before anything runs
-      - run: |
-          curl -sSfL -o "$RUNNER_TEMP/appimagetool" https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
-          curl -sSfL -o "$RUNNER_TEMP/runtime-x86_64" https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
-          sha256sum -c - <<SUMS
-          ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  $RUNNER_TEMP/appimagetool
-          2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  $RUNNER_TEMP/runtime-x86_64
-          SUMS
-          chmod +x "$RUNNER_TEMP/appimagetool"
-          APPIMAGETOOL="$RUNNER_TEMP/appimagetool" APPIMAGE_RUNTIME="$RUNNER_TEMP/runtime-x86_64" packaging/build_appimage.sh
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with: { name: linux, path: "launcher/dist/*.deb\nlauncher/dist/*.AppImage\nlauncher/dist/*.zsync" }
-
   publish:
-    needs: [check, shim-sign, launcher-windows, launcher-linux]
-    if: ${{ !failure() && !cancelled() }}         # a hotfix skips the jobs of the component it carries
+    needs: [check, shim-sign]
+    if: ${{ !failure() && !cancelled() }}         # a release that carries its shim skips the shim jobs
     runs-on: ubuntu-22.04
     permissions: { contents: write }
     environment: release              # add required reviewers to this environment in the repository settings to gate signing + publishing
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with: { python-version: "3.12" }
-      - run: pip install --require-hashes -r release/requirements-sign.txt
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with: { go-version-file: native/go.mod, cache: false }
       # The intermediate shim-unsigned artifact has the same ZIP filename as
       # shim. Download only final artifacts, so extraction cannot overwrite the
       # signed ZIP with unsigned bytes or interleave two writes to that file.
@@ -210,39 +116,31 @@ jobs:
         if: needs.check.outputs.build_shim == 'true'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { name: shim, path: dist }
-      - name: download Windows launchers
-        if: needs.check.outputs.build_launcher == 'true'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with: { name: windows, path: dist }
-      - name: download Linux launchers
-        if: needs.check.outputs.build_launcher == 'true'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with: { name: linux, path: dist }
-      # make_manifest.py checks every copied file against the carried release's signed manifest; the copies keep the new release complete for
-      # launchers that download from the manifest's own tag only (1.1.5 and older) and for the AppImage's zsync update.
-      - name: carry from earlier releases
-        if: needs.check.outputs.kind != 'release'
-        env:
-          GH_TOKEN: "${{ github.token }}"
-          SHIM: "${{ needs.check.outputs.shim }}"
-          APP: "${{ needs.check.outputs.launcher }}"
-          BUILD_SHIM: "${{ needs.check.outputs.build_shim }}"
-          BUILD_LAUNCHER: "${{ needs.check.outputs.build_launcher }}"
+      # fh2mp-release manifest-build checks the copied zip against the carried release's signed manifest
+      - name: carry the shim from its release
+        if: needs.check.outputs.build_shim != 'true'
+        env: { GH_TOKEN: "${{ github.token }}", SHIM: "${{ needs.check.outputs.shim }}" }
         run: |
+          mkdir -p dist "carry/v$SHIM"
+          gh release download "v$SHIM" -p manifest.json -p manifest.json.sig -D "carry/v$SHIM" --clobber
+          gh release download "v$SHIM" -p "fh2mp-shim-$SHIM.zip" -D dist
+      # Encore's files, from its release as release/launcher.json names them; manifest-build checks each against the pin's SHA-256 and size
+      - name: download the launcher (Encore)
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          . release/reltool.sh
+          repo=$(reltool launcher-pin repo); tag=$(reltool launcher-pin tag)
           mkdir -p dist
-          carry() { mkdir -p "carry/v$1"; gh release download "v$1" -p manifest.json -p manifest.json.sig -D "carry/v$1" --clobber; }
-          if [ "$BUILD_SHIM" != true ]; then carry "$SHIM"; gh release download "v$SHIM" -p "fh2mp-shim-$SHIM.zip" -D dist; fi
-          if [ "$BUILD_LAUNCHER" != true ]; then
-            carry "$APP"
-            gh release download "v$APP" -p "FH2MP-Launcher-$APP-*" -p "fh2mp-launcher_${APP}_*" -D dist
-          fi
+          for name in $(reltool launcher-pin names); do gh release download "$tag" -R "$repo" -p "$name" -D dist; done
           ls -l dist
       - name: sign the manifest
         env:
           FH2MP_RELEASE_KEY: "${{ secrets.RELEASE_SIGNING_KEY }}"
           SHIM: "${{ needs.check.outputs.shim }}"
-          APP: "${{ needs.check.outputs.launcher }}"
-        run: python3 -I release/make_manifest.py --tag "$GITHUB_REF_NAME" --shim-version "$SHIM" --launcher-version "$APP" --carry-dir carry --dist dist
+          KIND: "${{ needs.check.outputs.kind }}"
+        run: |
+          . release/reltool.sh
+          reltool manifest-build --tag "$GITHUB_REF_NAME" --kind "$KIND" --shim-version "$SHIM" --carry-dir carry --dist dist
       - name: release
         env: { GH_TOKEN: "${{ github.token }}", KIND: "${{ needs.check.outputs.kind }}" }
         run: |
