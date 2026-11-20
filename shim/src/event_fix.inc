@@ -324,7 +324,7 @@ static int ef_ready(void)
             log_begin();
             log_raw("eventfix: the part table List_Upgrade");
             log_raw(g_ppi_table[k]);
-            log_raw(" cannot be read from the game database, so cars with parts of other cars race as built in this game\n");
+            log_raw(" cannot be read from the game database, so cars with a swapped engine or gearbox race as built in this game\n");
             return 0;
         }
         rows += g_ef_tab[k].n;
@@ -449,7 +449,7 @@ static void ef_judge(unsigned car, unsigned wheel, const unsigned parts[EF_SLOTS
         QueryPerformanceCounter(&t1);
         if (ms) *ms += ef_ms(t0, t1);
     } else if (v->kind == EF_CANNOT) {
-        ef_log_decline("its engine, drivetrain, body or tires belong to another car and the car's own have no stock row", car);
+        ef_log_decline("its engine is swapped and the car has no stock engine row", car);
     }
     ef_cache_put(v);
 }
@@ -647,7 +647,7 @@ static char *ef_list_query(const char *sql, const char *table, int same_db)
         log_begin();
         log_raw("eventfix: first event car list of this game: ");
         log_dec((unsigned long)(n > 0 ? n : 0));
-        log_raw(" garage cars, none with parts of other cars; took ");
+        log_raw(" garage cars, none with a swapped engine or gearbox; took ");
         log_dec((unsigned long)ef_ms(t0, t1));
         log_raw(" ms\n");
     }
@@ -660,7 +660,7 @@ static char *ef_list_query(const char *sql, const char *table, int same_db)
             log_dec((unsigned long)(n > 0 ? n : 0));
             log_raw(" garage cars, ");
             log_dec(foreign_cars);
-            log_raw(" with parts of other cars (");
+            log_raw(" with a swapped engine or gearbox (");
             log_dec(fixed);
             if (shown) {
                 log_raw(" listed and shown by their fixed class, PI and ratings (a copy of the garage view), ");
@@ -790,7 +790,7 @@ static void ef_commit_outside(const unsigned char *self, unsigned car_at, unsign
 }
 
 /* ---- the race (event_stock.inc's commit hook) ---- */
-/* The pending block `self` of the online choices (ES_* offsets): a car with parts of other cars gets the fixed parts, the stock tune values that belong
+/* The pending block `self` of the online choices (ES_* offsets): a car with a swapped engine or gearbox gets the fixed parts, the stock tune values that belong
  * to them and the fixed class and PI before the game commits it. -> 1 when changed. */
 static int ef_commit(unsigned char *self, unsigned car_at, unsigned wheel_at, unsigned parts_at, unsigned tune_at, unsigned attrs_at)
 {
@@ -1001,10 +1001,10 @@ static int patch_event_fix(void)
     if (code_is("eventfix", "the car collection's list query", img, EF_QUERY_RVA, query, sizeof query) &&
         plat_hook("eventfix: event car lists by the fixed class and PI", img + EF_QUERY_RVA, (void *)ef_query_hook, (void **)&g_ef_query_orig)) {
         log_begin();
-        log_raw("hook: eventfix: online, an event car list takes a car with parts of other cars by its class and PI with its own stock parts (game+0x140c3f0)\n");
+        log_raw("hook: eventfix: online, an event car list takes a car with a swapped engine or gearbox by its class and PI with its own stock engine and gearbox (game+0x140c3f0)\n");
     }
     log_begin();
-    log_raw("hook: eventfix: online, a car with parts of other cars races an event with those parts and their tune values back to stock (car details, commit)\n");
+    log_raw("hook: eventfix: online, a car with a swapped engine or gearbox races an event with those and their tune values back to stock (car details, commit)\n");
     {
         static const unsigned char tamper[16] = {0x40, 0x57, 0xb8, 0x20, 0x3a, 0x00, 0x00, 0xe8, 0xc4, 0xf3, 0xfb, 0xff, 0x48, 0x2b, 0xe0, 0x48};
         static const unsigned char simpi[16] = {0x4c, 0x89, 0x4c, 0x24, 0x20, 0xc5, 0xfb, 0x11, 0x54, 0x24, 0x18, 0x55, 0x56, 0x57, 0x41, 0x54};

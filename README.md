@@ -1,6 +1,6 @@
 # FH2MP: Forza Horizon 2 online, back from the dead (sort of)
 
-> **v1.5.0.** It works and it is young: expect crashes, desyncs and rough edges.
+> **v1.5.1.** It works and it is young: expect crashes, desyncs and rough edges.
 > Known problems: [open issues](https://github.com/Charelene/FH2MP/issues) and the [help pages](https://forza.scuffed.af/help/). Changes per version: [Releases](https://github.com/Charelene/FH2MP/releases).
 
 [![Patreon](https://img.shields.io/badge/Patreon-Support%20FH2MP-FF424D?logo=patreon&logoColor=white)](https://www.patreon.com/fh2mp)
@@ -76,7 +76,7 @@ your account, your Azimuth folder and your game folders; nothing in the Azimuth 
 installed. The server refuses launchers and shims older than the minimum it announces (from 1.5.0: Encore 2.1.0), so an old install says
 it needs an update before it can play.
 
-FH2MP 1.5.0 is made for Azimuth 1.0.4, FH2 Extra Options 0.6.1, FH2 Mod Platform 2.9.1, HonkHonk 1.0.0 and FH2 ANNA 1.2.4; Achievements
+FH2MP 1.5.1 is made for Azimuth 1.0.4, FH2 Extra Options 0.6.1, FH2 Mod Platform 2.9.1, HonkHonk 1.0.0 and FH2 ANNA 1.2.4; Achievements
 1.0.2, NitroSystem 2.0.1 and Underglow 1.1.1 are optional. Encore installs that combination from FH2MP's server (the authors' releases are
 the fallback) and checks every file against its pinned hash.
 
