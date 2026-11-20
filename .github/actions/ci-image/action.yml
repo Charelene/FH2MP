@@ -6,7 +6,7 @@ runs:
     - name: image key
       id: key
       shell: bash
-      run: echo "tag=fh2mp-ci:$(cat release/ci.Containerfile release/requirements-sign.txt release/requirements-test.txt launcher/requirements-release.txt | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      run: echo "tag=fh2mp-ci:$(sha256sum < release/ci.Containerfile | cut -c1-16)" >> "$GITHUB_OUTPUT"
     - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with: { path: /tmp/ci-image.tar, key: "${{ steps.key.outputs.tag }}" }
     - name: load or build

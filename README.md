@@ -1,6 +1,6 @@
 # FH2MP: Forza Horizon 2 online, back from the dead (sort of)
 
-> **v1.2.0.** It works and it is young: expect crashes, desyncs and rough edges.
+> **v1.5.0.** It works and it is young: expect crashes, desyncs and rough edges.
 > Known problems: [open issues](https://github.com/Charelene/FH2MP/issues) and the [help pages](https://forza.scuffed.af/help/). Changes per version: [Releases](https://github.com/Charelene/FH2MP/releases).
 
 [![Patreon](https://img.shields.io/badge/Patreon-Support%20FH2MP-FF424D?logo=patreon&logoColor=white)](https://www.patreon.com/fh2mp)
@@ -11,15 +11,16 @@ drive in the same Online Free Roam world, race, run Road Trip events, share pain
 leaderboard pages.
 
 The game is the Xbox One build, run on a PC by [Azimuth](https://almost-there-games.itch.io/azimuth) (a compatibility layer that answers every
-online call as "offline"). FH2MP puts the online half back with three pieces:
+online call as "offline"). FH2MP puts the online half back with two pieces, and players get them through a third:
 
-- a **launcher** (Qt) that signs you in, keeps everything up to date and starts the game;
 - a **shim** (`fh2-mods\FH2MP.dll`, a mod for the [FH2 Mod Platform](https://github.com/Trinculo54/fh2-mod-platform)) that runs inside the
   game and re-enables real sockets, gives each install its own identity and redirects the game's web-service calls to our server. It works
   next to the other FH2 mods: the platform checks its changes to the game against theirs;
 - a **server** that speaks the game's UDP protocol (lobbies, worlds, relay) and stands in for the Turn 10 and Xbox Live HTTP services. It is
   written in Go (`native/`) and spreads busy worlds over several CPU cores. It was checked byte for byte against the earlier Python version,
-  which was removed after the 1.2.0 release (it is in the git history up to that point).
+  which was removed after the 1.2.0 release (it is in the git history up to that point);
+- **Encore**, the launcher (a project of its own) that signs you in, keeps everything up to date, starts the game and brings the in-game
+  Guide. Up to 1.4.8 the FH2MP Launcher (Qt) in this repository did that.
 
 The protocol was recovered from the game client itself, not from captured Microsoft traffic. No Microsoft or Xbox Live service is ever
 contacted. There was nothing left to sniff.
@@ -55,36 +56,35 @@ Open bugs are in the [issue tracker](https://github.com/Charelene/FH2MP/issues).
 ## Install (players)
 
 **You need:** a legitimately owned copy of Forza Horizon 2 (Xbox One build **1.0.0.64**) and [Azimuth **1.0.4**](https://almost-there-games.itch.io/azimuth),
-set up so the game starts in Azimuth. No game files are in this repo or the launcher.
+set up so the game starts in Azimuth. No game files are in this repo or in Encore.
 
-1. Download the launcher from the [latest release](https://github.com/Charelene/FH2MP/releases/latest):
-   - Windows: `...-windows-x64-setup.exe` (installer) or `...-windows-x64-portable.zip` (unpack anywhere, run `fh2mp-launcher.exe`);
-   - Linux: `...-x86_64.AppImage` (`chmod +x` it, then run) or `fh2mp-launcher_<version>_amd64.deb`.
-2. Start it. The first run asks for your **Azimuth folder** (the one with `azimuth.exe`), installs the shim and makes your account. The
-   [FH2 Mod Platform](https://github.com/Trinculo54/fh2-mod-platform) and [FH2 Extra Options](https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions)
-   are downloaded from their authors' GitHub releases (pinned builds, checked by SHA-256) when your folder does not have them already.
-   Mods you already have in `fh2-mods` keep working.
-3. Pick a gamertag and press **PLAY**. The launcher starts the game for you.
+Players use **Encore**, the launcher for the FH2MP service (it replaced the FH2MP Launcher in 1.5.0). It signs you in, installs and
+updates the shim, the [FH2 Mod Platform](https://github.com/Trinculo54/fh2-mod-platform), [FH2 Extra Options](https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions)
+and the other mods FH2MP supports (pinned builds, checked by SHA-256), starts the game and brings the in-game Guide (friends, messages,
+voice, achievements).
 
-**Solo play.** Turn on **Settings → Offline mode (solo play)** and press **PLAY**. A crossed-cloud icon indicates offline mode.
-The setting is saved for future starts. Online features and server sync are off; your existing account save and local progress are used
-in both modes. Turn the setting off to play online again. The Play menu also offers **Play offline** for a single run.
+1. Download Encore from the [latest FH2MP release](https://github.com/Charelene/FH2MP/releases/latest): `EncoreSetup-<version>.exe`
+   on Windows, `Encore-<version>-x86_64.AppImage` on Linux (`chmod +x` it, then run).
+2. Start it and follow its first run: your account, your **Azimuth folder** (the one with `azimuth.exe`) and the game's folder. Mods you
+   already have in `fh2-mods` keep working.
+3. Press **Play**.
 
-**Account.** There is no e-mail or password. Your account is a secret key stored in the OS keyring; you get a **recovery code** to move it to
-another computer. Keep that code private.
+**Coming from the FH2MP Launcher (1.4.x).** It updates itself to Encore: press **Update** when it says it is too old. Encore takes over
+your account, your Azimuth folder and your game folders; nothing in the Azimuth folder is lost.
 
-**Updates.** The launcher checks the signed release manifest and updates itself and the shim. Every release is signed; nothing unsigned is
-installed. The server refuses launchers and shims older than the minimum it announces (1.2.0 after this release is deployed), so an old install shows
-"update required" and has to update before it can play.
+**Updates.** Encore checks FH2MP's signed release manifest and installs the shim it names; every release is signed, nothing unsigned is
+installed. The server refuses launchers and shims older than the minimum it announces (from 1.5.0: Encore 2.1.0), so an old install says
+it needs an update before it can play.
 
-Version 1.4.8 uses Azimuth 1.0.4, FH2 Extra Options 0.6.1, FH2 Mod Platform 2.9.1, HonkHonk 1.0.0 and FH2 ANNA 1.2.4; Achievements 1.0.2, NitroSystem 2.0.1 and Underglow 1.1.1 are optional. Setup installs the supported combination and preserves your existing settings and saves. The launcher downloads them from FH2MP's server (the authors' releases are the fallback) and checks every file against its pinned hash.
+FH2MP 1.5.0 is made for Azimuth 1.0.4, FH2 Extra Options 0.6.1, FH2 Mod Platform 2.9.1, HonkHonk 1.0.0 and FH2 ANNA 1.2.4; Achievements
+1.0.2, NitroSystem 2.0.1 and Underglow 1.1.1 are optional. Encore installs that combination from FH2MP's server (the authors' releases are
+the fallback) and checks every file against its pinned hash.
 
-**Linux.** Azimuth runs under Wine/Proton. The launcher picks the newest Proton it finds in the usual Steam folders and starts the game with
-`WINEDLLOVERRIDES="winmm,dwrite,d3dcompiler_47=n,b"`, so Wine loads FH2 Extra Options (`winmm.dll`) and the FH2 Mod Platform (`DWrite.dll` and `d3dcompiler_47.dll`)
-instead of its own DLLs (see the platform's [Linux notes](https://github.com/Trinculo54/fh2-mod-platform/blob/main/docs/linux.md)). Starting
-Azimuth from Steam instead? Use the same value in its launch options: `WINEDLLOVERRIDES="winmm,dwrite,d3dcompiler_47=n,b" %command%`. Set the Proton
-script, prefix or a custom launch command once in Settings if yours are elsewhere. Tested on Proton-CachyOS 11; distro Wine is usually too old
-for Azimuth.
+**Linux.** Azimuth runs under Wine/Proton. The game has to start with `WINEDLLOVERRIDES="winmm,dwrite,d3dcompiler_47=n,b"`, so Wine loads
+FH2 Extra Options (`winmm.dll`) and the FH2 Mod Platform (`DWrite.dll` and `d3dcompiler_47.dll`) instead of its own DLLs (see the
+platform's [Linux notes](https://github.com/Trinculo54/fh2-mod-platform/blob/main/docs/linux.md)); Encore does that when it starts the
+game. Starting Azimuth from Steam instead? Use the same value in its launch options: `WINEDLLOVERRIDES="winmm,dwrite,d3dcompiler_47=n,b" %command%`.
+Tested on Proton-CachyOS 11; distro Wine is usually too old for Azimuth.
 
 **Windows.** Tested on Windows 10 and 11.
 
@@ -98,12 +98,13 @@ Check the [help pages](https://forza.scuffed.af/help/) and the [open issues](htt
   newest report in `fh2-mods\crashes` for a crash;
 - `data\azimuth.ini` if you changed settings.
 
-The launcher's own log is `launcher.log` in its cache folder (`%LOCALAPPDATA%\FH2MP\cache` on Windows, `~/.cache/fh2mp` on Linux). None of
-these contain passwords or keys.
+Encore keeps its own logs with its settings (`%APPDATA%\Encore` on Windows). None of these files contain passwords or keys.
 
 ## Build from source
 
-Sources: `shim/` (C), `launcher/` (Python, PySide6), `native/` (the server, Go), `release/` (packaging and signing).
+Sources: `shim/` (C), `native/` (the server and the release tool, Go), `proto/` (the chat schema), `release/` (packaging and signing).
+Encore, with the in-game Guide (`FH2MPGuide.dll`) and the chat client, is a project of its own; the FH2MP Launcher (`launcher/`, Python),
+the Guide (`guide/`) and the chat client (`client/`) were here up to 1.4.8 and are in the git history.
 
 **Shim.** Needs `x86_64-w64-mingw32-gcc` (and `windres`). It compiles against the FH2 Mod Platform's API header in
 `third_party/fh2-mod-platform`.
@@ -111,10 +112,10 @@ Sources: `shim/` (C), `launcher/` (Python, PySide6), `native/` (the server, Go),
 ```sh
 shim/build.sh          # release build -> shim/build/FH2MP.dll
 shim/build.sh debug    # research build -> shim/build/FH2MP-debug.dll (live debugger port, tracer, probes). Never ship it.
-release/build_shim_zip.sh   # dist/fh2mp-shim-<version>.zip: fh2-mods/FH2MP.dll (the platform is not in it; the launcher fetches it)
+release/build_shim_zip.sh   # dist/fh2mp-shim-<version>.zip: fh2-mods/FH2MP.dll (the platform is not in it; Encore fetches it)
 ```
 
-The version comes from `shim/VERSION`. A `-debug` shim is never replaced by the launcher's updater.
+The version comes from `shim/VERSION`. A `-debug` shim is never replaced by the launcher's updater (Encore's, as the FH2MP Launcher's was).
 
 **Server.** Needs Go 1.27 or newer and PostgreSQL; the game data is loaded into the `game` schema with the tools of an install you own, so it
 is not in this repository. It builds to two programs:
@@ -130,41 +131,27 @@ go vet ./... && go test ./...                 # or release/ci.sh go
 server and compare every datagram and log line (`native/testdata`, frozen since that server was removed); the tests that need a database make
 their own scratch databases on the PostgreSQL named by `FH2MP_TEST_PG_ADMIN_DSN` (an account that may create databases).
 
-**Launcher.** Python 3.10 or newer.
-
-```sh
-cd launcher
-python3 -m venv .venv && . .venv/bin/activate
-pip install -e ".[build]"
-fh2mp-launcher                 # the normal launcher
-fh2mp-launcher-dev             # developer launcher: its own settings, key and cache, talks to http://127.0.0.1:5180 (override with FH2MP_API)
-python3 tests/test_core.py     # headless tests
-pyinstaller --noconfirm --clean --distpath dist packaging/fh2mp.spec    # standalone build
-packaging/build_appimage.sh    # Linux AppImage (needs appimagetool and zsync); packaging/build_deb.sh for the .deb
-```
-
-The Windows installer is built by CI with Inno Setup (`packaging/fh2mp.iss`). The launcher version lives in
-`launcher/fh2mp_launcher/version.py`.
-
-**Release.** `release/publish.sh vX.Y.Z[-rcN]` checks that the tag, `shim/VERSION` and the launcher version agree, scans for personal paths,
-commits, tags and pushes. The workflow in `.github/workflows/release.yml` then builds the shim and the Windows and Linux launchers, signs
-`manifest.json` with the Ed25519 key in the `RELEASE_SIGNING_KEY` secret (the launcher embeds the public half) and publishes the GitHub
-release, using `release/notes/<tag>.md` as the description when that file exists. `release/keygen.py` makes a signing key.
+**Release.** `release/publish.sh vX.Y.Z[-rcN]` checks that the tag and `shim/VERSION` agree, scans for personal paths, pushes, waits for
+the commit's checks and tags. The workflow in `.github/workflows/release.yml` then builds and signs the shim, takes Encore's files named
+in `release/launcher.json` from Encore's release (each checked against its SHA-256 and size), builds and signs `manifest.json` with
+`native/cmd/fh2mp-release` and the Ed25519 key in the `RELEASE_SIGNING_KEY` secret (its public half is `release/release-key.pub`, which
+Encore and the 1.4.x launchers embed) and publishes the GitHub release, using `release/notes/<tag>.md` as the description when that file
+exists. `fh2mp-release keygen <file>` makes a signing key.
 
 ## Supported setups
 
 - Forza Horizon 2, Xbox One build 1.0.0.64.
-- **Azimuth 1.0.4** only. The shim checks its hooks against byte signatures of that build and skips anything that does not match; the
-  launcher warns you about other builds.
-- **FH2 Mod Platform 2.9.1** by Trinculo54, the `DWrite.dll` and `d3dcompiler_47.dll` next to `azimuth.exe` that load the shim. The launcher
+- **Azimuth 1.0.4** only. The shim checks its hooks against byte signatures of that build and skips anything that does not match;
+  Encore warns you about other builds.
+- **FH2 Mod Platform 2.9.1** by Trinculo54, the `DWrite.dll` and `d3dcompiler_47.dll` next to `azimuth.exe` that load the shim. Encore
   installs the 2.9.1 release when your folder has another build.
-- **[FH2 Extra Options](https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions) 0.6.1** by RokkuDayo, the only supported build. When the `winmm.dll` next to `azimuth.exe` is not that build, the launcher downloads the author's release (a setting turns that off; another `winmm.dll` is kept in `fh2extra`).
+- **[FH2 Extra Options](https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions) 0.6.1** by RokkuDayo, the only supported build. When the `winmm.dll` next to `azimuth.exe` is not that build, Encore downloads the author's release.
   It keeps its mods in `mods\Forza Horizon 2` and moves the ones in `mods` there itself the first time the game starts.
   By hand, put its `winmm.dll`, `FH2_ExtraOptions.ini` and `mods\Forza Horizon 2` next to `azimuth.exe`.
 - Other FH2 Mod Platform mods load next to the shim; the platform refuses any hook of theirs that would overlap one of ours. Online play uses the server's car
-  database, so their **database** changes are off while you play through the launcher (`platform.log` and the title screen say so). A
+  database, so their **database** changes are off while you play online (`platform.log` and the title screen say so). A
   car database another mod put in `mediaoverride` (traffic cars, a car pack's) is kept in `fh2mp\gamedb-kept.slt` while you play online
-  and put back when you start the game without the launcher (offline); if you then remove it from `mediaoverride`, it isn't put back
+  and put back when you start the game offline; if you then remove it from `mediaoverride`, it isn't put back
   again. With FH2MP turned off or removed, nothing puts it back: copy that file to `mediaoverride\Stripped\gamedbRC.slt` yourself. With
   nothing kept, the server's database stays in `mediaoverride` offline too, so a car pack's database in `mediapc` isn't read. With FH2
   Mod Platform 2.7.1, a mod's database changes are still made on the game's own database, not on the one put back.
@@ -188,7 +175,8 @@ This project is **AI-assisted**. If that makes you close the tab, fair enough. I
   shared hooks checked against other mods and Extra Options, crash reports).
 - **[HonkHonk](https://github.com/suderek22/FH2_HonkHonk)** by suderek22: horns, heard by the other players online.
 - **[FH2 ANNA](https://github.com/qiangqiang101/FH2-ANNA)** by qiangqiang101: headlights, display mode, pad and Auto Drive.
-- **[Achievements](https://github.com/Trinculo54/fh2-achievements)** by Trinculo54 (optional): the achievements the Guide shows.
+- **[Achievements](https://github.com/Trinculo54/fh2-achievements)** by Trinculo54 (optional): the achievements the server keeps and the
+  Guide shows.
 - **[NitroSystem](https://github.com/qiangqiang101/FH2-NitroSystem)** by qiangqiang101 (optional): nitro, switched off by FH2MP where it
   isn't allowed online through its own off switch.
 - **[Underglow](https://github.com/qiangqiang101/FH2-Underglow)** by qiangqiang101 (optional): underglow, shown to the other players online.
@@ -197,11 +185,11 @@ This project is **AI-assisted**. If that makes you close the tab, fair enough. I
 
 [GPL-3.0](LICENSE). The game, Azimuth and the mods mentioned above belong to their respective authors and are not covered by it.
 
-Third-party mods FH2MP uses (not part of FH2MP and not redistributed by it; the launcher downloads their authors' own releases):
+Third-party mods FH2MP uses (not part of FH2MP and not redistributed by it; Encore downloads their authors' own releases):
 
 - **FH2 Mod Platform** © 2026 Trinculo54, [MIT License](third_party/fh2-mod-platform/LICENSE). Its API header is in
   `third_party/fh2-mod-platform` (the shim is built against it). The platform includes [MinHook](https://github.com/TsudaKageyu/minhook)
-  © 2009-2017 Tsuda Kageyu (BSD 2-Clause) and [SQLite](https://sqlite.org) (public domain); the launcher keeps the release's
+  © 2009-2017 Tsuda Kageyu (BSD 2-Clause) and [SQLite](https://sqlite.org) (public domain); Encore keeps the release's
   `LICENSE.txt` (as `LICENSE-FH2ModPlatform.txt`) and `LICENSE-MinHook.txt` next to the DLL.
 - **[FH2 Extra Options](https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions)** © RokkuDayo, GPL-3.0.
 - **[HonkHonk](https://github.com/suderek22/FH2_HonkHonk)** © suderek22, GPL-3.0.
@@ -209,3 +197,15 @@ Third-party mods FH2MP uses (not part of FH2MP and not redistributed by it; the 
 - **[Achievements](https://github.com/Trinculo54/fh2-achievements)** © Trinculo54, GPL-3.0.
 - **[NitroSystem](https://github.com/qiangqiang101/FH2-NitroSystem)** © qiangqiang101, MIT License.
 - **[Underglow](https://github.com/qiangqiang101/FH2-Underglow)** © qiangqiang101, MIT License.
+
+Libraries the server and the release tool (`native/`) are built with (Go modules, compiled in; `native/go.mod` has the versions):
+
+- **[gotd/td](https://github.com/gotd/td)** © 2020 Aleksandr Razumov, MIT License: the MTProto chat server's protocol code and the TL code
+  generator (`native/internal/mt`).
+- **[gotd/ige](https://github.com/gotd/ige)** © 2018 Karl McGuire, MIT License.
+- **[pgx](https://github.com/jackc/pgx)** © 2013-2021 Jack Christensen, MIT License: PostgreSQL.
+- **[modernc.org/sqlite](https://gitlab.com/cznic/sqlite)** © 2017 The Sqlite Authors, BSD 3-Clause: the game's car database.
+- **[regexp2](https://github.com/dlclark/regexp2)** © Doug Clark, MIT License.
+- **[xz](https://github.com/ulikunitz/xz)** © 2014-2022 Ulrich Kunitz, BSD 3-Clause.
+- **[multierr](https://github.com/uber-go/multierr)** © 2017-2021 Uber Technologies, MIT License.
+- **[golang.org/x/text](https://cs.opensource.google/go/x/text)** © 2009 The Go Authors, BSD 3-Clause.

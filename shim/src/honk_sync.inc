@@ -8,7 +8,7 @@
  * Controls: HonkHonk honks on the left stick (L3, button bit 0x40, one `test byte [rsp+disp8], 0x40` in its input loop). Forza honks on the right
  * stick and Extra Options' headlights are moved to the left stick by the launcher, so the immediate is changed to 0x80 in memory. That is its own
  * step: it happens whether or not horns can be shared, and only when FH2_ExtraOptions.ini has the headlight/roof toggles off the right stick, so the
- * horn and a toggle never end up on one stick; data\bin\fh2mp-controls.txt tells the launcher where the horn is (launcher/fh2mp_launcher/shim.py).
+ * horn and a toggle never end up on one stick; data\bin\fh2mp-controls.txt tells the launcher where the horn is (Encore: encore-fh2 extra.rs).
  * A function start another mod hooked through the platform (Horizon Wave Radio hooks createSound) is called through that hook, as the game does.
  *
  * Remote voices run on the game's audio update (AudioEngineFmod::vfunc_5, 0x10140d0: Studio::System::update(*(this+0x7f0)), the call HonkHonk hooks
@@ -396,7 +396,7 @@ static void honk_redirect_pad(unsigned char *hh, const honk_build *b)
 }
 
 /* ---- which stick the horn is on: never the one Extra Options' headlight or roof toggle uses ----
- * The launcher moves those toggles to the left stick (launcher/fh2mp_launcher/shim.py swap_stick_bindings); the horn only goes to the right stick
+ * The launcher moves those toggles to the left stick (Encore: encore-fh2 extra.rs swap_stick_bindings); the horn only goes to the right stick
  * when FH2_ExtraOptions.ini really has them off it. The outcome goes to data\bin\fh2mp-controls.txt, from which the launcher puts the toggles back
  * on the right stick when the horn could not be moved. */
 #define HH_STICK_LEFT 1u

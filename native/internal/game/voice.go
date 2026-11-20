@@ -1,7 +1,7 @@
 package game
 
 // Voice relay (RE 2026-11-12, Notion "Voice A0: Microsoft's GameChat engine, read for its wire format"; the client side is the Guide's
-// ChatManager, guide/src/voice.cpp on feature/mtproto).
+// ChatManager, guide/src/voice.cpp: in FH2MP up to 1.4.8, in Encore since 1.5.0).
 //
 // The game sends unreliable chat packets after the messages of a datagram, from the next byte boundary, each as `0xC4A7:16 | size:16 |
 // payload` (HeaderToServer, game+0x176a860), and reads what the server relays as `0xC4A7:16 | size:16 | source

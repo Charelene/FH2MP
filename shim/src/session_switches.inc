@@ -1,5 +1,5 @@
 /* Kill switches from the launcher: `switches=NO_HONK,NO_PARTYHUD` in fh2mp-session.txt, written from the signed hotfix document the launcher
- * fetches (launcher/fh2mp_launcher/hotfix.py). Each name becomes FH2MP_<name>=1 in this process before late_init reads any FH2MP_NO_* variable,
+ * fetches (Encore: encore-core hotfix.rs). Each name becomes FH2MP_<name>=1 in this process before late_init reads any FH2MP_NO_* variable,
  * so a patch that crashes players can be switched off without a new shim. Only NO_ names of capitals, digits and underscores are taken: the
  * list can turn a patch off, never set a token, a server address or a debug option. */
 #define SWITCH_NAME_MAX 32

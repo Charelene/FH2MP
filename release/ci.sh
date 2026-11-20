@@ -3,12 +3,12 @@
 #
 #   release/ci.sh [--container] <lane>...
 #
-# Lanes: go (the game server and LSP in native/: fmt, vet, tests on a disposable PostgreSQL), unit (release flow, pure shim checks),
-# shim (Wine checks), launcher, mutations (deliberate launcher regressions must be caught), quick (go + unit + launcher, before a push), all,
-# rust (the chat client in client/: fmt, clippy, tests incl. the interop test against the Go chat server; not in all until the image has Rust).
-# The Python servers in server/ were removed on 2026-11-07; the Go tests replay their frozen fixtures (native/testdata).
-# --container runs the lanes in the image built from release/ci.Containerfile (podman or docker): the same Go, Python, Wine, mingw and
-# PostgreSQL as GitHub. Without it the host's tools are used, which can differ (host Wine 10/11 vs Debian's, Python 3.14 vs 3.12).
+# Lanes: go (the game server, the LSP and the release tool in native/: fmt, vet, tests on a disposable PostgreSQL), unit (release flow, pure
+# shim checks), shim (Wine checks), quick (go + unit, before a push), all (go + unit + shim).
+# The launcher, the in-game Guide and the chat client left for Encore in 1.5.0 (with their lanes launcher, mutations and rust); the Python
+# servers in server/ were removed on 2026-11-07, and the Go tests replay their frozen fixtures (native/testdata).
+# --container runs the lanes in the image built from release/ci.Containerfile (podman or docker): the same Go, Wine, mingw and PostgreSQL as
+# GitHub. Without it the host's tools are used, which can differ (host Wine 10/11 vs Debian's).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
@@ -18,7 +18,7 @@ lanes=()
 for a in "$@"; do
     case "$a" in
         --container) container=1 ;;
-        unit|shim|launcher|mutations|go|rust|quick|all) lanes+=("$a") ;;
+        unit|shim|go|quick|all) lanes+=("$a") ;;
         -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
         *) echo "unknown lane or option: $a" >&2; exit 2 ;;
     esac
@@ -34,9 +34,8 @@ if [ "$container" = 1 ]; then
         engine=$(command -v podman || command -v docker || true)
     fi
     [ -n "$engine" ] || { echo "--container needs podman or docker" >&2; exit 2; }
-    # the tag names the image's inputs, so an edited Containerfile or requirement file builds a new one
-    tag=fh2mp-ci:$(cat release/ci.Containerfile release/requirements-sign.txt release/requirements-test.txt launcher/requirements-release.txt \
-                   | sha256sum | cut -c1-16)
+    # the tag names the image's input, so an edited Containerfile builds a new one
+    tag=fh2mp-ci:$(sha256sum < release/ci.Containerfile | cut -c1-16)
     "$engine" image exists "$tag" 2>/dev/null || "$engine" image inspect "$tag" >/dev/null 2>&1 \
         || "$engine" build -f release/ci.Containerfile -t "$tag" .
     opts=(--rm -v "$root:/src:Z" -w /src)
@@ -45,7 +44,6 @@ if [ "$container" = 1 ]; then
 fi
 
 export PYTHONDONTWRITEBYTECODE=1
-py=${PYTHON:-python3}
 started=$(date +%s)
 summary=()
 run() {   # run <name> <command...>: time it and remember the result
@@ -102,13 +100,23 @@ pg_stop() { [ -z "$pg_root" ] || { pg_ctl -D "$pg_root/data" -m immediate stop >
 trap pg_stop EXIT
 pg_start() {   # a disposable cluster on a loopback port; FH2MP_TEST_PG_ADMIN_DSN names it (the Go tests make their own databases through it,
                # native/internal/dbtest)
-    local bin port=
+    local bin port= try
     bin=$(ls /usr/lib/postgresql/*/bin/initdb 2>/dev/null | sort -V | tail -1)
     command -v initdb >/dev/null || { [ -n "$bin" ] && PATH=$(dirname "$bin"):$PATH; } || return 1
     pg_root=$(mktemp -d)
     initdb -D "$pg_root/data" -A trust --no-locale --encoding=UTF8 >/dev/null
-    port=$("$py" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
-    pg_ctl -D "$pg_root/data" -l "$pg_root/postgres.log" -o "-h 127.0.0.1 -p $port -k $pg_root" -w start >/dev/null
+    # a random loopback port; one that is taken makes pg_ctl fail, and the next try takes another
+    for try in 1 2 3 4 5; do
+        port=$(( 20000 + RANDOM % 40000 ))
+        pg_ctl -D "$pg_root/data" -l "$pg_root/postgres.log" -o "-h 127.0.0.1 -p $port -k $pg_root" -w start >/dev/null 2>&1 && break
+        port=
+    done
+    if [ -z "$port" ]; then
+        echo "go lane: the disposable PostgreSQL did not start on 5 random ports; its log:" >&2
+        cat "$pg_root/postgres.log" >&2 || true
+        failed=1
+        return 1
+    fi
     export FH2MP_TEST_PG_ADMIN_DSN="postgresql://$(id -un)@127.0.0.1:$port/postgres"
 }
 
@@ -146,10 +154,6 @@ lane_shim() {
     rm -rf "$logs"
 }
 
-lane_launcher() {
-    run "launcher checks" env FH2MP_NO_KEYRING=1 QT_QPA_PLATFORM=offscreen sh -c 'cd launcher && "$0" -m unittest discover -s tests' "$py"
-}
-
 lane_go() {   # the servers (native/): format, vet, tests. The tests that need the game catalog or <repo>/data skip without them; the others use a disposable PostgreSQL
     command -v go >/dev/null 2>&1 || { echo "go lane: go is not installed" >&2; failed=1; return; }
     run "go fmt" sh -c 'cd native && test -z "$(gofmt -l .)"'
@@ -164,21 +168,10 @@ lane_go() {   # the servers (native/): format, vet, tests. The tests that need t
     fi
 }
 
-lane_rust() {   # the chat client (client/): format, clippy, tests; the interop test builds and runs native/cmd/fh2mp-mt-testserver with go
-    command -v cargo >/dev/null 2>&1 || { echo "rust lane: cargo is not installed" >&2; failed=1; return; }
-    run "cargo fmt" sh -c 'cd client && cargo fmt --check'
-    run "cargo clippy" sh -c 'cd client && cargo clippy --locked --all-targets -- -D warnings'
-    run "cargo test" sh -c 'cd client && cargo test --locked'
-}
-
-lane_mutations() {
-    run "mutations launcher" sh -c 'cd launcher && "$0" -I ../release/check_test_mutations.py --area launcher' "$py"
-}
-
 for lane in "${lanes[@]}"; do
     case "$lane" in
-        quick) lane_go; lane_unit; lane_launcher ;;
-        all) lane_go; lane_unit; lane_shim; lane_launcher; lane_mutations ;;
+        quick) lane_go; lane_unit ;;
+        all) lane_go; lane_unit; lane_shim ;;
         *) "lane_$lane" ;;
     esac
 done
