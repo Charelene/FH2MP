@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"fh2mp/internal/auth"
+	"fh2mp/internal/avatars"
 	"fh2mp/internal/cardb"
 	"fh2mp/internal/catalog"
 	"fh2mp/internal/clubs"
@@ -49,6 +50,7 @@ func (c *Core) Setup(dsn string) error {
 	c.Notif = notifstore.New(d)
 	c.Clubs = clubs.New(d)
 	c.Social = social.New(d)
+	c.Avatars = avatars.New(d)
 	c.Ugc = ugc.New(d)
 	cat, err := catalog.Load()
 	if err != nil {

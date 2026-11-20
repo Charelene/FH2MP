@@ -47,6 +47,9 @@ func (c *Core) StartChat() error {
 		return fmt.Errorf("chat server: listen on %s: %w", addr, err)
 	}
 	c.Chat = srv
+	// End-to-end DMs (P3): devices, secret chats, commitments and reports in the database. The chat server's janitor sweeps the stores
+	// every hour (stored updates and sealed bytes after mt.UpdateTTL, commitments and discarded chats after mt.SentTTL).
+	srv.SetChatStore(&mt.DBChatStore{DB: c.DB})
 	if la, ok := c.Launcher.(*Launcher); ok {
 		srv.SetCommunity(chatCommunity{la})
 		go (&presenceWatch{l: la, last: map[int64]string{}, friends: map[int64]friendsAt{}}).run(5 * time.Second)
@@ -54,15 +57,6 @@ func (c *Core) StartChat() error {
 	go func() {
 		if err := srv.Serve(l); err != nil {
 			c.LogAt(nil, diag.Error, "", fmt.Sprintf("chat server stopped: accept on %s failed: %v; chat is down until the LSP restarts", addr, err))
-		}
-	}()
-	go func() {
-		for range time.Tick(time.Hour) {
-			if n, err := store.Expire(); err != nil {
-				c.LogAt(nil, diag.Warn, "", fmt.Sprintf("chat: dropping stored updates older than %s failed: %v", mt.UpdateTTL, err))
-			} else if n > 0 {
-				c.Log(nil, fmt.Sprintf("chat: %d stored updates older than %s dropped (their clients did not come back)", n, mt.UpdateTTL))
-			}
 		}
 	}()
 	return nil

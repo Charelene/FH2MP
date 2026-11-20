@@ -353,6 +353,9 @@ func (c *Core) socialAPI(r *Req, method, path string, body []byte) (res *apiResu
 			}
 			removed, err := c.Social.RemoveFriend(a, b)
 			must(err)
+			if removed {
+				c.friendshipEnded(a, b)
+			}
 			return &apiResult{status: 200, obj: pyjson.Obj{{K: "removed", V: removed}}}
 		}
 	}

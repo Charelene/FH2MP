@@ -123,13 +123,14 @@ type authKey struct {
 	ip        string
 	firstSalt int64
 
-	mu       sync.Mutex
-	lastUsed time.Time
-	xuid     int64
-	tag      string
-	device   int64
-	sessions map[int64]*session
-	dead     bool
+	mu         sync.Mutex
+	lastUsed   time.Time
+	xuid       int64
+	tag        string
+	device     int64
+	accountKey []byte // the account's public key that signed in (chat device certificates are checked against it)
+	sessions   map[int64]*session
+	dead       bool
 }
 
 func (k *authKey) idHex() string { return fmt.Sprintf("%x", k.ak.ID[:]) }
@@ -193,6 +194,8 @@ type Server struct {
 	nextConn   atomic.Uint64
 	community  Community
 	sent       sentClub
+	chats      ChatStore
+	e2eMu      sync.Mutex // serialises the end-to-end state changes (devices, chats, relayed messages)
 
 	mu      sync.Mutex
 	ln      net.Listener
@@ -201,6 +204,7 @@ type Server struct {
 	byXuid  map[int64]*authKey
 	ipConns map[string]int
 	conns   map[*clientConn]struct{}
+	locals  map[int64]*Local
 	wg      sync.WaitGroup
 	stop    chan struct{}
 }
@@ -212,7 +216,7 @@ func New(cfg Config, key *ServerKey, accounts Accounts, store UpdateStore) (*Ser
 	}
 	cfg = cfg.withDefaults()
 	s := &Server{cfg: cfg, key: key, accounts: accounts, store: store, limits: auth.NewRateLimiter(), keys: map[[8]byte]*authKey{},
-		byXuid: map[int64]*authKey{}, ipConns: map[string]int{}, conns: map[*clientConn]struct{}{}, stop: make(chan struct{})}
+		byXuid: map[int64]*authKey{}, ipConns: map[string]int{}, conns: map[*clientConn]struct{}{}, locals: map[int64]*Local{}, stop: make(chan struct{})}
 	s.ids.now = cfg.Now
 	if _, err := rand.Read(s.saltSecret[:]); err != nil {
 		return nil, err
@@ -229,6 +233,7 @@ func New(cfg Config, key *ServerKey, accounts Accounts, store UpdateStore) (*Ser
 	})
 	s.registerAPI()
 	s.registerCommunity()
+	s.registerE2E()
 	if err := checkDHPrime(); err != nil {
 		return nil, fmt.Errorf("mt: dh_prime: %w", err)
 	}
@@ -1022,7 +1027,7 @@ func (c *Call) xuidHex() any {
 }
 
 // bind signs key k in as xuid. Another key of the account is ended: its sessions get updateLoggedOut, then their connections close.
-func (s *Server) bind(k *authKey, xuid int64, tag string, device int64) {
+func (s *Server) bind(k *authKey, xuid int64, tag string, device int64, accountKey []byte) {
 	s.mu.Lock()
 	old := s.byXuid[xuid]
 	s.byXuid[xuid] = k
@@ -1034,7 +1039,7 @@ func (s *Server) bind(k *authKey, xuid int64, tag string, device int64) {
 	}
 	s.mu.Unlock()
 	k.mu.Lock()
-	k.xuid, k.tag, k.device = xuid, tag, device
+	k.xuid, k.tag, k.device, k.accountKey = xuid, tag, device, append([]byte(nil), accountKey...)
 	k.mu.Unlock()
 	if old != nil {
 		old.mu.Lock()
@@ -1056,7 +1061,7 @@ func (s *Server) bind(k *authKey, xuid int64, tag string, device int64) {
 func (s *Server) unbind(k *authKey) int64 {
 	k.mu.Lock()
 	x := k.xuid
-	k.xuid, k.tag = 0, ""
+	k.xuid, k.tag, k.accountKey = 0, "", nil
 	k.mu.Unlock()
 	if x != 0 {
 		s.mu.Lock()
@@ -1119,7 +1124,11 @@ func (s *Server) EndAccount(xuid int64, reason string) bool {
 func (s *Server) Push(xuid int64, upds []tl.UpdateClass, pts int) {
 	s.mu.Lock()
 	k := s.byXuid[xuid]
+	l := s.locals[xuid]
 	s.mu.Unlock()
+	if l != nil && len(upds) > 0 {
+		l.poke()
+	}
 	if k == nil || len(upds) == 0 {
 		return
 	}
@@ -1168,18 +1177,25 @@ func (s *Server) ackPts(k *authKey, pts int) {
 	}
 }
 
-// janitor forgets expired keys, keys that never signed in and went idle, and message ids that left the window.
+// janitor forgets expired keys, keys that never signed in and went idle, and message ids that left the window; every hour it also sweeps
+// the stores (SweepStores).
 func (s *Server) janitor() {
 	defer s.wg.Done()
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
+	var stores time.Time
 	for {
 		select {
 		case <-s.stop:
 			return
 		case <-t.C:
 		}
-		s.sweep(s.cfg.Now())
+		now := s.cfg.Now()
+		s.sweep(now)
+		if now.Sub(stores) >= time.Hour {
+			stores = now
+			s.SweepStores(now)
+		}
 	}
 }
 

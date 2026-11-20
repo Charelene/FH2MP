@@ -710,6 +710,436 @@ func (u *UpdateFriends) DecodeBare(b *bin.Buffer) error {
 	return nil
 }
 
+// UpdateEncryption represents TL type `updateEncryption#b4a2e88d`.
+type UpdateEncryption struct {
+	// Chat field of UpdateEncryption.
+	Chat EncryptedChatClass
+	// Date field of UpdateEncryption.
+	Date int
+}
+
+// UpdateEncryptionTypeID is TL type id of UpdateEncryption.
+const UpdateEncryptionTypeID = 0xb4a2e88d
+
+// construct implements constructor of UpdateClass.
+func (u UpdateEncryption) construct() UpdateClass { return &u }
+
+// Ensuring interfaces in compile-time for UpdateEncryption.
+var (
+	_ bin.Encoder     = &UpdateEncryption{}
+	_ bin.Decoder     = &UpdateEncryption{}
+	_ bin.BareEncoder = &UpdateEncryption{}
+	_ bin.BareDecoder = &UpdateEncryption{}
+
+	_ UpdateClass = &UpdateEncryption{}
+)
+
+func (u *UpdateEncryption) Zero() bool {
+	if u == nil {
+		return true
+	}
+	if !(u.Chat == nil) {
+		return false
+	}
+	if !(u.Date == 0) {
+		return false
+	}
+
+	return true
+}
+
+// String implements fmt.Stringer.
+func (u *UpdateEncryption) String() string {
+	if u == nil {
+		return "UpdateEncryption(nil)"
+	}
+	type Alias UpdateEncryption
+	return fmt.Sprintf("UpdateEncryption%+v", Alias(*u))
+}
+
+// TypeID returns type id in TL schema.
+//
+// See https://core.telegram.org/mtproto/TL-tl#remarks.
+func (*UpdateEncryption) TypeID() uint32 {
+	return UpdateEncryptionTypeID
+}
+
+// TypeName returns name of type in TL schema.
+func (*UpdateEncryption) TypeName() string {
+	return "updateEncryption"
+}
+
+// TypeInfo returns info about TL type.
+func (u *UpdateEncryption) TypeInfo() tdp.Type {
+	typ := tdp.Type{
+		Name: "updateEncryption",
+		ID:   UpdateEncryptionTypeID,
+	}
+	if u == nil {
+		typ.Null = true
+		return typ
+	}
+	typ.Fields = []tdp.Field{
+		{
+			Name:       "Chat",
+			SchemaName: "chat",
+		},
+		{
+			Name:       "Date",
+			SchemaName: "date",
+		},
+	}
+	return typ
+}
+
+// Encode implements bin.Encoder.
+func (u *UpdateEncryption) Encode(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't encode updateEncryption#b4a2e88d as nil")
+	}
+	b.PutID(UpdateEncryptionTypeID)
+	return u.EncodeBare(b)
+}
+
+// EncodeBare implements bin.BareEncoder.
+func (u *UpdateEncryption) EncodeBare(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't encode updateEncryption#b4a2e88d as nil")
+	}
+	if u.Chat == nil {
+		return fmt.Errorf("unable to encode updateEncryption#b4a2e88d: field chat is nil")
+	}
+	if err := u.Chat.Encode(b); err != nil {
+		return fmt.Errorf("unable to encode updateEncryption#b4a2e88d: field chat: %w", err)
+	}
+	b.PutInt(u.Date)
+	return nil
+}
+
+// Decode implements bin.Decoder.
+func (u *UpdateEncryption) Decode(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't decode updateEncryption#b4a2e88d to nil")
+	}
+	if err := b.ConsumeID(UpdateEncryptionTypeID); err != nil {
+		return fmt.Errorf("unable to decode updateEncryption#b4a2e88d: %w", err)
+	}
+	return u.DecodeBare(b)
+}
+
+// DecodeBare implements bin.BareDecoder.
+func (u *UpdateEncryption) DecodeBare(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't decode updateEncryption#b4a2e88d to nil")
+	}
+	{
+		value, err := DecodeEncryptedChat(b)
+		if err != nil {
+			return fmt.Errorf("unable to decode updateEncryption#b4a2e88d: field chat: %w", err)
+		}
+		u.Chat = value
+	}
+	{
+		value, err := b.Int()
+		if err != nil {
+			return fmt.Errorf("unable to decode updateEncryption#b4a2e88d: field date: %w", err)
+		}
+		u.Date = value
+	}
+	return nil
+}
+
+// GetChat returns value of Chat field.
+func (u *UpdateEncryption) GetChat() (value EncryptedChatClass) {
+	if u == nil {
+		return
+	}
+	return u.Chat
+}
+
+// GetDate returns value of Date field.
+func (u *UpdateEncryption) GetDate() (value int) {
+	if u == nil {
+		return
+	}
+	return u.Date
+}
+
+// UpdateNewEncryptedMessage represents TL type `updateNewEncryptedMessage#a3135f31`.
+type UpdateNewEncryptedMessage struct {
+	// Message field of UpdateNewEncryptedMessage.
+	Message EncryptedMessage
+}
+
+// UpdateNewEncryptedMessageTypeID is TL type id of UpdateNewEncryptedMessage.
+const UpdateNewEncryptedMessageTypeID = 0xa3135f31
+
+// construct implements constructor of UpdateClass.
+func (u UpdateNewEncryptedMessage) construct() UpdateClass { return &u }
+
+// Ensuring interfaces in compile-time for UpdateNewEncryptedMessage.
+var (
+	_ bin.Encoder     = &UpdateNewEncryptedMessage{}
+	_ bin.Decoder     = &UpdateNewEncryptedMessage{}
+	_ bin.BareEncoder = &UpdateNewEncryptedMessage{}
+	_ bin.BareDecoder = &UpdateNewEncryptedMessage{}
+
+	_ UpdateClass = &UpdateNewEncryptedMessage{}
+)
+
+func (u *UpdateNewEncryptedMessage) Zero() bool {
+	if u == nil {
+		return true
+	}
+	if !(u.Message.Zero()) {
+		return false
+	}
+
+	return true
+}
+
+// String implements fmt.Stringer.
+func (u *UpdateNewEncryptedMessage) String() string {
+	if u == nil {
+		return "UpdateNewEncryptedMessage(nil)"
+	}
+	type Alias UpdateNewEncryptedMessage
+	return fmt.Sprintf("UpdateNewEncryptedMessage%+v", Alias(*u))
+}
+
+// TypeID returns type id in TL schema.
+//
+// See https://core.telegram.org/mtproto/TL-tl#remarks.
+func (*UpdateNewEncryptedMessage) TypeID() uint32 {
+	return UpdateNewEncryptedMessageTypeID
+}
+
+// TypeName returns name of type in TL schema.
+func (*UpdateNewEncryptedMessage) TypeName() string {
+	return "updateNewEncryptedMessage"
+}
+
+// TypeInfo returns info about TL type.
+func (u *UpdateNewEncryptedMessage) TypeInfo() tdp.Type {
+	typ := tdp.Type{
+		Name: "updateNewEncryptedMessage",
+		ID:   UpdateNewEncryptedMessageTypeID,
+	}
+	if u == nil {
+		typ.Null = true
+		return typ
+	}
+	typ.Fields = []tdp.Field{
+		{
+			Name:       "Message",
+			SchemaName: "message",
+		},
+	}
+	return typ
+}
+
+// Encode implements bin.Encoder.
+func (u *UpdateNewEncryptedMessage) Encode(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't encode updateNewEncryptedMessage#a3135f31 as nil")
+	}
+	b.PutID(UpdateNewEncryptedMessageTypeID)
+	return u.EncodeBare(b)
+}
+
+// EncodeBare implements bin.BareEncoder.
+func (u *UpdateNewEncryptedMessage) EncodeBare(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't encode updateNewEncryptedMessage#a3135f31 as nil")
+	}
+	if err := u.Message.Encode(b); err != nil {
+		return fmt.Errorf("unable to encode updateNewEncryptedMessage#a3135f31: field message: %w", err)
+	}
+	return nil
+}
+
+// Decode implements bin.Decoder.
+func (u *UpdateNewEncryptedMessage) Decode(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't decode updateNewEncryptedMessage#a3135f31 to nil")
+	}
+	if err := b.ConsumeID(UpdateNewEncryptedMessageTypeID); err != nil {
+		return fmt.Errorf("unable to decode updateNewEncryptedMessage#a3135f31: %w", err)
+	}
+	return u.DecodeBare(b)
+}
+
+// DecodeBare implements bin.BareDecoder.
+func (u *UpdateNewEncryptedMessage) DecodeBare(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't decode updateNewEncryptedMessage#a3135f31 to nil")
+	}
+	{
+		if err := u.Message.Decode(b); err != nil {
+			return fmt.Errorf("unable to decode updateNewEncryptedMessage#a3135f31: field message: %w", err)
+		}
+	}
+	return nil
+}
+
+// GetMessage returns value of Message field.
+func (u *UpdateNewEncryptedMessage) GetMessage() (value EncryptedMessage) {
+	if u == nil {
+		return
+	}
+	return u.Message
+}
+
+// UpdateChatDevice represents TL type `updateChatDevice#d088765d`.
+type UpdateChatDevice struct {
+	// UserID field of UpdateChatDevice.
+	UserID int64
+	// DeviceID field of UpdateChatDevice.
+	DeviceID int64
+}
+
+// UpdateChatDeviceTypeID is TL type id of UpdateChatDevice.
+const UpdateChatDeviceTypeID = 0xd088765d
+
+// construct implements constructor of UpdateClass.
+func (u UpdateChatDevice) construct() UpdateClass { return &u }
+
+// Ensuring interfaces in compile-time for UpdateChatDevice.
+var (
+	_ bin.Encoder     = &UpdateChatDevice{}
+	_ bin.Decoder     = &UpdateChatDevice{}
+	_ bin.BareEncoder = &UpdateChatDevice{}
+	_ bin.BareDecoder = &UpdateChatDevice{}
+
+	_ UpdateClass = &UpdateChatDevice{}
+)
+
+func (u *UpdateChatDevice) Zero() bool {
+	if u == nil {
+		return true
+	}
+	if !(u.UserID == 0) {
+		return false
+	}
+	if !(u.DeviceID == 0) {
+		return false
+	}
+
+	return true
+}
+
+// String implements fmt.Stringer.
+func (u *UpdateChatDevice) String() string {
+	if u == nil {
+		return "UpdateChatDevice(nil)"
+	}
+	type Alias UpdateChatDevice
+	return fmt.Sprintf("UpdateChatDevice%+v", Alias(*u))
+}
+
+// TypeID returns type id in TL schema.
+//
+// See https://core.telegram.org/mtproto/TL-tl#remarks.
+func (*UpdateChatDevice) TypeID() uint32 {
+	return UpdateChatDeviceTypeID
+}
+
+// TypeName returns name of type in TL schema.
+func (*UpdateChatDevice) TypeName() string {
+	return "updateChatDevice"
+}
+
+// TypeInfo returns info about TL type.
+func (u *UpdateChatDevice) TypeInfo() tdp.Type {
+	typ := tdp.Type{
+		Name: "updateChatDevice",
+		ID:   UpdateChatDeviceTypeID,
+	}
+	if u == nil {
+		typ.Null = true
+		return typ
+	}
+	typ.Fields = []tdp.Field{
+		{
+			Name:       "UserID",
+			SchemaName: "user_id",
+		},
+		{
+			Name:       "DeviceID",
+			SchemaName: "device_id",
+		},
+	}
+	return typ
+}
+
+// Encode implements bin.Encoder.
+func (u *UpdateChatDevice) Encode(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't encode updateChatDevice#d088765d as nil")
+	}
+	b.PutID(UpdateChatDeviceTypeID)
+	return u.EncodeBare(b)
+}
+
+// EncodeBare implements bin.BareEncoder.
+func (u *UpdateChatDevice) EncodeBare(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't encode updateChatDevice#d088765d as nil")
+	}
+	b.PutLong(u.UserID)
+	b.PutLong(u.DeviceID)
+	return nil
+}
+
+// Decode implements bin.Decoder.
+func (u *UpdateChatDevice) Decode(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't decode updateChatDevice#d088765d to nil")
+	}
+	if err := b.ConsumeID(UpdateChatDeviceTypeID); err != nil {
+		return fmt.Errorf("unable to decode updateChatDevice#d088765d: %w", err)
+	}
+	return u.DecodeBare(b)
+}
+
+// DecodeBare implements bin.BareDecoder.
+func (u *UpdateChatDevice) DecodeBare(b *bin.Buffer) error {
+	if u == nil {
+		return fmt.Errorf("can't decode updateChatDevice#d088765d to nil")
+	}
+	{
+		value, err := b.Long()
+		if err != nil {
+			return fmt.Errorf("unable to decode updateChatDevice#d088765d: field user_id: %w", err)
+		}
+		u.UserID = value
+	}
+	{
+		value, err := b.Long()
+		if err != nil {
+			return fmt.Errorf("unable to decode updateChatDevice#d088765d: field device_id: %w", err)
+		}
+		u.DeviceID = value
+	}
+	return nil
+}
+
+// GetUserID returns value of UserID field.
+func (u *UpdateChatDevice) GetUserID() (value int64) {
+	if u == nil {
+		return
+	}
+	return u.UserID
+}
+
+// GetDeviceID returns value of DeviceID field.
+func (u *UpdateChatDevice) GetDeviceID() (value int64) {
+	if u == nil {
+		return
+	}
+	return u.DeviceID
+}
+
 // UpdateClassName is schema name of UpdateClass.
 const UpdateClassName = "Update"
 
@@ -721,6 +1151,9 @@ const UpdateClassName = "Update"
 //   - [UpdateUserPresence]
 //   - [UpdateClubMessage]
 //   - [UpdateFriends]
+//   - [UpdateEncryption]
+//   - [UpdateNewEncryptedMessage]
+//   - [UpdateChatDevice]
 //
 // Example:
 //
@@ -734,6 +1167,9 @@ const UpdateClassName = "Update"
 //	case *tl.UpdateUserPresence: // updateUserPresence#806504bc
 //	case *tl.UpdateClubMessage: // updateClubMessage#5a6f6195
 //	case *tl.UpdateFriends: // updateFriends#1bfadb02
+//	case *tl.UpdateEncryption: // updateEncryption#b4a2e88d
+//	case *tl.UpdateNewEncryptedMessage: // updateNewEncryptedMessage#a3135f31
+//	case *tl.UpdateChatDevice: // updateChatDevice#d088765d
 //	default: panic(v)
 //	}
 type UpdateClass interface {
@@ -793,6 +1229,27 @@ func DecodeUpdate(buf *bin.Buffer) (UpdateClass, error) {
 	case UpdateFriendsTypeID:
 		// Decoding updateFriends#1bfadb02.
 		v := UpdateFriends{}
+		if err := v.Decode(buf); err != nil {
+			return nil, fmt.Errorf("unable to decode UpdateClass: %w", err)
+		}
+		return &v, nil
+	case UpdateEncryptionTypeID:
+		// Decoding updateEncryption#b4a2e88d.
+		v := UpdateEncryption{}
+		if err := v.Decode(buf); err != nil {
+			return nil, fmt.Errorf("unable to decode UpdateClass: %w", err)
+		}
+		return &v, nil
+	case UpdateNewEncryptedMessageTypeID:
+		// Decoding updateNewEncryptedMessage#a3135f31.
+		v := UpdateNewEncryptedMessage{}
+		if err := v.Decode(buf); err != nil {
+			return nil, fmt.Errorf("unable to decode UpdateClass: %w", err)
+		}
+		return &v, nil
+	case UpdateChatDeviceTypeID:
+		// Decoding updateChatDevice#d088765d.
+		v := UpdateChatDevice{}
 		if err := v.Decode(buf); err != nil {
 			return nil, fmt.Errorf("unable to decode UpdateClass: %w", err)
 		}

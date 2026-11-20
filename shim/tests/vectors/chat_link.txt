@@ -1,22 +1,31 @@
-# Chat link v1 (shim <-> chat core, loopback TCP): one frame per line, "<name> <hex>". All little-endian.
-# Frame: u32 length of what follows (2 + payload, at most 65536), u16 type, payload. Unknown types are skipped by their length.
-# 1 HELLO       shim->core  u16 version, 32 bytes secret (from fh2mp-chat.txt), u32 game pid, u64 game window, u64 xuid (0 unknown)
-# 2 WELCOME     core->shim  u16 version, u8 flags (bit 0: the Guide can be shown)
-# 3 PAD         shim->core  u16 XInput buttons (0x0400 = Guide), u8 left trigger, u8 right trigger, i16 lx, ly, rx, ry (only while the Guide is open)
-# 4 GUIDE       shim->core  u8 cause (1 Guide button held 1 s, 2 keyboard key, 3 the game asked to invite friends): open or close the Guide
-# 5 GUIDE_STATE core->shim  u8 open (1: the shim keeps the pad from the game and sends PAD)
-# 6 WINDOW      shim->core  i32 x, y, width, height of the game's client area in screen pixels, u8 flags (bit 0 fullscreen, bit 1 minimized)
-# 7 GAME_STATE  shim->core  u8 online, u8 mode (0 menus, 1 Free Roam, 2 event, 3 Road Trip, 4 Car Meet), u16 players in the world
-# 8 OPEN_PAGE   shim->core  u8 page (1 invite to game), u16 length, UTF-8 argument (at most 512 bytes)
-# 9 BYE         either      u8 reason (1 game closing, 2 core closing, 3 protocol error)
-# The C side is shim/src/chat_link_wire.h (tests/test_chat_link.sh), the Rust side client/crates/fh2mp-chat/src/link_wire.rs; both check
-# their encoder and decoder against these lines.
-hello 3800000001000100000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f921000002c0b1a00000000006b23d52700000900
-welcome 050000000200010001
-pad 0e0000000300011400ff0080ff7f64009cff
-guide 03000000040001
-guide_state 03000000050001
-window 13000000060080f8ffff00000000800700003804000001
-game_state 06000000070001010b00
-open_page 16000000080001110066726565726f616d3a3737343164633164
-bye 03000000090002
+# Chat link v2 (the in-game Guide <-> Encore, loopback TCP): one frame per line, "<name> <hex>". All little-endian.
+# Frame: u32 length of what follows (2 + payload, at most 65536), u16 type, payload. Unknown types are skipped by their length; a length
+# over 65536 or a payload that does not decode exactly is a protocol error (BYE 3, close). str: u16 byte length, that many UTF-8 bytes (no
+# terminator), at most 8192 (the sender cuts longer text at a UTF-8 boundary). Encore names its port and secret in the game's
+# data/bin/fh2mp-chat.txt ("port=<decimal>", "secret=<64 lowercase hex>").
+# 1  HELLO     Guide->Encore  u16 version (2), 32 bytes secret, u32 game pid, u64 xuid (the session's, 0 unknown)
+# 2  WELCOME   Encore->Guide  u16 version (2), u8 flags (bit 0: DMs are end-to-end now), u64 xuid Encore is signed in as (0 unknown)
+# 9  BYE       either         u8 reason (1 game closing, 2 Encore closing, 3 protocol error, 4 refused: secret, version or account)
+# 10 OPEN      Guide->Encore  str chat id (a friend's xuid in decimal, or "club")
+# 11 CLOSE     Guide->Encore  (none) the open conversation closed
+# 12 SEND      Guide->Encore  u32 request id, str chat id, str text (1-2000 characters)
+# 13 READ      Guide->Encore  str chat id, i64 max_id (the newest message seen)
+# 20 CHATS     Encore->Guide  u16 count, then per conversation: str id, str title, str last text, i32 unread, i64 last incoming id, u8 flags
+#                             (bit 0 end-to-end, bit 1 club)
+# 21 MESSAGES  Encore->Guide  str chat id, u16 count, then per message oldest first: i64 id, u64 sender xuid, str gamertag, str body,
+#                             i64 created (seconds since 1970), u8 state (0 incoming unread, 1 incoming seen, 2 sending, 3 sent, 4 read, 5 failed)
+# 22 SENT      Encore->Guide  u32 request id, u8 ok (1/0), str why (empty when ok)
+# 23 NOTICE    Encore->Guide  u8 kind (1 new DM, 2 new club post, 3 friend on a new PC), str chat id, str title (the sender's gamertag), str text
+# The C side is shim/src/chat_link_wire.h (tests/test_chat_link.sh, which also holds the values behind each line; Encore Launcher's Guide
+# keeps a copy), the Rust side Encore Launcher's crates/encore-core/src/link_wire.rs; both check their encoder and decoder against these lines.
+hello 3000000001000200000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f92100000010d000000000900
+welcome 0d0000000200020001010d000000000900
+bye 03000000090003
+open 080000000a000400636c7562
+close 020000000b00
+send 250000000c00070000001000323533333237343739303339393233350b0072656164793f20f09f8f81
+read 100000000d000400636c75622a00000000000000
+chats 7d000000140002000400636c756213005b4648545d204648324d5020546573746572731c006f6b2c206d6565742061742074686520666573746976616c206875620300000029000000000000000210003235333332373437393033393932333508004465627567466f7808006563686f3a20686901000000090000000000000001
+messages 65000000150010003235333332373437393033393932333502000800000000000000010d0000000009000300596f7502006869002e1d6900000000030900000000000000030d00000000090008004465627567466f7808006563686f3a206869032e1d690000000000
+sent 15000000160007000000000c004e6f7420667269656e64732e
+notice 2900000017000110003235333332373437393033393932333508004465627567466f7808006563686f3a206869

@@ -342,8 +342,8 @@ func (c *Core) expandCarTokens(text string) (string, error) {
 	return out, ferr
 }
 
-// Admin serves GET /admin/send, /admin/gamemode, /admin/drivatar, /admin/rotate, /admin/rivals and POST /admin/result: the text answered (200,
-// text/plain), or found=false for a path that is not an admin endpoint.
+// Admin serves GET /admin/send, /admin/gamemode, /admin/drivatar, /admin/rotate, /admin/rivals, /admin/avatar-items and POST /admin/result:
+// the text answered (200, text/plain), or found=false for a path that is not an admin endpoint.
 func (c *Core) Admin(r *Req, method, rawurl string, body []byte) (out string, found bool, err error) {
 	u, perr := url.Parse(rawurl)
 	if perr != nil {
@@ -496,6 +496,9 @@ func (c *Core) Admin(r *Req, method, rawurl string, body []byte) (out string, fo
 		sk, _ := rec.Get("UserSkillLevel")
 		wb, _ := rec.Get("wristbandLevel")
 		return fmt.Sprintf("drivatar %s xuid=%#x skill=%s wristband=%s\n", pyjson.PyRepr(gt), toInt(x), pyjson.PyStr(sk), pyjson.PyStr(wb)), true, nil
+	case u.Path == "/admin/avatar-items":
+		out, e := c.avatarItemsLine(q)
+		return out, true, e
 	case u.Path == "/admin/rotate" || u.Path == "/admin/rivals":
 		var evs []*rivals.Event
 		var e error

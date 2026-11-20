@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"fh2mp/internal/auth"
+	"fh2mp/internal/avatars"
 	"fh2mp/internal/cardb"
 	"fh2mp/internal/catalog"
 	"fh2mp/internal/clubs"
@@ -49,6 +50,8 @@ type Core struct {
 	Xbl    *xbl.Server
 	Tables *catalog.Tables // part ids of the game data (nil: tune checks are skipped)
 	Chat   *mt.Server      // the MTProto chat server (nil: FH2MP_MT is off)
+
+	Avatars *avatars.Store // Xbox 360 avatars and the avatar items each account owns (/v1/me/avatar)
 
 	Launcher  LauncherAPI                      // /v1/* (nil: not served)
 	Ops       OpsAPI                           // /ops/* (nil: not served)

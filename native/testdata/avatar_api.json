@@ -1,0 +1,838 @@
+{
+  "contract": "FH2MP avatar API 1",
+  "about": [
+    "The Xbox 360 avatar API of the FH2MP LSP for Encore: native/internal/lsp/avatar.go and native/internal/avatars.",
+    "TestAvatarContract (native/internal/lsp/avatar_test.go) writes this file with FH2MP_WRITE_AVATAR_CONTRACT=1 and fails when the server no longer answers what it says. Encore keeps a copy in testdata/ and its interop lane checks the copy against FH2MP at proto/FH2MP_COMMIT.",
+    "Base64 is the standard alphabet with padding (RFC 4648 section 4), checked strictly.",
+    "Errors are {\"error\": <code>, \"message\": <text>} with the HTTP status. The code is for programs, the message for people. A request whose Content-Length is over the route's limit gets 413 {\"error\": \"too_large\"} before it is read.",
+    "There is no store and no money: avatar items are rewards (later The Eliminator's battle pass), granted by the server only."
+  ],
+  "limits": {
+    "manifestBytes": 1000,
+    "coloursMaxBytes": 16384,
+    "coloursLines": "each line \"<record> <palette>\": two numbers of 1 to 6 digits, one space, ended by \"\\n\"; \"\" or no colours field = no choices",
+    "bodyMaxBytes": 2000000,
+    "bodyMinPixels": 64,
+    "bodyMaxPixels": 1024,
+    "bodyFormat": "PNG, 8 bits per channel, grey, grey+alpha, RGB or RGBA, not interlaced; width and height each 64 to 1024 pixels; at most 2000000 bytes as sent",
+    "bodyServed": "the server keeps and serves its own encoding of the pixels (pngtool), never the uploaded bytes: compare pictures by their pixels",
+    "requestMaxBytes": 2800000,
+    "savesPer10Minutes": 20
+  },
+  "itemId": {
+    "text": "32 lowercase hex digits: the item's 16 id bytes in the order the manifest holds them. The server reads either case and answers in lower case.",
+    "empty": "16 zero bytes are an empty slot, not an item (nor can they be granted).",
+    "slots": [
+      {
+        "at": 12,
+        "atHex": "0x00C",
+        "count": 15,
+        "step": 16,
+        "what": "face parts: chin, nose and ears (16 bytes each), then six 32-byte face textures (mouth, eyes, eyebrows, facial hair, eye shadow, facial features); read as fifteen 16-byte slots, so a texture's second half is read too"
+      },
+      {
+        "at": 288,
+        "atHex": "0x120",
+        "count": 22,
+        "step": 32,
+        "what": "asset entries, the id in each entry's first 16 bytes: body, head, 13 worn items, 7 of the basic outfit (to 0x3E0)"
+      }
+    ],
+    "worn": "A manifest wears every non-empty id in those slots. Nothing else in it is read as an id.",
+    "rewards": "The reward catalog lists the items that must be owned to be worn; every other item is free. It holds 0 items in this build (none yet: the battle pass picks them). PUT refuses a manifest wearing a catalog item the account does not own."
+  },
+  "card": "Every community card (GET /v1/community, /v1/community/player/<xuid>, invites, ...) carries avatarVersion next to gamerpicVersion: the time of the avatar's last save in seconds since 1970 (a float), above the one before at every save; 0 = no avatar. Fetch GET /v1/avatar/<xuid> again when it changes.",
+  "grants": [
+    "Items are granted by the server only: avatars.Store.Grant(xuid, item, source) (the battle pass calls it later). No client request grants.",
+    "For tests, the operators' control line (loopback only, like every /admin/ endpoint) answers one text line: GET /admin/avatar-items?xuid=<xuid>&grant=<item>[&source=<source>] grants (source \"admin\" when left out) and answers \"granted <item> to <xuid hex> (source <source>)\", \"<xuid hex> already owns <item>\" or \"refused: <reason>\"; GET /admin/avatar-items?xuid=<xuid> lists \"<item> granted <time> by <source>\" per item. xuid is decimal or 0x hex; source is 1 to 64 of A-Z a-z 0-9 . _ : -.",
+    "An account keeps its items when it deletes its avatar."
+  ],
+  "endpoints": [
+    {
+      "method": "PUT",
+      "path": "/v1/me/avatar",
+      "auth": "Authorization: Bearer <token from POST /v1/auth/login>",
+      "request": {
+        "manifest": "base64 of the 1000-byte manifest",
+        "colours": "the editor's colour list (optional)",
+        "body": "base64 of the full-body PNG"
+      },
+      "response": {
+        "version": "the avatar's new avatarVersion (float)"
+      },
+      "errors": [
+        {
+          "status": 413,
+          "error": "too_large",
+          "when": "the request's Content-Length is over 2800000 bytes: the HTTP front answers {\"error\": \"too_large\"} without reading it"
+        },
+        {
+          "status": 401,
+          "error": "invalid_token, token_expired, ip_changed",
+          "when": "no live session for the token (auth.json)"
+        },
+        {
+          "status": 429,
+          "error": "rate_limited",
+          "when": "over 20 saves in 10 minutes by this account (refused requests count)"
+        },
+        {
+          "status": 400,
+          "error": "bad_request",
+          "when": "the body is not a JSON object"
+        },
+        {
+          "status": 400,
+          "error": "bad_manifest",
+          "when": "manifest is missing, not a base64 string, or not 1000 bytes"
+        },
+        {
+          "status": 400,
+          "error": "bad_colours",
+          "when": "colours is not a string or not a colour list (limits)"
+        },
+        {
+          "status": 400,
+          "error": "bad_image",
+          "when": "body is missing or not base64, not a PNG, over 2 MB, under 64 or over 1024 pixels either way, or a PNG the server cannot read (16-bit, interlaced)"
+        },
+        {
+          "status": 403,
+          "error": "item_not_owned",
+          "when": "the manifest wears an item of the reward catalog that the account does not own"
+        }
+      ],
+      "notes": [
+        "Checked in the order of the errors above; the first that applies answers.",
+        "A save replaces the whole avatar."
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/me/avatar",
+      "auth": "Authorization: Bearer <token from POST /v1/auth/login>",
+      "response": {
+        "ok": true
+      },
+      "errors": [
+        {
+          "status": 401,
+          "error": "invalid_token, token_expired, ip_changed",
+          "when": "no live session for the token (auth.json)"
+        }
+      ],
+      "notes": [
+        "Also when there is no avatar. The card's avatarVersion is 0 afterwards; the owned items stay."
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/me/avatar/items",
+      "auth": "Authorization: Bearer <token from POST /v1/auth/login>",
+      "response": {
+        "items": [
+          {
+            "item": "item id",
+            "grantedAt": "seconds since 1970 (float)",
+            "source": "what granted it"
+          }
+        ]
+      },
+      "errors": [
+        {
+          "status": 401,
+          "error": "invalid_token, token_expired, ip_changed",
+          "when": "no live session for the token (auth.json)"
+        }
+      ],
+      "notes": [
+        "The oldest grant first; [] when the account owns nothing."
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/avatar/<xuid>",
+      "auth": "none (public, like /v1/gamerpic/<xuid>.png)",
+      "response": {
+        "manifest": "base64 of the 1000 bytes",
+        "colours": "the colour list as saved",
+        "version": "avatarVersion (float)"
+      },
+      "errors": [
+        {
+          "status": 404,
+          "error": "no_avatar",
+          "when": "the player has no avatar (or no account)"
+        },
+        {
+          "status": 404,
+          "error": "not_found",
+          "when": "<xuid> is not a decimal account id"
+        }
+      ],
+      "notes": [
+        "<xuid> in decimal, as the card's xuid. A query such as ?v=<version> is ignored."
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/avatar/<xuid>.png",
+      "auth": "none (public)",
+      "response": "the body picture, Content-Type image/png, Cache-Control max-age=60: add ?v=<avatarVersion> to fetch a new save at once",
+      "errors": [
+        {
+          "status": 404,
+          "error": "no_avatar",
+          "when": "the player has no avatar"
+        },
+        {
+          "status": 404,
+          "error": "not_found",
+          "when": "<xuid> is not a decimal account id"
+        }
+      ]
+    }
+  ],
+  "fixtures": [
+    {
+      "name": "body64x128",
+      "what": "the body picture the run uploads: 64 x 128 RGBA, made with Go's image/png (any encoder will do)",
+      "base64": "iVBORw0KGgoAAAANSUhEUgAAAEAAAACACAYAAAC7gW9qAAABKElEQVR42uzbbxGCQBAHUI4xCBGIYASjEIUoRjACEWiiERiRvVvh/T47Mvd2lz83c3138QAAAAAAAAAA2mV9zu+Gl+9KxgUPj6mcDmBPpWtA9JnbvMZ49NlnPBrBUyBz9Wt0gQ4AACD3/EffB8IAjn6JiXopMgIAAMTlqLmN/CjSAdEX+LV60Z/EVTpg7yKiF9/ZEUqQ1nuCl8/t6D8cp1doRZf5Xv7uJpg5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDzJexw0jCMmydH1nUp3/5WBwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDoAAIDNfAYA9Bs/N9UeVY0AAAAASUVORK5CYII=",
+      "pixelsSha256": "d959f4703d9a6f8588aeff4f4cc8966a159e0c26e89ef4b1f896053520b88456"
+    },
+    {
+      "name": "grey32",
+      "what": "a 32 x 32 grey PNG: too small",
+      "base64": "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAAAAABWESUoAAAAGUlEQVR42mJpYMAPmBhGFYwqGFUwQhUABgCkHgDDqP+neAAAAABJRU5ErkJggg=="
+    },
+    {
+      "name": "wide1025",
+      "what": "a PNG header of 1025 x 64 and nothing else: refused by its header",
+      "base64": "iVBORw0KGgoAAAANSUhEUgAABAEAAABACAYAAABryG7CAAAAAElFTkSuQmCC"
+    },
+    {
+      "name": "manifest",
+      "what": "a made-up 1000-byte manifest (no real avatar's): ids in the stock form with invented numbers, nine colours, no reward item",
+      "base64": "AAAAAQAAAAAAAAAAEAAAAAEBAAHByPEJoZyy4CAAAAABAgABwcjxCaGcsuBAAAAAAQMAAcHI8QmhnLLgAQAAAAIBAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/+CwkP8wIBD/MHDA/yAgMP//////////////////////////AAAAAQABAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAACAAIAAcHI8QmhnLLgAAAAAAAAAAAAAAAAAAAAAAAAAAgDAQABwcjxCaGcsuAACAAAAAAAAAAAAAAAAAAAAAAAEAMCAAHByPEJoZyy4AAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+    },
+    {
+      "name": "manifestWithReward",
+      "what": "the same with the test reward item f0000000000000000000000000000001 at worn slot 2 (0x1A0)",
+      "base64": "AAAAAQAAAAAAAAAAEAAAAAEBAAHByPEJoZyy4CAAAAABAgABwcjxCaGcsuBAAAAAAQMAAcHI8QmhnLLgAQAAAAIBAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/+CwkP8wIBD/MHDA/yAgMP//////////////////////////AAAAAQABAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAACAAIAAcHI8QmhnLLgAAAAAAAAAAAAAAAAAAAAAAAAAAgDAQABwcjxCaGcsuAACAAAAAAAAAAAAAAAAAAAAAAAEAMCAAHByPEJoZyy4AAQAAAAAAAAAAAAAAAAAADwAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+    }
+  ],
+  "run": {
+    "about": [
+      "The steps run in order on one empty database, with these accounts signed in, and the reward catalog holding the items in rewards (the shipped catalog is empty).",
+      "clock is the server's time from that step on, in seconds since 1970: versions and grant times come from it. A step with repeat is sent that many times, each answered alike.",
+      "control is an operators' control line and answer its text. pick: the answer has more fields than these, and the contract pins only the ones listed. png: the picture's size and the SHA-256 of its decoded pixel rows (width x channels bytes each, top row first)."
+    ],
+    "accounts": [
+      {
+        "name": "ann",
+        "xuid": 2533274790398465,
+        "xuidHex": "0x9000000000a01",
+        "gamertag": "Avatar Ann",
+        "token": "fh2.avatar-contract-ann"
+      },
+      {
+        "name": "bob",
+        "xuid": 2533274790398466,
+        "xuidHex": "0x9000000000a02",
+        "gamertag": "Avatar Bob",
+        "token": "fh2.avatar-contract-bob"
+      },
+      {
+        "name": "cy",
+        "xuid": 2533274790398467,
+        "xuidHex": "0x9000000000a03",
+        "gamertag": "Avatar Cy",
+        "token": "fh2.avatar-contract-cy"
+      }
+    ],
+    "rewards": [
+      "f0000000000000000000000000000001"
+    ],
+    "steps": [
+      {
+        "note": "no avatar yet",
+        "request": {
+          "method": "GET",
+          "path": "/v1/avatar/2533274790398465"
+        },
+        "response": {
+          "status": 404,
+          "contentType": "application/json",
+          "json": {
+            "error": "no_avatar",
+            "message": "this player has no avatar"
+          }
+        }
+      },
+      {
+        "note": "no avatar yet: no picture",
+        "request": {
+          "method": "GET",
+          "path": "/v1/avatar/2533274790398465.png"
+        },
+        "response": {
+          "status": 404,
+          "contentType": "application/json",
+          "json": {
+            "error": "no_avatar",
+            "message": "this player has no avatar"
+          }
+        }
+      },
+      {
+        "note": "not an account id",
+        "request": {
+          "method": "GET",
+          "path": "/v1/avatar/ann"
+        },
+        "response": {
+          "status": 404,
+          "contentType": "application/json",
+          "json": {
+            "error": "not_found",
+            "message": "not_found"
+          }
+        }
+      },
+      {
+        "note": "the card says avatarVersion 0",
+        "request": {
+          "method": "GET",
+          "path": "/v1/community/player/2533274790398465",
+          "as": "bob"
+        },
+        "response": {
+          "status": 200,
+          "contentType": "application/json",
+          "pick": [
+            "player.xuid",
+            "player.gamerpicVersion",
+            "player.avatarVersion"
+          ],
+          "json": {
+            "player": {
+              "xuid": 2533274790398465,
+              "gamerpicVersion": 0.0,
+              "avatarVersion": 0.0
+            }
+          }
+        }
+      },
+      {
+        "note": "nothing owned yet",
+        "request": {
+          "method": "GET",
+          "path": "/v1/me/avatar/items",
+          "as": "ann"
+        },
+        "response": {
+          "status": 200,
+          "contentType": "application/json",
+          "json": {
+            "items": []
+          }
+        }
+      },
+      {
+        "note": "a save needs a token",
+        "request": {
+          "method": "PUT",
+          "path": "/v1/me/avatar",
+          "json": {
+            "manifest": "AAAAAQAAAAAAAAAAEAAAAAEBAAHByPEJoZyy4CAAAAABAgABwcjxCaGcsuBAAAAAAQMAAcHI8QmhnLLgAQAAAAIBAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/+CwkP8wIBD/MHDA/yAgMP//////////////////////////AAAAAQABAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAACAAIAAcHI8QmhnLLgAAAAAAAAAAAAAAAAAAAAAAAAAAgDAQABwcjxCaGcsuAACAAAAAAAAAAAAAAAAAAAAAAAEAMCAAHByPEJoZyy4AAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            "colours": "12 3\n407 1\n",
+            "body": "iVBORw0KGgoAAAANSUhEUgAAAEAAAACACAYAAAC7gW9qAAABKElEQVR42uzbbxGCQBAHUI4xCBGIYASjEIUoRjACEWiiERiRvVvh/T47Mvd2lz83c3138QAAAAAAAAAA2mV9zu+Gl+9KxgUPj6mcDmBPpWtA9JnbvMZ49NlnPBrBUyBz9Wt0gQ4AACD3/EffB8IAjn6JiXopMgIAAMTlqLmN/CjSAdEX+LV60Z/EVTpg7yKiF9/ZEUqQ1nuCl8/t6D8cp1doRZf5Xv7uJpg5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDzJexw0jCMmydH1nUp3/5WBwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDoAAIDNfAYA9Bs/N9UeVY0AAAAASUVORK5CYII="
+          }
+        },
+        "response": {
+          "status": 401,
+          "contentType": "application/json",
+          "json": {
+            "error": "invalid_token",
+            "message": "invalid_token"
+          }
+        }
+      },
+      {
+        "note": "a manifest of 999 bytes",
+        "request": {
+          "method": "PUT",
+          "path": "/v1/me/avatar",
+          "as": "ann",
+          "json": {
+            "manifest": "AAAAAQAAAAAAAAAAEAAAAAEBAAHByPEJoZyy4CAAAAABAgABwcjxCaGcsuBAAAAAAQMAAcHI8QmhnLLgAQAAAAIBAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/+CwkP8wIBD/MHDA/yAgMP//////////////////////////AAAAAQABAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAACAAIAAcHI8QmhnLLgAAAAAAAAAAAAAAAAAAAAAAAAAAgDAQABwcjxCaGcsuAACAAAAAAAAAAAAAAAAAAAAAAAEAMCAAHByPEJoZyy4AAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "colours": "12 3\n407 1\n",
+            "body": "iVBORw0KGgoAAAANSUhEUgAAAEAAAACACAYAAAC7gW9qAAABKElEQVR42uzbbxGCQBAHUI4xCBGIYASjEIUoRjACEWiiERiRvVvh/T47Mvd2lz83c3138QAAAAAAAAAA2mV9zu+Gl+9KxgUPj6mcDmBPpWtA9JnbvMZ49NlnPBrBUyBz9Wt0gQ4AACD3/EffB8IAjn6JiXopMgIAAMTlqLmN/CjSAdEX+LV60Z/EVTpg7yKiF9/ZEUqQ1nuCl8/t6D8cp1doRZf5Xv7uJpg5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDzJexw0jCMmydH1nUp3/5WBwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDoAAIDNfAYA9Bs/N9UeVY0AAAAASUVORK5CYII="
+          }
+        },
+        "response": {
+          "status": 400,
+          "contentType": "application/json",
+          "json": {
+            "error": "bad_manifest",
+            "message": "the avatar manifest must be 1000 bytes, in base64"
+          }
+        }
+      },
+      {
+        "note": "a manifest that is not base64",
+        "request": {
+          "method": "PUT",
+          "path": "/v1/me/avatar",
+          "as": "ann",
+          "json": {
+            "manifest": "not base64!",
+            "colours": "",
+            "body": "iVBORw0KGgoAAAANSUhEUgAAAEAAAACACAYAAAC7gW9qAAABKElEQVR42uzbbxGCQBAHUI4xCBGIYASjEIUoRjACEWiiERiRvVvh/T47Mvd2lz83c3138QAAAAAAAAAA2mV9zu+Gl+9KxgUPj6mcDmBPpWtA9JnbvMZ49NlnPBrBUyBz9Wt0gQ4AACD3/EffB8IAjn6JiXopMgIAAMTlqLmN/CjSAdEX+LV60Z/EVTpg7yKiF9/ZEUqQ1nuCl8/t6D8cp1doRZf5Xv7uJpg5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDzJexw0jCMmydH1nUp3/5WBwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDoAAIDNfAYA9Bs/N9UeVY0AAAAASUVORK5CYII="
+          }
+        },
+        "response": {
+          "status": 400,
+          "contentType": "application/json",
+          "json": {
+            "error": "bad_manifest",
+            "message": "the avatar manifest must be 1000 bytes, in base64"
+          }
+        }
+      },
+      {
+        "note": "a colour line without its newline",
+        "request": {
+          "method": "PUT",
+          "path": "/v1/me/avatar",
+          "as": "ann",
+          "json": {
+            "manifest": "AAAAAQAAAAAAAAAAEAAAAAEBAAHByPEJoZyy4CAAAAABAgABwcjxCaGcsuBAAAAAAQMAAcHI8QmhnLLgAQAAAAIBAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/+CwkP8wIBD/MHDA/yAgMP//////////////////////////AAAAAQABAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAACAAIAAcHI8QmhnLLgAAAAAAAAAAAAAAAAAAAAAAAAAAgDAQABwcjxCaGcsuAACAAAAAAAAAAAAAAAAAAAAAAAEAMCAAHByPEJoZyy4AAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            "colours": "12 3",
+            "body": "iVBORw0KGgoAAAANSUhEUgAAAEAAAACACAYAAAC7gW9qAAABKElEQVR42uzbbxGCQBAHUI4xCBGIYASjEIUoRjACEWiiERiRvVvh/T47Mvd2lz83c3138QAAAAAAAAAA2mV9zu+Gl+9KxgUPj6mcDmBPpWtA9JnbvMZ49NlnPBrBUyBz9Wt0gQ4AACD3/EffB8IAjn6JiXopMgIAAMTlqLmN/CjSAdEX+LV60Z/EVTpg7yKiF9/ZEUqQ1nuCl8/t6D8cp1doRZf5Xv7uJpg5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDzJexw0jCMmydH1nUp3/5WBwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDoAAIDNfAYA9Bs/N9UeVY0AAAAASUVORK5CYII="
+          }
+        },
+        "response": {
+          "status": 400,
+          "contentType": "application/json",
+          "json": {
+            "error": "bad_colours",
+            "message": "the avatar's colour list cannot be read"
+          }
+        }
+      },
+      {
+        "note": "a body that is not a PNG",
+        "request": {
+          "method": "PUT",
+          "path": "/v1/me/avatar",
+          "as": "ann",
+          "json": {
+            "manifest": "AAAAAQAAAAAAAAAAEAAAAAEBAAHByPEJoZyy4CAAAAABAgABwcjxCaGcsuBAAAAAAQMAAcHI8QmhnLLgAQAAAAIBAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/+CwkP8wIBD/MHDA/yAgMP//////////////////////////AAAAAQABAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAACAAIAAcHI8QmhnLLgAAAAAAAAAAAAAAAAAAAAAAAAAAgDAQABwcjxCaGcsuAACAAAAAAAAAAAAAAAAAAAAAAAEAMCAAHByPEJoZyy4AAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            "colours": "12 3\n407 1\n",
+            "body": "R0lGODlhIG5vdCBhIHBuZw=="
+          }
+        },
+        "response": {
+          "status": 400,
+          "contentType": "application/json",
+          "json": {
+            "error": "bad_image",
+            "message": "send a PNG of at most 2 MB"
+          }
+        }
+      },
+      {
+        "note": "a body of 32 x 32 pixels",
+        "request": {
+          "method": "PUT",
+          "path": "/v1/me/avatar",
+          "as": "ann",
+          "json": {
+            "manifest": "AAAAAQAAAAAAAAAAEAAAAAEBAAHByPEJoZyy4CAAAAABAgABwcjxCaGcsuBAAAAAAQMAAcHI8QmhnLLgAQAAAAIBAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/+CwkP8wIBD/MHDA/yAgMP//////////////////////////AAAAAQABAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAACAAIAAcHI8QmhnLLgAAAAAAAAAAAAAAAAAAAAAAAAAAgDAQABwcjxCaGcsuAACAAAAAAAAAAAAAAAAAAAAAAAEAMCAAHByPEJoZyy4AAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            "colours": "12 3\n407 1\n",
+            "body": "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAAAAABWESUoAAAAGUlEQVR42mJpYMAPmBhGFYwqGFUwQhUABgCkHgDDqP+neAAAAABJRU5ErkJggg=="
+          }
+        },
+        "response": {
+          "status": 400,
+          "contentType": "application/json",
+          "json": {
+            "error": "bad_image",
+            "message": "the picture must be between 64 and 1024 pixels each way"
+          }
+        }
+      },
+      {
+        "note": "a body 1025 pixels wide",
+        "request": {
+          "method": "PUT",
+          "path": "/v1/me/avatar",
+          "as": "ann",
+          "json": {
+            "manifest": "AAAAAQAAAAAAAAAAEAAAAAEBAAHByPEJoZyy4CAAAAABAgABwcjxCaGcsuBAAAAAAQMAAcHI8QmhnLLgAQAAAAIBAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/+CwkP8wIBD/MHDA/yAgMP//////////////////////////AAAAAQABAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAACAAIAAcHI8QmhnLLgAAAAAAAAAAAAAAAAAAAAAAAAAAgDAQABwcjxCaGcsuAACAAAAAAAAAAAAAAAAAAAAAAAEAMCAAHByPEJoZyy4AAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            "colours": "12 3\n407 1\n",
+            "body": "iVBORw0KGgoAAAANSUhEUgAABAEAAABACAYAAABryG7CAAAAAElFTkSuQmCC"
+          }
+        },
+        "response": {
+          "status": 400,
+          "contentType": "application/json",
+          "json": {
+            "error": "bad_image",
+            "message": "the picture must be between 64 and 1024 pixels each way"
+          }
+        }
+      },
+      {
+        "note": "wearing the reward item without owning it",
+        "request": {
+          "method": "PUT",
+          "path": "/v1/me/avatar",
+          "as": "ann",
+          "json": {
+            "manifest": "AAAAAQAAAAAAAAAAEAAAAAEBAAHByPEJoZyy4CAAAAABAgABwcjxCaGcsuBAAAAAAQMAAcHI8QmhnLLgAQAAAAIBAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/+CwkP8wIBD/MHDA/yAgMP//////////////////////////AAAAAQABAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAACAAIAAcHI8QmhnLLgAAAAAAAAAAAAAAAAAAAAAAAAAAgDAQABwcjxCaGcsuAACAAAAAAAAAAAAAAAAAAAAAAAEAMCAAHByPEJoZyy4AAQAAAAAAAAAAAAAAAAAADwAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            "colours": "12 3\n407 1\n",
+            "body": "iVBORw0KGgoAAAANSUhEUgAAAEAAAACACAYAAAC7gW9qAAABKElEQVR42uzbbxGCQBAHUI4xCBGIYASjEIUoRjACEWiiERiRvVvh/T47Mvd2lz83c3138QAAAAAAAAAA2mV9zu+Gl+9KxgUPj6mcDmBPpWtA9JnbvMZ49NlnPBrBUyBz9Wt0gQ4AACD3/EffB8IAjn6JiXopMgIAAMTlqLmN/CjSAdEX+LV60Z/EVTpg7yKiF9/ZEUqQ1nuCl8/t6D8cp1doRZf5Xv7uJpg5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDzJexw0jCMmydH1nUp3/5WBwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDoAAIDNfAYA9Bs/N9UeVY0AAAAASUVORK5CYII="
+          }
+        },
+        "response": {
+          "status": 403,
+          "contentType": "application/json",
+          "json": {
+            "error": "item_not_owned",
+            "message": "this avatar wears a reward item this account does not own"
+          }
+        }
+      },
+      {
+        "note": "the operators grant it (the battle pass will, through avatars.Store.Grant)",
+        "clock": 1800000100,
+        "control": "/admin/avatar-items?xuid=0x9000000000a01&grant=f0000000000000000000000000000001&source=test",
+        "answer": "granted f0000000000000000000000000000001 to 0x9000000000a01 (source test)\n"
+      },
+      {
+        "note": "now it is owned",
+        "request": {
+          "method": "GET",
+          "path": "/v1/me/avatar/items",
+          "as": "ann"
+        },
+        "response": {
+          "status": 200,
+          "contentType": "application/json",
+          "json": {
+            "items": [
+              {
+                "item": "f0000000000000000000000000000001",
+                "grantedAt": 1800000100.0,
+                "source": "test"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "note": "the same save passes",
+        "clock": 1800000200,
+        "request": {
+          "method": "PUT",
+          "path": "/v1/me/avatar",
+          "as": "ann",
+          "json": {
+            "manifest": "AAAAAQAAAAAAAAAAEAAAAAEBAAHByPEJoZyy4CAAAAABAgABwcjxCaGcsuBAAAAAAQMAAcHI8QmhnLLgAQAAAAIBAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/+CwkP8wIBD/MHDA/yAgMP//////////////////////////AAAAAQABAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAACAAIAAcHI8QmhnLLgAAAAAAAAAAAAAAAAAAAAAAAAAAgDAQABwcjxCaGcsuAACAAAAAAAAAAAAAAAAAAAAAAAEAMCAAHByPEJoZyy4AAQAAAAAAAAAAAAAAAAAADwAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            "colours": "12 3\n407 1\n",
+            "body": "iVBORw0KGgoAAAANSUhEUgAAAEAAAACACAYAAAC7gW9qAAABKElEQVR42uzbbxGCQBAHUI4xCBGIYASjEIUoRjACEWiiERiRvVvh/T47Mvd2lz83c3138QAAAAAAAAAA2mV9zu+Gl+9KxgUPj6mcDmBPpWtA9JnbvMZ49NlnPBrBUyBz9Wt0gQ4AACD3/EffB8IAjn6JiXopMgIAAMTlqLmN/CjSAdEX+LV60Z/EVTpg7yKiF9/ZEUqQ1nuCl8/t6D8cp1doRZf5Xv7uJpg5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDzJexw0jCMmydH1nUp3/5WBwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDoAAIDNfAYA9Bs/N9UeVY0AAAAASUVORK5CYII="
+          }
+        },
+        "response": {
+          "status": 200,
+          "contentType": "application/json",
+          "json": {
+            "version": 1800000200.0
+          }
+        }
+      },
+      {
+        "note": "anyone reads it back",
+        "request": {
+          "method": "GET",
+          "path": "/v1/avatar/2533274790398465"
+        },
+        "response": {
+          "status": 200,
+          "contentType": "application/json",
+          "json": {
+            "manifest": "AAAAAQAAAAAAAAAAEAAAAAEBAAHByPEJoZyy4CAAAAABAgABwcjxCaGcsuBAAAAAAQMAAcHI8QmhnLLgAQAAAAIBAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/+CwkP8wIBD/MHDA/yAgMP//////////////////////////AAAAAQABAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAACAAIAAcHI8QmhnLLgAAAAAAAAAAAAAAAAAAAAAAAAAAgDAQABwcjxCaGcsuAACAAAAAAAAAAAAAAAAAAAAAAAEAMCAAHByPEJoZyy4AAQAAAAAAAAAAAAAAAAAADwAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            "colours": "12 3\n407 1\n",
+            "version": 1800000200.0
+          }
+        }
+      },
+      {
+        "note": "the picture: the server's encoding of the same pixels",
+        "request": {
+          "method": "GET",
+          "path": "/v1/avatar/2533274790398465.png?v=1800000200.0"
+        },
+        "response": {
+          "status": 200,
+          "contentType": "image/png",
+          "png": {
+            "width": 64,
+            "height": 128,
+            "channels": 4,
+            "pixelsSha256": "d959f4703d9a6f8588aeff4f4cc8966a159e0c26e89ef4b1f896053520b88456"
+          }
+        }
+      },
+      {
+        "note": "the card carries the version",
+        "request": {
+          "method": "GET",
+          "path": "/v1/community/player/2533274790398465",
+          "as": "bob"
+        },
+        "response": {
+          "status": 200,
+          "contentType": "application/json",
+          "pick": [
+            "player.xuid",
+            "player.gamerpicVersion",
+            "player.avatarVersion"
+          ],
+          "json": {
+            "player": {
+              "xuid": 2533274790398465,
+              "gamerpicVersion": 0.0,
+              "avatarVersion": 1800000200.0
+            }
+          }
+        }
+      },
+      {
+        "note": "a later save without the reward item, no colour choices",
+        "clock": 1800000300,
+        "request": {
+          "method": "PUT",
+          "path": "/v1/me/avatar",
+          "as": "ann",
+          "json": {
+            "manifest": "AAAAAQAAAAAAAAAAEAAAAAEBAAHByPEJoZyy4CAAAAABAgABwcjxCaGcsuBAAAAAAQMAAcHI8QmhnLLgAQAAAAIBAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/+CwkP8wIBD/MHDA/yAgMP//////////////////////////AAAAAQABAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAACAAIAAcHI8QmhnLLgAAAAAAAAAAAAAAAAAAAAAAAAAAgDAQABwcjxCaGcsuAACAAAAAAAAAAAAAAAAAAAAAAAEAMCAAHByPEJoZyy4AAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            "colours": "",
+            "body": "iVBORw0KGgoAAAANSUhEUgAAAEAAAACACAYAAAC7gW9qAAABKElEQVR42uzbbxGCQBAHUI4xCBGIYASjEIUoRjACEWiiERiRvVvh/T47Mvd2lz83c3138QAAAAAAAAAA2mV9zu+Gl+9KxgUPj6mcDmBPpWtA9JnbvMZ49NlnPBrBUyBz9Wt0gQ4AACD3/EffB8IAjn6JiXopMgIAAMTlqLmN/CjSAdEX+LV60Z/EVTpg7yKiF9/ZEUqQ1nuCl8/t6D8cp1doRZf5Xv7uJpg5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDzJexw0jCMmydH1nUp3/5WBwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDoAAIDNfAYA9Bs/N9UeVY0AAAAASUVORK5CYII="
+          }
+        },
+        "response": {
+          "status": 200,
+          "contentType": "application/json",
+          "json": {
+            "version": 1800000300.0
+          }
+        }
+      },
+      {
+        "note": "the later save read back",
+        "request": {
+          "method": "GET",
+          "path": "/v1/avatar/2533274790398465"
+        },
+        "response": {
+          "status": 200,
+          "contentType": "application/json",
+          "json": {
+            "manifest": "AAAAAQAAAAAAAAAAEAAAAAEBAAHByPEJoZyy4CAAAAABAgABwcjxCaGcsuBAAAAAAQMAAcHI8QmhnLLgAQAAAAIBAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/+CwkP8wIBD/MHDA/yAgMP//////////////////////////AAAAAQABAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAACAAIAAcHI8QmhnLLgAAAAAAAAAAAAAAAAAAAAAAAAAAgDAQABwcjxCaGcsuAACAAAAAAAAAAAAAAAAAAAAAAAEAMCAAHByPEJoZyy4AAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            "colours": "",
+            "version": 1800000300.0
+          }
+        }
+      },
+      {
+        "note": "a second grant changes nothing",
+        "clock": 1800000400,
+        "control": "/admin/avatar-items?xuid=0x9000000000a01&grant=F0000000000000000000000000000001",
+        "answer": "0x9000000000a01 already owns f0000000000000000000000000000001\n"
+      },
+      {
+        "note": "the control line's list",
+        "control": "/admin/avatar-items?xuid=2533274790398465",
+        "answer": "f0000000000000000000000000000001 granted 1800000100.0 by test\n"
+      },
+      {
+        "note": "a grant to an xuid without an account",
+        "control": "/admin/avatar-items?xuid=0x9000000000aff&grant=f0000000000000000000000000000001&source=test",
+        "answer": "refused: no account has the xuid 0x9000000000aff\n"
+      },
+      {
+        "note": "the empty id cannot be granted",
+        "control": "/admin/avatar-items?xuid=0x9000000000a01&grant=00000000000000000000000000000000",
+        "answer": "refused: 16 zero bytes are an empty slot, not an item\n"
+      },
+      {
+        "note": "the avatar goes",
+        "request": {
+          "method": "DELETE",
+          "path": "/v1/me/avatar",
+          "as": "ann"
+        },
+        "response": {
+          "status": 200,
+          "contentType": "application/json",
+          "json": {
+            "ok": true
+          }
+        }
+      },
+      {
+        "note": "no avatar any more",
+        "request": {
+          "method": "GET",
+          "path": "/v1/avatar/2533274790398465"
+        },
+        "response": {
+          "status": 404,
+          "contentType": "application/json",
+          "json": {
+            "error": "no_avatar",
+            "message": "this player has no avatar"
+          }
+        }
+      },
+      {
+        "note": "no picture any more",
+        "request": {
+          "method": "GET",
+          "path": "/v1/avatar/2533274790398465.png"
+        },
+        "response": {
+          "status": 404,
+          "contentType": "application/json",
+          "json": {
+            "error": "no_avatar",
+            "message": "this player has no avatar"
+          }
+        }
+      },
+      {
+        "note": "the card is back at 0",
+        "request": {
+          "method": "GET",
+          "path": "/v1/community/player/2533274790398465",
+          "as": "bob"
+        },
+        "response": {
+          "status": 200,
+          "contentType": "application/json",
+          "pick": [
+            "player.xuid",
+            "player.gamerpicVersion",
+            "player.avatarVersion"
+          ],
+          "json": {
+            "player": {
+              "xuid": 2533274790398465,
+              "gamerpicVersion": 0.0,
+              "avatarVersion": 0.0
+            }
+          }
+        }
+      },
+      {
+        "note": "the items stay",
+        "request": {
+          "method": "GET",
+          "path": "/v1/me/avatar/items",
+          "as": "ann"
+        },
+        "response": {
+          "status": 200,
+          "contentType": "application/json",
+          "json": {
+            "items": [
+              {
+                "item": "f0000000000000000000000000000001",
+                "grantedAt": 1800000100.0,
+                "source": "test"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "note": "deleting again is no error",
+        "request": {
+          "method": "DELETE",
+          "path": "/v1/me/avatar",
+          "as": "ann"
+        },
+        "response": {
+          "status": 200,
+          "contentType": "application/json",
+          "json": {
+            "ok": true
+          }
+        }
+      },
+      {
+        "note": "20 saves in 10 minutes are taken, refused ones too",
+        "repeat": 20,
+        "request": {
+          "method": "PUT",
+          "path": "/v1/me/avatar",
+          "as": "cy",
+          "json": {}
+        },
+        "response": {
+          "status": 400,
+          "contentType": "application/json",
+          "json": {
+            "error": "bad_manifest",
+            "message": "the avatar manifest must be 1000 bytes, in base64"
+          }
+        }
+      },
+      {
+        "note": "the next one is refused before it is read",
+        "request": {
+          "method": "PUT",
+          "path": "/v1/me/avatar",
+          "as": "cy",
+          "json": {
+            "manifest": "AAAAAQAAAAAAAAAAEAAAAAEBAAHByPEJoZyy4CAAAAABAgABwcjxCaGcsuBAAAAAAQMAAcHI8QmhnLLgAQAAAAIBAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/+CwkP8wIBD/MHDA/yAgMP//////////////////////////AAAAAQABAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAACAAIAAcHI8QmhnLLgAAAAAAAAAAAAAAAAAAAAAAAAAAgDAQABwcjxCaGcsuAACAAAAAAAAAAAAAAAAAAAAAAAEAMCAAHByPEJoZyy4AAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            "colours": "12 3\n407 1\n",
+            "body": "iVBORw0KGgoAAAANSUhEUgAAAEAAAACACAYAAAC7gW9qAAABKElEQVR42uzbbxGCQBAHUI4xCBGIYASjEIUoRjACEWiiERiRvVvh/T47Mvd2lz83c3138QAAAAAAAAAA2mV9zu+Gl+9KxgUPj6mcDmBPpWtA9JnbvMZ49NlnPBrBUyBz9Wt0gQ4AACD3/EffB8IAjn6JiXopMgIAAMTlqLmN/CjSAdEX+LV60Z/EVTpg7yKiF9/ZEUqQ1nuCl8/t6D8cp1doRZf5Xv7uJpg5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDzJexw0jCMmydH1nUp3/5WBwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDoAAIDNfAYA9Bs/N9UeVY0AAAAASUVORK5CYII="
+          }
+        },
+        "response": {
+          "status": 429,
+          "contentType": "application/json",
+          "json": {
+            "error": "rate_limited",
+            "message": "too many avatar saves, wait a few minutes"
+          }
+        }
+      },
+      {
+        "note": "another account is not held back",
+        "clock": 1800000500,
+        "request": {
+          "method": "PUT",
+          "path": "/v1/me/avatar",
+          "as": "ann",
+          "json": {
+            "manifest": "AAAAAQAAAAAAAAAAEAAAAAEBAAHByPEJoZyy4CAAAAABAgABwcjxCaGcsuBAAAAAAQMAAcHI8QmhnLLgAQAAAAIBAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/+CwkP8wIBD/MHDA/yAgMP//////////////////////////AAAAAQABAAHByPEJoZyy4AAAAAAAAAAAAAAAAAAAAAAAAAACAAIAAcHI8QmhnLLgAAAAAAAAAAAAAAAAAAAAAAAAAAgDAQABwcjxCaGcsuAACAAAAAAAAAAAAAAAAAAAAAAAEAMCAAHByPEJoZyy4AAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            "colours": "12 3\n407 1\n",
+            "body": "iVBORw0KGgoAAAANSUhEUgAAAEAAAACACAYAAAC7gW9qAAABKElEQVR42uzbbxGCQBAHUI4xCBGIYASjEIUoRjACEWiiERiRvVvh/T47Mvd2lz83c3138QAAAAAAAAAA2mV9zu+Gl+9KxgUPj6mcDmBPpWtA9JnbvMZ49NlnPBrBUyBz9Wt0gQ4AACD3/EffB8IAjn6JiXopMgIAAMTlqLmN/CjSAdEX+LV60Z/EVTpg7yKiF9/ZEUqQ1nuCl8/t6D8cp1doRZf5Xv7uJpg5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDzJexw0jCMmydH1nUp3/5WBwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDoAAIDNfAYA9Bs/N9UeVY0AAAAASUVORK5CYII="
+          }
+        },
+        "response": {
+          "status": 200,
+          "contentType": "application/json",
+          "json": {
+            "version": 1800000500.0
+          }
+        }
+      }
+    ]
+  }
+}

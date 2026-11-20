@@ -22,13 +22,13 @@ import (
 	"fh2mp/internal/social"
 )
 
-// The public /v1/ API the player's launcher talks to: server status, launcher configuration, sign up / sign in, profile and gamerpic.
+// The public /v1/ API the player's launcher talks to: server status, launcher configuration, sign up / sign in, profile, gamerpic and avatar.
 //
 //	GET    /v1/status                 GET /v1/launcher/config      GET /v1/hotfix
 //	GET    /v1/challenges[?top=3]     GET /v1/leaderboards[?limit=10]   GET /v1/home
 //	GET    /v1/launcher/assets/<file> POST /v1/auth/challenge|register|login|logout
 //	GET    /v1/gamertags/check?name=  GET|PATCH /v1/me     PUT|DELETE /v1/me/gamerpic     GET /v1/gamerpic/<xuid>.png
-//	PUT    /v1/me/standins
+//	PUT    /v1/me/standins            PUT|DELETE /v1/me/avatar     GET /v1/me/avatar/items        GET /v1/avatar/<xuid>[.png]
 //	GET    /v1/gamedb[/gamedbRC.slt.xz]    POST /v1/crash-reports    /v1/community[/...]
 //
 // Errors are {"error": "<code>", "message": "..."} with the HTTP status of the auth.Error.
@@ -322,8 +322,11 @@ func (l *Launcher) VersionAtLeast(have, need string) bool { return versionAtLeas
 // BodyLimit is the most bytes the HTTP server reads for a /v1 request (crash reports carry logs and a minidump).
 func (l *Launcher) BodyLimit(path string) int64 {
 	p, _, _ := strings.Cut(path, "?")
-	if strings.TrimRight(p, "/") == "/v1/crash-reports" {
+	switch strings.TrimRight(p, "/") {
+	case "/v1/crash-reports":
 		return crashreports.MaxBody
+	case "/v1/me/avatar":
+		return avatarRequestMax
 	}
 	return maxBody
 }
@@ -440,29 +443,45 @@ func bearer(h http.Header) string {
 
 var pngSig = "\x89PNG\r\n\x1a\n"
 
-// cleanGamerpic validates an uploaded PNG and returns a freshly encoded one (the original bytes never reach other players' game clients).
-func cleanGamerpic(png []byte) ([]byte, error) {
+// pngLimits are what an uploaded picture may be: its bytes as sent (maxText in the refusal) and its pixels each way.
+type pngLimits struct {
+	maxBytes       int
+	maxText        string
+	minDim, maxDim int
+}
+
+var (
+	gamerpicLimits   = pngLimits{social.MaxGamerpic, "1 MB", gamerpicMinDim, gamerpicMaxDim}
+	avatarBodyLimits = pngLimits{avatarBodyMaxBytes, "2 MB", avatarBodyMinDim, avatarBodyMaxDim}
+)
+
+// cleanGamerpic validates an uploaded gamerpic and returns a freshly encoded one (the original bytes never reach other players' game clients).
+func cleanGamerpic(png []byte) ([]byte, error) { return cleanPNG(png, gamerpicLimits) }
+
+// cleanPNG validates an uploaded PNG and returns a freshly encoded one: other players' game clients and launchers only ever get pngtool's
+// own encoding of the pixels.
+func cleanPNG(png []byte, lim pngLimits) ([]byte, error) {
 	hasSig := len(png) >= 8 && string(png[:8]) == pngSig
-	if !hasSig || len(png) > social.MaxGamerpic {
+	if !hasSig || len(png) > lim.maxBytes {
 		why := "no PNG signature"
 		if hasSig {
 			why = "PNG signature present"
 		}
-		return nil, auth.NewError(400, "bad_image", "send a PNG of at most 1 MB").WithDetail(fmt.Sprintf("%d bytes (limit %d), %s", len(png), social.MaxGamerpic, why))
+		return nil, auth.NewError(400, "bad_image", "send a PNG of at most "+lim.maxText).WithDetail(fmt.Sprintf("%d bytes (limit %d), %s", len(png), lim.maxBytes, why))
 	}
 	if len(png) < 24 || string(png[12:16]) != "IHDR" {
 		return nil, auth.NewError(400, "bad_image", "that PNG cannot be read").WithDetail("no IHDR chunk after the signature")
 	}
 	w0, h0 := int(be32(png[16:])), int(be32(png[20:])) // checked before inflating, so a tiny file cannot claim gigabytes
-	tooBig := fmt.Sprintf("the picture must be between %d and %d pixels each way", gamerpicMinDim, gamerpicMaxDim)
-	if !(gamerpicMinDim <= w0 && w0 <= gamerpicMaxDim && gamerpicMinDim <= h0 && h0 <= gamerpicMaxDim) {
+	tooBig := fmt.Sprintf("the picture must be between %d and %d pixels each way", lim.minDim, lim.maxDim)
+	if !(lim.minDim <= w0 && w0 <= lim.maxDim && lim.minDim <= h0 && h0 <= lim.maxDim) {
 		return nil, auth.NewError(400, "bad_image", tooBig).WithDetail(fmt.Sprintf("header says %dx%d", w0, h0))
 	}
-	im, err := pngtool.Decode(png, gamerpicMaxDim)
+	im, err := pngtool.Decode(png, lim.maxDim)
 	if err != nil {
 		return nil, auth.NewError(400, "bad_image", "that PNG cannot be read (8-bit, not interlaced, please)").WithDetail("decoder: " + diag.Scrub(err.Error()))
 	}
-	if !(gamerpicMinDim <= im.W && im.W <= gamerpicMaxDim && gamerpicMinDim <= im.H && im.H <= gamerpicMaxDim) {
+	if !(lim.minDim <= im.W && im.W <= lim.maxDim && lim.minDim <= im.H && im.H <= lim.maxDim) {
 		return nil, auth.NewError(400, "bad_image", tooBig).WithDetail(fmt.Sprintf("decoded %dx%d, the header said %dx%d", im.W, im.H, w0, h0))
 	}
 	return pngtool.Encode(im.W, im.H, im.Ch, im.Rows), nil
@@ -664,6 +683,8 @@ func (l *Launcher) route(r *Req, method, path string, h http.Header, body []byte
 		}
 		png, err := c.Social.Gamerpic(x)
 		return 200, png, "image/png", err
+	case strings.HasPrefix(p, "/v1/avatar/") && method == "GET":
+		return l.avatarGet(p[len("/v1/avatar/"):])
 	case p == "/v1/crash-reports" && method == "POST":
 		if l.Crashes == nil {
 			return 0, nil, "", auth.NewError(503, "crash_reports_off", "this server does not take crash reports").WithDetail("no crash report store is configured")
@@ -804,6 +825,28 @@ func (l *Launcher) route(r *Req, method, path string, h http.Header, body []byte
 				return 0, nil, "", err
 			}
 			return 200, pyjson.Obj{{K: "ok", V: true}}, ok, nil
+		case p == "/v1/me/avatar" && method == "PUT":
+			o, err := l.avatarPut(r, acct, body)
+			return 200, o, ok, err
+		case p == "/v1/me/avatar" && method == "DELETE":
+			gone, err := c.Avatars.Delete(acct.Xuid)
+			if err != nil {
+				return 0, nil, "", err
+			}
+			if gone {
+				c.Log(r, fmt.Sprintf("  v1 avatar of %#x removed; its card says avatarVersion 0, the owned items stay", acct.Xuid))
+			}
+			return 200, pyjson.Obj{{K: "ok", V: true}}, ok, nil
+		case p == "/v1/me/avatar/items" && method == "GET":
+			items, err := c.Avatars.Items(acct.Xuid)
+			if err != nil {
+				return 0, nil, "", err
+			}
+			list := []any{}
+			for _, it := range items {
+				list = append(list, pyjson.Obj{{K: "item", V: it.Item.String()}, {K: "grantedAt", V: it.GrantedAt}, {K: "source", V: it.Source}})
+			}
+			return 200, pyjson.Obj{{K: "items", V: list}}, ok, nil
 		}
 	}
 	return 0, nil, "", auth.NewError(404, "not_found", "unknown endpoint").WithDetail(fmt.Sprintf("no route for %s %s", method, p))

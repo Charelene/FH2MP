@@ -59,6 +59,40 @@ updateUserPresence#806504bc user_id:long presence:Presence = Update;
 updateClubMessage#5a6f6195 message:ClubMessage = Update;
 updateFriends#1bfadb02 = Update;
 
+// End-to-end direct messages (board item "MTProto chat P3"). A chat device: one install's Ed25519 key, signed by its account's key
+// (account.registerDevice); account_key is that account's public key, so a client can check the signature itself.
+chatDevice#65dfe2c8 user_id:long device_id:long pubkey:bytes account_key:bytes signature:bytes date:int = ChatDevice;
+users.devices#7880c09c devices:Vector<ChatDevice> = users.Devices;
+// The pinned Diffie-Hellman group (RFC 3526 group 14, g = 2) and server randomness the client mixes into its secret.
+messages.dhConfig#016b6ad9 g:int p:bytes version:int random:bytes = messages.DhConfig;
+messages.dhConfigNotModified#3005684a random:bytes = messages.DhConfig;
+// A secret chat as the server keeps it: who, which devices, the public halves with their device signatures; never a key.
+encryptedChatWaiting#cdee528d id:int date:int admin_id:long admin_device:long participant_id:long participant_device:long = EncryptedChat;
+encryptedChatRequested#f1169c9a id:int date:int admin_id:long admin_device:long participant_id:long participant_device:long g_a:bytes g_a_sig:bytes = EncryptedChat;
+encryptedChat#06ab831f id:int date:int admin_id:long admin_device:long participant_id:long participant_device:long g_a_or_b:bytes sig:bytes key_fingerprint:long = EncryptedChat;
+encryptedChatDiscarded#13d6dd27 id:int = EncryptedChat;
+// A sealed message as relayed: its chat, random_id, the server's date, the ciphertext and the sender's franking commitment.
+encryptedMessage#99905bdb random_id:long chat_id:int date:int bytes:bytes commitment:bytes = EncryptedMessage;
+messages.sentEncryptedMessage#560f8935 date:int = messages.SentEncryptedMessage;
+// Stored updates (pts): a secret chat changed; a sealed message arrived (its bytes stay until messages.ackEncrypted or 7 days).
+updateEncryption#b4a2e88d chat:EncryptedChat date:int = Update;
+updateNewEncryptedMessage#a3135f31 message:EncryptedMessage = Update;
+// Pushed without pts: a friend's chat device changed (their secret chats with this account are discarded).
+updateChatDevice#d088765d user_id:long device_id:long = Update;
+
+// The sealed layer: only clients read these, inside an encryptedMessage's bytes.
+decryptedMessageLayer#eaa344d0 random_bytes:bytes layer:int in_seq_no:int out_seq_no:int message:DecryptedMessage = DecryptedMessageLayer;
+decryptedMessage#4509cc9f random_id:long date:int text:string franking_key:bytes = DecryptedMessage;
+decryptedMessageService#73164160 random_id:long action:DecryptedMessageAction = DecryptedMessage;
+decryptedMessageActionReadMessages#0c4f40be random_ids:Vector<long> = DecryptedMessageAction;
+decryptedMessageActionTyping#ec2ee47f = DecryptedMessageAction;
+decryptedMessageActionResend#511110b0 start_seq_no:int end_seq_no:int = DecryptedMessageAction;
+decryptedMessageActionRequestKey#8937f937 exchange_id:long g_a:bytes = DecryptedMessageAction;
+decryptedMessageActionAcceptKey#f4ef171d exchange_id:long g_b:bytes key_fingerprint:long = DecryptedMessageAction;
+decryptedMessageActionCommitKey#ec2e0b9b exchange_id:long key_fingerprint:long = DecryptedMessageAction;
+decryptedMessageActionAbortKey#dd05ec6b exchange_id:long = DecryptedMessageAction;
+decryptedMessageActionNoop#a82fdd63 = DecryptedMessageAction;
+
 ---functions---
 
 // The first call of every session: names the client's layer. Other API calls before it get 400 INIT_REQUIRED.
@@ -88,3 +122,18 @@ clubs.sendMessage#17becd97 club_id:long random_id:long text:string = ClubMessage
 clubs.readHistory#77932beb club_id:long max_id:long = Bool;
 
 users.getGamerpic#9fb5567b user_id:long = users.Gamerpic;
+
+// Publishes this install's chat device key for the session's device_id (auth.signIn); a new key replaces the account's old device.
+// signature = Ed25519 (account key) over "FH2MP-CHAT-DEVICE-v1\0" realm "\0" device_id (8 bytes LE) pubkey (32 bytes).
+account.registerDevice#53f94e7b pubkey:bytes signature:bytes = ChatDevice;
+users.getDevices#527d2763 user_id:long = users.Devices;
+messages.getDhConfig#26cf8950 version:int random_length:int = messages.DhConfig;
+// device_id: the participant's current chat device, as users.getDevices gave it (DEVICE_CHANGED when it is not).
+messages.requestEncryption#d51984dc user_id:long device_id:long random_id:int g_a:bytes g_a_sig:bytes = EncryptedChat;
+messages.acceptEncryption#2b1bf8ea chat_id:int g_b:bytes key_fingerprint:long g_b_sig:bytes = EncryptedChat;
+messages.discardEncryption#edd923c5 chat_id:int = Bool;
+messages.sendEncrypted#93dc425e chat_id:int random_id:long data:bytes commitment:bytes = messages.SentEncryptedMessage;
+// This account's sealed messages up to max_pts are on its PC now: the server drops their bytes.
+messages.ackEncrypted#066f076b max_pts:int = Bool;
+// A received message reported with its text and franking key; the server checks them against the commitment it kept (ops list only).
+messages.reportEncrypted#4fc55348 chat_id:int random_id:long text:string franking_key:bytes reason:string = Bool;
