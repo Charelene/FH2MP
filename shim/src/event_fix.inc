@@ -1,7 +1,8 @@
 /* FH2 1.0.0.64, online events: a car whose engine, gearbox or another part belongs to a different car, engine or drivetrain (FH2 Extra Options by
  * RokkuDayo lets a player install any engine or transmission; the PI the game computes from those parts moves the car into another class) is judged, listed and raced
  * with only those parts back to the car's own stock ones and the tune values that belong to them back to stock (user decisions 2026-11-19: drop a
- * car the fix moves out of the event's class from the event's car list, not even a tile; an any-class event lists it; it always races fixed).
+ * car the fix moves into another class than its tile shows from the event's car list, not even a tile; one the fix keeps in its class is listed by
+ * its fixed PI; an any-class event lists it; it always races fixed).
  *
  * Where [C: decompile of the Ghidra export, ghidra/export-named; bytes checked against the 1.0.0.64 exe]:
  * - The rule (which parts, which stock parts, which tune values): event_fix_rule.inc, from the game database's List_Upgrade tables, loaded once per
@@ -16,7 +17,8 @@
  *   GarageCarCollection::vfunc_16 (+c2ec60) builds "SELECT Garage.* , 0 AS IsOwned ... FROM <garage table> AS Garage ... WHERE <filter> ..." with the
  *   event's class and PI terms in <filter> (Garage.ClassId, Garage.PerformanceIndex; CarFilter_BuildGarageWhereClause +984850,
  *   CarCollection_AppendPerfRatingRestriction +c16500). In a network session such a query (one with those terms) is run with each of them replaced by
- *   the fixed values of the garage's cars that have one (event_fix_rule.inc ef_rewrite_sql), so the list takes or drops them by the fixed car. The
+ *   the fixed values of the garage's cars that have one (event_fix_rule.inc ef_rewrite_sql), or NULL for a car the fix moves into another class
+ *   than the view's ClassId (its tile; ef_shown_classes, one more query of the list's own table), so the list takes or drops them. The
  *   garage's part ids come from one query of the garage table, by the columns CCarInGarage's constructor (+2be790) reads: CarId, WheelStyle and the
  *   43 short names of CarPartSlotTable (+2e797f0, 32-byte entries, +8 the name).
  * - The car's details while the event car select runs: QueryCarAttributes (picker_pi.inc) gives the fixed class and PI (ef_attrs), so the game's
@@ -60,7 +62,7 @@ static ef_verdict g_ef_cache[EF_CACHE];
 static unsigned g_ef_cache_n, g_ef_cache_next;
 static unsigned char *g_ef_snap_out;
 static unsigned char g_ef_save[EF_RATINGS_SAVE];
-static volatile LONG g_ef_declined, g_ef_lists, g_ef_commits, g_ef_busy;
+static volatile LONG g_ef_declined, g_ef_lists, g_ef_commits, g_ef_busy, g_ef_drops;
 static volatile LONG64 g_ef_fixed_at;            /* tick of the last commit this file changed (the PI check hook below acts only after one) */
 
 /* No thread ever waits on this file while it calls into the game (both rigs hung at their first event car select on 2026-11-19 with a lock held
@@ -466,6 +468,67 @@ static int ef_in_select(void)
     return (armed && now - armed <= EF_EVENT_WINDOW_MS) || (listed && now - listed <= EF_EVENT_WINDOW_MS);
 }
 
+/* The class the tile of each fixed car shows (ClassId of the list's own table `table`, the view the select list takes Garage.* from) against its
+ * fixed class: rows[i].drop = 1 when they differ (ef_rewrite_sql then keeps the car out of the list). -> 1 when the view was read, 0 when not
+ * (the fixed cars are then listed by their fixed class and PI). */
+static int ef_shown_classes(const char *table, ef_row *rows, unsigned n, unsigned *dropped)
+{
+    char q[256];
+    void *db, *row;
+    ef_get_fn get;
+    ppi_key kgi, kgk;
+    int m, i;
+    unsigned j, len = 0;
+
+    *dropped = 0;
+    while (table[len]) len++;
+    if (!len || len > 160 || !(db = ef_database())) {
+        return 0;
+    }
+    q[0] = 0;
+    ef_cat(q, sizeof q, "SELECT Id AS gi, ClassId AS gk FROM ");
+    ef_cat(q, sizeof q, table);
+    row = ppi_query(db, q);
+    if (!row) {
+        return 0;
+    }
+    m = ppi_rows(row);
+    get = ef_getter(row);
+    if (m > 0 && !get) {
+        ppi_release(row);
+        return 0;
+    }
+    kgi = ppi_key_for("gi");
+    kgk = ppi_key_for("gk");
+    for (i = 0; i < m; i++) {
+        unsigned gid = (unsigned)get(row, i, &kgi, -1);
+        int shown = get(row, i, &kgk, -1);
+        for (j = 0; j < n; j++) {
+            if (rows[j].garage_id != gid) continue;
+            if (shown >= 0 && (unsigned)shown != rows[j].klass) {
+                LONG nd = InterlockedIncrement(&g_ef_drops);
+                rows[j].drop = 1;
+                (*dropped)++;
+                if (nd <= 20 || nd % 50 == 0) {
+                    log_begin();
+                    log_raw("eventfix: garage car ");
+                    log_dec(gid);
+                    log_raw(" is out of this event car list: its tile shows class ");
+                    log_dec((unsigned long)shown);
+                    log_raw(", its own parts in place of those of other cars make it class ");
+                    log_dec(rows[j].klass);
+                    log_raw(" (#");
+                    log_dec((unsigned long)nd);
+                    log_raw(")\n");
+                }
+            }
+            break;
+        }
+    }
+    ppi_release(row);
+    return 1;
+}
+
 /* the garage list query `sql` (an event car list of garage table `table`, ef_garage_query) with the fixed values in place, in a HeapAlloc'd buffer
  * the caller frees, or NULL to run it as it is (only with the work flag taken) */
 static char *ef_list_query(const char *sql, const char *table)
@@ -473,8 +536,8 @@ static char *ef_list_query(const char *sql, const char *table)
     char scan[2048], base[128], *text = NULL;
     void *db, *row;
     ef_row *rows;
-    int n, i, k, replaced;
-    unsigned fixed = 0, cannot = 0, foreign_cars = 0;
+    int n, i, k, replaced, shown = 0;
+    unsigned fixed = 0, cannot = 0, foreign_cars = 0, dropped = 0;
     double sim_ms = 0;
     LARGE_INTEGER t0, t1;
     ef_get_fn get;
@@ -541,6 +604,7 @@ static char *ef_list_query(const char *sql, const char *table)
         if (vd->kind == EF_FIXED) {
             rows[fixed].garage_id = gid;
             rows[fixed].klass = vd->klass;
+            rows[fixed].drop = 0;
             rows[fixed].pi = vd->pi;
             fixed++;
             foreign_cars++;
@@ -550,6 +614,9 @@ static char *ef_list_query(const char *sql, const char *table)
         }
     }
     ppi_release(row);
+    if (fixed) {
+        shown = ef_shown_classes(table, rows, fixed, &dropped);
+    }
     replaced = 0;
     if (fixed) {
         text = (char *)HeapAlloc(GetProcessHeap(), 0, EF_SQL_MAX);
@@ -580,7 +647,10 @@ static char *ef_list_query(const char *sql, const char *table)
             log_dec(foreign_cars);
             log_raw(" with parts of other cars (");
             log_dec(fixed);
-            log_raw(" judged by their fixed class and PI, ");
+            log_raw(" fixed, of them ");
+            log_dec(dropped);
+            log_raw(shown ? " out of the list as the fix moves them out of the class their tile shows, "
+                          : " out of the list (the classes the tiles show could not be read, so the fixed ones are listed by their fixed class and PI), ");
             log_dec(cannot);
             log_raw(" left as built); ");
             if (replaced < 0) {

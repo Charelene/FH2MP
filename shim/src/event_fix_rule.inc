@@ -126,10 +126,13 @@ static unsigned long long ef_tune_mask(unsigned long long changed)
  * the filter from CarFilter_BuildGarageWhereClause (+984850: "Garage.ClassId=", "Garage.PerformanceIndex>=" / "<") or
  * CarCollection_AppendPerfRatingRestriction (+c16500: Garage.PerformanceIndex ranges) [C: decompile]. Those are the only qualified uses of the two
  * columns in that query (the select list takes Garage.*, the order is by the unqualified PerformanceIndex), so each one becomes the fixed value for
- * the cars that have one: "(CASE Garage.Id WHEN <id> THEN <value> ... ELSE Garage.ClassId END)". A car the fix moves out of the event's class then
- * is not listed at all, one it moves into it is. */
+ * the cars that have one: "(CASE Garage.Id WHEN <id> THEN <value> ... ELSE Garage.ClassId END)". A car whose fix keeps the class its tile shows
+ * (the view's ClassId) is listed by its fixed PI. A car the fix moves into another class (`drop`) gets NULL in every term, so no comparison of the
+ * filter holds for it and it is not listed at all, not even as a tile (user rule 2026-11-19: "if ANY of these changes lead to class downgrade,
+ * immediately remove it from list"; dev 2026-11-20 03:11 UTC: a Mercedes shown S1 807, A 745 with its own gearbox, was listed and raced in an
+ * A event). A list without class or PI terms (an any-class event) is not rewritten: every car is in it and races fixed. */
 typedef struct {
-    unsigned garage_id, klass;
+    unsigned garage_id, klass, drop;
     float pi;
 } ef_row;
 
@@ -194,7 +197,9 @@ static void ef_put_case(ef_buf *b, const ef_row *rows, unsigned n, int pi, const
         ef_puts(b, " WHEN ");
         ef_putu(b, rows[i].garage_id);
         ef_puts(b, " THEN ");
-        if (pi) {
+        if (rows[i].drop) {
+            ef_puts(b, "NULL");
+        } else if (pi) {
             ef_putpi(b, rows[i].pi);
         } else {
             ef_putu(b, rows[i].klass);
