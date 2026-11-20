@@ -484,6 +484,37 @@ static DWORD WINAPI carsel_worker(void *unused)
 }
 
 /* Hooks C and D (the group deadline). Each is optional: when one cannot be installed the hold (hook A) goes on without that part. */
+/* E  game+0x921457, the one call of FUN_1402b3e40 (store, key, float seconds in xmm2: a RefContainer<float> under `key` at store+0x9290) in
+ *    States::SetInviteCountdown::Execute (+921350) [C: decompile + disassembly]. Key 0x84 is invite_type Event: the race_starting_prompt of a
+ *    Free Roam event invite, 15 s from the state flow. While the server's launch countdown runs (SessionHost CountdownType 1: every game's
+ *    SessionHost::helper_a313f0 puts CountdownEndTime into [manager+0x44], what the leader's 'Waiting for Players {0}' counts down), the prompt
+ *    gets the seconds left of it, so the invitees' prompts and the leader's wait end together (game server EventFlowV2). */
+#define CS_INVITE_CALL_RVA 0x921457u
+#define CS_INVITE_SET_RVA 0x2b3e40u
+#define CS_INVITE_KEY_EVENT 0x84u
+static void (*g_cs_invite_set)(void *, unsigned, float);
+static volatile LONG g_cs_invite_logs;
+static void carsel_invite_countdown(void *store, unsigned key, float seconds)
+{
+    unsigned clock = 0, end = 0, left;
+    if (key == CS_INVITE_KEY_EVENT && seconds > 0.0f && carsel_clock(&clock) && carsel_read_end(CS_INVITE_END_OFFSET, &end)) {
+        left = end - clock;
+        if (left >= 1000u && left < 60000u && (float)left / 1000.0f < seconds) {
+            LONG n = InterlockedIncrement(&g_cs_invite_logs);
+            if (n <= 20 || n % 50 == 0) {
+                log_begin(); log_raw("carsel: the event invite prompt counts "); log_dec(left / 1000u); log_raw(".");
+                log_dec((left % 1000u) / 100u); log_raw(" s, the time left of the server's launch countdown, instead of ");
+                log_dec((unsigned long)seconds); log_raw(" s (#"); log_dec((unsigned long)n); log_raw(")\n");
+            }
+            seconds = (float)left / 1000.0f;
+        } else if (InterlockedIncrement(&g_cs_invite_logs) <= 20) {
+            log_begin(); log_raw("carsel: the event invite prompt keeps its "); log_dec((unsigned long)seconds);
+            log_raw(" s: no launch countdown of the server is running (its end is "); log_dec(left); log_raw(" ms after the clock)\n");
+        }
+    }
+    g_cs_invite_set(store, key, seconds);
+}
+
 static void carsel_attach_deadline(unsigned char *img)
 {
     static const unsigned char countdown_code[9] = {0x40,0x57,0x48,0x83,0xec,0x20,0x48,0x8b,0xf9};
@@ -504,6 +535,17 @@ static void carsel_attach_deadline(unsigned char *img)
     } else {
         g_cs_wait_message = (void (*)(void *))(img + CS_MSG_WAIT_RVA);
         log_begin(); log_raw("carsel: an early picker's loading screen shows Waiting for Players with the group's time left\n");
+    }
+    {
+        const unsigned char *site = img + CS_INVITE_CALL_RVA;
+        int rel = 0;
+        if (site[0] == 0xe8) memcpy(&rel, site + 1, sizeof rel);
+        if (site[0] != 0xe8 || site + 5 + rel != img + CS_INVITE_SET_RVA ||
+            !plat_hook_call("carsel: event invite prompt countdown", (void *)site, (void *)carsel_invite_countdown, (void **)&g_cs_invite_set)) {
+            log_begin(); log_raw("carsel: the event invite prompt keeps the state flow's 15 s (the call at game+0x921457 is not the expected call of game+0x2b3e40)\n");
+        } else {
+            log_begin(); log_raw("carsel: the event invite prompt counts the server's launch countdown (the call at game+0x921457)\n");
+        }
     }
 }
 

@@ -17,6 +17,7 @@ static int (WINAPI *g_r_wsasendto)(UINT_PTR,void *,DWORD,DWORD *,DWORD,const voi
 static int read_game_memory(const void *p,void *out,SIZE_T n) { if(!p)return 0;memcpy(out,p,n);return 1; }
 static unsigned char *find_fh2_image(void) {return NULL;}
 static int plat_hook(const char *name,void *target,void *detour,void **original) {(void)name;(void)target;(void)detour;(void)original;return 0;}
+static int plat_hook_call(const char *name, void *site, void *detour, void **original) { (void)name; (void)site; (void)detour; (void)original; return 0; }
 static int code_is(const char *tag,const char *what,const unsigned char *img,unsigned rva,const void *expect,unsigned n) {(void)tag;(void)what;return !memcmp(img+rva,expect,n);}
 static void mem_copy(void *to,const void *from,SIZE_T n) {memcpy(to,from,n);}
 static char g_log[8192];
