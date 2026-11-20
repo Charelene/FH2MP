@@ -249,6 +249,24 @@ static int ef_rewrite_sql(const char *sql, const ef_row *rows, unsigned n, char 
     return replaced;
 }
 
+/* The table that holds the garage's part ids for the list's FROM name. The list reads the view CareerDb_CreateGarageView (+986240) makes,
+ * "View_" + <profile prefix>Career_Garage, which keeps the class, PI and car columns but no part ids; they are in the table it is made from, the
+ * same name without "View_" [C: decompile; the template NewProfile_Career_Garage in the car database has Id, CarId, the 43 part columns by
+ * CarPartSlotTable's short names and WheelStyle]. A name without "View_" is taken as it is. -> 1 and out[cap], 0 when it does not fit. */
+static int ef_garage_table(const char *from, char *out, unsigned cap)
+{
+    static const char view[] = "View_";
+    unsigned i = 0, n;
+    while (view[i] && from[i] == view[i]) i++;
+    if (view[i] || !from[i]) i = 0;
+    for (n = 0; from[i + n]; n++) {
+        if (n + 1 >= cap) return 0;
+        out[n] = from[i + n];
+    }
+    out[n] = 0;
+    return n > 0;
+}
+
 /* the garage list query of GarageCarCollection::vfunc_16 (its fixed start) whose filter names a class or PI -> 1, and the garage table name of
  * "FROM <name> AS Garage" into name[cap] */
 static int ef_garage_query(const char *sql, char *name, unsigned cap)

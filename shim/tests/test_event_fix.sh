@@ -177,6 +177,11 @@ int main(void)
         CHECK(!ef_garage_query("SELECT Garage.* , 0 AS IsOwned FROM G AS Garage  WHERE 1 AND 1 AND Garage.Id!=1215 ORDER BY PerformanceIndex DESC", table, sizeof table));
         /* other queries are not either */
         CHECK(!ef_garage_query("SELECT Id FROM List_UpgradeEngine WHERE Garage.ClassId=3", table, sizeof table));
+        /* the list reads the game's view View_<prefix>Career_Garage (no part columns); the parts are in the table under it */
+        CHECK(ef_garage_table("View_Profile0_Career_Garage", table, sizeof table) && strcmp(table, "Profile0_Career_Garage") == 0);
+        CHECK(ef_garage_table("Profile0_Career_Garage", table, sizeof table) && strcmp(table, "Profile0_Career_Garage") == 0);
+        CHECK(!ef_garage_table("View_Profile0_Career_Garage", table, 8));                /* does not fit */
+        CHECK(ef_garage_table("View_", table, sizeof table) && strcmp(table, "View_") == 0);  /* nothing after the prefix: taken as it is */
         /* whole words only */
         CHECK(ef_rewrite_sql("x Garage.PerformanceIndexes MyGarage.ClassId y", rows, 2, sql, sizeof sql) == 0);
     }

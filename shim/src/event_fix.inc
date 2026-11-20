@@ -467,7 +467,7 @@ static int ef_in_select(void)
  * the caller frees, or NULL to run it as it is (only with the work flag taken) */
 static char *ef_list_query(const char *sql, const char *table)
 {
-    char scan[2048], *text = NULL;
+    char scan[2048], base[128], *text = NULL;
     void *db, *row;
     ef_row *rows;
     int n, i, k, replaced;
@@ -489,11 +489,24 @@ static char *ef_list_query(const char *sql, const char *table)
         ef_cat(scan, sizeof scan, " AS gp");
         ef_cat_dec(scan, sizeof scan, (unsigned)k);
     }
+    if (!ef_garage_table(table, base, sizeof base)) {
+        return NULL;
+    }
     ef_cat(scan, sizeof scan, " FROM ");
-    ef_cat(scan, sizeof scan, table);
+    ef_cat(scan, sizeof scan, base);
     row = ppi_query(db, scan);
     if (!row) {
-        ef_log_decline("the garage table cannot be read, so this event car list is the game's", 0);
+        LONG nd = InterlockedIncrement(&g_ef_declined);
+        if (nd <= 10 || nd % 100 == 0) {
+            log_begin();
+            log_raw("eventfix: the garage table ");
+            log_raw(base);
+            log_raw(" (the list reads ");
+            log_raw(table);
+            log_raw(") cannot be read by its part columns, so this event car list is the game's (#");
+            log_dec((unsigned long)nd);
+            log_raw(")\n");
+        }
         return NULL;
     }
     n = ppi_rows(row);
