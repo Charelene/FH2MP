@@ -5,9 +5,9 @@ import (
 	"sort"
 	"testing"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/parts"
 	"fh2mp/internal/playersetup"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // A car with a part id the catalog does not know is repaired to stock (PartPolicy fix). From then on the class and PI that every later update of that

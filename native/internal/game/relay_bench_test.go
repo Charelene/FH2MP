@@ -5,10 +5,10 @@ import (
 	"strings"
 	"testing"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/catalog"
 	"fh2mp/internal/netv2"
 	"fh2mp/internal/pyrand"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // BenchmarkCarPredictionRelay: one player's car prediction relayed in a Free Roam world of 12 connected players (no network: a fake socket),

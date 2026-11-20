@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/catalog"
 	"fh2mp/internal/gameopts"
 	"fh2mp/internal/netv2"
 	"fh2mp/internal/parts"
 	"fh2mp/internal/playersetup"
 	"fh2mp/internal/pyrand"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // A car pack's own car (not in the game data, not a DLC car) drives in Free Roam but is refused by every event and by Road Trip, with a notice;

@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"fh2mp/internal/bits"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 type vec struct {

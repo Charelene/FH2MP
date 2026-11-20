@@ -18,7 +18,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/capacity"
 	"fh2mp/internal/catalog"
 	"fh2mp/internal/diag"
@@ -28,6 +27,7 @@ import (
 	"fh2mp/internal/pyfmt"
 	"fh2mp/internal/pyjson"
 	"fh2mp/internal/pyrand"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 type authEnt struct {

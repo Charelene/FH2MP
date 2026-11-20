@@ -13,9 +13,9 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/diag"
 	"fh2mp/internal/netv2"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 const (

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/gameopts"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // A client report is accepted once per sequence number (the shim sends it three times), within a budget per window, and a new ticket epoch starts afresh.

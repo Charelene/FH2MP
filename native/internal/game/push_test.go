@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"fh2mp/internal/bits"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // pushBody is the part of a prediction the push check reads: velocity (int16 over +-200 m/s) and throttle (uint8 0..1).

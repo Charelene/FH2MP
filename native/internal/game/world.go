@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/bucketlist"
 	"fh2mp/internal/capacity"
 	"fh2mp/internal/catalog"
@@ -20,6 +19,7 @@ import (
 	"fh2mp/internal/omap"
 	"fh2mp/internal/pyjson"
 	"fh2mp/internal/traffic"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // Clock is the time source of the engine: monotonic seconds (time.monotonic) and wall-clock seconds (time.time).

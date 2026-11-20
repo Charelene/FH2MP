@@ -23,6 +23,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { submodules: true }
       - uses: ./.github/actions/ci-image
       - name: checks
         run: release/ci.sh --container all

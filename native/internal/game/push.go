@@ -3,7 +3,7 @@ package game
 import (
 	"math"
 
-	"fh2mp/internal/bits"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // Push check (log only): a car that gains energy its engine cannot give it. A mod that adds speed to the car's velocity

@@ -7,13 +7,13 @@ import (
 	"os"
 	"strings"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/bucketlist"
 	"fh2mp/internal/diag"
 	"fh2mp/internal/gameopts"
 	"fh2mp/internal/netv2"
 	"fh2mp/internal/pyfmt"
 	"fh2mp/internal/traffic"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // rd wraps a bit reader so a read past the end panics like Python's ValueError("read past end"); the hub recovers per datagram.

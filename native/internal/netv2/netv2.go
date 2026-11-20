@@ -6,7 +6,7 @@ import (
 	"encoding/binary"
 	"math"
 
-	"fh2mp/internal/bits"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // Message ids and protocol constants.

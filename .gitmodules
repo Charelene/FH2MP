@@ -1,0 +1,3 @@
+[submodule "paddock"]
+	path = paddock
+	url = https://github.com/Charelene/encore-paddock

@@ -6,7 +6,7 @@ import (
 	"math/bits"
 	"sort"
 
-	b "fh2mp/internal/bits"
+	b "github.com/Charelene/encore-paddock/bits"
 )
 
 // Variable ids.

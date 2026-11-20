@@ -6,9 +6,9 @@ import (
 	"strconv"
 	"strings"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/netv2"
 	"fh2mp/internal/pyjson"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // Live telemetry for speed traps and speed zones. Every client streams its own car state (CarPredictionFull, docs/re/netv2.md 7)

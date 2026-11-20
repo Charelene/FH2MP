@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/playersetup"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // prod 2026-11-11 20:37: one participant was still choosing its car 43.8 s after the start; the others could not report loaded before it left the

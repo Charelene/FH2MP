@@ -1,7 +1,7 @@
 // Package replay is the history the game server keeps of every client's objects and replays to late joiners (= server/replay.py).
 package replay
 
-import "fh2mp/internal/bits"
+import "github.com/Charelene/encore-paddock/bits"
 
 // SeqMod is the 8-bit object sequence modulus (0..254).
 const SeqMod = 0xFF

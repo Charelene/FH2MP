@@ -20,6 +20,7 @@ import (
 	"fh2mp/internal/pngtool"
 	"fh2mp/internal/pyjson"
 	"fh2mp/internal/social"
+	"github.com/Charelene/encore-paddock/version"
 )
 
 // The public /v1/ API the player's launcher talks to: server status, launcher configuration, sign up / sign in, profile, gamerpic and avatar.
@@ -47,42 +48,6 @@ const (
 var assetTypes = map[string]string{".png": "image/png", ".jpg": "image/jpeg", ".webp": "image/webp", ".wav": "audio/wav"}
 
 var launcherLog = diag.Get("launcher")
-
-var verRe = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)(?:-rc(\d+))?(-debug)?$`)
-
-// versionAtLeast: `have` ("1.0.0-rc3", "1.0.0", "1.0.0-rc4-debug") is the same as or later than `need`. A pre-release sorts before its release; our own debug
-// builds always pass; an empty or unreadable `have` fails unless nothing is required (need "0.0.0" or empty).
-func versionAtLeast(have, need string) bool {
-	n := verRe.FindStringSubmatch(strings.TrimSpace(need))
-	if n == nil || (n[1] == "0" && n[2] == "0" && n[3] == "0") {
-		return true
-	}
-	h := verRe.FindStringSubmatch(strings.TrimSpace(have))
-	if h == nil {
-		return false
-	}
-	if h[5] != "" {
-		return true
-	}
-	key := func(m []string) [5]int {
-		a, _ := strconv.Atoi(m[1])
-		b, _ := strconv.Atoi(m[2])
-		c, _ := strconv.Atoi(m[3])
-		pre, rc := 1, 0
-		if m[4] != "" {
-			pre = 0
-			rc, _ = strconv.Atoi(m[4])
-		}
-		return [5]int{a, b, c, pre, rc}
-	}
-	hk, nk := key(h), key(n)
-	for i := range hk {
-		if hk[i] != nk[i] {
-			return hk[i] > nk[i]
-		}
-	}
-	return true
-}
 
 // ---------------------------------------------------------------- launcher.json
 
@@ -316,8 +281,8 @@ func NewLauncher(c *Core) *Launcher {
 // MinShim, VersionAtLeast, BodyLimit and GameDB make a Launcher the front's LauncherAPI.
 func (l *Launcher) MinShim() string { return objStr(l.Config.Get(), "minShim") }
 
-// VersionAtLeast is versionAtLeast.
-func (l *Launcher) VersionAtLeast(have, need string) bool { return versionAtLeast(have, need) }
+// VersionAtLeast is the Paddock's version.AtLeast: the rules every Encore product shares (paddock/version/testdata/vectors.tsv).
+func (l *Launcher) VersionAtLeast(have, need string) bool { return version.AtLeast(have, need) }
 
 // BodyLimit is the most bytes the HTTP server reads for a /v1 request (crash reports carry logs and a minidump).
 func (l *Launcher) BodyLimit(path string) int64 {
@@ -498,7 +463,7 @@ var launcherClientRe = regexp.MustCompile(`^launcher/(\S+)`)
 func (l *Launcher) requireLauncher(client string) error {
 	m := launcherClientRe.FindStringSubmatch(client)
 	c := l.Config.Get()
-	if m != nil && !versionAtLeast(m[1], objStr(c, "minLauncher")) {
+	if m != nil && !version.AtLeast(m[1], objStr(c, "minLauncher")) {
 		site := ""
 		if lv, ok := objAny(c, "links").(pyjson.Obj); ok {
 			site = objStr(lv, "website")

@@ -6,7 +6,6 @@ import (
 	"sort"
 	"strings"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/capacity"
 	"fh2mp/internal/diag"
 	"fh2mp/internal/gameopts"
@@ -15,6 +14,7 @@ import (
 	"fh2mp/internal/playersetup"
 	"fh2mp/internal/pyfmt"
 	"fh2mp/internal/pyjson"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 func kv(k string, v any) pyjson.Pair { return pyjson.Pair{K: k, V: v} }

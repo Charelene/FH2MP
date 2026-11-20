@@ -3,8 +3,8 @@ package game
 import (
 	"testing"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/netv2"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // The group route (the map's group waypoint; the game's group sat nav). The game sends message 52 SetGroupSatNavEvent with the road node

@@ -5,12 +5,12 @@ import (
 	"os"
 	"strings"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/bucketlist"
 	"fh2mp/internal/diag"
 	"fh2mp/internal/gameopts"
 	"fh2mp/internal/netv2"
 	"fh2mp/internal/playersetup"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 func kindName(mtype int) string {

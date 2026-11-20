@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/gameopts"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // optionsWith builds a GameOptions payload with an end condition and a lap count (the stock game's default: laps end condition, 3 laps).
