@@ -40,7 +40,6 @@
 #define EF_ROW_INT_AT 0xa0u            /* record set: int (row set, row index, column name, default) [C: the row loops at +21xxxx, the constructor] */
 #define EF_CACHE 512
 #define EF_SQL_MAX (256u * 1024u)
-#define EF_SELECT_MS 3000u
 
 typedef void *(*ef_snapshot_fn)(void *out, unsigned car, const unsigned *block);
 typedef void (*ef_query_fn)(void *collection, const char *sql, void *database, void *extra);
@@ -455,12 +454,15 @@ static void ef_judge(unsigned car, unsigned wheel, const unsigned parts[EF_SLOTS
 static volatile LONG64 g_ef_list_at;            /* tick of the last event car list (a garage list with class or PI terms, in a session) */
 static volatile LONG g_ef_first_list;
 
-/* an online event car select runs: its countdown hook ran within 3 s, or an event car list was built within 2 minutes (the list can come before the
- * countdown's first frame, and the car's details must agree with it) */
+/* an online event's car select ran within 2 minutes: its countdown hook, or an event car list. The list can come before the countdown's first frame
+ * and the car's details must agree with it; the picked car is committed when it loads (States::LoadPlayerCar +8ae8e0 calls the choices' slot 59
+ * [C: decompile]), after the select screen has closed: win1 2026-11-20 01:11 UTC committed a car with Extra Options swaps unfixed while the
+ * window was 3 s after the countdown's last frame. */
+#define EF_EVENT_WINDOW_MS 120000u
 static int ef_in_select(void)
 {
     ULONGLONG now = GetTickCount64(), armed = (ULONGLONG)g_cs_count_armed_at, listed = (ULONGLONG)g_ef_list_at;
-    return (armed && now - armed <= EF_SELECT_MS) || (listed && now - listed <= 120000u);
+    return (armed && now - armed <= EF_EVENT_WINDOW_MS) || (listed && now - listed <= EF_EVENT_WINDOW_MS);
 }
 
 /* the garage list query `sql` (an event car list of garage table `table`, ef_garage_query) with the fixed values in place, in a HeapAlloc'd buffer
@@ -665,6 +667,15 @@ static int ef_commit(unsigned char *self, unsigned car_at, unsigned wheel_at, un
         ef_work_end();
     }
     if (copy.kind != EF_FIXED) {
+        LONG nc = InterlockedIncrement(&g_ef_commits);
+        if (nc <= 10 || nc % 50 == 0) {
+            log_begin();
+            log_raw("eventfix: car ");
+            log_dec(car);
+            log_raw(copy.kind == EF_CLEAN ? " committed for an online event with its own parts (#" : " committed for an online event as built: it cannot be fixed (#");
+            log_dec((unsigned long)nc);
+            log_raw(")\n");
+        }
         return 0;
     }
     if (attr_id != (short)car) {

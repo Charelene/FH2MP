@@ -177,6 +177,21 @@ int main(void)
         CHECK(!ef_garage_query("SELECT Garage.* , 0 AS IsOwned FROM G AS Garage  WHERE 1 AND 1 AND Garage.Id!=1215 ORDER BY PerformanceIndex DESC", table, sizeof table));
         /* other queries are not either */
         CHECK(!ef_garage_query("SELECT Id FROM List_UpgradeEngine WHERE Garage.ClassId=3", table, sizeof table));
+        /* CarCollection_AppendPerfRatingRestriction's shape: a car that could be upgraded into the class is listed too; a fixed car is listed only
+         * by its fixed PI (S1 starts at 0.800 here: the fixed car 7, 0.5, is out by both branches) */
+        {
+            const char *q2 = "SELECT Garage.* , 0 AS IsOwned FROM G AS Garage  WHERE 1 AND ((Garage.MaxUpgradeWizardPerfRating >= 0.800000 AND StockPerformanceRating <= 0.900000) "
+                             "OR (Garage.PerformanceIndex >= 0.800000 AND Garage.PerformanceIndex <= 0.900000)) AND Garage.Id!=1215";
+            const char *expect2 = "SELECT Garage.* , 0 AS IsOwned FROM G AS Garage  WHERE 1 AND (("
+                                  "(CASE Garage.Id WHEN 7 THEN 0.500000000 WHEN 9 THEN 0.750000000 ELSE Garage.MaxUpgradeWizardPerfRating END) >= 0.800000 AND StockPerformanceRating <= 0.900000) "
+                                  "OR ((CASE Garage.Id WHEN 7 THEN 0.500000000 WHEN 9 THEN 0.750000000 ELSE Garage.PerformanceIndex END) >= 0.800000 AND "
+                                  "(CASE Garage.Id WHEN 7 THEN 0.500000000 WHEN 9 THEN 0.750000000 ELSE Garage.PerformanceIndex END) <= 0.900000)) AND Garage.Id!=1215";
+            CHECK(ef_garage_query(q2, table, sizeof table) && strcmp(table, "G") == 0);
+            n = ef_rewrite_sql(q2, rows, 2, sql, sizeof sql);
+            CHECK(n == 3);
+            if (strcmp(sql, expect2) != 0) printf("got  %s\nwant %s\n", sql, expect2);
+            CHECK(strcmp(sql, expect2) == 0);
+        }
         /* the list reads the game's view View_<prefix>Career_Garage (no part columns); the parts are in the table under it */
         CHECK(ef_garage_table("View_Profile0_Career_Garage", table, sizeof table) && strcmp(table, "Profile0_Career_Garage") == 0);
         CHECK(ef_garage_table("Profile0_Career_Garage", table, sizeof table) && strcmp(table, "Profile0_Career_Garage") == 0);

@@ -220,11 +220,14 @@ static int ef_at_word(const char *s, const char *w)
     return !ef_word_char(s[i]);
 }
 
-/* `sql` with every "Garage.ClassId" and "Garage.PerformanceIndex" replaced by the fixed values of `rows` into out[cap]. -> the number of replacements
- * (0: nothing to replace, out is not to be used), -1 when the result does not fit. */
+/* `sql` with every "Garage.ClassId" and "Garage.PerformanceIndex" replaced by the fixed values of `rows` into out[cap]. "Garage.MaxUpgradeWizardPerfRating"
+ * (CarCollection_AppendPerfRatingRestriction's other branch: a car that could be upgraded into the class is listed too) gets the fixed PI as
+ * well, so a fixed car is only listed by what it is: nothing is upgraded in an online event (dev 2026-11-20 01:11 UTC: a car with swaps, S1 807
+ * as built, A 748 to the server, was listed and picked in an S1 event). -> the number of replacements (0: nothing to replace, out is not to be
+ * used), -1 when the result does not fit. */
 static int ef_rewrite_sql(const char *sql, const ef_row *rows, unsigned n, char *out, unsigned cap)
 {
-    static const char k_class[] = "Garage.ClassId", k_pi[] = "Garage.PerformanceIndex";
+    static const char k_class[] = "Garage.ClassId", k_pi[] = "Garage.PerformanceIndex", k_max[] = "Garage.MaxUpgradeWizardPerfRating";
     ef_buf b = {out, 0, cap, 0};
     int replaced = 0;
     const char *s = sql;
@@ -239,6 +242,10 @@ static int ef_rewrite_sql(const char *sql, const ef_row *rows, unsigned n, char 
         } else if (prev_ok && ef_at_word(s, k_pi)) {
             ef_put_case(&b, rows, n, 1, k_pi);
             s += sizeof k_pi - 1;
+            replaced++;
+        } else if (prev_ok && ef_at_word(s, k_max)) {
+            ef_put_case(&b, rows, n, 1, k_max);
+            s += sizeof k_max - 1;
             replaced++;
         } else {
             ef_put(&b, s, 1);

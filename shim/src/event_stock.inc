@@ -145,10 +145,11 @@ static void es_hook(void *self)
     ULONGLONG now = GetTickCount64(), armed = (ULONGLONG)g_cs_count_armed_at;
     unsigned char probe;
 
-    if (s && armed && now - armed <= ES_SELECT_MS && read_game_memory(s + ES_ATTRS + PPI_OUT_SIZE - 1, &probe, 1)) {
+    if (s && read_game_memory(s + ES_ATTRS + PPI_OUT_SIZE - 1, &probe, 1)) {
         ppi_ops ops = {ppi_base_exists, ppi_base_stock, NULL};
         es_ops es = {es_game_stock_parts, NULL};
-        if (!(g_es_stock_on && g_ppi_base_ready && es_stock_pending(s, &es, &ops))) {
+        int swapped = g_es_stock_on && g_ppi_base_ready && armed && now - armed <= ES_SELECT_MS && es_stock_pending(s, &es, &ops);
+        if (!swapped && ef_in_select() && ppi_in_session(g_ppi_img)) {
             ef_commit(s, ES_CAR, ES_WHEEL, ES_PARTS, ES_TUNE, ES_ATTRS);   /* event_fix.inc: parts of other cars back to the car's own stock ones */
         }
     }
@@ -174,6 +175,10 @@ static int patch_event_stock(int stock_on)
     if (g_es_stock_on) {
         log_begin();
         log_raw("hook: eventstock: in an online event car select, a car with parts the server's database does not have races as the stock car (game+0x28d9a0)\n");
+    }
+    if (g_ef_on) {
+        log_begin();
+        log_raw("hook: eventfix: the car committed for an online event (game+0x28d9a0, slot 59, also when it loads after the car select) gets the fixed parts\n");
     }
     return 1;
 }
