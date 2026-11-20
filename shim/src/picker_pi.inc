@@ -677,7 +677,7 @@ static void ppi_base_load(const wchar_t *path)
 }
 
 /* ---- the hook ---- */
-static int ef_attrs(void *car, unsigned char *out);    /* event_fix.inc: the fixed class and PI of a car with parts of other cars */
+static int ef_attrs(void *car, unsigned char *out);    /* event_fix.inc: the fixed class and PI of a car with a swapped engine or gearbox */
 typedef unsigned char *(*ppi_query_fn)(void *car, unsigned char *out);
 static ppi_query_fn g_ppi_orig;
 static const unsigned char *g_ppi_img;
