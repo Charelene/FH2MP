@@ -503,9 +503,10 @@ func (l *Launcher) requireLauncher(client string) error {
 		if lv, ok := objAny(c, "links").(pyjson.Obj); ok {
 			site = objStr(lv, "website")
 		}
-		msg := fmt.Sprintf("This launcher (%s) is out of date. Download the latest FH2MP launcher", m[1])
+		// since 1.5.0 the FH2MP launcher is Encore; a 1.4.x FH2MP Launcher's own update (its signed manifest names Encore's files) is Encore
+		msg := fmt.Sprintf("This launcher (%s) is out of date. Update it, or download Encore, the FH2MP launcher", m[1])
 		if site != "" {
-			msg += " from " + site
+			msg += ", from " + site
 		}
 		return auth.NewError(426, "launcher_too_old", msg+".").WithDetail(fmt.Sprintf("launcher %s is older than minLauncher %s", m[1], objStr(c, "minLauncher")))
 	}
