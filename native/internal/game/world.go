@@ -194,6 +194,7 @@ type Event struct {
 	Laps                 *omap.Map[*Peer, int]
 	LoadedAfter          *omap.Map[*Peer, float64]
 	PickedAfter          *omap.Map[*Peer, float64]
+	JudgeAt              map[*Peer]float64 // EventFlowV2: when a participant that left the car select has its picked car judged
 	SelectEnteredAt      *float64
 	Held                 map[*Peer]bool
 	HoldLimitLogged      bool

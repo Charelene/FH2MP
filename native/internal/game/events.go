@@ -914,6 +914,13 @@ func (w *World) ValidateEventCars() bool {
 	if len(wrong) == 0 {
 		return true
 	}
+	return w.dropWrongCars(wrong, "")
+}
+
+// dropWrongCars takes participants whose car does not meet the event restrictions out of the event (when: "" after loading, or how long after
+// leaving the car select); -> false when nobody connected is left and the event ended.
+func (w *World) dropWrongCars(wrong []*Peer, when string) bool {
+	ev := w.Event
 	for _, q := range wrong {
 		ev.remove(q)
 		if q.Connected {
@@ -924,7 +931,7 @@ func (w *World) ValidateEventCars() bool {
 			}
 		}
 	}
-	w.Warnf("event: %s out of the event (car does not meet the restrictions, see the 'not eligible' line above); %d participant(s) remain %s", owners(wrong), len(ev.People), owners(ev.People))
+	w.Warnf("event: %s out of the event%s (car does not meet the restrictions, see the 'not eligible' line above); %d participant(s) remain %s", owners(wrong), when, len(ev.People), owners(ev.People))
 	w.RefreshCarPhasing()
 	any := false
 	for _, q := range ev.People {
@@ -1118,6 +1125,20 @@ func (w *World) StartEventWith(leader *Peer, chosen []*Peer) {
 		}
 		w.SetConsoleBool(q, ConsoleVarParticipatingInRace, 1, "participant selected")
 	}
+	if w.launchCountdownOn() && chosen == nil {
+		w.SetRaceClock(0, "join wait over: the event started")
+		var held []*Peer
+		for _, q := range w.Peers.Values() {
+			if q.ReadyHeld && inList(people, q) && q.ConsoleVars[4] {
+				held = append(held, q)
+				w.SetConsoleBool(q, 4, 1, "join wait over: the leader's game gets this Ready now")
+			}
+			q.ReadyHeld = false
+		}
+		if len(held) > 0 {
+			w.Logf("join wait: the Ready of owner %s reached the leader's game (owner %d) only now, at the start", owners(held), leader.Owner)
+		}
+	}
 	w.SetSessionHostBool(SHRaceParticipantsSelected, 1, "participants selected")
 	w.RefreshCarPhasing()
 	if !w.Roadtrip {
@@ -1257,6 +1278,11 @@ func (w *World) NotePlayerStatus(peer *Peer, size int, payload bits.Int) {
 	if peer.PlayerStatus != PlayerStatusPreRace {
 		return
 	}
+	w.notePicked(ev, peer)
+}
+
+// notePicked: participant `peer` of the running event left its car select (PlayerStatus CarSelect -> PreRace).
+func (w *World) notePicked(ev *Event, peer *Peer) {
 	if ev.PickedAfter == nil {
 		ev.PickedAfter = omap.New[*Peer, float64]()
 	}
@@ -1276,6 +1302,43 @@ func (w *World) NotePlayerStatus(peer *Peer, size int, payload bits.Int) {
 		msg += ", everybody is"
 	}
 	w.Log(msg)
+	if EventFlowV2 && ev.CarRule != nil {
+		if ev.JudgeAt == nil {
+			ev.JudgeAt = map[*Peer]float64{}
+		}
+		ev.JudgeAt[peer] = w.Mono() + EventPickJudgeSeconds
+	}
+}
+
+// JudgePicks (EventFlowV2): a participant that left the car select EventPickJudgeSeconds ago has its car judged now, with the numbers its game
+// sent for the picked car; one that does not fit is out of the event at once instead of when everybody has loaded.
+func (w *World) JudgePicks(now float64) {
+	ev := w.Event
+	if ev == nil || len(ev.JudgeAt) == 0 {
+		return
+	}
+	var wrong []*Peer
+	for _, q := range ev.People {
+		at, ok := ev.JudgeAt[q]
+		if !ok || now < at {
+			continue
+		}
+		delete(ev.JudgeAt, q)
+		if ev.Begun || !q.Connected || ev.CarRule == nil {
+			continue
+		}
+		if !w.EligibleForEvent(q, ev.CarRule) {
+			wrong = append(wrong, q)
+		}
+	}
+	for q, at := range ev.JudgeAt {
+		if now >= at && !ev.has(q) {
+			delete(ev.JudgeAt, q)
+		}
+	}
+	if len(wrong) > 0 {
+		w.dropWrongCars(wrong, fmt.Sprintf(" %s s after leaving the car select", fmtG(EventPickJudgeSeconds)))
+	}
 }
 
 // NoteLoaded notes how long after the event start a participant's HasLoadedCarsForAllParticipants went to 1.

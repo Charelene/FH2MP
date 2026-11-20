@@ -305,6 +305,7 @@ func (w *World) Tick() {
 	if ev != nil && !ev.Begun && !w.Roadtrip && now-orNow(ev.Started, now) > EventLoadTimeout {
 		w.DropUnloaded(now)
 	}
+	w.JudgePicks(now)
 	if w.Event != nil && w.Event.GoAt != nil {
 		if now >= *w.Event.GoAt {
 			w.GoRace(fmt.Sprintf("backstop after %.0f s", RaceGridBackstopSecs))
@@ -337,13 +338,18 @@ func (w *World) Tick() {
 				joining = append(joining, q)
 			}
 		}
-		if len(joining) > 0 && leader.Connected && now < w.RaceHardDeadline {
+		if len(joining) > 0 && leader.Connected && now < w.RaceHardDeadline && !EventFlowV2 {
 			w.PendingRace = &PendingRace{now + 2.0, leader}
 			w.LogEvery([2]any{"invite-wait", asked}, 10.0, fmt.Sprintf("event start held for owner %s: accepted the invite but no Ready yet (still choosing a car?); leader owner %d, invite window of %.0f s is over, grace ends in %.0f s",
 				owners(joining), leader.Owner, RaceInviteSeconds, w.RaceHardDeadline-now), diag.Info)
 		} else {
 			if len(joining) > 0 && leader.Connected {
-				w.Warnf("invite grace over (%.0f s after the request): starting without owner %s, who accepted the invite but never reported Ready", RaceJoinGraceSeconds, owners(joining))
+				if EventFlowV2 {
+					w.Logf("join wait over (%s s after the request): the event starts now; owner %s accepted without a Ready: one refused on its car gets the event car select, one that never sent a Ready stays in Free Roam",
+						fmtG(EventJoinSeconds), owners(joining))
+				} else {
+					w.Warnf("invite grace over (%.0f s after the request): starting without owner %s, who accepted the invite but never reported Ready", RaceJoinGraceSeconds, owners(joining))
+				}
 			}
 			w.PendingRace = nil
 			if leader.Connected {

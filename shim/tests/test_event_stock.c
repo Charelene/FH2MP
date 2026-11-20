@@ -18,6 +18,7 @@ static int code_is(const char *tag, const char *what, const unsigned char *img, 
     return 0;
 }
 static int plat_hook(const char *name, void *target, void *detour, void **original) { (void)name; (void)target; (void)detour; (void)original; return 0; }
+static int plat_hook_call(const char *name, void *site, void *detour, void **original) { (void)name; (void)site; (void)detour; (void)original; return 0; }
 static void log_begin(void) { strcat(g_log, "|"); }
 static void log_raw(const char *s) { strcat(g_log, s); }
 static void log_dec(unsigned long v) { char b[24]; sprintf(b, "%lu", v); strcat(g_log, b); }
