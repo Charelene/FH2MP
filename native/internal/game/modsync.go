@@ -159,7 +159,7 @@ func (h *Hub) modsHandle(data []byte, addr Addr, only *World) {
 	if seq == 0 || h.isRevoked(xuid) {
 		return
 	}
-	world, peer, key := h.findAuthed(only, h.modsRoutes(only), xuid, data, now)
+	world, peer, key := h.sideAuthed(only, h.modsRoutes(only), xuid, data, now, true, addr)
 	if world == nil {
 		if ok, skipped := sideRate.Allow([2]any{"md-unmatched", xuid}, rejectLogSeconds); ok {
 			why, expected := h.whyUnmatched(xuid, data, now)

@@ -100,6 +100,7 @@ const (
 	TagKeyframeMinSecs = 20.0
 	TagGridAssignDelay = 1.5
 	TagResyncS         = 3.0
+	raceOverResendS    = 2.0 // a client still hitting in a finished tag event gets the race-over flag again at most this often
 
 	LobbyTypeRoadTrip = 1
 	LobbyTypeFreeRoam = 2
@@ -259,3 +260,7 @@ var TagModes = map[int]*TagMode{
 
 // TagAssignRepeats: seconds after the first send.
 var TagAssignRepeats = []float64{0.0, 0.4, 1.2, 3.0}
+
+// GameMaxDatagramBytes is the largest datagram FH2 takes: Connection::ReadPacketHeader (1.0.0.64, game+0x17672b0) disconnects with
+// 0x80600007 ("Disconnect Invalid Msg Size.") when the header's size field is above 0x55c bytes. FlushPeer logs a datagram above it.
+const GameMaxDatagramBytes = 0x55c

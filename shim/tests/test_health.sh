@@ -114,6 +114,14 @@ int main(void)
         CHECK(!health_census_due(61 * GB, 16 * GB, &stage) && stage == 2);       /* twice per game at most */
         stage = 0;
         CHECK(!health_census_due(61 * GB, 0, &stage) && stage == 0);             /* RAM unknown: never */
+        /* the watches: past 1.25 x RAM and 14 GB, since a normal boot takes up to ~12 GB and an 8 GB PC passes 1.25 x RAM in a normal boot */
+        CHECK(!health_watch_due(11 * GB, 8 * GB, 0));                             /* an 8 GB laptop booting: no hooks */
+        CHECK(health_watch_due(14 * GB, 8 * GB, 0));
+        CHECK(!health_watch_due(19 * GB, 16 * GB, 0) && health_watch_due(20 * GB, 16 * GB, 0));
+        CHECK(!health_watch_due(39 * GB, 16 * GB, 1) && health_watch_due(40 * GB, 16 * GB, 1));
+        CHECK(!health_watch_due(61 * GB, 16 * GB, 2));                            /* two windows per game at most */
+        CHECK(!health_watch_due(61 * GB, 0, 0));                                  /* RAM unknown: never */
+        CHECK(!health_watch_due(39 * GB, 32 * GB, 0) && health_watch_due(40 * GB, 32 * GB, 0));
 
         /* the segment the 2026-11-13 dump kept: 0xffeeffee at +0x10, heap at +0x28, its own base at +0x30 */
         hdr[0x10] = 0xee, hdr[0x11] = 0xff, hdr[0x12] = 0xee, hdr[0x13] = 0xff, hdr[0x14] = 2;

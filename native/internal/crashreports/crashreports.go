@@ -467,8 +467,14 @@ func Signature(line string) (string, string) {
 
 // IssueKey is Signature for the report's game: a crash of another game than Forza Horizon 2 (the "game" field Encore sends) never joins an
 // FH2 issue, even at the same exception and address, and its title names the game. A report without the field is Forza Horizon 2's.
+// A report whose azimuth.log has no failure line is grouped by the fault in its minidump (dumpKey), when it has one.
 func IssueKey(r *Report, line string) (string, string) {
 	key, title := Signature(line)
+	if key == "" {
+		if k, t := dumpKey(reportDump(r)); k != "" { // no failure line: the dump's fault groups the reports instead of one issue each
+			key, title = k, t
+		}
+	}
 	game := r.field("game")
 	if game == "" || game == "Forza Horizon 2" {
 		return key, title
@@ -583,6 +589,9 @@ func FileLinks(rid string, r *Report, linkBase string) string {
 // IssueBody is the text of a new issue.
 func IssueBody(rid string, r *Report, line, linkBase string) string {
 	head := "This issue was created automatically by launcher's crash reporter.\n\n" + SummaryTable(rid, r, line)
+	if s := DumpSummary(reportDump(r)); s != "" {
+		head += "\n" + s + "\n"
+	}
 	var blocks []string
 	for _, b := range []string{tailBlock("FH2 Mod Platform crash report", Redact(r.file("mod-crash.txt")), 80, 8_000), tailBlock("azimuth.log, last 40 lines", Redact(r.file("azimuth.log")), 40, 10_000)} {
 		if b != "" {
@@ -608,7 +617,11 @@ func CommentBody(rid string, r *Report, linkBase string) string {
 			b.WriteString("| " + fieldLabels[k] + " | " + code(Redact(f)) + " |\n")
 		}
 	}
-	b.WriteString("| Report id | `" + rid + "` |\n\n" + FileLinks(rid, r, linkBase))
+	b.WriteString("| Report id | `" + rid + "` |\n\n")
+	if s := DumpSummary(reportDump(r)); s != "" {
+		b.WriteString(s + "\n\n")
+	}
+	b.WriteString(FileLinks(rid, r, linkBase))
 	return b.String()
 }
 

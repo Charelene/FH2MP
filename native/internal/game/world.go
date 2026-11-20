@@ -809,10 +809,19 @@ func (w *World) RefreshCarPhasing() {
 	}
 }
 
+// outboxKeep: a client's outbox array of up to this many messages is kept for the next round; a bigger one (a burst) is dropped.
+const outboxKeep = 1024
+
 // FlushPeer sends everything queued for a client.
 func (w *World) FlushPeer(peer *Peer) {
 	out := peer.Outbox
 	peer.Outbox = nil
+	defer func() { // the array is used again: a flush used to drop it, so every round grew a new one message by message
+		if peer.Outbox == nil && cap(out) <= outboxKeep {
+			clear(out)
+			peer.Outbox = out[:0]
+		}
+	}()
 	peer.Due, peer.Hold = math.Inf(1), 0.0
 	w.Dirty.Delete(peer)
 	ack, ackBits := peer.AckFields()
@@ -828,6 +837,10 @@ func (w *World) FlushPeer(peer *Peer) {
 		for j < len(out) && j-i < 255 && (j == i || size+out[j].N <= limit) {
 			size += out[j].N
 			j++
+		}
+		if n := netv2.HeaderBits/8 + (size+7)/8; n > GameMaxDatagramBytes { // only a single message can get there (MaxPacketBytes is below it)
+			w.LogEvery([2]any{"oversize-datagram", peer.Addr}, 60, fmt.Sprintf("%d a datagram of %d bytes (%d message(s), the first of type %d and %d bits) goes to owner %d xuid %#x; the game disconnects on more than %d (reason 0x80600007, Connection::ReadPacketHeader game+0x17672b0); sent as it is",
+				peer.Addr.Port, n, j-i, out[i].Type(), out[i].N, peer.Owner, peer.Xuid, GameMaxDatagramBytes), diag.Warn)
 		}
 		pid := uint16(netv2.UnreliableID)
 		if reliableNow {
@@ -859,12 +872,13 @@ func (w *World) Flush(now float64) float64 {
 
 // Others are the other connected, entered clients of the same world.
 func (w *World) Others(peer *Peer) []*Peer {
-	var out []*Peer
-	for _, q := range w.Peers.Values() {
+	out := make([]*Peer, 0, w.Peers.Len())
+	w.Peers.Range(func(_ Addr, q *Peer) bool {
 		if q != peer && q.Connected && q.Entered && sameWorld(q.World, peer.World) {
 			out = append(out, q)
 		}
-	}
+		return true
+	})
 	return out
 }
 

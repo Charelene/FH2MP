@@ -150,8 +150,53 @@ func (r *RateLimit) Allow(key any, interval float64) (bool, int) {
 
 var secrets = regexp.MustCompile(`(?i)(fh2\.[A-Za-z0-9_\-]{8,}|Bearer\s+\S+|X-FH2MP-Token\S*\s*[:=]\s*\S+|(?:token|secret|password|private[_ ]?key)\s*[=:]\s*\S+)`)
 
-// Scrub removes session tokens, bearer headers and key=value secrets.
-func Scrub(text string) string { return secrets.ReplaceAllString(text, "<redacted>") }
+// Scrub removes session tokens, bearer headers and key=value secrets. Every log line of the game server and the LSP goes through it, and the
+// regex costs about 20 us a line, so a line that cannot match is returned as it is: every match needs one of secretWords (case folded), and a
+// line with a non-ASCII byte always goes to the regex, whose case folding also matches the Kelvin sign and the long s.
+func Scrub(text string) string {
+	if !maySecret(text) {
+		return text
+	}
+	return secrets.ReplaceAllString(text, "<redacted>")
+}
+
+// secretWords: each alternative of secrets starts with or contains one of these (fh2., Bearer, X-FH2MP-Token, token, secret, password, private).
+var secretWords = []string{"fh2.", "bearer", "token", "secret", "password", "private"}
+
+// maySecret is false only when secrets cannot match text.
+func maySecret(text string) bool {
+	for i := 0; i < len(text); i++ {
+		if text[i] >= 0x80 {
+			return true
+		}
+	}
+	for _, w := range secretWords {
+		if containsFold(text, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsFold: ASCII text contains the lower-case ASCII word in any case.
+func containsFold(text, word string) bool {
+	for i := 0; i+len(word) <= len(text); i++ {
+		j := 0
+		for ; j < len(word); j++ {
+			c := text[i+j]
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			if c != word[j] {
+				break
+			}
+		}
+		if j == len(word) {
+			return true
+		}
+	}
+	return false
+}
 
 var runID = regexp.MustCompile(`^[0-9a-f]{8}(?:\.[0-9]{1,10})?$`)
 

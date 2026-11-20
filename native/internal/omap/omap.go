@@ -98,6 +98,15 @@ func (m *Map[K, V]) Values() []V {
 	return out
 }
 
+// Range calls fn for the entries in order, without a snapshot, until fn returns false; fn must not change the map.
+func (m *Map[K, V]) Range(fn func(K, V) bool) {
+	for i, k := range m.keys {
+		if m.live[i] && !fn(k, m.vals[i]) {
+			return
+		}
+	}
+}
+
 // Each calls fn for a snapshot of the entries in order; fn may change the map.
 func (m *Map[K, V]) Each(fn func(K, V)) {
 	for _, k := range m.Keys() {
