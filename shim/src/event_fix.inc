@@ -61,6 +61,7 @@ static unsigned g_ef_cache_n, g_ef_cache_next;
 static unsigned char *g_ef_snap_out;
 static unsigned char g_ef_save[EF_RATINGS_SAVE];
 static volatile LONG g_ef_declined, g_ef_lists, g_ef_commits, g_ef_busy;
+static volatile LONG64 g_ef_fixed_at;            /* tick of the last commit this file changed (the PI check hook below acts only after one) */
 
 /* No thread ever waits on this file while it calls into the game (both rigs hung at their first event car select on 2026-11-19 with a lock held
  * across the game's database calls, which take the database's own critical section, CDatabase slot 8 +108f720; the lock order could invert).
@@ -701,6 +702,7 @@ static int ef_commit(unsigned char *self, unsigned car_at, unsigned wheel_at, un
     self[attrs_at + PPI_OUT_CLASS] = (unsigned char)copy.klass;
     dpi = (double)copy.pi;
     memcpy(self + attrs_at + PPI_OUT_PI, &dpi, sizeof dpi);
+    g_ef_fixed_at = (LONG64)GetTickCount64();
     n = InterlockedIncrement(&g_ef_commits);
     if (n <= 20 || n % 50 == 0) {
         log_begin();
@@ -737,6 +739,81 @@ static int ef_commit(unsigned char *self, unsigned car_at, unsigned wheel_at, un
     return 1;
 }
 
+/* ---- the car as raced: the game's own PI check when the race car loads ----
+ * Car::DetectPerformanceTampering (+f58a90, called from Car::LoadCarModelAndPresentation for the local player's car) copies the car's setup
+ * (car+0x1200), runs CarPerformance_SimulatePIScore (+1046e00; [[+365d6f0]], the copy, the car's CarClassModifier, 0, 0, 0) and compares the
+ * result with the PI the car's info object reports ([car+0x390] slot 0x100 -> slot 0x120); more than 0.001 apart, or above the reported class's
+ * top, and it sets car+0x11f5 and writes PI 0.9998 (slot 0x118, a float) and class 7 (slot 0x78, an int) [C: decompile and the bytes at
+ * +f58dc3..+f58e0c]. A car this file fixed reported the PI of its fixed parts while the race car's info still had its garage car's (win1 dev,
+ * 2026-11-20 01:46 UTC: car 1500 fixed to A 0.7457, raced as class 7 PI 1000 and the server put it out of the event) [inferred: which source the
+ * info object takes]. For such a car (a fix committed within the event window), when the check has flagged it, the info gets the PI the
+ * same simulation gives for the car as it will race, and the class of that PI (+104c8d0 with [[+365d6e0]], the picker's own class lookup), and
+ * the flag is cleared: the reported numbers are the car's true ones, not the check's marker. Every other car the check flags stays flagged. */
+#define EF_TAMPER_RVA 0xf58a90u
+#define EF_SIMPI_RVA 0x1046e00u
+#define EF_CLASSOF_RVA 0x104c8d0u
+#define EF_PI_SETTINGS_RVA 0x365d6f0u
+#define EF_CLASS_TABLE_RVA 0x365d6e0u
+#define EF_CAR_SETUP 0x1200u
+#define EF_CAR_TAMPERED 0x11f5u
+#define EF_CAR_INFO 0x390u
+#define EF_SETUP_BYTES 0x3a00u
+typedef unsigned long long (*ef_tamper_fn)(void *car, void *row);
+typedef double (*ef_simpi_fn)(void *settings, void *setup, double modifier, ULONG_PTR a, ULONG_PTR b, ULONG_PTR c);
+typedef int (*ef_classof_fn)(void *table, double pi);
+static ef_tamper_fn g_ef_tamper_orig;
+static ef_simpi_fn g_ef_simpi;
+static ef_classof_fn g_ef_classof;
+static unsigned char *g_ef_setup_copy;
+
+static unsigned long long ef_tamper_hook(void *car, void *row)
+{
+    unsigned long long r = g_ef_tamper_orig(car, row);
+    const unsigned char *c = (const unsigned char *)car;
+    ULONGLONG now = GetTickCount64(), fixed_at = (ULONGLONG)g_ef_fixed_at;
+    unsigned char flagged = 0;
+    void *settings = NULL, *table = NULL, *holder = NULL, *info = NULL, *get_mod, *set_pi, *set_class, *get_info;
+    ppi_key key = ppi_key_for("CarClassModifier");
+    float modifier;
+    double pi;
+    int klass;
+
+    if (!(r & 0xff) || !g_ef_on || !g_ef_simpi || !g_ef_classof || !g_ef_setup_copy || !fixed_at || now - fixed_at > EF_EVENT_WINDOW_MS ||
+        !ppi_in_session(g_ppi_img) || !read_game_memory(c + EF_CAR_TAMPERED, &flagged, 1) || flagged != 1) {
+        return r;
+    }
+    if (!read_game_memory(g_ppi_img + EF_PI_SETTINGS_RVA, &settings, sizeof settings) || !settings ||
+        !read_game_memory(g_ppi_img + EF_CLASS_TABLE_RVA, &table, sizeof table) || !table ||
+        !read_game_memory(c + EF_CAR_INFO, &holder, sizeof holder) || !holder || !(get_info = ppi_method(holder, 0x100)) ||
+        !(get_mod = ppi_method(row, PPI_ROW_FLOAT_SLOT)) || !read_game_memory(c + EF_CAR_SETUP, g_ef_setup_copy, EF_SETUP_BYTES)) {
+        ef_log_decline("the game's PI check flagged the fixed car and its setup or info object cannot be read: it stays flagged", 0);
+        return r;
+    }
+    info = ((void *(*)(void *))get_info)(holder);
+    if (!info || !(set_pi = ppi_method(info, 0x118)) || !(set_class = ppi_method(info, 0x78))) {
+        ef_log_decline("the game's PI check flagged the fixed car and its info object has no PI setter: it stays flagged", 0);
+        return r;
+    }
+    modifier = ((float (*)(void *, const ppi_key *))get_mod)(row, &key);
+    pi = g_ef_simpi(settings, g_ef_setup_copy, (double)modifier, 0, 0, 0);
+    if (!ppi_pi_usable(pi)) {
+        ef_log_decline("the game's PI check flagged the fixed car and the lap simulation gave no usable PI: it stays flagged", 0);
+        return r;
+    }
+    klass = g_ef_classof(table, pi);
+    ((void (*)(void *, float))set_pi)(info, (float)pi);
+    ((void (*)(void *, int))set_class)(info, klass);
+    *((unsigned char *)car + EF_CAR_TAMPERED) = 0;
+    log_begin();
+    log_raw("eventfix: the fixed car loaded for the race: the game's PI check did not match its reported PI, so it reports what the game's own lap "
+            "simulation of the race setup gives, class ");
+    log_dec((unsigned long)klass);
+    log_raw(" PI ");
+    ppi_log_pi(pi);
+    log_raw(" (not the check's class 7 PI 0.9998)\n");
+    return r & ~0xffull;
+}
+
 static int patch_event_fix(void)
 {
     static const unsigned char snap[16] = {0x40, 0x55, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8d, 0xac, 0x24, 0xd0, 0xc1, 0xff, 0xff};
@@ -759,5 +836,21 @@ static int patch_event_fix(void)
     }
     log_begin();
     log_raw("hook: eventfix: online, a car with parts of other cars races an event with those parts and their tune values back to stock (car details, commit)\n");
+    {
+        static const unsigned char tamper[16] = {0x40, 0x57, 0xb8, 0x20, 0x3a, 0x00, 0x00, 0xe8, 0xc4, 0xf3, 0xfb, 0xff, 0x48, 0x2b, 0xe0, 0x48};
+        static const unsigned char simpi[16] = {0x4c, 0x89, 0x4c, 0x24, 0x20, 0xc5, 0xfb, 0x11, 0x54, 0x24, 0x18, 0x55, 0x56, 0x57, 0x41, 0x54};
+        static const unsigned char classof[16] = {0xc5, 0xfb, 0x10, 0x05, 0xf0, 0x6c, 0x31, 0x01, 0xc5, 0xf8, 0x28, 0xd1, 0xc5, 0xf0, 0x57, 0xc9};
+        g_ef_setup_copy = (unsigned char *)VirtualAlloc(NULL, 0x4000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (g_ef_setup_copy && code_is("eventfix", "CarPerformance_SimulatePIScore", img, EF_SIMPI_RVA, simpi, sizeof simpi) &&
+            code_is("eventfix", "the class of a PI (+104c8d0)", img, EF_CLASSOF_RVA, classof, sizeof classof) &&
+            code_is("eventfix", "Car::DetectPerformanceTampering", img, EF_TAMPER_RVA, tamper, sizeof tamper)) {
+            g_ef_simpi = (ef_simpi_fn)(img + EF_SIMPI_RVA);
+            g_ef_classof = (ef_classof_fn)(img + EF_CLASSOF_RVA);
+            if (plat_hook("eventfix: the fixed car's PI as raced", img + EF_TAMPER_RVA, (void *)ef_tamper_hook, (void **)&g_ef_tamper_orig)) {
+                log_begin();
+                log_raw("hook: eventfix: a fixed car the game's PI check flags reports the PI of the game's lap simulation of its race setup (game+0xf58a90)\n");
+            }
+        }
+    }
     return 1;
 }
