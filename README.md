@@ -181,6 +181,9 @@ This project is **AI-assisted**. If that makes you close the tab, fair enough. I
   isn't allowed online through its own off switch.
 - **[Underglow](https://github.com/qiangqiang101/FH2-Underglow)** by qiangqiang101 (optional): underglow, shown to the other players online.
 
+Code contributed to FH2MP itself by **Trinculo54**: the Modded cars row of Event Options, the developer badge on name tags and
+crash guards in the shim (and the in-game Guide's Xbox 360 and Xbox One looks, which moved to Encore with the Guide).
+
 ## License
 
 [GPL-3.0](LICENSE). The game, Azimuth and the mods mentioned above belong to their respective authors and are not covered by it.
