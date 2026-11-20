@@ -118,7 +118,7 @@ int wmain(int argc, wchar_t **argv)
     }
     fputs(g_log, stdout);
     assert(strstr(g_log, "offline: FH2MP_OFFLINE is set"));
-    assert(strstr(g_log, "offline: 2 of 13 crash guards made (the lines above name the ones that were not)\n"));
+    assert(strstr(g_log, "offline: 2 of 14 crash guards made (the lines above name the ones that were not)\n"));
     assert(g_img[0x10c8974u] == 0xff && g_img[0x10c8975u] == 0x15);    /* call [rip+slot] into the placement fallback */
     assert(g_img[0x21f44du] == 0xff && g_img[0x21f44eu] == 0x15);      /* call [rip+slot] into the Cinematics check */
     assert(strstr(g_log, "dtconv") && strstr(g_log, "; not patched\n")); /* the hook guards checked their sites and said why not */
