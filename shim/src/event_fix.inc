@@ -462,10 +462,12 @@ static volatile LONG g_ef_first_list;
  * [C: decompile]), after the select screen has closed: win1 2026-11-20 01:11 UTC committed a car with Extra Options swaps unfixed while the
  * window was 3 s after the countdown's last frame. */
 #define EF_EVENT_WINDOW_MS 120000u
+/* The window also closes at the race start (MsgStartRace, grid_trace.inc): every commit of the event's car comes before it, and a car the player
+ * commits after it is its own Free Roam car again (win1 2026-11-20 04:05 UTC: the player left the race and its Free Roam car, a Mercedes with an
+ * Extra Options gearbox, was committed with the stock one 12 s after the race start, inside the 2 minutes). */
 static int ef_in_select(void)
 {
-    ULONGLONG now = GetTickCount64(), armed = (ULONGLONG)g_cs_count_armed_at, listed = (ULONGLONG)g_ef_list_at;
-    return (armed && now - armed <= EF_EVENT_WINDOW_MS) || (listed && now - listed <= EF_EVENT_WINDOW_MS);
+    return ef_select_open(GetTickCount64(), (ULONGLONG)g_cs_count_armed_at, (ULONGLONG)g_ef_list_at, (ULONGLONG)g_race_start_msg_at, EF_EVENT_WINDOW_MS);
 }
 
 /* The class the tile of each fixed car shows (ClassId of the list's own table `table`, the view the select list takes Garage.* from) against its
@@ -845,7 +847,7 @@ static unsigned long long ef_tamper_hook(void *car, void *row)
     double pi;
     int klass;
 
-    if (!(r & 0xff) || !g_ef_on || !g_ef_simpi || !g_ef_setup_copy || !fixed_at || now - fixed_at > EF_EVENT_WINDOW_MS ||
+    if (!(r & 0xff) || !g_ef_on || !g_ef_simpi || !g_ef_setup_copy || !fixed_at || now - fixed_at > EF_EVENT_WINDOW_MS || !ef_in_select() ||
         !ppi_in_session(g_ppi_img) || !read_game_memory(c + EF_CAR_TAMPERED, &flagged, 1) || flagged != 1) {
         return r;
     }

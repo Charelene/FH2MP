@@ -306,3 +306,14 @@ static int ef_garage_query(const char *sql, char *name, unsigned cap)
     }
     return 0;
 }
+
+/* An online event's car select is open at `now` (ticks, ms): its countdown ran (`armed`) or an event car list was made (`listed`) within
+ * `window` ms, and not before the last race start (`race_started`; 0 = none yet). After the race start a committed car is the player's own
+ * again, never the event's (event_fix.inc ef_in_select). */
+static int ef_select_open(unsigned long long now, unsigned long long armed, unsigned long long listed, unsigned long long race_started,
+                          unsigned long long window)
+{
+    if (armed && armed <= race_started) armed = 0;
+    if (listed && listed <= race_started) listed = 0;
+    return (armed && now - armed <= window) || (listed && now - listed <= window);
+}

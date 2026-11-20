@@ -216,6 +216,17 @@ int main(void)
         /* whole words only */
         CHECK(ef_rewrite_sql("x Garage.PerformanceIndexes MyGarage.ClassId y", rows, 2, sql, sizeof sql) == 0);
     }
+    /* the event car select window: open for 2 minutes after its countdown or list, closed by the race start (win1 2026-11-20 04:05 UTC: the
+     * Free Roam car committed 12 s after the race start was fixed like an event car) */
+    {
+        const unsigned long long W = 120000;
+        CHECK(ef_select_open(10000, 5000, 0, 0, W));               /* countdown 5 s ago, no race yet */
+        CHECK(ef_select_open(10000, 0, 6000, 0, W));               /* only a list */
+        CHECK(ef_select_open(70000, 5000, 6000, 60000, W) == 0);  /* the race started after both: the player's own car again */
+        CHECK(ef_select_open(90000, 80000, 0, 60000, W));          /* the next event's car select, after that race */
+        CHECK(ef_select_open(200000, 5000, 6000, 0, W) == 0);     /* over 2 minutes */
+        CHECK(ef_select_open(10000, 0, 0, 0, W) == 0);             /* never armed */
+    }
     if (failed) {
         printf("%d check(s) failed\n", failed);
         return 1;
