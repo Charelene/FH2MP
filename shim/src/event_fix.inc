@@ -59,26 +59,72 @@ static char g_ef_short[EF_SLOTS][40];           /* the garage table's part colum
 static int g_ef_short_ok;
 static ef_verdict g_ef_cache[EF_CACHE];
 static unsigned g_ef_cache_n, g_ef_cache_next;
-static SRWLOCK g_ef_lock = SRWLOCK_INIT;
-static volatile DWORD g_ef_holder;              /* the thread inside the lock: a call from the game back into us on it is skipped, not a deadlock */
 static unsigned char *g_ef_snap_out;
 static unsigned char g_ef_save[EF_RATINGS_SAVE];
-static volatile LONG g_ef_declined, g_ef_lists, g_ef_commits;
+static volatile LONG g_ef_declined, g_ef_lists, g_ef_commits, g_ef_busy;
 
-static int ef_lock(void)
+/* No thread ever waits on this file while it calls into the game (both rigs hung at their first event car select on 2026-11-19 with a lock held
+ * across the game's database calls, which take the database's own critical section, CDatabase slot 8 +108f720; the lock order could invert).
+ * - The work (loading the part tables, judging cars: the game's database and simulation) is taken with a flag, never waited for: a thread that
+ *   finds it taken (another thread, or the game calling back into a hook while the work runs) leaves its list or car as the game has it.
+ * - The verdict cache has its own lock, held only to copy an entry in or out, with no call into the game inside. */
+static volatile LONG g_ef_work;
+static SRWLOCK g_ef_cache_lock = SRWLOCK_INIT;
+
+static int ef_work_begin(void)
 {
-    if (g_ef_holder == GetCurrentThreadId()) {
-        return 0;
+    if (InterlockedCompareExchange(&g_ef_work, 1, 0) == 0) {
+        return 1;
     }
-    AcquireSRWLockExclusive(&g_ef_lock);
-    g_ef_holder = GetCurrentThreadId();
-    return 1;
+    {
+        LONG n = InterlockedIncrement(&g_ef_busy);
+        if (n <= 5 || n % 100 == 0) {
+            log_begin();
+            log_raw("eventfix: a car list or car arrived while another was being judged; it is left as the game has it (#");
+            log_dec((unsigned long)n);
+            log_raw(")\n");
+        }
+    }
+    return 0;
 }
 
-static void ef_unlock(void)
+static void ef_work_end(void)
 {
-    g_ef_holder = 0;
-    ReleaseSRWLockExclusive(&g_ef_lock);
+    InterlockedExchange(&g_ef_work, 0);
+}
+
+static unsigned ef_hash(unsigned wheel, const unsigned parts[EF_SLOTS])
+{
+    unsigned hash = 2166136261u ^ wheel, i;
+    for (i = 0; i < EF_SLOTS; i++) {
+        hash = (hash ^ parts[i]) * 16777619u;
+    }
+    return hash;
+}
+
+static int ef_cache_get(unsigned car, unsigned hash, ef_verdict *out)
+{
+    unsigned i;
+    int found = 0;
+    AcquireSRWLockShared(&g_ef_cache_lock);
+    for (i = 0; i < g_ef_cache_n; i++) {
+        if (g_ef_cache[i].car == car && g_ef_cache[i].hash == hash) {
+            *out = g_ef_cache[i];
+            found = 1;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&g_ef_cache_lock);
+    return found;
+}
+
+static void ef_cache_put(const ef_verdict *v)
+{
+    AcquireSRWLockExclusive(&g_ef_cache_lock);
+    g_ef_cache[g_ef_cache_next] = *v;
+    g_ef_cache_next = (g_ef_cache_next + 1) % EF_CACHE;
+    if (g_ef_cache_n < EF_CACHE) g_ef_cache_n++;
+    ReleaseSRWLockExclusive(&g_ef_cache_lock);
 }
 
 static void ef_cat_dec(char *d, unsigned cap, unsigned v)
@@ -243,7 +289,7 @@ static void *ef_database(void)
     return db;
 }
 
-/* the part tables and the garage's part columns, once per game -> 1 when ready (call under g_ef_lock) */
+/* the part tables and the garage's part columns, once per game -> 1 when ready (only with the work flag taken, ef_work_begin) */
 static int ef_ready(void)
 {
     LARGE_INTEGER t0, t1;
@@ -258,6 +304,8 @@ static int ef_ready(void)
     if (!db) {
         return 0;               /* not yet: asked again at the next list */
     }
+    log_begin();
+    log_raw("eventfix: loading the part tables of the game database (first event car list or car of this game)\n");
     QueryPerformanceCounter(&t0);
     for (k = 0; k < EF_SLOTS; k++) {
         const char *name = NULL;
@@ -378,25 +426,17 @@ static int ef_rescore(unsigned car, const unsigned block[2 + EF_SLOTS], unsigned
     return 1;
 }
 
-/* The verdict on car `car` with WheelStyle `wheel` and parts `parts` (call under g_ef_lock, after ef_ready) */
-static const ef_verdict *ef_judge(unsigned car, unsigned wheel, const unsigned parts[EF_SLOTS], double *ms)
+/* The verdict on car `car` with WheelStyle `wheel` and parts `parts` into *v (only with the work flag taken, after ef_ready) */
+static void ef_judge(unsigned car, unsigned wheel, const unsigned parts[EF_SLOTS], double *ms, ef_verdict *v)
 {
     ef_ops ops = {ef_op_owner, ef_op_stock, ef_op_installs, NULL};
-    unsigned hash = 2166136261u ^ wheel, i, block[2 + EF_SLOTS];
-    ef_verdict *v;
+    unsigned hash = ef_hash(wheel, parts), block[2 + EF_SLOTS];
     LARGE_INTEGER t0, t1;
 
-    for (i = 0; i < EF_SLOTS; i++) {
-        hash = (hash ^ parts[i]) * 16777619u;
+    if (ef_cache_get(car, hash, v)) {
+        return;
     }
-    for (i = 0; i < g_ef_cache_n; i++) {
-        if (g_ef_cache[i].car == car && g_ef_cache[i].hash == hash) {
-            return &g_ef_cache[i];
-        }
-    }
-    v = &g_ef_cache[g_ef_cache_next];
-    g_ef_cache_next = (g_ef_cache_next + 1) % EF_CACHE;
-    if (g_ef_cache_n < EF_CACHE) g_ef_cache_n++;
+    memset(v, 0, sizeof *v);
     v->car = car;
     v->hash = hash;
     v->kind = (unsigned)ef_fix(car, parts, &ops, v->fixed, &v->changed);
@@ -414,7 +454,7 @@ static const ef_verdict *ef_judge(unsigned car, unsigned wheel, const unsigned p
     } else if (v->kind == EF_CANNOT) {
         ef_log_decline("its engine, drivetrain, body or tires belong to another car and the car's own have no stock row", car);
     }
-    return v;
+    ef_cache_put(v);
 }
 
 /* ---- the event car list ---- */
@@ -429,11 +469,11 @@ static int ef_in_select(void)
     return (armed && now - armed <= EF_SELECT_MS) || (listed && now - listed <= 120000u);
 }
 
-/* the garage list query `sql` with the fixed values in place, in a HeapAlloc'd buffer the caller frees, or NULL to run it as it is (call under
- * g_ef_lock) */
-static char *ef_list_query(const char *sql)
+/* the garage list query `sql` (an event car list of garage table `table`, ef_garage_query) with the fixed values in place, in a HeapAlloc'd buffer
+ * the caller frees, or NULL to run it as it is (only with the work flag taken) */
+static char *ef_list_query(const char *sql, const char *table)
 {
-    char table[128], scan[2048], *text = NULL;
+    char scan[2048], *text = NULL;
     void *db, *row;
     ef_row *rows;
     int n, i, k, v, replaced;
@@ -441,10 +481,6 @@ static char *ef_list_query(const char *sql)
     double sim_ms = 0;
     LARGE_INTEGER t0, t1;
 
-    if (!ef_garage_query(sql, table, sizeof table)) {
-        return NULL;
-    }
-    g_ef_list_at = (LONG64)GetTickCount64();
     if (!ef_ready() || !g_ef_short_ok || !(db = ef_database())) {
         return NULL;
     }
@@ -472,7 +508,7 @@ static char *ef_list_query(const char *sql)
     }
     for (i = 0; i < n; i++) {
         unsigned parts[EF_SLOTS], car, wheel, gid;
-        const ef_verdict *vd;
+        ef_verdict verdict, *vd = &verdict;
         ef_row_int(row, i, "gi", &v);
         gid = (unsigned)v;
         ef_row_int(row, i, "gc", &v);
@@ -485,7 +521,7 @@ static char *ef_list_query(const char *sql)
             ef_row_int(row, i, col, &v);
             parts[k] = (unsigned)v;
         }
-        vd = ef_judge(car, wheel, parts, &sim_ms);
+        ef_judge(car, wheel, parts, &sim_ms, vd);
         if (vd->kind == EF_FIXED) {
             rows[fixed].garage_id = gid;
             rows[fixed].klass = vd->klass;
@@ -548,10 +584,13 @@ static char *ef_list_query(const char *sql)
 
 static void ef_query_hook(void *collection, const char *sql, void *database, void *extra)
 {
-    char *use = NULL;
-    if (g_ef_on && sql && ppi_in_session(g_ppi_img) && ef_lock()) {
-        use = ef_list_query(sql);
-        ef_unlock();
+    char *use = NULL, table[128];
+    if (g_ef_on && sql && ef_garage_query(sql, table, sizeof table) && ppi_in_session(g_ppi_img)) {
+        g_ef_list_at = (LONG64)GetTickCount64();
+        if (ef_work_begin()) {
+            use = ef_list_query(sql, table);
+            ef_work_end();
+        }
     }
     g_ef_query_orig(collection, use ? use : sql, database, extra);
     if (use) {
@@ -560,34 +599,25 @@ static void ef_query_hook(void *collection, const char *sql, void *database, voi
 }
 
 /* ---- the car's details (QueryCarAttributes, picker_pi.inc) ---- */
-/* While an online event car select runs: the attribute block of garage car `car` (CCarInGarage) gets the fixed class and PI. -> 1 when changed. */
+/* While an online event car select runs: the attribute block of garage car `car` (CCarInGarage) gets the fixed class and PI that the event car list
+ * judged it by. Only the cache is read here, never the game: QueryCarAttributes runs on any thread, in the middle of anything. -> 1 when changed. */
 static int ef_attrs(void *car, unsigned char *out)
 {
     unsigned id = 0, wheel = 0, parts[EF_SLOTS];
-    const ef_verdict *v;
+    ef_verdict v;
     double dpi;
-    int changed = 0;
 
     if (!g_ef_on || !ef_in_select() || !ppi_in_session(g_ppi_img) ||
         !read_game_memory((const unsigned char *)car + PPI_CAR_ID, &id, sizeof id) ||
         !read_game_memory((const unsigned char *)car + PPI_CAR_PARTS - 4, &wheel, sizeof wheel) ||
-        !read_game_memory((const unsigned char *)car + PPI_CAR_PARTS, parts, sizeof parts)) {
+        !read_game_memory((const unsigned char *)car + PPI_CAR_PARTS, parts, sizeof parts) ||
+        !ef_cache_get(id, ef_hash(wheel, parts), &v) || v.kind != EF_FIXED) {
         return 0;
     }
-    if (!ef_lock()) {
-        return 0;
-    }
-    if (ef_ready()) {
-        v = ef_judge(id, wheel, parts, NULL);
-        if (v->kind == EF_FIXED) {
-            dpi = (double)v->pi;
-            memcpy(out + PPI_OUT_PI, &dpi, sizeof dpi);
-            out[PPI_OUT_CLASS] = (unsigned char)v->klass;
-            changed = 1;
-        }
-    }
-    ef_unlock();
-    return changed;
+    dpi = (double)v.pi;
+    memcpy(out + PPI_OUT_PI, &dpi, sizeof dpi);
+    out[PPI_OUT_CLASS] = (unsigned char)v.klass;
+    return 1;
 }
 
 /* ---- the race (event_stock.inc's commit hook) ---- */
@@ -599,7 +629,6 @@ static int ef_commit(unsigned char *self, unsigned car_at, unsigned wheel_at, un
     unsigned long long tune;
     short attr_id;
     double before_pi = 0, dpi;
-    const ef_verdict *v;
     ef_verdict copy;
     LONG n;
 
@@ -610,16 +639,18 @@ static int ef_commit(unsigned char *self, unsigned car_at, unsigned wheel_at, un
     memcpy(&wheel, self + wheel_at, sizeof wheel);
     memcpy(parts, self + parts_at, sizeof parts);
     memcpy(&attr_id, self + attrs_at + PPI_OUT_ID, sizeof attr_id);
-    if (!ef_lock()) {
-        return 0;
+    if (!ef_cache_get(car, ef_hash(wheel, parts), &copy)) {
+        /* not judged by a list (the picked car was not listed through the hook): judge it here, on the game thread that commits it */
+        if (!ef_work_begin()) {
+            return 0;
+        }
+        if (!ef_ready()) {
+            ef_work_end();
+            return 0;
+        }
+        ef_judge(car, wheel, parts, NULL, &copy);
+        ef_work_end();
     }
-    if (!ef_ready()) {
-        ef_unlock();
-        return 0;
-    }
-    v = ef_judge(car, wheel, parts, NULL);
-    copy = *v;
-    ef_unlock();
     if (copy.kind != EF_FIXED) {
         return 0;
     }
