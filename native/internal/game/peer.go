@@ -68,6 +68,7 @@ type Peer struct {
 	Choices                               *Choices
 	ChoicesNotes                          int
 	ReadyRetry                            *float64
+	ReadyHeld                             bool // its Console.Ready = 1 went to every game but the leader's during the join wait (readyHoldLeader)
 	CarSeenAt, CarDoubtAt, GoptsWrittenAt float64
 	GoptsView, GoptsPending               *GameOptionsView
 	EsSeq                                 int

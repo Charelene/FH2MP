@@ -1118,6 +1118,20 @@ func (w *World) StartEventWith(leader *Peer, chosen []*Peer) {
 		}
 		w.SetConsoleBool(q, ConsoleVarParticipatingInRace, 1, "participant selected")
 	}
+	if w.launchCountdownOn() && chosen == nil {
+		w.SetRaceClock(0, "join wait over: the event started")
+		var held []*Peer
+		for _, q := range w.Peers.Values() {
+			if q.ReadyHeld && inList(people, q) && q.ConsoleVars[4] {
+				held = append(held, q)
+				w.SetConsoleBool(q, 4, 1, "join wait over: the leader's game gets this Ready now")
+			}
+			q.ReadyHeld = false
+		}
+		if len(held) > 0 {
+			w.Logf("join wait: the Ready of owner %s reached the leader's game (owner %d) only now, at the start", owners(held), leader.Owner)
+		}
+	}
 	w.SetSessionHostBool(SHRaceParticipantsSelected, 1, "participants selected")
 	w.RefreshCarPhasing()
 	if !w.Roadtrip {

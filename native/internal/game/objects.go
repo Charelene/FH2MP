@@ -262,9 +262,20 @@ func (w *World) rememberAndRelay(peer *Peer, mtype, router, oid int, tid *int, s
 			return netv2.RelayObjectMessage(uint64(mtype), uint64(router), uint64(oid), uint64(owner), tidv, uint64(sq), idBits, typeBits, re.Size, re.Payload)
 		}
 	}
+	var hold *relayHold
+	if router == 3 && mtype == netv2.MsgObjectUpdate {
+		if leader := w.readyHoldLeader(peer); leader != nil {
+			if hp, ok := consoleReadyCleared(payload, size); ok {
+				peer.ReadyHeld = true
+				hold = &relayHold{to: leader, build: func(sq int) netv2.Msg {
+					return netv2.RelayObjectMessage(uint64(mtype), uint64(router), uint64(oid), uint64(owner), tidv, uint64(sq), idBits, typeBits, size, hp)
+				}}
+			}
+		}
+	}
 	w.relayNumbered(peer, key, n, func(sq int) netv2.Msg {
 		return netv2.RelayObjectMessage(uint64(mtype), uint64(router), uint64(oid), uint64(owner), tidv, uint64(sq), idBits, typeBits, size, payload)
-	}, realBuild)
+	}, realBuild, hold)
 }
 
 func maxInt(a, b int) int {
@@ -301,7 +312,7 @@ func (w *World) RelayHeldObjects(peer *Peer) {
 			}
 			w.relayNumbered(peer, key, n, func(sq int) netv2.Msg {
 				return netv2.RelayObjectMessage(uint64(e2.Type), uint64(key.Router), uint64(key.ID), uint64(owner), uint64(e2.TID), uint64(sq), idBits, typeBits, e2.Size, e2.Payload)
-			}, realBuild)
+			}, realBuild, nil)
 		}
 		peer.Objs.Set(key, hist)
 	}
@@ -309,11 +320,19 @@ func (w *World) RelayHeldObjects(peer *Peer) {
 
 // RelayNumbered is relay() for a message numbered by the server (its n-th of that object): build(seq) writes it.
 func (w *World) RelayNumbered(sender *Peer, key ObjKey, n int, build func(seq int) netv2.Msg) {
-	w.relayNumbered(sender, key, n, build, nil)
+	w.relayNumbered(sender, key, n, build, nil, nil)
 }
 
-// relayNumbered is RelayNumbered with a second version (realBuild, nil when there is none) for the players RealCarsFor allows.
-func (w *World) relayNumbered(sender *Peer, key ObjKey, n int, build, realBuild func(seq int) netv2.Msg) {
+// relayHold is the version of a relayed message one player gets instead (an invitee's Console update without its Ready, for the event leader
+// during the join wait: readyHoldLeader).
+type relayHold struct {
+	to    *Peer
+	build func(seq int) netv2.Msg
+}
+
+// relayNumbered is RelayNumbered with a second version (realBuild, nil when there is none) for the players RealCarsFor allows, and hold's
+// version for hold.to (nil = none).
+func (w *World) relayNumbered(sender *Peer, key ObjKey, n int, build, realBuild func(seq int) netv2.Msg, hold *relayHold) {
 	baked := netv2.Bake(build(n % 0xFF))
 	alt := map[int]netv2.Baked{}
 	var realBaked *netv2.Baked
@@ -323,7 +342,9 @@ func (w *World) relayNumbered(sender *Peer, key ObjKey, n int, build, realBuild 
 	for _, q := range w.Audience(sender, key.Router) {
 		b := baked
 		bld, cache := build, alt
-		if realBuild != nil && w.RealCarsFor(sender, q) {
+		if hold != nil && q == hold.to {
+			b, bld, cache = netv2.Bake(hold.build(n%0xFF)), hold.build, map[int]netv2.Baked{}
+		} else if realBuild != nil && w.RealCarsFor(sender, q) {
 			if realBaked == nil {
 				rb := netv2.Bake(realBuild(n % 0xFF))
 				realBaked = &rb
@@ -575,6 +596,45 @@ func (w *World) SetSessionHostBool(varID, value int, why string) {
 		q.HostSeq = (q.HostSeq + 1) % 0xFF
 	}
 	w.Logf("SessionHost var %d = %d sent to %s (%s)", varID, value, w.sessionHostAudience(), why)
+}
+
+// launchCountdownOn: a Free Roam world's event join wait runs as the game's launch countdown (EventFlowV2 const block).
+func (w *World) launchCountdownOn() bool {
+	return EventFlowV2 && !w.Roadtrip && !w.Carmeet
+}
+
+// SetLaunchCountdown starts the SessionHost launch countdown to endMs (network clock): every game's "Waiting for Players {0}" counts down to it.
+func (w *World) SetLaunchCountdown(endMs int64, why string) {
+	endMs &= 0xFFFFFFFF
+	w.raceClock = [2]int64{SHCountdownLaunch, endMs} // SetRaceClock(0) at the start or the end sends CountdownType 0 again
+	w.SendSessionHostVars([]shVar{{SHCountdownType, SHCountdownTypeBits, SHCountdownLaunch}, {SHCountdownEndTime, 32, uint64(endMs)}})
+	w.Logf("SessionHost CountdownType = %d (launch), CountdownEndTime = %d (%d ms from now) sent to %s (%s)", SHCountdownLaunch, endMs,
+		endMs-w.NowMs(), w.sessionHostAudience(), why)
+}
+
+// readyHoldLeader: the event leader that must not see `peer`'s Console.Ready yet (the join wait of launchCountdownOn), nil when none.
+func (w *World) readyHoldLeader(peer *Peer) *Peer {
+	pr := w.PendingRace
+	if !w.launchCountdownOn() || pr == nil || w.Event != nil || peer == pr.Leader || !pr.Leader.Connected {
+		return nil
+	}
+	return pr.Leader
+}
+
+// consoleReadyCleared is a Console update (`size` bits of (var id, 1-bit value) pairs, consoleUpdate's reading) with Ready = 1 turned to 0;
+// ok = false when it sets no Ready = 1.
+func consoleReadyCleared(payload bits.Int, size int) (bits.Int, bool) {
+	out, ok := payload, false
+	for at := 0; at+netv2.ConsoleVarIDBits+1 <= size; at += netv2.ConsoleVarIDBits + 1 {
+		vid := payload.Field(at, netv2.ConsoleVarIDBits)
+		if _, known := ConsoleBoolVarNames[int(vid)]; !known {
+			break
+		}
+		if vid == 4 && payload.Field(at+netv2.ConsoleVarIDBits, 1) == 1 {
+			out, ok = replaceBits(out, at+netv2.ConsoleVarIDBits, 1, bits.FromUint64(0)), true
+		}
+	}
+	return out, ok
 }
 
 // SetRaceClock sets CountdownType + RaceStartTime in one update.

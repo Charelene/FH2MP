@@ -492,6 +492,12 @@ loop:
 			}
 			w.PendingRace = &PendingRace{w.Mono() + window, peer}
 			w.RaceRequestedAt = w.Mono()
+			if w.launchCountdownOn() {
+				for _, q := range w.Peers.Values() {
+					q.ReadyHeld = false
+				}
+				w.SetLaunchCountdown(w.NowMs()+int64(window*1000), "race requested: the join wait")
+			}
 			w.RaceHardDeadline = w.Mono() + RaceJoinGraceSeconds
 			var invited []*Peer
 			for _, q := range w.Others(peer) {

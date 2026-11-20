@@ -134,6 +134,11 @@ const (
 	SHCountdownType      = 2
 	SHCountdownTypeBits  = 2
 	SHCountdownStartRace = 2
+	// SHCountdownLaunch: CountdownType 1, the join wait of a Free Roam event. On a change of CountdownType or CountdownEndTime every game runs
+	// SessionHost::helper_a313f0 (game+0xa313f0, from vfunc_13 +0xa2e490); with type 1 it sets the network manager's +0x44 to CountdownEndTime,
+	// sets its own Console.HasGrid and raises NetworkLaunchCountdownStarted. +0x44 is the {0} of the leader's "Waiting for Players {0}"
+	// (ShowLoadingMessageNetworkLaunchCountdown, wait_for_additional_players; FUN_140a2adc0(1) = +0x44 - clock) [C: decompile].
+	SHCountdownLaunch = 1
 	// SessionHostSynced.CountdownEndTime (var 3, u32, network clock): a Showdown's staggered start counts each car's RollOffDelay from it
 	// (States::WaitForPlayerBucketRollOffDelay game+0x964dc0, read while CountdownType is StartRace).
 	SHCountdownEndTime = 3
@@ -227,7 +232,11 @@ var (
 	// wait is EventJoinSeconds; at its end the event starts at once, an invitee whose Ready was refused on its car is a participant and gets the
 	// event car select like everybody (nobody joins after the wait); a participant whose picked car does not fit is out EventPickJudgeSeconds
 	// after it left the car select (its game's new car numbers have arrived by then), not when everybody has loaded. FH2MP_EVENT_FLOW=1 = the
-	// old flow (RaceInviteSeconds, the RaceJoinGraceSeconds hold, the check after loading only).
+	// old flow (RaceInviteSeconds, the RaceJoinGraceSeconds hold, the check after loading only). In a Free Roam world it also runs the join wait
+	// the way the game shows it (user design 2026-11-20: the leader sees "Waiting for Players 0:10", then everybody goes to the car select): the
+	// request starts the SessionHost launch countdown (SHCountdownLaunch) to the end of the wait, and an invitee's Console.Ready = 1 reaches every
+	// game but the leader's until the event starts (the leader's wait_for_additional_players_internal leaves on NetworkAnyRemoteConsolesReady, so
+	// the first accept took it to the car select at once; at the start its own ParticipatingInRace = 1 takes it there, the held Ready follows).
 	EventFlowV2           = envStr("FH2MP_EVENT_FLOW", "2") != "1"
 	EventJoinSeconds      = envFloat("FH2MP_EVENT_JOIN_SECONDS", 10)
 	EventPickJudgeSeconds = 3.0
