@@ -46,6 +46,30 @@ int main(void)
         snprintf(value, sizeof value, "Value=\"%s&#x222c;\" />", names[i]);
         CHECK(count(DEV_BADGE_NEW, value) == 1);
     }
+    /* the lists: the player list's and the leaderboards' gamertag line, each turned into the same Control with name-only rules */
+    {
+        const char *news[2] = {DEV_BADGE_LIST_NEW, DEV_BADGE_BOARD_NEW}, *olds[2] = {DEV_BADGE_LIST_OLD, DEV_BADGE_BOARD_OLD};
+        const char *styles[2] = {"Style=\"{StaticResource A_Style_FZTextBlock_PlayerList}\"", "Style=\"{StaticResource A_Style_FZTextBlock_Primary}\""};
+        int p;
+        for (p = 0; p < 2; p++) {
+            size_t len = strlen(news[p]), k;
+            CHECK(count(olds[p], "Text=\"{Binding UserProfile.FormattedGamertag}\"") == 1 && count(olds[p], styles[p]) == 1 && count(olds[p], "\r\n") == 1);
+            CHECK(count(news[p], "Text=\"{Binding UserProfile.FormattedGamertag}\"") == 1 && count(news[p], styles[p]) == 1);
+            CHECK(count(news[p], "<Control ") == 1 && !strcmp(news[p] + len - 12, "</Control>\r\n"));
+            CHECK(count(news[p], "<Viewbox x:Name=\"FH2MP_DevBadge\"") == 1 && count(news[p], "Visibility=\"Collapsed\"") == 1);
+            CHECK(count(news[p], "x:Name=\"PlayerName\"") == 0);
+            for (k = 0; k < len; k++) CHECK(news[p][k] != '\n' || (k && news[p][k - 1] == '\r'));
+            for (j = 0; names[j]; j++) {
+                snprintf(value, sizeof value, "Value=\"%s\"", names[j]);
+                CHECK(count(news[p], value) == 3);                         /* the plain name's rule, and the text the two rules with a mark set */
+                snprintf(value, sizeof value, "Value=\"%s&#x222b;\">", names[j]);
+                CHECK(count(news[p], value) == 1);
+                snprintf(value, sizeof value, "Value=\"%s&#x222c;\">", names[j]);
+                CHECK(count(news[p], value) == 1);
+            }
+            CHECK(count(news[p], "<DataTrigger ") == 3 * (int)i && count(news[p], "IsDrivatar") == 0);
+        }
+    }
     CHECK(count(DEV_BADGE_NEW, "<MultiDataTrigger>") == 3 * (int)i);
     CHECK(count(DEV_BADGE_NEW, "Property=\"Text\"\r\n") == 2 * (int)i);
     CHECK(count(DEV_BADGE_NEW, "Binding=\"{Binding IsDrivatar}\"\r\n") == 3 * (int)i && count(DEV_BADGE_NEW, "Value=\"False\" />") == 3 * (int)i);   /* never on a Drivatar */

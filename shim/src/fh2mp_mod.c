@@ -3497,16 +3497,33 @@ static int ui_race_toast_layout(void)
     return ok;
 }
 
-/* Developer badge (src/dev_badge.inc): FH2MP's logo after a developer's gamertag on the name tag over their car. Disable with env FH2MP_NO_DEVBADGE. */
+/* Developer badge (src/dev_badge.inc): the Encore logo after a developer's gamertag on the name tag over their car, in the player lists and on the
+ * leaderboards. Disable with env FH2MP_NO_DEVBADGE. */
 #include "dev_badge.inc"
 
 static int ui_dev_badge(void)
 {
+    static const char *const boards[3][2] = {
+        {"Scenes/Anthem/A_RivalsLeaderboard.xaml", "UI/Scenes/Anthem/A_RivalsLeaderboard.xaml"},
+        {"Scenes/Anthem/A_SpeedTrapLeaderboard.xaml", "UI/Scenes/Anthem/A_SpeedTrapLeaderboard.xaml"},
+        {"Scenes/Anthem/A_GlobalXPLeaderboard.xaml", "UI/Scenes/Anthem/A_GlobalXPLeaderboard.xaml"},
+    };
     int ok = stateflow_replace(L"\\media\\UI.zip", "Scenes/Anthem/AR_OpponentLabel.xaml", "UI/Scenes/Anthem/AR_OpponentLabel.xaml", DEV_BADGE_OLD,
                                sizeof DEV_BADGE_OLD - 1, DEV_BADGE_NEW, sizeof DEV_BADGE_NEW - 1, "devbadge");
-    if (ok) {
+    int lists = stateflow_replace(L"\\media\\UI.zip", "Controls/PlayerListControl.xaml", "UI/Controls/PlayerListControl.xaml", DEV_BADGE_LIST_OLD,
+                                  sizeof DEV_BADGE_LIST_OLD - 1, DEV_BADGE_LIST_NEW, sizeof DEV_BADGE_LIST_NEW - 1, "devbadge");
+    unsigned i;
+    for (i = 0; i < 3; i++) {
+        lists += stateflow_replace(L"\\media\\UI.zip", boards[i][0], boards[i][1], DEV_BADGE_BOARD_OLD, sizeof DEV_BADGE_BOARD_OLD - 1, DEV_BADGE_BOARD_NEW,
+                                   sizeof DEV_BADGE_BOARD_NEW - 1, "devbadge");
+    }
+    if (ok || lists) {
         log_begin();
-        log_raw("devbadge: Scenes/Anthem/AR_OpponentLabel.xaml handed to the platform, FH2MP's developers have its logo after their gamertag on name tags\n");
+        log_raw("devbadge: FH2MP's developers have the Encore logo after their gamertag: on name tags ");
+        log_raw(ok ? "yes" : "no");
+        log_raw(", in ");
+        log_dec((unsigned long)lists);
+        log_raw(" of 4 pages of lists (the player list, the Rivals, speed trap and XP leaderboards)\n");
     }
     return ok;
 }
