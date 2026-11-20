@@ -27,6 +27,10 @@ static const row g_rows[] = {
     {24, 90024, 900, 0, 0},
     {31, 61031, 61, 1, 0}, {31, 61032, 61, 0, 0}, {31, 90031, 90, 0, 0},
     {34, 1005340, 1005, 1, 0}, {34, 2000340, 2000, 1, 0},
+    /* rows Extra Options 0.6.0 adds at run time, under the player's own car / drivetrain (its SQL's numbering): the donor engine 900 for car 1005,
+     * and gearbox source key 90*8+1 (drivetrain 90, level 1) for drivetrain 61 */
+    {0, 1073741824u + 1005u * 32768u + 900u, 1005, 0, 900},
+    {31, 536870912u + 61u * 65536u + 90u * 8u + 1u, 61, 0, 0},
 };
 #define NROWS (sizeof g_rows / sizeof g_rows[0])
 
@@ -99,6 +103,19 @@ int main(void)
     base(want);
     want[31] = 61031;
     CHECK(ef_fix(1005, in, &g_ops, out, &changed) == EF_FIXED && changed == (1ull << 31) && same(out, want));
+
+    /* Extra Options' own engine swap: its added row claims car 1005 as owner, but no row of the game's database has that id. It goes back to the
+     * stock engine, and the donor engine's camshaft follows it, exactly as for a donor car's row. */
+    base(in);
+    in[0] = 1073741824u + 1005u * 32768u + 900u; in[12] = 90002;
+    base(want);
+    want[12] = 50100;
+    CHECK(ef_fix(1005, in, &g_ops, out, &changed) == EF_FIXED && changed == ((1ull << 0) | (1ull << 12)) && same(out, want));
+
+    /* Extra Options' own gearbox swap: a donor gearbox under the car's own drivetrain goes back to that drivetrain's stock gearbox */
+    base(in);
+    in[31] = 536870912u + 61u * 65536u + 90u * 8u + 1u;
+    CHECK(ef_fix(1005, in, &g_ops, out, &changed) == EF_FIXED && changed == (1ull << 31) && out[31] == 61031);
 
     /* a bumper of another car's body goes back to the car's own body's stock bumper */
     base(in);

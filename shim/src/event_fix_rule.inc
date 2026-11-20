@@ -30,6 +30,13 @@ typedef struct {
 
 enum { EF_CLEAN, EF_FIXED, EF_CANNOT };
 
+/* A part row a mod added to the game's database at run time, not a row of the game's own [C: FH2 Extra Options 0.6.0 winmm.dll SQL]: with
+ * AllEngineSwaps it inserts List_UpgradeEngine rows "1073741824 + S.Ordinal*32768 + E.EngineID AS Id, S.Ordinal AS Ordinal, ... E.EngineID" (the donor's
+ * engine under the player's own car), with AllTransmissionSwaps List_UpgradeDrivetrainTransmission rows "536870912 + T.DrivetrainID*65536 + ..."
+ * (a donor's gearbox under the player's own drivetrain), so by its owner such a row looks like the car's own. The game's own part ids end at 5,000,004
+ * (the server's database of 2026-11-19, all 43 tables); anything from 0x20000000 up is a mod's row and goes back to stock like a foreign one. */
+#define EF_MOD_ROW_MIN 0x20000000u
+
 /* who a row of slot k must belong to on car `car` with the parts `parts` -> 1 and *who, 0 when it cannot be told */
 static int ef_expected(unsigned car, int k, const unsigned *parts, const ef_ops *ops, unsigned *who)
 {
@@ -51,23 +58,29 @@ static int ef_expected(unsigned car, int k, const unsigned *parts, const ef_ops 
  * drivetrain, a camshaft of another engine, ...) becomes the stock part of the car's own owner; nothing else changes. The slots go in order, so the
  * engine, drivetrain and body (0-2) are the car's own before the parts that belong to them are judged: when a foreign engine goes back to stock,
  * the swapped engine's own parts are foreign to the stock engine and follow it. A part slot whose own owner has no stock row becomes empty (no turbo
- * on an engine that has none); the engine, drivetrain, body and tires cannot, so such a car is EF_CANNOT and left as it is. A part id that is no row
- * of its slot's table is not judged here (picker_pi.inc, event_stock.inc and the server handle those).
+ * on an engine that has none); the engine, drivetrain, body and tires cannot, so such a car is EF_CANNOT and left as it is. A mod's added row
+ * (EF_MOD_ROW_MIN) is foreign whatever owner it claims; another part id that is no row of its slot's table is not judged here (picker_pi.inc,
+ * event_stock.inc and the server handle those).
  * -> EF_CLEAN (out = in), EF_FIXED (out and *changed, one bit per slot replaced) or EF_CANNOT. */
 static int ef_fix(unsigned car, const unsigned in[EF_SLOTS], const ef_ops *ops, unsigned out[EF_SLOTS], unsigned long long *changed)
 {
     int k;
-    unsigned have, want, stock;
+    unsigned have = 0, want = 0, stock = 0;
 
     *changed = 0;
     for (k = 0; k < EF_SLOTS; k++) {
         out[k] = in[k];
     }
     for (k = 0; k < EF_SLOTS; k++) {
-        if (g_ef_owner[k] == EF_NO_OWNER || out[k] == EF_NONE || !ops->owner(ops->ctx, k, out[k], &have)) {
+        int added;
+        if (g_ef_owner[k] == EF_NO_OWNER || out[k] == EF_NONE) {
             continue;
         }
-        if (!ef_expected(car, k, out, ops, &want) || have == want) {
+        added = out[k] >= EF_MOD_ROW_MIN;
+        if (!added && !ops->owner(ops->ctx, k, out[k], &have)) {
+            continue;
+        }
+        if (!ef_expected(car, k, out, ops, &want) || (!added && have == want)) {
             continue;
         }
         if (ops->stock(ops->ctx, k, want, &stock)) {
