@@ -2,7 +2,11 @@
  * ReadBytes result as a u32 stack index (#144). Validate at each of its three
  * receive-handler boundaries, where 80600006 already means message failure.
  * Never call a listener, construct a substitute string, or advance the native
- * cursor on failure. Dispatch then skips the rest of the packet (+1761d60).
+ * cursor on failure. What the refusal costs is decided by ProcessReceivedPackets
+ * (+1766100, docs/re/netv2.md section 3): before the connection is up the rest of
+ * the datagram is dropped; on an established connection (every message from our
+ * server after the handshake) the game disconnects with reason 80600006, which the
+ * net watch (net_watch.inc) logs. A crash is still the worse outcome.
  */
 typedef unsigned long long (*net_string_receive_fn)(void *, void *, void *, ULONG_PTR);
 static net_string_receive_fn g_string_open_orig, g_string_meet_orig, g_string_bucket_orig;
@@ -103,7 +107,7 @@ static unsigned long long net_string_receive(unsigned handler, net_string_receiv
 {
     net_string_cursor why = {0};
     if (!original || !net_string_check(stream, handler, &why)) {
-        /* the sender gets no answer and the rest of its datagram is skipped (native 80600006); a client that keeps sending these is named by the count */
+        /* native 80600006: before the handshake the rest of the datagram is dropped, after it the game disconnects (see the top); the count names a sender that keeps doing it */
         LONG n = InterlockedIncrement(&g_string_rejections[handler < 3 ? handler : 0]);
         if (n <= 4 || n % 256 == 0) {
             char line[512];

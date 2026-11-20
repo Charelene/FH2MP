@@ -68,6 +68,7 @@ type Peer struct {
 	Choices                               *Choices
 	ChoicesNotes                          int
 	ReadyRetry                            *float64
+	ReadyHeld                             bool // its Console.Ready = 1 went to every game but the leader's during the join wait (readyHoldLeader)
 	CarSeenAt, CarDoubtAt, GoptsWrittenAt float64
 	GoptsView, GoptsPending               *GameOptionsView
 	EsSeq                                 int
@@ -93,10 +94,12 @@ type Peer struct {
 	Objs                                  *omap.Map[ObjKey, []replay.Entry]
 	RealObjs                              map[ObjKey][]replay.Entry // the real version of objects relayed with a stand-in car, numbered like Objs
 	HostSeq                               int
+	RaceOverSentAt                        float64 // the last time a finished tag event's race-over flag was sent to it again (TagCollision)
 	RelayNext                             map[ObjKey]int
 	SeqShift                              map[OwnerObj]int
 	CompactAt                             map[ObjKey]int
 	ConsoleVars                           map[int]bool
+	RaceFlag                              bool // the server last sent this console ParticipatingInRace = 1 (SetConsoleBool), so every other game counts it as a racer
 	GoptsSeq                              int
 	VipHidden                             *VipHidden
 	PlayerStatus                          int // latest LobbyPlayer.PlayerStatus this client wrote (PlayerVarStatus); valid when HasPlayerStatus
@@ -176,7 +179,8 @@ type Peer struct {
 	Honk             *HonkState
 	HonkLoggedAt     float64
 	Carsel           *CarselState
-	Mods             *ModState // add-on mods' state (modsync.go)
+	Mods             *ModState       // add-on mods' state (modsync.go)
+	Eventopts        *EventoptsState // the leader choice its shim last sent (eventopts.go)
 	ModsChanges      int
 	ModsLoggedAt     float64
 	ModsNosWarnedAt  float64

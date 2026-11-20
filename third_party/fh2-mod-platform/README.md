@@ -15,11 +15,11 @@ What is here:
 | `LICENSE` | The platform's MIT licence. It applies to `fh2mod.h` (and to the platform DLL, which FH2MP does not ship). |
 | `VERSION` | The platform release FH2MP is built and tested against. |
 
-The DLL itself is not in this repository or in FH2MP's releases: the launcher downloads the author's release zip
-(`launcher/fh2mp_launcher/upstream.py`, pinned in `constants.UPSTREAM` by the zip's and the DLL's SHA-256) when the Azimuth folder has no
-platform or an older one, and keeps the release's `LICENSE.txt` (as `LICENSE-FH2ModPlatform.txt`) and `LICENSE-MinHook.txt` next to the DLL.
+The DLL itself is not in this repository or in FH2MP's releases: the launcher (Encore since 1.5.0) downloads the author's release zip
+(encore-fh2 `pins.rs` `PLATFORM`, pinned by the zip's and the DLL's SHA-256; `launcher/fh2mp_launcher/upstream.py` up to 1.4.8) when the
+Azimuth folder has no platform or an older one, and keeps the release's `LICENSE.txt` (as `LICENSE-FH2ModPlatform.txt`) and `LICENSE-MinHook.txt` next to the DLL.
 The platform includes [MinHook](https://github.com/TsudaKageyu/minhook) (BSD 2-Clause, Tsuda Kageyu) and [SQLite](https://sqlite.org)
 (public domain).
 
-To move to a newer platform: copy its `include/fh2mod.h` and `LICENSE` here, update `VERSION`, and change `UPSTREAM["platform"]` in
-`launcher/fh2mp_launcher/constants.py`.
+To move to a newer platform: copy its `include/fh2mod.h` and `LICENSE` here and update `VERSION`; Encore's pin (encore-fh2 `pins.rs`
+`PLATFORM`) moves with it.

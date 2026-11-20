@@ -27,8 +27,10 @@ func (f *fakeCommunity) Friends(me int64) (*tl.FriendsList, error) {
 func (f *fakeCommunity) AddFriend(me int64, q string) error {
 	return auth.NewError(404, "player_not_found", "No player has that gamertag or ID.")
 }
-func (f *fakeCommunity) Respond(me, o int64, a bool) error { return nil }
-func (f *fakeCommunity) RemoveFriend(me, o int64) error    { return nil }
+func (f *fakeCommunity) Respond(me, o int64, a bool) error   { return nil }
+func (f *fakeCommunity) RemoveFriend(me, o int64) error      { return nil }
+func (f *fakeCommunity) AreFriends(a, b int64) (bool, error) { return false, nil }
+func (f *fakeCommunity) FriendIDs(me int64) ([]int64, error) { return []int64{7}, nil }
 func (f *fakeCommunity) ClubHistory(me, club, after int64, limit int) (*tl.ClubsHistory, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

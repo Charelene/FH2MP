@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
-# The component versions of a release, from shim/VERSION and launcher/fh2mp_launcher/version.py, checked against the tag.
+# The component versions of a release, from shim/VERSION and release/launcher.json, checked against the tag.
 #
-#   release/versions.sh --tag v1.1.6 [--full] [--github-output FILE]
-#   release/versions.sh                      (no tag: a test build of both)
+#   release/versions.sh --tag v1.5.1 [--full] [--github-output FILE]
+#   release/versions.sh                      (no tag: a test build of the shim)
 #
-# A full release builds the shim and the launcher at the tag's version. A hotfix (a patch tag of the same X.Y line, cut from a hotfix/X.Y branch
-# that starts at the release tag) builds only the component whose version file was set to the tag. The other keeps the version of the
-# release it was built in and is carried: release/make_manifest.py --carry-dir copies its signed manifest entry, and the release workflow
-# copies its files, from that release. Setting shim/VERSION back to an earlier release's version withdraws a shim hotfix the same way.
+# The shim is built at the tag's version when shim/VERSION equals the tag; otherwise it keeps the version of the release it was built in
+# and is carried: fh2mp-release manifest-build --carry-dir copies its signed manifest entry, and the release workflow its zip, from that
+# release (a launcher-only release; setting shim/VERSION back to an earlier release's version withdraws a shim hotfix the same way).
+# The launcher is never built here since 1.5.0: it is Encore, pinned by version and file in release/launcher.json and taken from Encore's
+# release (build_launcher is always false); its version is Encore's own, on no FH2MP line.
 #
-# Rules: the tag is vX.Y.Z or vX.Y.Z-rcN; both versions are of its X.Y line and not above it; a carried version is a stable X.Y.Z and the tag
-# is too; --full (release/publish.sh for ops/ship.sh) requires both to equal the tag.
-# Prints key=value lines (shim, launcher, build_shim, build_launcher, kind = release | hotfix | rollback); --github-output appends them there.
-# Exit 1 with the reason when a rule does not hold, 2 for a wrong command line. (Was release/versions.py until 2026-11-14; same rules and text.)
+# Rules: the tag is vX.Y.Z or vX.Y.Z-rcN; a carried shim is of the tag's X.Y line, not above it, and a stable X.Y.Z as the tag is; --full
+# (release/publish.sh for ops/ship.sh) requires the shim to equal the tag; the launcher pin's version is X.Y.Z or X.Y.Z-rcN.
+# kind: release for an X.Y.0 tag (or its release candidate) that builds the shim, hotfix for a later patch or a carried shim.
+# Prints key=value lines (shim, launcher, build_shim, build_launcher, kind); --github-output appends them there.
+# Exit 1 with the reason when a rule does not hold, 2 for a wrong command line. (Was release/versions.py until 2026-11-14; the launcher's
+# version came from launcher/fh2mp_launcher/version.py until 1.5.0.)
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 tag= full=0 out=
@@ -30,7 +33,9 @@ re='^([0-9]+)\.([0-9]+)\.([0-9]+)(-rc([0-9]+))?$'
 
 trim() { local s=$1; s=${s#"${s%%[![:space:]]*}"}; s=${s%"${s##*[![:space:]]}"}; printf '%s' "$s"; }
 shim=$(trim "$(cat "$root/shim/VERSION")")
-launcher=$(sed -n "s/^__version__[[:space:]]*=[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" "$root/launcher/fh2mp_launcher/version.py" | head -n 1)
+# the pin's top-level "version" (the file's first "version" key; fh2mp-release launcher-pin reads the whole file)
+[ -f "$root/release/launcher.json" ] || fail "release/launcher.json is missing: it pins the launcher the manifest names"
+launcher=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$root/release/launcher.json" | head -n 1)
 
 # vkey v -> "major minor patch stable rc" (stable 1, a release candidate 0), compared field by field
 vkey() {
@@ -49,29 +54,26 @@ newer() { # newer a b: a's key above b's
 line() { local -a x; read -r -a x <<<"$(vkey "$1")"; echo "${x[0]}.${x[1]}"; }
 
 [[ $shim =~ $re ]] || fail "shim/VERSION is '$shim', not X.Y.Z or X.Y.Z-rcN"
-[[ $launcher =~ $re ]] || fail "launcher version.py is '$launcher', not X.Y.Z or X.Y.Z-rcN"
+[[ $launcher =~ $re ]] || fail "the launcher pin's version (release/launcher.json) is '$launcher', not X.Y.Z or X.Y.Z-rcN"
 
+build_launcher=false
 if [ -z "$tag" ]; then
-  build_shim=true build_launcher=true kind=release
+  build_shim=true kind=release
 else
   [[ $tag == v* && ${tag#v} =~ $re ]] || fail "tag '$tag' is not vX.Y.Z or vX.Y.Z-rcN"
   ver=${tag#v}
-  build_shim=false build_launcher=false
+  build_shim=false
   [ "$shim" = "$ver" ] && build_shim=true
-  [ "$launcher" = "$ver" ] && build_launcher=true
-  if [ $full = 1 ] && { [ $build_shim = false ] || [ $build_launcher = false ]; }; then
-    fail "version mismatch: tag $ver, shim $shim, launcher $launcher (a full release sets both to the tag)"
+  if [ $full = 1 ] && [ $build_shim = false ]; then
+    fail "version mismatch: tag $ver, shim $shim (a full release sets shim/VERSION to the tag)"
   fi
-  for name in shim launcher; do
-    v=${!name}; b=build_$name
-    [ "${!b}" = true ] && continue
-    [ "$(line "$v")" = "$(line "$ver")" ] || fail "the $name ($v) is not of the $ver line: only a full release changes X.Y"
-    newer "$v" "$ver" && fail "the $name ($v) is newer than the tag $ver"
-    [[ $v == *-* || $ver == *-* ]] && fail "a carried $name needs stable versions (tag $ver, $name $v): release candidates build both"
-  done
-  if [ $build_shim = true ] && [ $build_launcher = true ]; then kind=release
-  elif [ $build_shim = true ] || [ $build_launcher = true ]; then kind=hotfix
-  else kind=rollback; fi
+  if [ $build_shim = false ]; then
+    [ "$(line "$shim")" = "$(line "$ver")" ] || fail "the shim ($shim) is not of the $ver line: only a full release changes X.Y"
+    newer "$shim" "$ver" && fail "the shim ($shim) is newer than the tag $ver"
+    [[ $shim == *-* || $ver == *-* ]] && fail "a carried shim needs stable versions (tag $ver, shim $shim): release candidates build it"
+  fi
+  [[ $ver =~ $re ]]
+  if [ $build_shim = true ] && [ "$((10#${BASH_REMATCH[3]}))" = 0 ]; then kind=release; else kind=hotfix; fi
 fi
 lines=$(printf 'shim=%s\nlauncher=%s\nbuild_shim=%s\nbuild_launcher=%s\nkind=%s\n' "$shim" "$launcher" "$build_shim" "$build_launcher" "$kind")
 printf '%s\n' "$lines"

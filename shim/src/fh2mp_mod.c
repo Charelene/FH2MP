@@ -2320,10 +2320,14 @@ static int patch_online_meet(void)
 #include "gameplaylog_guard.inc"
 #include "remote_prediction_guard.inc"
 #include "model_unload_guard.inc"
+#include "state_machine_guard.inc"
 #include "dtconv_guard.inc"
 #include "blob_limit_guard.inc"
 #include "camanim_guard.inc"
 #include "component_lookup_guard.inc"
+#include "travelxp_guard.inc"
+#include "carlist_room.inc"
+#include "net_watch.inc"
 #include "picker_pi.inc"
 #include "autodrive_rule.inc"
 #include "tune_gate.inc"
@@ -2371,6 +2375,7 @@ static int patch_torque_load(void)
 }
 
 #include "garage_rating_guard.inc"
+#include "car_physics_guard.inc"
 
 static int patch_net_string_receivers(void)
 {
@@ -2577,14 +2582,15 @@ static int patch_xsapi_token(void)
     }
     mem_copy(&rel, call + 7, 4);
     alloc = *(void *(**)(ULONGLONG))(call + 11 + rel);
-    if (!xs_find_import_slot(img, "WindowsCreateString")) {
-        log_begin();
-        log_raw("xstoken: not patched, WindowsCreateString is not in the XSAPI import table\n");
-        return 2;
-    }
-    mkstr = (LONG(*)(const WCHAR *, unsigned, void **))xs_find_import(img, "WindowsCreateString");
     {
         static DWORD since;
+        /* The file imports it (combase.dll, with its name list), so a miss is a moment while the import table is being filled in, not its
+         * absence: retried like an unbound import (win1 2026-11-20 00:39 UTC gave up at the first miss and its game stayed offline with
+         * "Unable to connect to the Live configuration servers"; the same files on win2 and win1's earlier sessions found it). */
+        if (!xs_find_import_slot(img, "WindowsCreateString")) {
+            return xs_unbound_wait("xstoken", "its WindowsCreateString import (not in the import table yet)", &since);
+        }
+        mkstr = (LONG(*)(const WCHAR *, unsigned, void **))xs_find_import(img, "WindowsCreateString");
         if (!xs_bound(img, (void *)alloc) || !xs_bound(img, (void *)mkstr)) {
             return xs_unbound_wait("xstoken", !xs_bound(img, (void *)alloc) ? "its allocator import" : "its WindowsCreateString import", &since);
         }
@@ -3229,9 +3235,11 @@ static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *
 #include "honk_sync.inc"
 #include "carsel_sync.inc"
 #include "mods_sync.inc"
+#include "eventopts_sync.inc"
 #include "nos_flames.inc"
 #include "ug_remote.inc"
 #include "race_wait.inc"
+#include "event_fix.inc"
 #include "event_stock.inc"
 #include "stall_trace.inc"
 
@@ -3263,14 +3271,21 @@ static const char RIVALS_LAUNCH_NEW[] =
     "    <behavior id=\"ModuleMethodCall\" module_id=\"RivalsModule\" method=\"RequestLaunchRivalsEventFromMenu\" />\r\n"
     "  </state>";
 
-/* One exact replacement in a file of one of the game's media zips (stateflow.zip, UI.zip), handed to the platform (set_file <set_path>).
- * Nothing is changed unless the old text occurs exactly once. `tag` starts the log lines. */
-static int stateflow_replace(const WCHAR *zip_name, const char *file, const char *set_path, const char *old, size_t olen, const char *neu, size_t nlen,
-                             const char *tag)
+struct sf_pair {
+    const char *old;
+    size_t olen;
+    const char *neu;
+    size_t nlen;
+};
+
+/* Exact replacements, one after the other, in a file of one of the game's media zips (stateflow.zip, UI.zip), handed to the platform
+ * (set_file <set_path>). Nothing is changed unless each old text occurs exactly once. `tag` starts the log lines. */
+static int stateflow_replace_n(const WCHAR *zip_name, const char *file, const char *set_path, const struct sf_pair *pairs, unsigned n, const char *tag)
 {
     WCHAR zip[MAX_PATH];
     unsigned char *orig, *out;
-    size_t size = 0, at = 0, i, hits = 0;
+    size_t size = 0, i;
+    unsigned p;
     int ok;
 
     if (!g_api->game_dir[0] || lstrlenW(g_api->game_dir) + lstrlenW(zip_name) + 8 >= MAX_PATH) {
@@ -3294,34 +3309,40 @@ static int stateflow_replace(const WCHAR *zip_name, const char *file, const char
         log_raw(" (missing, unreadable or not a zip the reader handles), not changed\n");
         return 0;
     }
-    for (i = 0; i + olen <= size; i++) {
-        if (orig[i] == (unsigned char)old[0] && mem_equal(orig + i, (const unsigned char *)old, olen)) {
-            at = i;
-            hits++;
+    for (p = 0; p < n; p++) {
+        const char *old = pairs[p].old;
+        size_t olen = pairs[p].olen, nlen = pairs[p].nlen, at = 0, hits = 0;
+        for (i = 0; i + olen <= size; i++) {
+            if (orig[i] == (unsigned char)old[0] && mem_equal(orig + i, (const unsigned char *)old, olen)) {
+                at = i;
+                hits++;
+            }
         }
-    }
-    if (hits != 1 || !(out = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, size - olen + nlen))) {
+        if (hits != 1 || !(out = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, size - olen + nlen))) {
+            HeapFree(GetProcessHeap(), 0, orig);
+            log_begin();
+            log_raw(tag);
+            log_raw(": the state in ");
+            log_raw(file);
+            if (hits != 1) {
+                log_raw(" is not as expected (the text to replace occurs ");
+                log_dec((unsigned long)hits);
+                log_raw(" times in ");
+                log_dec((unsigned long)size);
+                log_raw(" bytes, it must occur once: another mod or a game update changed it), not changed\n");
+            } else {
+                log_raw(" could not be rewritten (out of memory), not changed\n");
+            }
+            return 0;
+        }
+        mem_copy(out, orig, at);
+        mem_copy(out + at, pairs[p].neu, nlen);
+        mem_copy(out + at + nlen, orig + at + olen, size - at - olen);
         HeapFree(GetProcessHeap(), 0, orig);
-        log_begin();
-        log_raw(tag);
-        log_raw(": the state in ");
-        log_raw(file);
-        if (hits != 1) {
-            log_raw(" is not as expected (the text to replace occurs ");
-            log_dec((unsigned long)hits);
-            log_raw(" times in ");
-            log_dec((unsigned long)size);
-            log_raw(" bytes, it must occur once: another mod or a game update changed it), not changed\n");
-        } else {
-            log_raw(" could not be rewritten (out of memory), not changed\n");
-        }
-        return 0;
+        orig = out;
+        size = size - olen + nlen;
     }
-    mem_copy(out, orig, at);
-    mem_copy(out + at, neu, nlen);
-    mem_copy(out + at + nlen, orig + at + olen, size - at - olen);
-    ok = g_api->set_file(g_mod, set_path, out, size - olen + nlen);
-    HeapFree(GetProcessHeap(), 0, out);
+    ok = g_api->set_file(g_mod, set_path, orig, size);
     HeapFree(GetProcessHeap(), 0, orig);
     if (ok) return ok;
     log_begin();
@@ -3332,6 +3353,18 @@ static int stateflow_replace(const WCHAR *zip_name, const char *file, const char
         log_raw(" was not changed (another mod replaces it, see fh2-mods\\platform.log)\n");
     }
     return ok;
+}
+
+/* One exact replacement (stateflow_replace_n with one pair). */
+static int stateflow_replace(const WCHAR *zip_name, const char *file, const char *set_path, const char *old, size_t olen, const char *neu, size_t nlen,
+                             const char *tag)
+{
+    struct sf_pair one;
+    one.old = old;
+    one.olen = olen;
+    one.neu = neu;
+    one.nlen = nlen;
+    return stateflow_replace_n(zip_name, file, set_path, &one, 1, tag);
 }
 
 static int stateflow_rivals_leave_session(void)
@@ -3370,6 +3403,12 @@ static int stateflow_bucket_cars_online(void)
  * bold gamertag and TitlePostGamertag, and line 2 as 'Press (X) to join'. The shim puts the track's name in TitlePreGamertag (empty for races). For a
  * race event (IsRaceEvent) line 1 no longer shows it, and line 2 starts with it in the gamertag's bold style: 'Castelletto Meadow Circuit | Press (X) to
  * join' (user 2026-11-05). Only converters and styles the file already uses. Disable with env FH2MP_NO_RACETOAST.
+ *
+ * The wrench (event_options.inc): in front of the event's name on line 2, shown when the event takes modded cars. It is a filled shape, one
+ * polygon drawn for this (a wrench in the manner of Material Symbols Sharp "build": the jaw up and to the left, a straight handle), in the
+ * colour of the name beside it. Its style collapses it while the popup's Text is empty or null, word for word the rule of the file's own
+ * A_Style_FZTextBlock_Notification_OptionalText; FZMaterial with an FZGeometry is how the game draws the pin under a name tag
+ * (Scenes/Anthem/AR_OpponentLabel.xaml). The style is the second replacement in the same file.
  */
 static const char RACE_TOAST_OLD[] =
     "                                <local:FZTextBlock Text=\"{Binding TitlePreGamertag}\"\r\n"
@@ -3398,20 +3437,76 @@ static const char RACE_TOAST_NEW[] =
     "                                <Grid Visibility=\"{Binding PlayerHasAccepted, Converter={StaticResource A_FZBooleanToVisibilityConverter_Inverse}}\">\r\n"
     "                                    <StackPanel Orientation=\"Horizontal\" \r\n"
     "                                            Visibility=\"{Binding IsInputBlocked, Converter={StaticResource A_FZBooleanToVisibilityConverter_Inverse}}\">\r\n"
+    "                                        <Grid Visibility=\"{Binding IsRaceEvent, Converter={StaticResource A_FZBooleanToVisibilityConverter}}\">\r\n"
+    "                                            <local:FZMaterial Style=\"{StaticResource FH2MP_Style_FZMaterial_Notification_ModdedCars}\"\r\n"
+    "                                                              Width=\"20\"\r\n"
+    "                                                              Height=\"20\"\r\n"
+    "                                                              Margin=\"0,0,6,0\">\r\n"
+    "                                                <local:FZMaterial.Data>\r\n"
+    "                                                    <local:FZGeometry Data=\"M10.06,6.38 5.79,2.11 7.19,1.9 8.59,2.06 9.9,2.57 11.04,3.4 11.92,4.5 12.49,5.79 12.7,7.19 12.54,8.59 12.03,9.9 11.93,10.09 20.66,18.83 18.83,20.66 10.09,11.93 8.79,12.49 7.4,12.7 6,12.54 4.69,12.03 3.55,11.19 2.67,10.09 2.11,8.79 1.9,7.4 2.06,6 2.11,5.79 6.38,10.06z\" />\r\n"
+    "                                                </local:FZMaterial.Data>\r\n"
+    "                                            </local:FZMaterial>\r\n"
+    "                                        </Grid>\r\n"
     "                                        <local:FZTextBlock Text=\"{Binding TitlePreGamertag}\"\r\n"
     "                                                   Visibility=\"{Binding IsRaceEvent, Converter={StaticResource A_FZBooleanToVisibilityConverter}}\"\r\n"
     "                                                   Style=\"{StaticResource A_Style_FZTextBlock_Notification_Gamertag}\"/>\r\n"
     "                                        <local:FZTextBlock Text=\"{local:Loc Lobby.IDS_Invite_Join_Prefix}\"\r\n"
     "                                                       Style=\"{StaticResource A_Style_FZTextBlock_Notification_BodyText}\"/>\r\n";
 
+/* The wrench's style, put after the optional text's style it takes its rule from. */
+static const char RACE_TOAST_STYLE_OLD[] =
+    "                <DataTrigger Binding=\"{Binding Text}\" Value=\"{x:Null}\">\r\n"
+    "                    <Setter Property=\"Visibility\" Value=\"Collapsed\"/>\r\n"
+    "                </DataTrigger>\r\n"
+    "            </Style.Triggers>\r\n"
+    "        </Style>\r\n";
+static const char RACE_TOAST_STYLE_NEW[] =
+    "                <DataTrigger Binding=\"{Binding Text}\" Value=\"{x:Null}\">\r\n"
+    "                    <Setter Property=\"Visibility\" Value=\"Collapsed\"/>\r\n"
+    "                </DataTrigger>\r\n"
+    "            </Style.Triggers>\r\n"
+    "        </Style>\r\n"
+    "\r\n"
+    "        <Style x:Key=\"FH2MP_Style_FZMaterial_Notification_ModdedCars\" TargetType=\"{x:Type local:FZMaterial}\">\r\n"
+    "            <Setter Property=\"Color\" Value=\"{StaticResource A_Color_Notification_GamertagText}\"/>\r\n"
+    "            <Setter Property=\"VerticalAlignment\" Value=\"Center\"/>\r\n"
+    "            <Setter Property=\"Visibility\" Value=\"Visible\"/>\r\n"
+    "            <Style.Triggers>\r\n"
+    "                <DataTrigger Binding=\"{Binding Text}\" Value=\"\">\r\n"
+    "                    <Setter Property=\"Visibility\" Value=\"Collapsed\"/>\r\n"
+    "                </DataTrigger>\r\n"
+    "                <DataTrigger Binding=\"{Binding Text}\" Value=\"{x:Null}\">\r\n"
+    "                    <Setter Property=\"Visibility\" Value=\"Collapsed\"/>\r\n"
+    "                </DataTrigger>\r\n"
+    "            </Style.Triggers>\r\n"
+    "        </Style>\r\n";
+
 static int ui_race_toast_layout(void)
 {
-    int ok = stateflow_replace(L"\\media\\UI.zip", "Controls/NotificationPopupControl.xaml", "UI/Controls/NotificationPopupControl.xaml", RACE_TOAST_OLD,
-                               sizeof RACE_TOAST_OLD - 1, RACE_TOAST_NEW, sizeof RACE_TOAST_NEW - 1, "racetoast layout");
+    static const struct sf_pair pairs[2] = {
+        {RACE_TOAST_OLD, sizeof RACE_TOAST_OLD - 1, RACE_TOAST_NEW, sizeof RACE_TOAST_NEW - 1},
+        {RACE_TOAST_STYLE_OLD, sizeof RACE_TOAST_STYLE_OLD - 1, RACE_TOAST_STYLE_NEW, sizeof RACE_TOAST_STYLE_NEW - 1},
+    };
+    int ok = stateflow_replace_n(L"\\media\\UI.zip", "Controls/NotificationPopupControl.xaml", "UI/Controls/NotificationPopupControl.xaml", pairs, 2,
+                                 "racetoast layout");
     if (ok) {
         InterlockedExchange(&g_rt_layout, 1);
         log_begin();
         log_raw("racetoast layout: Controls/NotificationPopupControl.xaml handed to the platform, race toasts show the event name in bold at the start of line 2\n");
+    }
+    return ok;
+}
+
+/* Developer badge (src/dev_badge.inc): FH2MP's logo after a developer's gamertag on the name tag over their car. Disable with env FH2MP_NO_DEVBADGE. */
+#include "dev_badge.inc"
+
+static int ui_dev_badge(void)
+{
+    int ok = stateflow_replace(L"\\media\\UI.zip", "Scenes/Anthem/AR_OpponentLabel.xaml", "UI/Scenes/Anthem/AR_OpponentLabel.xaml", DEV_BADGE_OLD,
+                               sizeof DEV_BADGE_OLD - 1, DEV_BADGE_NEW, sizeof DEV_BADGE_NEW - 1, "devbadge");
+    if (ok) {
+        log_begin();
+        log_raw("devbadge: Scenes/Anthem/AR_OpponentLabel.xaml handed to the platform, FH2MP's developers have its logo after their gamertag on name tags\n");
     }
     return ok;
 }
@@ -3494,7 +3589,9 @@ static void gamedb_hash(char out[65])
 }
 
 #include "restricted_tools.inc"
+#include "guard_counts.inc"
 #include "xhr2.inc"
+#define HEALTH_SLICE_WATCH
 #include "health.inc"
 #ifdef FH2MP_DEBUG_BUILD
 #include "dbg.inc"
@@ -5419,6 +5516,7 @@ static int install_create_probe(void)
 }
 
 #include "eo_routes.inc"
+#include "event_options.inc"
 
 static int page_executable(const void *p);
 typedef void (*eor_helper_fn)(void *state, struct eor_str *name, unsigned char on);
@@ -5643,6 +5741,7 @@ static DWORD WINAPI late_init(LPVOID unused)
         {
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_NETSTRINGS", env, 8) == 0) patch_net_string_receivers();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_NETWATCH", env, 8) == 0) patch_net_watch();    /* log only */
         }
         {
             wchar_t env[8];
@@ -5655,8 +5754,8 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_STALLTRACE", env, 8) == 0) patch_stall_trace();
         }
 #endif
-        {   /* the game-bug guards here and below (hook, model, dtconv, cam, comp, nulltorque, torqueload, garagerating, cinematics,
-             * placement) are also made in offline runs, by offline_guards */
+        {   /* the game-bug guards here and below (hook, model, dtconv, cam, comp, travelxp, carroom, nulltorque, torqueload, garagerating, carphysics,
+             * cinematics, placement) are also made in offline runs, by offline_guards */
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_PARTYHUD", env, 8) == 0) patch_party_hud();
             if (GetEnvironmentVariableW(L"FH2MP_NO_RACETOAST", env, 8) == 0) patch_race_toast();
@@ -5664,9 +5763,12 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_LOGGUARD", env, 8) == 0) patch_gameplaylog_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_PREDGUARD", env, 8) == 0) patch_remote_prediction_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_MODELGUARD", env, 8) == 0) patch_model_unload_guard();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_SMGUARD", env, 8) == 0) patch_state_machine_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_DTCONVGUARD", env, 8) == 0) patch_dtconv_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_CAMGUARD", env, 8) == 0) patch_camanim_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_COMPGUARD", env, 8) == 0) patch_component_lookup_guard();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_TRAVELXPGUARD", env, 8) == 0) patch_travelxp_guard();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_CARROOM", env, 8) == 0) patch_carlist_room();
         }
         {   /* online only: an offline run sends no share anywhere */
             wchar_t env[8];
@@ -5716,20 +5818,27 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_GARAGERATING", env, 8) == 0) {
                 patch_garage_rating_guard();
             }
+            if (GetEnvironmentVariableW(L"FH2MP_NO_CARPHYSICS", env, 8) == 0) {
+                patch_car_physics();
+            }
         }
         {
             wchar_t env[8];
             if (GetEnvironmentVariableW(L"FH2MP_NO_PICKERPI", env, 8) == 0) {
                 patch_picker_pi();
-                if (GetEnvironmentVariableW(L"FH2MP_NO_EVENTSTOCK", env, 8) == 0) {
-                    patch_event_stock();
+                if (GetEnvironmentVariableW(L"FH2MP_NO_EVENTFIX", env, 8) == 0) {
+                    patch_event_fix();
                 }
+                patch_event_stock(GetEnvironmentVariableW(L"FH2MP_NO_EVENTSTOCK", env, 8) == 0);
             }
             if (GetEnvironmentVariableW(L"FH2MP_NO_AUTODRIVE_RULE", env, 8) == 0) {
                 patch_autodrive_rule();
             }
             if (GetEnvironmentVariableW(L"FH2MP_NO_EOROUTES", env, 8) == 0) {
                 patch_eo_routes();
+            }
+            if (GetEnvironmentVariableW(L"FH2MP_NO_EVENTOPTS", env, 8) == 0 && patch_event_options()) {
+                start_eventopts();   /* the row is only added while the server answers */
             }
             if (GetEnvironmentVariableW(L"FH2MP_NO_TUNEGATE", env, 8) == 0) {
                 patch_tune_gate();
@@ -5861,10 +5970,13 @@ static DWORD WINAPI offline_guards(LPVOID unused)
     OFFLINE_GUARD(L"FH2MP_NO_DTCONVGUARD", patch_dtconv_guard())
     OFFLINE_GUARD(L"FH2MP_NO_CAMGUARD", patch_camanim_guard())
     OFFLINE_GUARD(L"FH2MP_NO_COMPGUARD", patch_component_lookup_guard())
+    OFFLINE_GUARD(L"FH2MP_NO_TRAVELXPGUARD", patch_travelxp_guard())
+    OFFLINE_GUARD(L"FH2MP_NO_CARROOM", patch_carlist_room())
     OFFLINE_GUARD(L"FH2MP_NO_NULLTORQUE", patch_null_torque_curve())
     OFFLINE_GUARD(L"FH2MP_NO_NULLTORQUE", patch_null_torque_scale())
     OFFLINE_GUARD(L"FH2MP_NO_TORQUELOAD", patch_torque_load())
     OFFLINE_GUARD(L"FH2MP_NO_GARAGERATING", patch_garage_rating_guard())
+    OFFLINE_GUARD(L"FH2MP_NO_CARPHYSICS", patch_car_physics())
     OFFLINE_GUARD(L"FH2MP_NO_CINEMATICS", patch_missing_cinematics())
     OFFLINE_GUARD(L"FH2MP_NO_PLACEMENTFIX", patch_placement_fallback())
 #undef OFFLINE_GUARD
@@ -6563,6 +6675,9 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
         }
         if (GetEnvironmentVariableW(L"FH2MP_NO_RACETOAST", tmp, 8) == 0) {
             ui_race_toast_layout();    /* now: the game reads its UI files when the first screen loads */
+        }
+        if (GetEnvironmentVariableW(L"FH2MP_NO_DEVBADGE", tmp, 8) == 0) {
+            ui_dev_badge();
         }
     }
     {

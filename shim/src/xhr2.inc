@@ -805,6 +805,12 @@ static DWORD WINAPI xhr_thread(LPVOID param)
         hdrline[k + i] = 0;
         xhr_add_header(req, hdrline, x->seq);
     }
+    if (net_watch_header(hdrline)) { /* the game's newest close of its game-server connection, once (net_watch.inc); the LSP logs it */
+        xhr_add_header(req, hdrline, x->seq);
+    }
+    if (guard_counts_header(hdrline)) { /* how often each crash guard fired, when a count changed (guard_counts.inc); the LSP logs it */
+        xhr_add_header(req, hdrline, x->seq);
+    }
 
     {   /* the launcher runs a local UDP-over-TCP proxy for this game (experimental TCP fallback): the server then names 127.0.0.1 as the game server */
         WCHAR tun[4];

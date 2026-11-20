@@ -1,0 +1,42 @@
+{
+ "kind": "release",
+ "launcher": {
+  "assets": {
+   "linux-appimage": {
+    "name": "FH2MP-Launcher-1.4.8-x86_64.AppImage",
+    "sha256": "893ecf3502e5405ac5d0b97aa6d6d8a5157c2427c4222494ecaea4e7b45298d2",
+    "size": 76032504
+   },
+   "linux-deb": {
+    "name": "fh2mp-launcher_1.4.8_amd64.deb",
+    "sha256": "e0adeb42f2b3a5d7104f85abc9e70b267e20d467157f55905609939ba9c20586",
+    "size": 82185020
+   },
+   "windows-x64-installer": {
+    "name": "FH2MP-Launcher-1.4.8-windows-x64-setup.exe",
+    "sha256": "f8944fa247b7171ec3668c8af385f4aa295691463643d7d5860aea34cbc2a3dd",
+    "size": 35205688
+   },
+   "windows-x64-portable": {
+    "name": "FH2MP-Launcher-1.4.8-windows-x64-portable.zip",
+    "sha256": "24e3ad970dba2df700ad9143dda4ac0cf177122c2f3ec64309ebf4b3ca608b01",
+    "size": 50597271
+   }
+  },
+  "version": "1.4.8"
+ },
+ "line": "1.4",
+ "minLauncher": "1.4.8",
+ "notes": "",
+ "schema": 1,
+ "shim": {
+  "dllSha256": "38987884f9b023b3f96bfab31a2f13038438dd9da049e86b8e92f87fdd13c047",
+  "guideSha256": "255d2e57e60befb2512607c3caf14654bfd57d14542f304ae95944de88239a1c",
+  "name": "fh2mp-shim-1.4.8.zip",
+  "sha256": "e865902937e8990f4368f3ddc3b8562a0fb43c38ab1e940a70cb62e2221451df",
+  "size": 1617336,
+  "version": "1.4.8"
+ },
+ "tag": "v1.4.8",
+ "version": "1.4.8"
+}

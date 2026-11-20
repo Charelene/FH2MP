@@ -166,6 +166,8 @@ func (h *Hub) sideForged(kind jobKind, xuid uint64) {
 		lg, name = carselLog, "car select"
 	case jobMods:
 		lg, name = modsLog, "mod state"
+	case jobEventopts:
+		lg, name = eventoptsLog, "event options"
 	}
 	if ok, skipped := sideRate.Allow([2]any{"side-forged", xuid}, rejectLogSeconds); ok {
 		extra := ""
@@ -176,49 +178,64 @@ func (h *Hub) sideForged(kind jobKind, xuid uint64) {
 	}
 }
 
+// sideAuthed is findAuthedCar for a request that came from addr. On a match it also tells the TCP carrier that addr carries this player's signed
+// side-channel traffic: with the TCP fallback the shim's horn (and other side-channel) socket is a tunnel of its own, which never opens a game
+// connection, and the carrier closed it every helloSeconds (42,149 such closes on prod, 2026-11-13..19).
+func (h *Hub) sideAuthed(only *World, routes map[uint64]Addr, xuid uint64, data []byte, now float64, checkCar bool, from Addr) (*World, *Peer, []byte) {
+	w, p, k := h.findAuthedCar(only, routes, xuid, data, now, checkCar)
+	if w != nil {
+		if keep, ok := h.Tunnel.(SideKeeper); ok {
+			keep.KeepSide(from)
+		}
+	}
+	return w, p, k
+}
+
 // findAuthed matches a side-channel request to the live, ticket-bound game connection of its xuid.
 func (h *Hub) findAuthed(only *World, routes map[uint64]Addr, xuid uint64, data []byte, now float64) (*World, *Peer, []byte) {
 	return h.findAuthedCar(only, routes, xuid, data, now, true)
 }
 
 // findAuthedCar is findAuthed; checkCar says whether byte 52 of the request is the player's car id (lighting, horn) or something else.
+//
+// The address that verified this xuid's last request is tried first and, when it verifies again (nearly every request: a horn poll comes every 50-100 ms,
+// a lighting update with the car), nothing else is looked at. Only when it does not, every route of the hub is tried in order. The answer is the one a
+// scan of [last, every route] gives, without copying the whole route table for each side-channel datagram.
 func (h *Hub) findAuthedCar(only *World, routes map[uint64]Addr, xuid uint64, data []byte, now float64, checkCar bool) (*World, *Peer, []byte) {
-	last, hasLast := routes[xuid]
-	type cand struct {
-		addr Addr
-		w    *World
-	}
-	var cands []cand
-	if hasLast {
-		if w, ok := h.Route.Get(last); ok {
-			cands = append(cands, cand{last, w})
+	try := func(a Addr, w *World) (*Peer, []byte, bool) {
+		if only != nil && w != only {
+			return nil, nil, false
 		}
-	}
-	for _, a := range h.Route.Keys() {
-		w, _ := h.Route.Get(a)
-		cands = append(cands, cand{a, w})
-	}
-	for _, c := range cands {
-		if only != nil && c.w != only {
-			continue
-		}
-		binding, ok := h.Bound[c.addr]
-		peer, _ := c.w.Peers.Get(c.addr)
+		binding, ok := h.Bound[a]
+		peer, _ := w.Peers.Get(a)
 		if !ok || binding.xuid != xuid || peer == nil || !peer.Connected || !peer.Entered || peer.Xuid != xuid || checkCar && (peer.CarID == nil || *peer.CarID != int(data[52])) ||
 			!(1 <= peer.Owner && peer.Owner <= 254) {
-			continue
+			return nil, nil, false
 		}
 		key := []byte(binding.key)
-		if h.Keys[xuid][binding.key] <= now || !bytes.Equal(h.TicketEpochs[c.addr], data[36:52]) {
-			continue
+		if h.Keys[xuid][binding.key] <= now || !bytes.Equal(h.TicketEpochs[a], data[36:52]) {
+			return nil, nil, false
 		}
 		m := hmac.New(sha256.New, key)
 		m.Write(data[:len(data)-sideMacSize])
 		if !hmac.Equal(m.Sum(nil), data[len(data)-sideMacSize:]) {
-			continue
+			return nil, nil, false
 		}
-		routes[xuid] = c.addr
-		return c.w, peer, key
+		return peer, key, true
+	}
+	if last, hasLast := routes[xuid]; hasLast {
+		if w, ok := h.Route.Get(last); ok {
+			if peer, key, ok := try(last, w); ok {
+				return w, peer, key
+			}
+		}
+	}
+	for _, a := range h.Route.Keys() {
+		w, _ := h.Route.Get(a)
+		if peer, key, ok := try(a, w); ok {
+			routes[xuid] = a
+			return w, peer, key
+		}
 	}
 	delete(routes, xuid)
 	return nil, nil, nil
@@ -267,7 +284,7 @@ func (h *Hub) lightingHandle(data []byte, addr Addr, only *World) {
 	if seq == 0 || h.isRevoked(xuid) {
 		return
 	}
-	world, peer, key := h.findAuthed(only, h.routesFor(only, false), xuid, data, now)
+	world, peer, key := h.sideAuthed(only, h.routesFor(only, false), xuid, data, now, true, addr)
 	if world == nil {
 		if ok, skipped := sideRate.Allow([2]any{"lt-unmatched", xuid}, rejectLogSeconds); ok {
 			why, expected := h.whyUnmatched(xuid, data, now)
@@ -434,7 +451,7 @@ func (h *Hub) honkHandle(data []byte, addr Addr, only *World) {
 	if seq == 0 || h.isRevoked(xuid) {
 		return
 	}
-	world, peer, key := h.findAuthed(only, h.routesFor(only, true), xuid, data, now)
+	world, peer, key := h.sideAuthed(only, h.routesFor(only, true), xuid, data, now, true, addr)
 	if world == nil {
 		if ok, skipped := sideRate.Allow([2]any{"hn-unmatched", xuid}, rejectLogSeconds); ok {
 			why, expected := h.whyUnmatched(xuid, data, now)

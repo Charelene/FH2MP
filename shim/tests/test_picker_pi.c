@@ -32,6 +32,7 @@ static void log_begin(void) { g_lines++; strcat(g_log, "|"); }
 static void log_raw(const char *s) { strcat(g_log, s); }
 static void log_dec(unsigned long v) { char b[24]; sprintf(b, "%lu", v); strcat(g_log, b); }
 #include "src/picker_pi.inc"
+static int ef_attrs(void *car, unsigned char *out) { (void)car; (void)out; return 0; }   /* event_fix.inc, tested by test_event_fix.sh */
 
 /* ---- a fake database: (table, id) pairs and one Data_Car row ---- */
 typedef struct { const char *table; unsigned id; } part_row;

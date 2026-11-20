@@ -2,7 +2,11 @@
 // It never touches a database or a real account.
 //
 //	fh2mp-mt-testserver -account <ed25519 pubkey hex>=<xuid hex>:<gamertag> ...
-//	fh2mp-mt-testserver -demo -addr 127.0.0.1:5170 -pubout key.pem   (made-up friends and club to try the chat window; see demo.go)
+//	fh2mp-mt-testserver -demo -addr 127.0.0.1:5170 -pubout key.pem   (made-up friends and club to try the chat window; see demo.go;
+//	                                                                   DebugFox has a chat device and answers secret chats, peer.go)
+//
+// End-to-end DMs keep their state in memory (devices, chats, commitments); in -account mode nobody is anybody's friend, so secret chats
+// are refused with USER_NOT_FRIEND there.
 //
 // stdout: "listening <host:port>", then "pubkey <PKCS#1 public key, base64 DER>". stdin, one command per line:
 // "notify <xuid hex> <text>" (stores and pushes a notice) and "end <xuid hex> <reason>" (ends the account's session).
@@ -108,9 +112,13 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	s.SetChatStore(mt.NewMemChatStore())
 	if d != nil {
 		d.s = s
 		s.SetCommunity(d)
+		if d.peer, err = newPeer(s, d.friend("DebugFox"), cfg.Realm); err != nil {
+			panic(err)
+		}
 	}
 	if *pubout != "" {
 		if err := os.WriteFile(*pubout, pem.EncodeToMemory(&pem.Block{Type: "RSA PUBLIC KEY", Bytes: x509.MarshalPKCS1PublicKey(&priv.PublicKey)}), 0o644); err != nil {

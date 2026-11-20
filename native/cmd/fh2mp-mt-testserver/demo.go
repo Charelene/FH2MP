@@ -6,6 +6,8 @@ package main
 //	say <friend> <text>            the friend posts in the club (pushed to everyone signed in)
 //	presence <friend> <state>      offline | online | freeroam | roadtrip
 //	request <friend>               the friend sends a friend request
+//	dm DebugFox <text>             DebugFox (the friend with a chat device) starts a secret chat with the signed-in account and sends
+//	                               the text; it also accepts every secret chat request and answers each message with "echo: <text>"
 
 import (
 	"crypto/ed25519"
@@ -38,6 +40,7 @@ type demo struct {
 	club     tl.Club
 	posts    []tl.ClubMessage
 	reads    map[int64]int64
+	peer     *peer // the friend with a chat device (peer.go)
 }
 
 func newDemo(realm string) *demo {
@@ -138,6 +141,35 @@ func (d *demo) RemoveFriend(me, other int64) error {
 	return auth.NewError(403, "demo", "the demo keeps its friends")
 }
 
+// AreFriends: every signed-in account is friends with every made-up friend (and the made-up friends with each other).
+func (d *demo) AreFriends(a, b int64) (bool, error) {
+	if a == b {
+		return false, nil
+	}
+	return d.isFriend(a) || d.isFriend(b), nil
+}
+
+func (d *demo) isFriend(x int64) bool {
+	for _, f := range d.friends {
+		if f.id == x {
+			return true
+		}
+	}
+	return false
+}
+
+// FriendIDs: a made-up friend's friends are everyone signed in; an account's are the made-up friends.
+func (d *demo) FriendIDs(me int64) ([]int64, error) {
+	if d.isFriend(me) {
+		return d.s.SignedIn(), nil
+	}
+	out := make([]int64, 0, len(d.friends))
+	for _, f := range d.friends {
+		out = append(out, f.id)
+	}
+	return out, nil
+}
+
 func (d *demo) ClubHistory(me, club, after int64, limit int) (*tl.ClubsHistory, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -224,6 +256,11 @@ func (d *demo) command(line string) (string, bool) {
 		d.mu.Unlock()
 		d.s.PushShort(d.s.SignedIn(), &tl.UpdateFriends{})
 		return fmt.Sprintf("%s sent a friend request", fr.tag), true
+	case "dm":
+		if fr == nil || len(f) < 3 {
+			return "usage: dm <friend> <text>", true
+		}
+		return d.dmCommand(fr, f[2]), true
 	}
 	return "", false
 }

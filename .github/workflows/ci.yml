@@ -1,11 +1,12 @@
 name: ci
 
 # Every check on every push and pull request, so a release tag only ever builds a commit that already passed (release/publish.sh and the
-# ship step refuse a commit without a green run of this workflow). Linux runs release/ci.sh in the image from
-# release/ci.Containerfile, the same one `release/ci.sh --container` uses on a developer machine; Windows runs the launcher checks.
+# ship step refuse a commit without a green run of this workflow). It runs release/ci.sh in the image from release/ci.Containerfile, the
+# same one `release/ci.sh --container` uses on a developer machine. (The Windows job ran the launcher's checks; the launcher left for
+# Encore in 1.5.0.)
 on:
   push:
-    branches: [develop, main, "hotfix/**"]       # hotfix/X.Y: ops/ship-hotfix.sh tags only commits whose run passed
+    branches: [develop, main, "hotfix/**", "release/**"]       # hotfix/X.Y, release/X.Y.Z: the ship scripts tag only commits whose run passed
   pull_request:
   workflow_dispatch:
 
@@ -25,16 +26,3 @@ jobs:
       - uses: ./.github/actions/ci-image
       - name: checks
         run: release/ci.sh --container all
-
-  windows:
-    runs-on: windows-2022
-    timeout-minutes: 20
-    defaults: { run: { working-directory: launcher } }
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with: { python-version: "3.12" }
-      - run: pip install --require-hashes -r requirements-release.txt
-      - run: python -m unittest discover -s tests
-        env: { FH2MP_NO_KEYRING: "1" }
-      - run: python -I ../release/check_test_mutations.py --area launcher

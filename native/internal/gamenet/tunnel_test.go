@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"fh2mp/internal/bits"
+	"fh2mp/internal/game"
 	"fh2mp/internal/netv2"
 )
 
@@ -170,4 +171,38 @@ func TestTunnelDropsConnectionsThatNeverOpenAGame(t *testing.T) {
 		}
 	}
 	t.Fatal("a connection that opens no game connection must be closed after the hello time")
+}
+
+// With the TCP fallback the shim's horn socket is a connection of its own that never opens a game; once the hub has matched a signed side-channel
+// request on it (KeepSide), it stays past the hello time. Before 2026-11-19 it was closed and reopened every 10 s (42,149 times on prod in 6 days).
+func TestTunnelKeepsAConnectionCarryingSideChannelTraffic(t *testing.T) {
+	old := helloSeconds
+	helloSeconds = 0.4
+	defer func() { helloSeconds = old }()
+	s, addr := startServer(t)
+	side, err := net.Dial("tcp4", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer side.Close()
+	other, err := net.Dial("tcp4", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	key := game.Addr{IP: "127.0.0.1", Port: side.LocalAddr().(*net.TCPAddr).Port}
+	deadline := time.Now().Add(3 * time.Second)
+	for !s.tun.has(key) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !s.tun.has(key) {
+		t.Fatal("the connection was never registered")
+	}
+	s.tun.KeepSide(key)
+	if !closed(other, 3*time.Second) {
+		t.Fatal("a connection with neither a game nor side-channel traffic must still be closed after the hello time")
+	}
+	if closed(side, 1500*time.Millisecond) {
+		t.Fatal("a connection carrying signed side-channel traffic was closed after the hello time")
+	}
 }

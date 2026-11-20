@@ -1,0 +1,12 @@
+{
+ "version": "2.1.0",
+ "about": "The launcher the signed manifest names (manifest.json launcher: version and assets). Since 1.5.0 it is Encore, built and published by Encore's own release (repo and tag below); release.yml downloads each file, fh2mp-release manifest-build checks it against the SHA-256 and size here and the release carries it, because a 1.4.x FH2MP Launcher downloads its update from the manifest's own tag. Assets are keyed by the 1.4.x launcher's flavours (launcher/fh2mp_launcher/updater.py launcher_flavour at v1.4.8): windows-x64-installer is run with /SILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS; windows-x64-portable is a zip with fh2mp-launcher.exe at its root, copied over the portable folder and started; linux-appimage is copied over $APPIMAGE; linux-deb is installed with apt-get. A flavour left out sends that launcher to the release page. minLauncher is the manifest's minLauncher. Every sha256 and size must be filled in from Encore's published files before a release can be built.",
+ "minLauncher": "2.1.0",
+ "repo": "Charelene/FH3MP",
+ "tag": "v0.1.2",
+ "assets": {
+  "linux-appimage": {"name": "Encore-2.1.0-x86_64.AppImage", "sha256": "bb53a760bddb62f644b847c5afb9868d762dd3f136124d13d1f609fb17a9cadb", "size": 20417016},
+  "windows-x64-installer": {"name": "EncoreSetup-2.1.0.exe", "sha256": "265c41e0b63fada19c65601ceb68bc4990074d45170d957f69c83a5d7705dfe7", "size": 19057360},
+  "windows-x64-portable": {"name": "Encore-2.1.0-windows-x64-portable.zip", "sha256": "fa8e72eef28c53e351fc494efa36fb55410911763c4e56f3e44aa1a4fd624bf1", "size": 26033851}
+ }
+}

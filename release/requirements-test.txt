@@ -1,3 +1,0 @@
-# The Python checks of release/ci.sh (release flow, launcher, signing), Linux x64 on Python 3.12 (CI) or 3.14. The Python servers and their
-# PostgreSQL driver (psycopg) were removed on 2026-11-07; the Go tests bring their own driver (native/go.mod).
--r requirements-sign.txt

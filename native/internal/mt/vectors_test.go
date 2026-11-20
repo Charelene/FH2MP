@@ -19,7 +19,7 @@ import (
 )
 
 // The cross-language vectors of the chat protocol (native/testdata/mt_vectors.json), read by this test and by the Rust client
-// (client/crates/fh2mp-mtproto/tests/vectors.rs). Regenerate with `go test ./internal/mt -run TestVectors -update` only when the protocol
+// (Encore's crates/fh2mp-mtproto/tests/vectors.rs; client/ in FH2MP up to 1.4.8). Regenerate with `go test ./internal/mt -run TestVectors -update` only when the protocol
 // changes on purpose; both sides must then agree on the new bytes.
 
 var updateVectors = flag.Bool("update", false, "rewrite native/testdata/mt_vectors.json")

@@ -27,8 +27,6 @@
 /scratch/
 /build/
 /target/
-/client/target/
-!/client/Cargo.lock
 __pycache__/
 *.pyc
 .venv/
@@ -46,11 +44,13 @@ ops/fh2mp-restore
 ops/fh2mp-archive-wal
 ops/fh2mp-lsp.service
 
-# launcher / release build output and local environments
+# release build output; the launcher, the Guide and the chat client left for Encore in 1.5.0, and their build output from
+# older checkouts stays ignored
 /dist/
 /launcher/dist/
 /launcher/build/
 /guide/build/
+/client/target/
 /launcher/.venv/
 /launcher/*.spec.bak
 *.AppImage

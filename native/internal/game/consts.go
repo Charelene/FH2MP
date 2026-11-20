@@ -100,6 +100,7 @@ const (
 	TagKeyframeMinSecs = 20.0
 	TagGridAssignDelay = 1.5
 	TagResyncS         = 3.0
+	raceOverResendS    = 2.0 // a client still hitting in a finished tag event gets the race-over flag again at most this often
 
 	LobbyTypeRoadTrip = 1
 	LobbyTypeFreeRoam = 2
@@ -134,6 +135,11 @@ const (
 	SHCountdownType      = 2
 	SHCountdownTypeBits  = 2
 	SHCountdownStartRace = 2
+	// SHCountdownLaunch: CountdownType 1, the join wait of a Free Roam event. On a change of CountdownType or CountdownEndTime every game runs
+	// SessionHost::helper_a313f0 (game+0xa313f0, from vfunc_13 +0xa2e490); with type 1 it sets the network manager's +0x44 to CountdownEndTime,
+	// sets its own Console.HasGrid and raises NetworkLaunchCountdownStarted. +0x44 is the {0} of the leader's "Waiting for Players {0}"
+	// (ShowLoadingMessageNetworkLaunchCountdown, wait_for_additional_players; FUN_140a2adc0(1) = +0x44 - clock) [C: decompile].
+	SHCountdownLaunch = 1
 	// SessionHostSynced.CountdownEndTime (var 3, u32, network clock): a Showdown's staggered start counts each car's RollOffDelay from it
 	// (States::WaitForPlayerBucketRollOffDelay game+0x964dc0, read while CountdownType is StartRace).
 	SHCountdownEndTime = 3
@@ -218,8 +224,25 @@ var (
 	// slow loader had already used 18 of its 30 s). FH2MP_CARSEL_LATE_RELEASE=0 turns it off.
 	CarselLateRelease        = envStr("FH2MP_CARSEL_LATE_RELEASE", "1") != "0"
 	CarselLateReleaseSeconds = 30.0
-	LspURL                   = envStr("FH2MP_LSP", "http://127.0.0.1:5080")
-	TracePackets             = Verbosity.Enabled(diag.Trace, "packet")
+	// RaceFlagClear: the end of an event sets ParticipatingInRace to 0 for the finishers who left its results screen too, and an event start sets it
+	// to 0 for every connected player outside the event that still has it (prod 2026-11-09..19: finishers kept the flag, the next event's games
+	// counted them as racers whose car choice was pending, and 121 of the 123 events that ended "nobody loaded" had such a player outside them).
+	// FH2MP_RACEFLAG_CLEAR=0 turns it off.
+	RaceFlagClear = envStr("FH2MP_RACEFLAG_CLEAR", "1") != "0"
+	// EventFlowV2 (user design 2026-11-20, after dev tests where one invitee whose car was refused held everyone for the 45 s join grace): the join
+	// wait is EventJoinSeconds; at its end the event starts at once, an invitee whose Ready was refused on its car is a participant and gets the
+	// event car select like everybody (nobody joins after the wait); a participant whose picked car does not fit is out EventPickJudgeSeconds
+	// after it left the car select (its game's new car numbers have arrived by then), not when everybody has loaded. FH2MP_EVENT_FLOW=1 = the
+	// old flow (RaceInviteSeconds, the RaceJoinGraceSeconds hold, the check after loading only). In a Free Roam world it also runs the join wait
+	// the way the game shows it (user design 2026-11-20: the leader sees "Waiting for Players 0:10", then everybody goes to the car select): the
+	// request starts the SessionHost launch countdown (SHCountdownLaunch) to the end of the wait, and an invitee's Console.Ready = 1 reaches every
+	// game but the leader's until the event starts (the leader's wait_for_additional_players_internal leaves on NetworkAnyRemoteConsolesReady, so
+	// the first accept took it to the car select at once; at the start its own ParticipatingInRace = 1 takes it there, the held Ready follows).
+	EventFlowV2           = envStr("FH2MP_EVENT_FLOW", "2") != "1"
+	EventJoinSeconds      = envFloat("FH2MP_EVENT_JOIN_SECONDS", 10)
+	EventPickJudgeSeconds = 3.0
+	LspURL                = envStr("FH2MP_LSP", "http://127.0.0.1:5080")
+	TracePackets          = Verbosity.Enabled(diag.Trace, "packet")
 )
 
 // ValidatePolicies is the start-up check Python does at import time.
@@ -259,3 +282,7 @@ var TagModes = map[int]*TagMode{
 
 // TagAssignRepeats: seconds after the first send.
 var TagAssignRepeats = []float64{0.0, 0.4, 1.2, 3.0}
+
+// GameMaxDatagramBytes is the largest datagram FH2 takes: Connection::ReadPacketHeader (1.0.0.64, game+0x17672b0) disconnects with
+// 0x80600007 ("Disconnect Invalid Msg Size.") when the header's size field is above 0x55c bytes. FlushPeer logs a datagram above it.
+const GameMaxDatagramBytes = 0x55c

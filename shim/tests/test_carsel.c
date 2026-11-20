@@ -17,6 +17,7 @@ static int (WINAPI *g_r_wsasendto)(UINT_PTR,void *,DWORD,DWORD *,DWORD,const voi
 static int read_game_memory(const void *p,void *out,SIZE_T n) { if(!p)return 0;memcpy(out,p,n);return 1; }
 static unsigned char *find_fh2_image(void) {return NULL;}
 static int plat_hook(const char *name,void *target,void *detour,void **original) {(void)name;(void)target;(void)detour;(void)original;return 0;}
+static int plat_hook_call(const char *name, void *site, void *detour, void **original) { (void)name; (void)site; (void)detour; (void)original; return 0; }
 static int code_is(const char *tag,const char *what,const unsigned char *img,unsigned rva,const void *expect,unsigned n) {(void)tag;(void)what;return !memcmp(img+rva,expect,n);}
 static void mem_copy(void *to,const void *from,SIZE_T n) {memcpy(to,from,n);}
 static char g_log[8192];
@@ -230,6 +231,19 @@ int main(int argc,char **argv)
         /* disabled: never */
         memset(&w,0,sizeof w);
         assert(!carsel_decide(&w,t,0,1,t-10,&event) && !carsel_decide(&w,t+16,0,1,t+6,&event) && event==CS_NONE);
+    }
+    /* ---- the join hold (pure): an invitee that accepted stays on its loading screen until the event starts (user design 2026-11-20) ---- */
+    {
+        ULONGLONG t=500000;
+        assert(carsel_join_verdict(t,0,1,8000,1,0)==NULL);                       /* countdown running, not yet racing: held */
+        assert(carsel_join_verdict(t+5000,t,1,3000,1,0)==NULL);                  /* still within the wait */
+        assert(strstr(carsel_join_verdict(t,t-100,1,6000,1,1),"has started"));   /* the event start sets ParticipatingInRace: on at once */
+        assert(strstr(carsel_join_verdict(t,t-100,1,150,1,0),"is over"));        /* the countdown has run out */
+        assert(strstr(carsel_join_verdict(t,0,1,0xfffff000u,1,0),"is over"));    /* an end in the past (u32 wrap): no hold */
+        assert(strstr(carsel_join_verdict(t,0,1,90000,1,0),"is over"));          /* an end too far away is not believed */
+        assert(strstr(carsel_join_verdict(t,0,0,8000,1,0),"cannot be read"));    /* no clock: the game's update runs */
+        assert(strstr(carsel_join_verdict(t,0,1,8000,0,0),"console"));
+        assert(strstr(carsel_join_verdict(t+CS_JOIN_MAX_MS,t,1,8000,1,0),"20 s"));  /* never longer than the cap */
     }
     /* ---- the group deadline rules (pure) ---- */
     {

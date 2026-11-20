@@ -154,6 +154,14 @@ func runTraceN(t *testing.T, name string, seed uint64, workers int) {
 	prevLook, prevEarly, prevLate := EventCarLook, CarselPickedBeforeStart, CarselLateRelease
 	EventCarLook, CarselPickedBeforeStart, CarselLateRelease = false, false, false
 	t.Cleanup(func() { EventCarLook, CarselPickedBeforeStart, CarselLateRelease = prevLook, prevEarly, prevLate })
+	// The traces were recorded when finishers who left the results screen kept ParticipatingInRace after the event ended (TestRaceFlag* cover the clear).
+	prevRaceFlag := RaceFlagClear
+	RaceFlagClear = false
+	t.Cleanup(func() { RaceFlagClear = prevRaceFlag })
+	// ... and with the 20 s invite window, its join grace and the car check after loading only (TestEventFlow* cover the new flow).
+	prevFlow := EventFlowV2
+	EventFlowV2 = false
+	t.Cleanup(func() { EventFlowV2 = prevFlow })
 	hub, err := NewHub(HubConfig{Roadtrip: tr.Roadtrip, CtlSend: func(d []byte, _ Addr) { lastCtl = string(d) }, Port: 0, Clock: clk, Rng: pyrand.New(seed), Sock: sock, Out: NewLogOut(logSink), Catalog: cat,
 		Sinks: &Sinks{Gamemode: func(int, []uint64) (string, string, error) { return "session-1", "template-1", nil }}})
 	if err != nil {

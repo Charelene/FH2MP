@@ -70,8 +70,17 @@ func (w *World) EndEvent(why string, keepLeader bool) {
 			}
 		}
 	}
+	// A finisher who left the results screen kept its flag (ParticipantLeft: it is part of the result) and is no longer in People. Left at 1, the
+	// next event's games count it as a racer whose car choice is pending and none of them loads (RaceFlagClear).
+	for _, q := range w.Peers.Values() {
+		if RaceFlagClear && q.Connected && q.RaceFlag {
+			w.SetConsoleBool(q, ConsoleVarParticipatingInRace, 0, why+"; it had finished and left the results screen")
+			q.ConsoleVars[ConsoleVarParticipatingInRace] = false
+		}
+	}
 	w.Event = nil
 	w.PendingRace = nil
+	w.ModdedCars = false
 	if !keepLeader {
 		former := w.Leader
 		if former == nil {
@@ -228,7 +237,14 @@ func (w *World) TagCollision(peer *Peer, k1, k2 carKey, oldA, newA, oldB, newB i
 	tag := ev.Tag
 	if ev.Over {
 		secs := tag.Seconds
-		w.LogEvery([2]any{"tag-over", fmt.Sprintf("%p", ev)}, 60.0, fmt.Sprintf("tag: collision from owner %d ignored: the server ended the event (time limit %s s or all infected) but this client still plays it", peer.Owner, pyfmt.FmtG(secs)), diag.Info)
+		w.LogEvery([2]any{"tag-over", fmt.Sprintf("%p", ev)}, 60.0, fmt.Sprintf("tag: collision from owner %d ignored: the server ended the event (time limit %s s or all infected) but this client still plays it; the race-over flag is sent to it again every %s s while it does", peer.Owner, pyfmt.FmtG(secs), pyfmt.FmtG(raceOverResendS)), diag.Info)
+		// The race-over flag (SessionHost InRace = 0) goes out once, unreliably; a client that lost it plays on alone (world 14062880, 2026-11-17: one
+		// client hit for 2 min after a 240 s King had ended). Its own hits say it did not get it, so it gets the flag again, at most every raceOverResendS.
+		if now := w.Mono(); now-peer.RaceOverSentAt >= raceOverResendS {
+			if w.sessionHostBoolTo(peer, SHInRace, 0) {
+				peer.RaceOverSentAt = now
+			}
+		}
 		return
 	}
 	car := func(k carKey) *Peer {
@@ -794,13 +810,13 @@ func (w *World) noticeRefused(peer *Peer, notice string) {
 }
 
 const (
-	customCarNotice  = "Custom cars can't race in online events or Road Trip. Pick a car from the game."
+	customCarNotice  = "Modded cars can't race here: this event's leader didn't allow them, and Road Trip never does. Pick a car from the game."
 	trafficCarNotice = "Traffic cars and other cars you can't buy can't race in online events or Road Trip. Pick another car."
 )
 
 // refusalNotice is the notice for the peer's current car against the stored event rule, without a log line ("" = it fits, or the rule is unreadable).
 func (w *World) refusalNotice(peer *Peer) string {
-	if w.CustomCar(peer) {
+	if w.customCarRefused(peer) {
 		return customCarNotice
 	}
 	if w.BlockedCar(peer) {
@@ -815,9 +831,9 @@ func (w *World) refusalNotice(peer *Peer) string {
 
 // carFitsEvent is EligibleForEvent without the notice: (fits, the notice text for a refusal). The "not eligible" line is logged either way.
 func (w *World) carFitsEvent(peer *Peer, rule *gameopts.Rule) (bool, string) {
-	if w.CustomCar(peer) {
+	if w.customCarRefused(peer) {
 		w.ev("not_eligible", kv("xuid", fmt.Sprintf("%#x", peer.Xuid)), kv("car", *peer.ModelID), kv("custom", true), kv("roadtrip", w.Roadtrip))
-		w.Logf("%d not eligible: owner %d car %d is not in the game data (a car pack's own car); custom cars do not race in events or Road Trip", peer.Addr.Port, peer.Owner, *peer.ModelID)
+		w.Logf("%d not eligible: owner %d car %d is not in the game data (a car pack's own car); custom cars do not race in Road Trip, nor in an event whose leader did not allow modded cars", peer.Addr.Port, peer.Owner, *peer.ModelID)
 		return false, customCarNotice
 	}
 	if w.BlockedCar(peer) {
@@ -899,6 +915,13 @@ func (w *World) ValidateEventCars() bool {
 	if len(wrong) == 0 {
 		return true
 	}
+	return w.dropWrongCars(wrong, "")
+}
+
+// dropWrongCars takes participants whose car does not meet the event restrictions out of the event (when: "" after loading, or how long after
+// leaving the car select); -> false when nobody connected is left and the event ended.
+func (w *World) dropWrongCars(wrong []*Peer, when string) bool {
+	ev := w.Event
 	for _, q := range wrong {
 		ev.remove(q)
 		if q.Connected {
@@ -909,7 +932,7 @@ func (w *World) ValidateEventCars() bool {
 			}
 		}
 	}
-	w.Warnf("event: %s out of the event (car does not meet the restrictions, see the 'not eligible' line above); %d participant(s) remain %s", owners(wrong), len(ev.People), owners(ev.People))
+	w.Warnf("event: %s out of the event%s (car does not meet the restrictions, see the 'not eligible' line above); %d participant(s) remain %s", owners(wrong), when, len(ev.People), owners(ev.People))
 	w.RefreshCarPhasing()
 	any := false
 	for _, q := range ev.People {
@@ -1090,11 +1113,32 @@ func (w *World) StartEventWith(leader *Peer, chosen []*Peer) {
 		}
 		w.Logf("tag: event %s is %s, time limit %s s%s", where, tm.Name, pyfmt.FmtG(seconds), def)
 	}
+	// Every game counts each console with ParticipatingInRace = 1 as a racer of this event: a player outside it must not carry the flag.
+	for _, q := range w.Peers.Values() {
+		if RaceFlagClear && q.Connected && q.RaceFlag && !inList(people, q) {
+			w.SetConsoleBool(q, ConsoleVarParticipatingInRace, 0, "left over from an earlier event; not a participant of this one")
+			q.ConsoleVars[ConsoleVarParticipatingInRace] = false
+		}
+	}
 	for _, q := range people {
 		for _, stale := range []int{ConsoleVarHasLoadedCars, ConsoleVarHasGrid, ConsoleVarRenderReady} {
 			delete(q.ConsoleVars, stale)
 		}
 		w.SetConsoleBool(q, ConsoleVarParticipatingInRace, 1, "participant selected")
+	}
+	if w.launchCountdownOn() && chosen == nil {
+		w.SetRaceClock(0, "join wait over: the event started")
+		var held []*Peer
+		for _, q := range w.Peers.Values() {
+			if q.ReadyHeld && inList(people, q) && q.ConsoleVars[4] {
+				held = append(held, q)
+				w.SetConsoleBool(q, 4, 1, "join wait over: the leader's game gets this Ready now")
+			}
+			q.ReadyHeld = false
+		}
+		if len(held) > 0 {
+			w.Logf("join wait: the Ready of owner %s reached the leader's game (owner %d) only now, at the start", owners(held), leader.Owner)
+		}
 	}
 	w.SetSessionHostBool(SHRaceParticipantsSelected, 1, "participants selected")
 	w.RefreshCarPhasing()
@@ -1235,6 +1279,11 @@ func (w *World) NotePlayerStatus(peer *Peer, size int, payload bits.Int) {
 	if peer.PlayerStatus != PlayerStatusPreRace {
 		return
 	}
+	w.notePicked(ev, peer)
+}
+
+// notePicked: participant `peer` of the running event left its car select (PlayerStatus CarSelect -> PreRace).
+func (w *World) notePicked(ev *Event, peer *Peer) {
 	if ev.PickedAfter == nil {
 		ev.PickedAfter = omap.New[*Peer, float64]()
 	}
@@ -1254,6 +1303,43 @@ func (w *World) NotePlayerStatus(peer *Peer, size int, payload bits.Int) {
 		msg += ", everybody is"
 	}
 	w.Log(msg)
+	if EventFlowV2 && ev.CarRule != nil {
+		if ev.JudgeAt == nil {
+			ev.JudgeAt = map[*Peer]float64{}
+		}
+		ev.JudgeAt[peer] = w.Mono() + EventPickJudgeSeconds
+	}
+}
+
+// JudgePicks (EventFlowV2): a participant that left the car select EventPickJudgeSeconds ago has its car judged now, with the numbers its game
+// sent for the picked car; one that does not fit is out of the event at once instead of when everybody has loaded.
+func (w *World) JudgePicks(now float64) {
+	ev := w.Event
+	if ev == nil || len(ev.JudgeAt) == 0 {
+		return
+	}
+	var wrong []*Peer
+	for _, q := range ev.People {
+		at, ok := ev.JudgeAt[q]
+		if !ok || now < at {
+			continue
+		}
+		delete(ev.JudgeAt, q)
+		if ev.Begun || !q.Connected || ev.CarRule == nil {
+			continue
+		}
+		if !w.EligibleForEvent(q, ev.CarRule) {
+			wrong = append(wrong, q)
+		}
+	}
+	for q, at := range ev.JudgeAt {
+		if now >= at && !ev.has(q) {
+			delete(ev.JudgeAt, q)
+		}
+	}
+	if len(wrong) > 0 {
+		w.dropWrongCars(wrong, fmt.Sprintf(" %s s after leaving the car select", fmtG(EventPickJudgeSeconds)))
+	}
 }
 
 // NoteLoaded notes how long after the event start a participant's HasLoadedCarsForAllParticipants went to 1.

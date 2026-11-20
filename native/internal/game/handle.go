@@ -486,8 +486,22 @@ loop:
 			}
 			w.Logf("%d MsgRequestRace (owner %d) -> RaceReady=1", addr.Port, peer.Owner)
 			w.SetSessionHostBool(SHRaceReady, 1, "race requested")
-			w.PendingRace = &PendingRace{w.Mono() + RaceInviteSeconds, peer}
+			window := RaceInviteSeconds
+			if EventFlowV2 {
+				window = EventJoinSeconds
+			}
+			w.PendingRace = &PendingRace{w.Mono() + window, peer}
+			w.ModdedCars = false
+			if !w.Roadtrip {
+				w.SetModdedCars(peer.allowsModded(w.Mono()), peer, "its Event Options at the race request")
+			}
 			w.RaceRequestedAt = w.Mono()
+			if w.launchCountdownOn() {
+				for _, q := range w.Peers.Values() {
+					q.ReadyHeld = false
+				}
+				w.SetLaunchCountdown(w.NowMs()+int64(window*1000), "race requested: the join wait")
+			}
 			w.RaceHardDeadline = w.Mono() + RaceJoinGraceSeconds
 			var invited []*Peer
 			for _, q := range w.Others(peer) {
@@ -498,7 +512,7 @@ loop:
 			for _, q := range invited {
 				w.Send(q, false, netv2.RequestRaceRelay())
 			}
-			w.Logf("MsgRequestRace relayed to %d other client(s): %s (invite window %.0f s)", len(invited), owners(invited), RaceInviteSeconds)
+			w.Logf("MsgRequestRace relayed to %d other client(s): %s (invite window %.0f s)", len(invited), owners(invited), window)
 		case mtype == netv2.MsgReadyRequest:
 			a, b := r.bits(1), r.bits(1)
 			oid := r.bits(2)
