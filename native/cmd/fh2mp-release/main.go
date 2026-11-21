@@ -14,6 +14,8 @@
 //	    release/launcher.json, every file in DIR with the pin's SHA-256 and size. The key is the base64 seed in FILE or FH2MP_RELEASE_KEY.
 //	fh2mp-release launcher-pin check|version|min|repo|tag|names|flavours [--root DIR]
 //	    release/launcher.json, complete: what it names, one field per call.
+//	fh2mp-release launcher-pin set --tag vX.Y.Z --files DIR [--repo OWNER/NAME] [--root DIR]
+//	    release/launcher.json moved to that Encore release: each flavour's file from DIR hashed, minLauncher kept, never to an older version.
 //	fh2mp-release keygen <file>
 //	    a new release key pair: the private seed into <file> (must not exist), the public half printed for release/release-key.pub.
 //	fh2mp-release zip <out.zip> <dir> <file>...
@@ -112,6 +114,9 @@ func run(args []string, stdin io.Reader) (string, error) {
 		}
 		return manifestBuild(a)
 	case "launcher-pin":
+		if len(args) > 1 && args[0] == "set" {
+			return launcherPinSet(dir, args[1:])
+		}
 		if len(args) != 1 {
 			return "", usageError("usage: fh2mp-release launcher-pin check|version|min|repo|tag|names|flavours [--root DIR]")
 		}
