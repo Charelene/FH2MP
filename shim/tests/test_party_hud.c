@@ -84,6 +84,10 @@ static int plat_hook_call(const char *name, void *site, void *detour, void **ori
 
 #include "src/party_hud.inc"
 
+/* the developer badge's row mark around each writer call (src/dev_badge_hud.inc, tested by test_dev_badge_hud.sh): nothing here */
+static void devhud_row_begin(void) {}
+static void devhud_row_end(void **slot) { (void)slot; }
+
 static int has(const char *s, const char *part) { return strstr(s, part) != NULL; }
 
 int main(void)

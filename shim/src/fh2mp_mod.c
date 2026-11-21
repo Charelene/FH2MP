@@ -3497,16 +3497,36 @@ static int ui_race_toast_layout(void)
     return ok;
 }
 
-/* Developer badge (src/dev_badge.inc): FH2MP's logo after a developer's gamertag on the name tag over their car. Disable with env FH2MP_NO_DEVBADGE. */
+/* Developer badge (src/dev_badge.inc): the Encore logo after a developer's gamertag on the name tag over their car, in the player lists and on the
+ * leaderboards. Disable with env FH2MP_NO_DEVBADGE. */
 #include "dev_badge.inc"
+#include "dev_badge_hud.inc"
 
 static int ui_dev_badge(void)
 {
+    static const char *const boards[3][2] = {
+        {"Scenes/Anthem/A_RivalsLeaderboard.xaml", "UI/Scenes/Anthem/A_RivalsLeaderboard.xaml"},
+        {"Scenes/Anthem/A_SpeedTrapLeaderboard.xaml", "UI/Scenes/Anthem/A_SpeedTrapLeaderboard.xaml"},
+        {"Scenes/Anthem/A_GlobalXPLeaderboard.xaml", "UI/Scenes/Anthem/A_GlobalXPLeaderboard.xaml"},
+    };
     int ok = stateflow_replace(L"\\media\\UI.zip", "Scenes/Anthem/AR_OpponentLabel.xaml", "UI/Scenes/Anthem/AR_OpponentLabel.xaml", DEV_BADGE_OLD,
                                sizeof DEV_BADGE_OLD - 1, DEV_BADGE_NEW, sizeof DEV_BADGE_NEW - 1, "devbadge");
-    if (ok) {
+    int lists = stateflow_replace(L"\\media\\UI.zip", "Controls/PlayerListControl.xaml", "UI/Controls/PlayerListControl.xaml", DEV_BADGE_LIST_OLD,
+                                  sizeof DEV_BADGE_LIST_OLD - 1, DEV_BADGE_LIST_NEW, sizeof DEV_BADGE_LIST_NEW - 1, "devbadge");
+    unsigned i;
+    for (i = 0; i < 3; i++) {
+        lists += stateflow_replace(L"\\media\\UI.zip", boards[i][0], boards[i][1], DEV_BADGE_BOARD_OLD, sizeof DEV_BADGE_BOARD_OLD - 1, DEV_BADGE_BOARD_NEW,
+                                   sizeof DEV_BADGE_BOARD_NEW - 1, "devbadge");
+    }
+    lists += stateflow_replace(L"\\media\\UI.zip", "Controls/HUDMiniLeaderboardControl.xaml", "UI/Controls/HUDMiniLeaderboardControl.xaml", DEV_BADGE_HUD_OLD,
+                               sizeof DEV_BADGE_HUD_OLD - 1, DEV_BADGE_HUD_NEW, sizeof DEV_BADGE_HUD_NEW - 1, "devbadge");
+    if (ok || lists) {
         log_begin();
-        log_raw("devbadge: Scenes/Anthem/AR_OpponentLabel.xaml handed to the platform, FH2MP's developers have its logo after their gamertag on name tags\n");
+        log_raw("devbadge: FH2MP's developers have the Encore logo after their gamertag: on name tags ");
+        log_raw(ok ? "yes" : "no");
+        log_raw(", in ");
+        log_dec((unsigned long)lists);
+        log_raw(" of 5 pages of lists (the player list, the Rivals, speed trap and XP leaderboards, the HUD's player list)\n");
     }
     return ok;
 }
@@ -5757,7 +5777,10 @@ static DWORD WINAPI late_init(LPVOID unused)
         {   /* the game-bug guards here and below (hook, model, dtconv, cam, comp, travelxp, carroom, nulltorque, torqueload, garagerating, carphysics,
              * cinematics, placement) are also made in offline runs, by offline_guards */
             wchar_t env[8];
-            if (GetEnvironmentVariableW(L"FH2MP_NO_PARTYHUD", env, 8) == 0) patch_party_hud();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_PARTYHUD", env, 8) == 0 && patch_party_hud() &&
+                GetEnvironmentVariableW(L"FH2MP_NO_DEVBADGE", env, 8) == 0) {
+                patch_dev_badge_hud();    /* the badge in the HUD's player list goes through party_row */
+            }
             if (GetEnvironmentVariableW(L"FH2MP_NO_RACETOAST", env, 8) == 0) patch_race_toast();
             if (GetEnvironmentVariableW(L"FH2MP_NO_HOOKGUARD", env, 8) == 0) patch_hook_guard();
             if (GetEnvironmentVariableW(L"FH2MP_NO_LOGGUARD", env, 8) == 0) patch_gameplaylog_guard();
