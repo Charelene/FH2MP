@@ -88,8 +88,9 @@ int main(void)
     CHECK(sizeof QC_BOX_RES_NEW > sizeof QC_BOX_RES_OLD && !strncmp(QC_BOX_RES_NEW, "\r\n", 2) &&
           !strcmp(QC_BOX_RES_NEW + sizeof QC_BOX_RES_NEW - sizeof QC_BOX_RES_OLD + 2, QC_BOX_RES_OLD + 2));
     CHECK(count(QC_BOX_ROW_NEW, "{StaticResource QuickChat_ControlTemplate_Pill}") == 1 && count(QC_BOX_RES_NEW, "x:Key=\"QuickChat_ControlTemplate_Pill\"") == 1);
-    CHECK(count(QC_BOX_RES_NEW, "{Binding FH2Mod_Text_QuickChat_Pill}") == 1 && count(QC_BOX_RES_NEW, "{Binding FH2Mod_Text_QuickChat_PillOn}") == 2);
+    CHECK(count(QC_BOX_RES_NEW, "{Binding FH2Mod_Text_QuickChat_Pill}") == 3 && count(QC_BOX_RES_NEW, "{Binding FH2Mod_Text_QuickChat_PillOn}") == 2);
     CHECK(count(QC_BOX_RES_NEW, "<DataTrigger Binding=\"{Binding IsDrivatar}\" Value=\"True\">") == 1);
+    CHECK(count(QC_BOX_RES_NEW, "<DataTrigger Binding=\"{Binding FH2Mod_Text_QuickChat_Pill}\" Value=\"\">") == 1);   /* no text, no box */
     for (j = 0; j + 1 < sizeof QC_BOX_RES_NEW; j++) CHECK(QC_BOX_RES_NEW[j] != '\n' || (j && QC_BOX_RES_NEW[j - 1] == '\r'));
     if (!failed) printf("dev badge: all checks pass (%d names)\n", (int)i);
     return failed != 0;

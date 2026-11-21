@@ -5,8 +5,8 @@
  * Two exact replacements (ui_name_tag_page in fh2mp_mod.c, with the badge's): the box's place after the row of icons over the tag, and its
  * template and easings at the end of the page's resources. Its text and its life come from QuickChat's page texts (FH2 Mod Platform API 11):
  * FH2Mod_Text_QuickChat_Pill is the phrase, FH2Mod_Text_QuickChat_PillOn turns "1" or "2" to start the pop, hold and fade (Forza Horizon
- * 5's timings). Without QuickChat those find nothing, so the box stays hidden. One rule is FH2MP's own: never on a Drivatar's tag, since
- * online a Drivatar carries a real player's name. Generated (with the checks: each old text occurs once, the page stays well-formed) by
+ * 5's timings). Without QuickChat those find nothing, so the box stays hidden. Two rules are FH2MP's own: never on a Drivatar's tag, since
+ * online a Drivatar carries a real player's name, and never without text, so a fade that started late can't leave an empty box. Generated (with the checks: each old text occurs once, the page stays well-formed) by
  * a script kept with QuickChat's source; FH2MP_NO_CHATBOX=1 leaves it out. */
 static const char QC_BOX_ROW_OLD[] =
     "                                  x:Name=\"HVTIcon\" />\r\n"
@@ -106,6 +106,12 @@ static const char QC_BOX_RES_NEW[] =
     "                    </DataTrigger.EnterActions>\r\n"
     "                </DataTrigger>\r\n"
     "                <DataTrigger Binding=\"{Binding IsDrivatar}\" Value=\"True\">\r\n"
+    "                    <Setter TargetName=\"ChatPill\" Property=\"Visibility\" Value=\"Collapsed\" />\r\n"
+    "                </DataTrigger>\r\n"
+    "                <DataTrigger Binding=\"{Binding FH2Mod_Text_QuickChat_Pill}\" Value=\"\">\r\n"
+    "                    <Setter TargetName=\"ChatPill\" Property=\"Visibility\" Value=\"Collapsed\" />\r\n"
+    "                </DataTrigger>\r\n"
+    "                <DataTrigger Binding=\"{Binding FH2Mod_Text_QuickChat_Pill}\" Value=\"{x:Null}\">\r\n"
     "                    <Setter TargetName=\"ChatPill\" Property=\"Visibility\" Value=\"Collapsed\" />\r\n"
     "                </DataTrigger>\r\n"
     "            </ControlTemplate.Triggers>\r\n"

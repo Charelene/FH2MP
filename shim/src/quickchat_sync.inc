@@ -10,6 +10,7 @@
 
 #define QC_POLL_MS 250u          /* a poll while nothing of ours is waiting to be taken */
 #define QC_BUSY_MS 80u           /* while one is */
+#define QC_FRESH_MS 5000u        /* older messages aren't passed on: one said in solo would go out when a session starts */
 
 static const QuickChatBridge *g_qc;   /* set once by the worker */
 
@@ -57,7 +58,7 @@ static DWORD WINAPI qc_worker(void *unused)
         int length, i, n, drained; ULONGLONG predicted,current_generation,now=GetTickCount64(); unsigned count=0, number=0, phrase=0;
         uint32_t qn=0, qp=0; uint64_t qms=0;
         if(!g_light_enabled) {Sleep(1000);continue;}
-        if(g_qc->latest(&qn,&qp,&qms)) number=qn, phrase=qp;
+        if(g_qc->latest(&qn,&qp,&qms) && qms+QC_FRESH_MS>now) number=qn, phrase=qp;
         AcquireSRWLockShared(&g_light_lock);
         length=g_light.address_len; predicted=g_light.prediction_at; current_generation=g_light.generation;
         light_copy(address,g_light.address,(unsigned)length);
