@@ -150,7 +150,15 @@ func TestReplayAnsweredFromCache(t *testing.T) {
 
 func TestBadServerSalt(t *testing.T) {
 	ts := startServer(t, nil)
-	c := dialRaw(t, ts.addr, false).mustKey()
+	// Both clocks start at real time. Pin them to 5 minutes past the next hour: an hour's salt is good until 30 minutes after that hour
+	// ends, so the 31-minute step below lands inside it only when the test starts before xx:59 (CI run 44858626410 started at 02:59:56).
+	// Forward only: the server's socket deadlines read the same clock.
+	now := time.Now()
+	pin := now.Truncate(time.Hour).Add(time.Hour + 5*time.Minute).Sub(now)
+	ts.clock.add(pin)
+	c := dialRaw(t, ts.addr, false)
+	c.offset = pin
+	c.mustKey()
 	id := c.newMsgID()
 	c.sendRaw(c.salt^0x5555, id, c.nextSeq(true), encode(t, &mt.PingRequest{PingID: 9}))
 	var b mt.BadServerSalt
@@ -163,7 +171,7 @@ func TestBadServerSalt(t *testing.T) {
 	c.next(mt.PongTypeID)
 	// The exchange's first salt runs out 30 minutes after the key was made; the hourly salt keeps working.
 	ts.clock.add(31 * time.Minute)
-	c.offset = 31 * time.Minute
+	c.offset = pin + 31*time.Minute
 	c.send(&mt.PingRequest{PingID: 10})
 	c.next(mt.PongTypeID)
 }
