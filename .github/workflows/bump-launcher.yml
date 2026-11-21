@@ -1,0 +1,95 @@
+name: bump-launcher
+
+# Moves release/launcher.json to Encore's latest release by a pull request into develop, so every FH2MP release carries the Encore that is
+# current when it is made and nobody pins it by hand. Encore is built and signed in Charelene/Encore-Launcher and the Signer
+# (Charelene/encore-signer) and published to Charelene/Encore; its "Live" tap makes a release the latest one, which is the only kind this
+# workflow follows (a pre-release is the Signer's PTR, not for players).
+#
+# It runs when the Signer takes an Encore release Live (a repository_dispatch of type "encore-released" with client_payload.tag, sent by
+# promote-live in scrutineering.yml) and by hand (gh workflow run bump-launcher.yml -f tag=v2.1.3; no tag: the latest release). The files are downloaded
+# from the release and hashed here (fh2mp-release launcher-pin set); the portable zip must hold fh2mp-launcher.exe at its root, which a
+# 1.4.x portable launcher starts again after its update. Nothing is released: the pull request is the review, and the next FH2MP release
+# carries what it merged.
+#
+# Needs: Settings > Actions > General > "Allow GitHub Actions to create and approve pull requests". A pull request made with the workflow's
+# token starts no ci.yml run by itself: re-run it from the Actions tab (or push an empty commit to its branch) before merging.
+on:
+  workflow_dispatch:
+    inputs:
+      repo: { description: "Encore's release repository", default: "Charelene/Encore", required: false }
+      tag: { description: "release tag vX.Y.Z (empty: the latest release)", required: false }
+  repository_dispatch:
+    types: [encore-released]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bump-launcher
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-22.04
+    permissions: { contents: write, pull-requests: write }
+    env:
+      GH_TOKEN: ${{ github.token }}
+      IN_REPO: ${{ github.event.inputs.repo }}
+      IN_TAG: ${{ github.event.inputs.tag || github.event.client_payload.tag }}
+    steps:
+      # the integration branch, whichever branch this workflow file was run from (a schedule runs the default branch's copy)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { ref: develop }
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with: { go-version-file: native/go.mod, cache: false }
+      - name: Encore's release
+        id: release
+        run: |
+          repo=${IN_REPO:-Charelene/Encore}
+          tag=$IN_TAG
+          if [ -z "$tag" ]; then
+            # the latest release (never a pre-release); none yet while the Signer has published nothing
+            tag=$(gh release view -R "$repo" --json tagName --jq .tagName 2>/dev/null || true)
+            [ -n "$tag" ] || { echo "::notice::$repo has no release yet"; echo "tag=" >> "$GITHUB_OUTPUT"; exit 0; }
+          fi
+          [[ $repo =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "::error::repository $repo"; exit 1; }
+          [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$ ]] || { echo "::error::tag $tag is not vX.Y.Z"; exit 1; }
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"; echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: move the pin
+        id: pin
+        if: steps.release.outputs.tag != ''
+        env: { REPO: "${{ steps.release.outputs.repo }}", TAG: "${{ steps.release.outputs.tag }}" }
+        run: |
+          . release/reltool.sh
+          version=${TAG#v}
+          mkdir -p files
+          for name in "EncoreSetup-$version.exe" "Encore-$version-x86_64.AppImage" "Encore-$version-windows-x64-portable.zip"; do
+            gh release download "$TAG" -R "$REPO" -p "$name" -D files
+          done
+          unzip -Z1 "files/Encore-$version-windows-x64-portable.zip" | grep -qx 'fh2mp-launcher.exe' \
+            || { echo "::error::the portable zip has no fh2mp-launcher.exe at its root"; exit 1; }
+          # a tag below the pinned version (an old run, a withdrawn release) moves nothing: set refuses it
+          if ! out=$(reltool launcher-pin set --tag "$TAG" --repo "$REPO" --files files 2>&1); then
+            case $out in
+              *"only moves forward"*) echo "::notice::$out"; echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0;;
+              *) echo "::error::$out"; exit 1;;
+            esac
+          fi
+          reltool launcher-pin check
+          if git diff --quiet -- release/launcher.json; then echo "changed=false" >> "$GITHUB_OUTPUT"; else echo "changed=true" >> "$GITHUB_OUTPUT"; fi
+      - name: pull request
+        if: steps.pin.outputs.changed == 'true'
+        env: { REPO: "${{ steps.release.outputs.repo }}", TAG: "${{ steps.release.outputs.tag }}" }
+        run: |
+          branch="bump-launcher/${TAG#v}"
+          if [ -n "$(gh pr list --head "$branch" --state open --json number --jq '.[0].number // empty')" ]; then
+            echo "::notice::$branch has a pull request already"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add release/launcher.json
+          git commit -q -m "Launcher pin: Encore ${TAG#v}" -m "release/launcher.json names the files of $REPO $TAG, hashed from the release (fh2mp-release launcher-pin set)."
+          git push origin "$branch"
+          gh pr create --base develop --head "$branch" --title "Launcher pin: Encore ${TAG#v}" \
+            --body "Moves release/launcher.json to the files of [$REPO $TAG](https://github.com/$REPO/releases/tag/$TAG), each hashed from the release. The next FH2MP release carries them in its signed manifest. Nothing is released by merging."
