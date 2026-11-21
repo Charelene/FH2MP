@@ -93,6 +93,7 @@ lane_unit() {
     run "shim contact forecast" shim/tests/test_contact_forecast.sh
     run "shim copy path" shim/tests/test_copy_path.sh
     run "shim dev badge" shim/tests/test_dev_badge.sh
+    run "shim dev badge HUD" shim/tests/test_dev_badge_hud.sh
 }
 
 pg_root=
