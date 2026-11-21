@@ -9,6 +9,7 @@ cat > "$tmp/t.c" <<'EOT'
 #include <stdio.h>
 #include <string.h>
 #include "dev_badge.inc"
+#include "quickchat_box.inc"
 static int failed;
 #define CHECK(cond) do { if (!(cond)) { printf("FAIL line %d: %s\n", __LINE__, #cond); failed++; } } while (0)
 #define NAME_ROW(name) name,
@@ -81,6 +82,16 @@ int main(void)
     CHECK(count(DEV_BADGE_NEW, "<MultiDataTrigger>") == 3 * (int)i);
     CHECK(count(DEV_BADGE_NEW, "Property=\"Text\"\r\n") == 2 * (int)i);
     CHECK(count(DEV_BADGE_NEW, "Binding=\"{Binding IsDrivatar}\"\r\n") == 3 * (int)i && count(DEV_BADGE_NEW, "Value=\"False\" />") == 3 * (int)i);   /* never on a Drivatar */
+    /* QuickChat's message box in the same page (src/quickchat_box.inc): each new text keeps its old one, the box's place and template
+     * are there once, it reads QuickChat's two texts, and a Drivatar's tag never shows it */
+    CHECK(sizeof QC_BOX_ROW_NEW > sizeof QC_BOX_ROW_OLD && !memcmp(QC_BOX_ROW_NEW, QC_BOX_ROW_OLD, sizeof QC_BOX_ROW_OLD - 1));
+    CHECK(sizeof QC_BOX_RES_NEW > sizeof QC_BOX_RES_OLD && !strncmp(QC_BOX_RES_NEW, "\r\n", 2) &&
+          !strcmp(QC_BOX_RES_NEW + sizeof QC_BOX_RES_NEW - sizeof QC_BOX_RES_OLD + 2, QC_BOX_RES_OLD + 2));
+    CHECK(count(QC_BOX_ROW_NEW, "{StaticResource QuickChat_ControlTemplate_Pill}") == 1 && count(QC_BOX_RES_NEW, "x:Key=\"QuickChat_ControlTemplate_Pill\"") == 1);
+    CHECK(count(QC_BOX_RES_NEW, "{Binding FH2Mod_Text_QuickChat_Pill}") == 3 && count(QC_BOX_RES_NEW, "{Binding FH2Mod_Text_QuickChat_PillOn}") == 2);
+    CHECK(count(QC_BOX_RES_NEW, "<DataTrigger Binding=\"{Binding IsDrivatar}\" Value=\"True\">") == 1);
+    CHECK(count(QC_BOX_RES_NEW, "<DataTrigger Binding=\"{Binding FH2Mod_Text_QuickChat_Pill}\" Value=\"\">") == 1);   /* no text, no box */
+    for (j = 0; j + 1 < sizeof QC_BOX_RES_NEW; j++) CHECK(QC_BOX_RES_NEW[j] != '\n' || (j && QC_BOX_RES_NEW[j - 1] == '\r'));
     if (!failed) printf("dev badge: all checks pass (%d names)\n", (int)i);
     return failed != 0;
 }

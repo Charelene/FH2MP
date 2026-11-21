@@ -3242,6 +3242,7 @@ static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *
 #include "event_fix.inc"
 #include "event_stock.inc"
 #include "stall_trace.inc"
+#include "quickchat_sync.inc"
 
 /*
  * #64: a Monthly Rival started from the pause menu inside an online session loaded for ever. The menu's launch (RivalsModule
@@ -3498,20 +3499,53 @@ static int ui_race_toast_layout(void)
 }
 
 /* Developer badge (src/dev_badge.inc): the Encore logo after a developer's gamertag on the name tag over their car, in the player lists and on the
- * leaderboards. Disable with env FH2MP_NO_DEVBADGE. */
+ * leaderboards. Disable with env FH2MP_NO_DEVBADGE.
+ * The name tag over a car (UI.zip Scenes/Anthem/AR_OpponentLabel.xaml) is one page the shim owns for two things: the badge and QuickChat's
+ * message box over the sender's car (src/quickchat_box.inc; env FH2MP_NO_CHATBOX leaves it out). Only one mod can replace a game file, so
+ * QuickChat leaves the page to FH2MP when FH2MP is there. */
 #include "dev_badge.inc"
 #include "dev_badge_hud.inc"
+#include "quickchat_box.inc"
 
-static int ui_dev_badge(void)
+static int ui_name_tag_page(void)
+{
+    struct sf_pair pairs[3];
+    unsigned n = 0;
+    wchar_t tmp[8];
+    int badge = GetEnvironmentVariableW(L"FH2MP_NO_DEVBADGE", tmp, 8) == 0, box = GetEnvironmentVariableW(L"FH2MP_NO_CHATBOX", tmp, 8) == 0, ok;
+
+    if (badge) {
+        pairs[n].old = DEV_BADGE_OLD, pairs[n].olen = sizeof DEV_BADGE_OLD - 1, pairs[n].neu = DEV_BADGE_NEW, pairs[n].nlen = sizeof DEV_BADGE_NEW - 1;
+        n++;
+    }
+    if (box) {
+        pairs[n].old = QC_BOX_ROW_OLD, pairs[n].olen = sizeof QC_BOX_ROW_OLD - 1, pairs[n].neu = QC_BOX_ROW_NEW, pairs[n].nlen = sizeof QC_BOX_ROW_NEW - 1;
+        n++;
+        pairs[n].old = QC_BOX_RES_OLD, pairs[n].olen = sizeof QC_BOX_RES_OLD - 1, pairs[n].neu = QC_BOX_RES_NEW, pairs[n].nlen = sizeof QC_BOX_RES_NEW - 1;
+        n++;
+    }
+    if (!n) {
+        return 0;
+    }
+    ok = stateflow_replace_n(L"\\media\\UI.zip", "Scenes/Anthem/AR_OpponentLabel.xaml", "UI/Scenes/Anthem/AR_OpponentLabel.xaml", pairs, n, "nametag page");
+    if (ok) {
+        log_begin();
+        log_raw("nametag page: Scenes/Anthem/AR_OpponentLabel.xaml handed to the platform, with ");
+        log_raw(badge && box ? "the developer badge and QuickChat's message box" : badge ? "the developer badge" : "QuickChat's message box");
+        log_raw("\n");
+    }
+    return ok;
+}
+
+/* The badge in the lists; tag says whether the name tag page has it (ui_name_tag_page). */
+static void ui_dev_badge_lists(int tag)
 {
     static const char *const boards[3][2] = {
         {"Scenes/Anthem/A_RivalsLeaderboard.xaml", "UI/Scenes/Anthem/A_RivalsLeaderboard.xaml"},
         {"Scenes/Anthem/A_SpeedTrapLeaderboard.xaml", "UI/Scenes/Anthem/A_SpeedTrapLeaderboard.xaml"},
         {"Scenes/Anthem/A_GlobalXPLeaderboard.xaml", "UI/Scenes/Anthem/A_GlobalXPLeaderboard.xaml"},
     };
-    int ok = stateflow_replace(L"\\media\\UI.zip", "Scenes/Anthem/AR_OpponentLabel.xaml", "UI/Scenes/Anthem/AR_OpponentLabel.xaml", DEV_BADGE_OLD,
-                               sizeof DEV_BADGE_OLD - 1, DEV_BADGE_NEW, sizeof DEV_BADGE_NEW - 1, "devbadge");
-    int lists = stateflow_replace(L"\\media\\UI.zip", "Controls/PlayerListControl.xaml", "UI/Controls/PlayerListControl.xaml", DEV_BADGE_LIST_OLD,
+    int lists =stateflow_replace(L"\\media\\UI.zip", "Controls/PlayerListControl.xaml", "UI/Controls/PlayerListControl.xaml", DEV_BADGE_LIST_OLD,
                                   sizeof DEV_BADGE_LIST_OLD - 1, DEV_BADGE_LIST_NEW, sizeof DEV_BADGE_LIST_NEW - 1, "devbadge");
     unsigned i;
     for (i = 0; i < 3; i++) {
@@ -3520,15 +3554,14 @@ static int ui_dev_badge(void)
     }
     lists += stateflow_replace(L"\\media\\UI.zip", "Controls/HUDMiniLeaderboardControl.xaml", "UI/Controls/HUDMiniLeaderboardControl.xaml", DEV_BADGE_HUD_OLD,
                                sizeof DEV_BADGE_HUD_OLD - 1, DEV_BADGE_HUD_NEW, sizeof DEV_BADGE_HUD_NEW - 1, "devbadge");
-    if (ok || lists) {
+    if (tag || lists) {
         log_begin();
         log_raw("devbadge: FH2MP's developers have the Encore logo after their gamertag: on name tags ");
-        log_raw(ok ? "yes" : "no");
+        log_raw(tag ? "yes" : "no");
         log_raw(", in ");
         log_dec((unsigned long)lists);
         log_raw(" of 5 pages of lists (the player list, the Rivals, speed trap and XP leaderboards, the HUD's player list)\n");
     }
-    return ok;
 }
 
 /*
@@ -5757,6 +5790,7 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_CARSELECT_HOLD", env, 8) == 0) patch_carsel();
             patch_mods(g_exe_dir);    /* NitroSystem's NOS rule (always online) and other players' NOS and underglow */
             if (GetEnvironmentVariableW(L"FH2MP_NO_RACEWAIT", env, 8) == 0) patch_race_wait();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_QUICKCHAT", env, 8) == 0) start_quickchat();   /* nothing without QuickChat */
         }
         {
             wchar_t env[8];
@@ -6699,8 +6733,9 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
         if (GetEnvironmentVariableW(L"FH2MP_NO_RACETOAST", tmp, 8) == 0) {
             ui_race_toast_layout();    /* now: the game reads its UI files when the first screen loads */
         }
+        int tag = ui_name_tag_page();    /* the developer badge and QuickChat's message box, each with its own switch */
         if (GetEnvironmentVariableW(L"FH2MP_NO_DEVBADGE", tmp, 8) == 0) {
-            ui_dev_badge();
+            ui_dev_badge_lists(tag);
         }
     }
     {

@@ -17,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"fh2mp/internal/bits"
 	"fh2mp/internal/capacity"
@@ -122,7 +123,9 @@ type Hub struct {
 	HonkRoutes     map[uint64]Addr
 	CarselRoutes   map[uint64]Addr
 	ModsRoutes     map[uint64]Addr
-	EvoRoutes      map[uint64]Addr // event options' (eventopts.go)
+	EvoRoutes      map[uint64]Addr   // event options' (eventopts.go)
+	ChatRoutes     map[uint64]Addr   // quick chat's (quickchat.go)
+	Gamertags      map[uint64]string // xuid -> gamertag, from the account service ("name <xuid hex> <UTF-8 hex>"), for quick chat's senders
 	probeSeen      map[Addr]probeEnt
 	autoWorlds     int
 	lastSweep      float64
@@ -152,7 +155,7 @@ func NewHub(cfg HubConfig) (*Hub, error) {
 		Assign: map[uint64]string{}, Follow: map[uint64]bool{}, Standins: map[uint64]map[int64]int64{}, CustomCars: map[uint64]map[int64]bool{}, Runs: map[uint64]string{}, Authed: map[uint64]authEnt{}, Flagged: omap.New[uint64, flagEnt](), Trusted: map[uint64]float64{}, Revoked: map[uint64]float64{},
 		Keys: map[uint64]map[string]float64{}, TicketEpochs: map[Addr][]byte{}, Bound: map[Addr]boundEnt{}, Nonces: omap.New[nonceKey, float64](), NonceCount: map[uint64]int{},
 		AuthLog: map[any]float64{}, Worlds: omap.New[WorldKey, *World](), Route: omap.New[Addr, *World](), EmptySince: map[WorldKey]float64{},
-		LightingRoutes: map[uint64]Addr{}, HonkRoutes: map[uint64]Addr{}, CarselRoutes: map[uint64]Addr{}, ModsRoutes: map[uint64]Addr{}, EvoRoutes: map[uint64]Addr{}, probeSeen: map[Addr]probeEnt{}, nxt: math.Inf(1)}
+		LightingRoutes: map[uint64]Addr{}, HonkRoutes: map[uint64]Addr{}, CarselRoutes: map[uint64]Addr{}, ModsRoutes: map[uint64]Addr{}, EvoRoutes: map[uint64]Addr{}, ChatRoutes: map[uint64]Addr{}, Gamertags: map[uint64]string{}, probeSeen: map[Addr]probeEnt{}, nxt: math.Inf(1)}
 	h.catalogPtr.Store(cfg.Catalog)
 	h.DefaultType = 2
 	h.PickRng = func() Rand { return pyrand.New(entropySeed()) }
@@ -296,7 +299,7 @@ func parseHex(s string) (uint64, error) {
 	return strconv.ParseUint(s, 16, 64)
 }
 
-// ControlText handles one control message: assign, auth, logout, revoke, allow, unflag, flags, trust, untrust, trusted, run, tools, pop, lobbies, positions, telemetry, bots.
+// ControlText handles one control message: assign, auth, name, logout, revoke, allow, unflag, flags, trust, untrust, trusted, run, tools, pop, lobbies, positions, telemetry, bots.
 func (h *Hub) ControlText(text string, replyTo *Addr) {
 	parts := strings.Fields(text)
 	n := len(parts)
@@ -421,6 +424,20 @@ func (h *Hub) ControlText(text string, replyTo *Addr) {
 				h.ctlIgnored(parts, fmt.Sprintf("ticket key of %#x not stored: the account already has %d live sessions (limit 16), tickets of this one are refused", xuid, len(keys)))
 			}
 		}
+	case n == 3 && parts[0] == "name":
+		xuid, err := parseHex(parts[1])
+		var raw []byte
+		if err == nil {
+			raw, err = hex.DecodeString(parts[2])
+		}
+		if err == nil && !utf8.Valid(raw) {
+			err = fmt.Errorf("the gamertag is not UTF-8")
+		}
+		if err != nil {
+			h.ctlIgnored(parts, fmt.Sprintf("name message unreadable (%v)", err))
+			return
+		}
+		h.setGamertag(xuid, string(raw))
 	case n == 3 && parts[0] == "logout":
 		xuid, err := parseHex(parts[1])
 		var key []byte
@@ -1025,6 +1042,10 @@ func (h *Hub) Handle(data []byte, addr Addr) {
 	}
 	if len(data) >= 19 && string(data[11:19]) == eventoptsMagic {
 		h.eventoptsHandle(data, addr, nil)
+		return
+	}
+	if len(data) >= 19 && string(data[11:19]) == quickchatMagic {
+		h.quickchatHandle(data, addr, nil)
 		return
 	}
 	if h.probeHandle(data, addr) {
