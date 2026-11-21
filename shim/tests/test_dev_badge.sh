@@ -71,6 +71,13 @@ int main(void)
             CHECK(count(news[p], "<DataTrigger ") == 3 * (int)i && count(news[p], "IsDrivatar") == 0);
         }
     }
+    /* the HUD's player list: one rule on the row's TeamID, the value dev_badge_hud.inc writes; the template's other rules kept */
+    snprintf(value, sizeof value, "<DataTrigger Binding=\"{Binding TeamID}\" Value=\"%d\">", DEV_BADGE_HUD_TEAM);
+    CHECK(DEV_BADGE_HUD_TEAM != 0 && DEV_BADGE_HUD_TEAM != 1 && count(DEV_BADGE_HUD_NEW, value) == 1 && count(DEV_BADGE_HUD_NEW, "TeamID") == 1);
+    CHECK(count(DEV_BADGE_HUD_OLD, "IsInPartyWithLocalPlayer") == 1 && count(DEV_BADGE_HUD_NEW, "IsInPartyWithLocalPlayer") == 1);
+    CHECK(count(DEV_BADGE_HUD_NEW, "Text=\"{Binding Gamertag}\"") == 1 && count(DEV_BADGE_HUD_NEW, "<Grid x:Name=\"FH2MP_DevBadge\" Width=\"20\" Height=\"20\"") == 1);
+    CHECK(count(DEV_BADGE_HUD_NEW, "Visibility=\"Collapsed\"") == 1 && count(DEV_BADGE_HUD_NEW, "Viewbox") == 0);
+    for (j = 0; j < sizeof DEV_BADGE_HUD_NEW - 1; j++) CHECK(DEV_BADGE_HUD_NEW[j] != '\n' || (j && DEV_BADGE_HUD_NEW[j - 1] == '\r'));
     CHECK(count(DEV_BADGE_NEW, "<MultiDataTrigger>") == 3 * (int)i);
     CHECK(count(DEV_BADGE_NEW, "Property=\"Text\"\r\n") == 2 * (int)i);
     CHECK(count(DEV_BADGE_NEW, "Binding=\"{Binding IsDrivatar}\"\r\n") == 3 * (int)i && count(DEV_BADGE_NEW, "Value=\"False\" />") == 3 * (int)i);   /* never on a Drivatar */
