@@ -25,8 +25,8 @@
  * space; with these rules her tag shows the plain name and then the badge. Not seen: a club mod's mark (taken to be U+222C, the leader mark's
  * near-twin in the font).
  *
- * In the lists the gamertag's text line becomes the same kind of Control: the text (its style kept) and the badge, scaled down by a Viewbox to
- * the list's 24-unit type. A list row has no IsDrivatar, so the rules there are on the gamertag alone (DataTriggers, three per name as above):
+ * In the lists the gamertag's text line becomes the same kind of Control: the text (its style kept) and the badge, its shapes drawn at the
+ * list's 24-unit type's size (a Viewbox scaling the tag's shapes drew nothing). A list row has no IsDrivatar, so the rules there are on the gamertag alone (DataTriggers, three per name as above):
  * offline, a Drivatar that carries a developer's name gets the badge in a race's grid and results. The player list's text was named PlayerName;
  * nothing refers to that name (not the page, and the exe only has PlayerName as a property of the online event pages), so it is renamed. */
 #define DEV_BADGE_NAMES(X) X("Charelene") X("AVALON")
@@ -134,39 +134,38 @@ static const char DEV_BADGE_NEW[] =
 /* In the lists (see above). DEV_BADGE_LIST_OLD occurs once in Controls/PlayerListControl.xaml, DEV_BADGE_BOARD_OLD once in each of
  * Scenes/Anthem/A_RivalsLeaderboard.xaml, A_SpeedTrapLeaderboard.xaml and A_GlobalXPLeaderboard.xaml. */
 #define DEV_BADGE_ROW_LOGO \
-    "                                                        <local:FZMaterial Color=\"#FFFFFFFF\"\r\n" \
-    "                                                                          Width=\"92\"\r\n" \
-    "                                                                          Height=\"180\"\r\n" \
-    "                                                                          HorizontalAlignment=\"Left\"\r\n" \
-    "                                                                          VerticalAlignment=\"Top\"\r\n" \
-    "                                                                          Margin=\"0,0,0,0\">\r\n" \
-    "                                                            <local:FZMaterial.Data>\r\n" \
-    "                                                                <local:FZGeometry Data=\"M92,180 38.79,180 28.75,178.68 19.4,174.8 11.36,168.64 5.2,160.6 1.32,151.25 0,141.21 0,38.79 1.32,28.75 5.2,19.4 11.36,11.36 19.4,5.2 28.75,1.32 38.79,0 92,0 92,13.97 38.79,13.97 32.37,14.81 26.38,17.29 21.24,21.24 17.29,26.38 14.81,32.37 13.97,38.79 13.97,141.21 14.81,147.63 17.29,153.62 21.24,158.76 26.38,162.71 32.37,165.19 38.79,166.03 92,166.03z\" />\r\n" \
-    "                                                            </local:FZMaterial.Data>\r\n" \
-    "                                                        </local:FZMaterial>\r\n" \
-    "                                                        <local:FZMaterial Color=\"#FFFFFFFF\"\r\n" \
-    "                                                                          Width=\"90\"\r\n" \
-    "                                                                          Height=\"180\"\r\n" \
-    "                                                                          HorizontalAlignment=\"Left\"\r\n" \
-    "                                                                          VerticalAlignment=\"Top\"\r\n" \
-    "                                                                          Margin=\"90,0,0,0\">\r\n" \
-    "                                                            <local:FZMaterial.Data>\r\n" \
-    "                                                                <local:FZGeometry Data=\"M0,0 51.21,0 61.25,1.32 70.6,5.2 78.64,11.36 84.8,19.4 88.68,28.75 90,38.79 90,141.21 88.68,151.25 84.8,160.6 78.64,168.64 70.6,174.8 61.25,178.68 51.21,180 0,180 0,166.03 51.21,166.03 57.63,165.19 63.62,162.71 68.76,158.76 72.71,153.62 75.19,147.63 76.03,141.21 76.03,38.79 75.19,32.37 72.71,26.38 68.76,21.24 63.62,17.29 57.63,14.81 51.21,13.97 0,13.97z\" />\r\n" \
-    "                                                            </local:FZMaterial.Data>\r\n" \
-    "                                                        </local:FZMaterial>\r\n" \
-    "                                                        <local:FZMaterial Color=\"#FFFFFFFF\"\r\n" \
-    "                                                                          Width=\"83.5\"\r\n" \
-    "                                                                          Height=\"98.92\"\r\n" \
-    "                                                                          HorizontalAlignment=\"Left\"\r\n" \
-    "                                                                          VerticalAlignment=\"Top\"\r\n" \
-    "                                                                          Margin=\"48.25,40.54,0,0\">\r\n" \
-    "                                                            <local:FZMaterial.Data>\r\n" \
-    "                                                                <local:FZGeometry Data=\"M17.12,0 83.5,0 80.31,18.41 37.23,18.41 33.6,39.27 69.91,39.27 66.85,57 30.52,57 26.42,80.58 69.37,80.58 66.17,98.92 0,98.92z\" />\r\n" \
-    "                                                            </local:FZMaterial.Data>\r\n" \
-    "                                                        </local:FZMaterial>\r\n"
+    "                                                    <local:FZMaterial Color=\"#FFFFFFFF\"\r\n" \
+    "                                                                      Width=\"8.69\"\r\n" \
+    "                                                                      Height=\"17\"\r\n" \
+    "                                                                      HorizontalAlignment=\"Left\"\r\n" \
+    "                                                                      VerticalAlignment=\"Top\"\r\n" \
+    "                                                                      Margin=\"0,0,0,0\">\r\n" \
+    "                                                        <local:FZMaterial.Data>\r\n" \
+    "                                                            <local:FZGeometry Data=\"M8.69,17 3.66,17 2.72,16.88 1.83,16.51 1.07,15.93 0.49,15.17 0.12,14.28 0,13.34 0,3.66 0.12,2.72 0.49,1.83 1.07,1.07 1.83,0.49 2.72,0.12 3.66,0 8.69,0 8.69,1.32 3.66,1.32 3.06,1.4 2.49,1.63 2.01,2.01 1.63,2.49 1.4,3.06 1.32,3.66 1.32,13.34 1.4,13.94 1.63,14.51 2.01,14.99 2.49,15.37 3.06,15.6 3.66,15.68 8.69,15.68z\" />\r\n" \
+    "                                                        </local:FZMaterial.Data>\r\n" \
+    "                                                    </local:FZMaterial>\r\n" \
+    "                                                    <local:FZMaterial Color=\"#FFFFFFFF\"\r\n" \
+    "                                                                      Width=\"8.5\"\r\n" \
+    "                                                                      Height=\"17\"\r\n" \
+    "                                                                      HorizontalAlignment=\"Left\"\r\n" \
+    "                                                                      VerticalAlignment=\"Top\"\r\n" \
+    "                                                                      Margin=\"8.5,0,0,0\">\r\n" \
+    "                                                        <local:FZMaterial.Data>\r\n" \
+    "                                                            <local:FZGeometry Data=\"M0,0 4.84,0 5.78,0.12 6.67,0.49 7.43,1.07 8.01,1.83 8.38,2.72 8.5,3.66 8.5,13.34 8.38,14.28 8.01,15.17 7.43,15.93 6.67,16.51 5.78,16.88 4.84,17 0,17 0,15.68 4.84,15.68 5.44,15.6 6.01,15.37 6.49,14.99 6.87,14.51 7.1,13.94 7.18,13.34 7.18,3.66 7.1,3.06 6.87,2.49 6.49,2.01 6.01,1.63 5.44,1.4 4.84,1.32 0,1.32z\" />\r\n" \
+    "                                                        </local:FZMaterial.Data>\r\n" \
+    "                                                    </local:FZMaterial>\r\n" \
+    "                                                    <local:FZMaterial Color=\"#FFFFFFFF\"\r\n" \
+    "                                                                      Width=\"7.89\"\r\n" \
+    "                                                                      Height=\"9.34\"\r\n" \
+    "                                                                      HorizontalAlignment=\"Left\"\r\n" \
+    "                                                                      VerticalAlignment=\"Top\"\r\n" \
+    "                                                                      Margin=\"4.56,3.83,0,0\">\r\n" \
+    "                                                        <local:FZMaterial.Data>\r\n" \
+    "                                                            <local:FZGeometry Data=\"M1.62,0 7.89,0 7.58,1.74 3.52,1.74 3.17,3.71 6.6,3.71 6.31,5.38 2.88,5.38 2.5,7.61 6.55,7.61 6.25,9.34 0,9.34z\" />\r\n" \
+    "                                                        </local:FZMaterial.Data>\r\n" \
+    "                                                    </local:FZMaterial>\r\n"
 #define DEV_BADGE_ROW_HEAD_B \
-    "                                                    </Grid>\r\n" \
-    "                                                </Viewbox>\r\n" \
+    "                                                </Grid>\r\n" \
     "                                            </StackPanel>\r\n" \
     "                                            <ControlTemplate.Triggers>\r\n"
 #define DEV_BADGE_ROW_TRIGGER(name) \
@@ -195,8 +194,7 @@ static const char DEV_BADGE_LIST_NEW[] =
     "                                        <ControlTemplate TargetType=\"{x:Type Control}\">\r\n"
     "                                            <StackPanel Orientation=\"Horizontal\">\r\n"
     "                                                <local:FZTextBlock x:Name=\"FH2MP_DevName\" Text=\"{Binding UserProfile.FormattedGamertag}\" Style=\"{StaticResource A_Style_FZTextBlock_PlayerList}\" VerticalAlignment=\"Center\" />\r\n"
-    "                                                <Viewbox x:Name=\"FH2MP_DevBadge\" Width=\"17\" Height=\"17\" Margin=\"6,0,0,0\" VerticalAlignment=\"Center\" Visibility=\"Collapsed\">\r\n"
-    "                                                    <Grid Width=\"180\" Height=\"180\">\r\n"
+    "                                                <Grid x:Name=\"FH2MP_DevBadge\" Width=\"17\" Height=\"17\" Margin=\"6,0,0,0\" VerticalAlignment=\"Center\" Visibility=\"Collapsed\">\r\n"
     DEV_BADGE_ROW_LOGO DEV_BADGE_ROW_HEAD_B DEV_BADGE_NAMES(DEV_BADGE_ROW_TRIGGER) DEV_BADGE_ROW_TAIL;
 
 static const char DEV_BADGE_BOARD_OLD[] =
@@ -207,6 +205,5 @@ static const char DEV_BADGE_BOARD_NEW[] =
     "                                        <ControlTemplate TargetType=\"{x:Type Control}\">\r\n"
     "                                            <StackPanel Orientation=\"Horizontal\">\r\n"
     "                                                <local:FZTextBlock x:Name=\"FH2MP_DevName\" Text=\"{Binding UserProfile.FormattedGamertag}\" Style=\"{StaticResource A_Style_FZTextBlock_Primary}\" VerticalAlignment=\"Center\" />\r\n"
-    "                                                <Viewbox x:Name=\"FH2MP_DevBadge\" Width=\"17\" Height=\"17\" Margin=\"6,0,0,0\" VerticalAlignment=\"Center\" Visibility=\"Collapsed\">\r\n"
-    "                                                    <Grid Width=\"180\" Height=\"180\">\r\n"
+    "                                                <Grid x:Name=\"FH2MP_DevBadge\" Width=\"17\" Height=\"17\" Margin=\"6,0,0,0\" VerticalAlignment=\"Center\" Visibility=\"Collapsed\">\r\n"
     DEV_BADGE_ROW_LOGO DEV_BADGE_ROW_HEAD_B DEV_BADGE_NAMES(DEV_BADGE_ROW_TRIGGER) DEV_BADGE_ROW_TAIL;

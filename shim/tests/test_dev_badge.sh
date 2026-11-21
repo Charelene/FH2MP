@@ -56,7 +56,8 @@ int main(void)
             CHECK(count(olds[p], "Text=\"{Binding UserProfile.FormattedGamertag}\"") == 1 && count(olds[p], styles[p]) == 1 && count(olds[p], "\r\n") == 1);
             CHECK(count(news[p], "Text=\"{Binding UserProfile.FormattedGamertag}\"") == 1 && count(news[p], styles[p]) == 1);
             CHECK(count(news[p], "<Control ") == 1 && !strcmp(news[p] + len - 12, "</Control>\r\n"));
-            CHECK(count(news[p], "<Viewbox x:Name=\"FH2MP_DevBadge\"") == 1 && count(news[p], "Visibility=\"Collapsed\"") == 1);
+            CHECK(count(news[p], "<Grid x:Name=\"FH2MP_DevBadge\" Width=\"17\" Height=\"17\"") == 1 && count(news[p], "Visibility=\"Collapsed\"") == 1);
+            CHECK(count(news[p], "Viewbox") == 0);                         /* a Viewbox around the shapes drew nothing in the game */
             CHECK(count(news[p], "x:Name=\"PlayerName\"") == 0);
             for (k = 0; k < len; k++) CHECK(news[p][k] != '\n' || (k && news[p][k - 1] == '\r'));
             for (j = 0; names[j]; j++) {
