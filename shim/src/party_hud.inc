@@ -32,6 +32,10 @@ static struct { void *component; void *rows[PARTY_EXTRA_MAX]; } g_party_ext[PART
 static int g_party_next_table;
 static volatile LONG g_party_logged;
 
+/* the developer badge's mark on a row (dev_badge_hud.inc), around each call to the row writer */
+static void devhud_row_begin(void);
+static void devhud_row_end(void **slot);
+
 /* The rows of one component; a new component takes a free table, or the oldest one (its rows are generic items, rebound at each rebuild). */
 static void **party_extra_rows(void *component, int create)
 {
@@ -60,7 +64,9 @@ static void party_row(void *component, void **slot, void *member, char flag)
     void **rows, **row;
 
     if (i < PARTY_NATIVE_ROWS) {
+        devhud_row_begin();
         g_party_row_orig(component, slot, member, flag);
+        devhud_row_end(slot);
         return;
     }
     if (i >= g_party_max || !(rows = party_extra_rows(component, 1))) {
@@ -77,7 +83,9 @@ static void party_row(void *component, void **slot, void *member, char flag)
         }
     }
     if (*row) {
+        devhud_row_begin();
         g_party_row_orig(component, row, member, flag);
+        devhud_row_end(row);
     }
 }
 
