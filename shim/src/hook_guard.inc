@@ -42,12 +42,16 @@ static int hg_readable(const void *p, SIZE_T n)
 }
 
 /* Follows the jumps from `at`. -> 1 when every hop is in executable memory (more than HG_MAX_HOPS jumps also count as fine: nothing to judge),
- * 0 with *bad = the first address that is not. */
+ * 0 with *bad = the first address that is not.
+ * `at` itself is not asked about: it is the game's own function, in the image the call came from, and this runs every frame. VirtualQuery
+ * works out the size of the run of pages around the address, which from game+0xad6070 is the rest of the game's code, about 19 MB.
+ * Measured in the game (2026-11-22, 60,000 frames): 0.53 ms a call on average and single calls of 15 to 41 ms; the same call that
+ * stalled the lighting sync (game_image.inc). A relay or a detour is a small block: under a microsecond a frame, 0.4 ms at worst. */
 static int hg_chain_ok(const unsigned char *at, const unsigned char **bad)
 {
     int hop;
     for (hop = 0; hop < HG_MAX_HOPS; hop++) {
-        if (!hg_executable(at, 6)) {
+        if (hop && !hg_executable(at, 6)) {
             *bad = at;
             return 0;
         }
