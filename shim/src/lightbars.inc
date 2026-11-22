@@ -45,7 +45,12 @@ static struct {
     ULONGLONG mapped;
     unsigned char flags[256];                    /* owner -> MODS_ADDON_* of the newest fresh reply */
     unsigned char shown[256];                    /* owner -> 1 + whether its bar was last driven lit, 0 never (for the log) */
+    unsigned known;                              /* other players' cars with a fresh prediction at the last lb_map */
+    /* the state line (every LB_STATE_MS when it changed): light updates seen, of other players' cars, of those with bar lights */
+    ULONGLONG state_at;
+    unsigned calls, remote, barred, last[5];
 } g_lb;
+#define LB_STATE_MS 10000u
 static unsigned char *g_lb_img;
 static volatile LONG g_lb_loaded;               /* PoliceLightbars.dll is loaded: this player's flags say so */
 static volatile LONG g_lb_switch = 1;           /* its Police lights switch, as the ini says */
@@ -138,7 +143,7 @@ static void lb_map(ULONGLONG now)
     g_lb.mapped = now;
     for (i = 0; i < 32 && m < LB_CARS; i++) {
         unsigned char *pres;
-        if (!cars[i].car || !cars[i].owner || cars[i].owner > 254 || now - cars[i].seen > LB_SEEN_MS) continue;
+        if (!cars[i].car || !cars[i].owner || cars[i].owner > 254 || (cars[i].seen < now && now - cars[i].seen > LB_SEEN_MS)) continue;
         if (!(pres = car_presentation(g_lb_img, cars[i].car))) continue;
         next[m].pres = (ULONG_PTR)pres; next[m].owner = (unsigned char)cars[i].owner; next[m].bar = -1; next[m].scanned = 0;
         for (j = 0; j < g_lb.n; j++)
@@ -147,6 +152,8 @@ static void lb_map(ULONGLONG now)
     }
     for (j = 0; j < m; j++) g_lb.car[j] = next[j];
     g_lb.n = m;
+    g_lb.known = 0;
+    for (i = 0; i < 32; i++) g_lb.known += cars[i].car && cars[i].owner && cars[i].owner <= 254 && (cars[i].seen >= now || now - cars[i].seen <= LB_SEEN_MS);
     for (k = 0; k < 256; k++) g_lb.flags[k] = 0;
     n = mods_snapshot(records, now);
     for (k = 0; k < n; k++) g_lb.flags[records[k].owner] = records[k].addons;
@@ -163,14 +170,36 @@ static void lb_check(FH2Context *ctx, void *user)
     (void)user;
     if (!TryAcquireSRWLockExclusive(&g_lb_lock)) return;
     now = GetTickCount64();
+    if (!g_lb.state_at) {
+        log_begin();
+        log_raw("lightbars: the car light loop runs through the hook\n");
+    }
     if (now - g_lb.mapped >= LB_MAP_MS) lb_map(now);
+    g_lb.calls++;
+    if (now - g_lb.state_at >= LB_STATE_MS) {
+        unsigned s[5] = {g_lb.calls ? 1u : 0u, g_lb.known, (unsigned)g_lb.n, g_lb.remote ? 1u : 0u, g_lb.barred ? 1u : 0u};
+        if (g_lb.state_at && (s[0] != g_lb.last[0] || s[1] != g_lb.last[1] || s[2] != g_lb.last[2] || s[3] != g_lb.last[3] || s[4] != g_lb.last[4])) {
+            log_begin();
+            log_raw("lightbars: last 10 s: ");
+            log_dec(g_lb.calls); log_raw(" light updates, ");
+            log_dec(g_lb.remote); log_raw(" of other players' cars, ");
+            log_dec(g_lb.barred); log_raw(" of those with bar lights; other players' cars with a prediction ");
+            log_dec(g_lb.known); log_raw(", with a presentation "); log_dec((unsigned long)g_lb.n);
+            log_raw("\n");
+            for (i = 0; i < 5; i++) g_lb.last[i] = s[i];
+        }
+        g_lb.state_at = now;
+        g_lb.calls = g_lb.remote = g_lb.barred = 0;
+    }
     for (i = 0; i < g_lb.n && g_lb.car[i].pres != pres; i++) {}
     if (i == g_lb.n) { ReleaseSRWLockExclusive(&g_lb_lock); return; }        /* this player's car, an AI car: the DLL's */
+    g_lb.remote++;
     if (g_lb.car[i].bar < 0 || now - g_lb.car[i].scanned >= LB_SCAN_MS) {
         g_lb.car[i].bar = (signed char)lb_has_bar((const unsigned char *)pres);
         g_lb.car[i].scanned = now;
     }
     if (!g_lb.car[i].bar) { ReleaseSRWLockExclusive(&g_lb_lock); return; }
+    g_lb.barred++;
     owner = g_lb.car[i].owner;
     lit = (g_lb.flags[owner] & MODS_ADDON_LIGHTS_ON) != 0;
     lb_pattern(now, lit, &a, &b);
