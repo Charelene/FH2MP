@@ -30,6 +30,15 @@
 #define MODS_NOS_NOSWITCH 0x08u     /* a NitroSystem without the switch is loaded: its NOS cannot be turned off */
 #define MODS_NOS_ALL 0x0fu
 #define MODS_SERVER_NOS_OK 0x01u    /* this player is in a Free Roam world and not in an event: NOS may burn */
+/* v2 (2026-11-21): request type 3 (byte 54 = add-on flags), reply type 4 (record byte 3 = the owner's add-on flags); v1 keeps both 0. A v1 server
+ * answers no v2 request, so mods_sync.inc goes back to v1 for the ticket epoch; a v2 reply comes only to a v2 request. */
+#define MODS_REQ_V1 1u
+#define MODS_REPLY_V1 2u
+#define MODS_REQ_V2 3u
+#define MODS_REPLY_V2 4u
+#define MODS_ADDON_LIGHTBARS 0x01u  /* PoliceLightbars (suderek22/FH2_Lightbars 0.2.2): its DLL is loaded */
+#define MODS_ADDON_LIGHTS_ON 0x02u  /* and its Police lights switch is on: the bar flashes */
+#define MODS_ADDON_ALL 0x03u
 #define MODS_UG_LIGHTS 64u
 #define MODS_UG_EFFECTS 61u
 #define MODS_UG_WIDTH_MAX 3000u
@@ -50,43 +59,60 @@ static int mods_ug_valid(const unsigned char *ug)
     return 1;
 }
 
-static void mods_request(unsigned char out[MODS_REQUEST], const unsigned char key[32], unsigned long long xuid, unsigned long long seq,
-                         const unsigned char epoch[16], unsigned char car, unsigned char nos, const unsigned char ug[MODS_UG])
+/* v2 (types 3/4): `addons` is this player's MODS_ADDON_* flags; v1 is mods_request (type 1, byte 54 = 0) */
+static void mods_request_v(unsigned char out[MODS_REQUEST], const unsigned char key[32], unsigned long long xuid, unsigned long long seq,
+                           const unsigned char epoch[16], unsigned char car, unsigned char nos, unsigned char addons, const unsigned char ug[MODS_UG], int v2)
 {
     unsigned i;
     for (i = 0; i < 19; i++) out[i] = mods_header[i];
-    out[9] = (unsigned char)MODS_REQUEST; out[10] = (unsigned char)(MODS_REQUEST >> 8); out[19] = 1;
+    out[9] = (unsigned char)MODS_REQUEST; out[10] = (unsigned char)(MODS_REQUEST >> 8); out[19] = (unsigned char)(v2 ? MODS_REQ_V2 : MODS_REQ_V1);
     light_put64(out + 20, xuid); light_put64(out + 28, seq);
     for (i = 0; i < 16; i++) out[36 + i] = epoch[i];
-    out[52] = car; out[53] = (unsigned char)(nos & MODS_NOS_ALL); out[54] = 0;
+    if (addons & MODS_ADDON_LIGHTS_ON) addons |= MODS_ADDON_LIGHTBARS;
+    out[52] = car; out[53] = (unsigned char)(nos & MODS_NOS_ALL); out[54] = v2 ? (unsigned char)(addons & MODS_ADDON_ALL) : 0;
     for (i = 0; i < MODS_UG; i++) out[MODS_HEAD + i] = ug[i];
     hmac_sha256(key, 32, out, MODS_BASE, out + MODS_BASE);
 }
 
-typedef struct { unsigned char owner, car, nos, ug[MODS_UG]; } mods_record;
+static __attribute__((unused)) void mods_request(unsigned char out[MODS_REQUEST], const unsigned char key[32], unsigned long long xuid, unsigned long long seq,
+                         const unsigned char epoch[16], unsigned char car, unsigned char nos, const unsigned char ug[MODS_UG])
+{
+    mods_request_v(out, key, xuid, seq, epoch, car, nos, 0, ug, 0);
+}
 
-/* Checks a reply (this player's xuid and epoch, a sequence number that is new and recent, the signature, every record well formed and its owner
- * once) and unpacks it: 1 with the server flags, the records and their count, 0 for anything else. */
-static int mods_response(const unsigned char *data, unsigned n, const unsigned char key[32], unsigned long long xuid, unsigned long long sent,
-                         unsigned long long received, const unsigned char epoch[16], unsigned char *server, mods_record out[MODS_MAX], unsigned *count)
+typedef struct { unsigned char owner, car, nos, addons, ug[MODS_UG]; } mods_record;
+
+/* Checks a reply (the type that answers the request's version, this player's xuid and epoch, a sequence number that is new and recent, the
+ * signature, every record well formed and its owner once) and unpacks it: 1 with the server flags, the records and their count, 0 for anything
+ * else. A v1 reply's records have no add-on flags; a v2 reply's are MODS_ADDON_* (the flashing bit only with the bar). */
+static int mods_response_v(const unsigned char *data, unsigned n, const unsigned char key[32], unsigned long long xuid, unsigned long long sent,
+                           unsigned long long received, const unsigned char epoch[16], unsigned char *server, mods_record out[MODS_MAX], unsigned *count,
+                           int v2)
 {
     unsigned i, j, c; unsigned char mac[32]; unsigned long long seq;
     if (n < MODS_HEAD + MODS_MAC || n > MODS_LIMIT || !light_equal(data, mods_header, 9) || !light_equal(data + 11, mods_header + 11, 8) ||
-        (unsigned)(data[9] | data[10] << 8) != n || data[19] != 2 || light_u64(data + 20) != xuid || !light_equal(data + 36, epoch, 16) ||
-        data[52] > 127 || data[53] > MODS_SERVER_NOS_OK) return 0;
+        (unsigned)(data[9] | data[10] << 8) != n || data[19] != (v2 ? MODS_REPLY_V2 : MODS_REPLY_V1) || light_u64(data + 20) != xuid ||
+        !light_equal(data + 36, epoch, 16) || data[52] > 127 || data[53] > MODS_SERVER_NOS_OK) return 0;
     seq = light_u64(data + 28); c = data[54];
     if (seq <= received || seq > sent || sent - seq > MODS_SEQ_WINDOW || c > MODS_MAX || n != MODS_HEAD + MODS_RECORD * c + MODS_MAC) return 0;
     hmac_sha256(key, 32, data, n - MODS_MAC, mac);
     if (!light_equal(mac, data + n - MODS_MAC, MODS_MAC)) return 0;
     for (i = 0; i < c; i++) {
         const unsigned char *r = data + MODS_HEAD + MODS_RECORD * i;
-        if (!r[0] || r[0] == 255 || r[1] > 127 || r[2] > MODS_NOS_ALL || r[3] || !mods_ug_valid(r + 4)) return 0;
+        if (!r[0] || r[0] == 255 || r[1] > 127 || r[2] > MODS_NOS_ALL || (v2 ? (r[3] & ~MODS_ADDON_ALL) ||
+            ((r[3] & MODS_ADDON_LIGHTS_ON) && !(r[3] & MODS_ADDON_LIGHTBARS)) : r[3] != 0) || !mods_ug_valid(r + 4)) return 0;
         for (j = 0; j < i; j++) if (out[j].owner == r[0]) return 0;
-        out[i].owner = r[0]; out[i].car = r[1]; out[i].nos = r[2];
+        out[i].owner = r[0]; out[i].car = r[1]; out[i].nos = r[2]; out[i].addons = r[3];
         for (j = 0; j < MODS_UG; j++) out[i].ug[j] = r[4 + j];
     }
     *server = data[53];
     *count = c;
     return 1;
+}
+
+static __attribute__((unused)) int mods_response(const unsigned char *data, unsigned n, const unsigned char key[32], unsigned long long xuid, unsigned long long sent,
+                         unsigned long long received, const unsigned char epoch[16], unsigned char *server, mods_record out[MODS_MAX], unsigned *count)
+{
+    return mods_response_v(data, n, key, xuid, sent, received, epoch, server, out, count, 0);
 }
 #endif
