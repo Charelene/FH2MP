@@ -274,14 +274,18 @@ static unsigned char lighting_receive(void *self, const void *context, const voi
 typedef struct { unsigned char manual, forced, signals[3]; int active; } light_scope;
 static light_scope lighting_begin(void *car)
 {
-    light_scope scope={0}; void *animation=NULL; unsigned i,j; int flags=-1;
+    light_scope scope={0}; unsigned i,j; int flags=-1;
     ULONGLONG now=GetTickCount64();
-    if(!g_light_enabled || !read_game_memory((unsigned char *)car+0x4d40,&animation,8)) return scope;
+    if(!g_light_enabled) return scope;
     AcquireSRWLockShared(&g_light_lock);
     if(g_light.response_at && now-g_light.response_at<=LIGHT_LEASE_MS) {
         for(i=0;i<32 && flags<0;i++) {
             light_remote_car *remote=g_light_cars+i;
-            if(remote->car!=car || remote->animation!=animation || now-remote->seen>LIGHT_LEASE_MS) continue;
+            if(remote->car!=car || now-remote->seen>LIGHT_LEASE_MS) continue;
+            /* Only a car known as another player's is looked at, and directly: the game is updating it in this very call, and the override
+             * below writes straight into it too. Reading every car first through read_game_memory was a system call twice a frame for
+             * each car this runs for, the local car and cars with no player too (under Wine two VirtualQuery calls more each time). */
+            if(remote->animation!=*(void **)((unsigned char *)car+0x4d40)) continue;
             for(j=0;j<g_light.count;j++) {
                 unsigned char *r=g_light.records+g_light.record_size*j;
                 if(r[0]==remote->owner && r[1]==remote->id) {flags=r[2];break;}
