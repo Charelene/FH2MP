@@ -3233,6 +3233,7 @@ static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *
 #include "perf.inc"
 #include "lighting_sync.inc"
 #include "honk_sync.inc"
+#include "activity_report.inc"
 #include "carsel_sync.inc"
 #include "mods_sync.inc"
 #include "eventopts_sync.inc"
@@ -4058,6 +4059,7 @@ static DWORD WINAPI option_monitor(LPVOID unused)
             weather_sample(img);
         }
         eo_timelock_tick(img);
+        activity_write(online_allowed());
         if (g_gamedb_started && tick % 10 == 0) {
             gamedb_place();               /* a copy that failed, or a mod's apply_database putting the platform's copy back */
         }
@@ -5931,6 +5933,12 @@ static DWORD WINAPI late_init(LPVOID unused)
         }
         patch_copy_path();
         patch_contact_forecast();
+        {
+            wchar_t ar_env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_ACTIVITY", ar_env, 8) == 0) {
+                patch_activity_report();
+            }
+        }
     }
 #ifdef FH2MP_DEBUG_BUILD
     install_trace();
@@ -5987,6 +5995,13 @@ static DWORD WINAPI offline_guards(LPVOID unused)
     log_dec(tried);
     log_raw(" crash guards made");
     log_raw(made == tried ? "\n" : " (the lines above name the ones that were not)\n");
+    /* what the player is doing, for Encore (activity_report.inc): offline runs have no monitor, so this thread writes it */
+    if (GetEnvironmentVariableW(L"FH2MP_NO_ACTIVITY", env, 8) == 0 && patch_activity_report()) {
+        for (;;) {
+            activity_write(0);
+            Sleep(1000);
+        }
+    }
     return 0;
 }
 
