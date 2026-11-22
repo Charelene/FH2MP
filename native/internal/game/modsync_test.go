@@ -329,3 +329,85 @@ func TestPushCheckSkipsAllowedNos(t *testing.T) {
 		t.Fatalf("%d PUSH line(s) for an allowed NOS burn", n)
 	}
 }
+
+func modsTestRequestV2(key, epoch []byte, xuid, seq uint64, car, nos, addons byte, ug []byte) []byte {
+	d := modsTestRequest(key, epoch, xuid, seq, car, nos, ug)[:modsBase]
+	d[19], d[54] = modsReqV2, addons
+	return signed(d, key)
+}
+
+// v2 requests carry PoliceLightbars' flags (loaded, flashing); a lit bar without the DLL, or an unknown bit, is malformed, as is any flag in v1.
+func TestModsV2WireRules(t *testing.T) {
+	ug := modsVecUG()
+	for addons, ok := range map[byte]bool{0: true, modsAddonLightbars: true, modsAddonLightbars | modsAddonLightsOn: true, modsAddonLightsOn: false, 0x04: false, 0x80: false} {
+		if got := modsParse(modsTestRequestV2(modsVecKey, modsVecEpoch, modsVecXuid, 9, 6, 0, addons, ug)); got != ok {
+			t.Errorf("v2 request with add-on byte %#x accepted %v, want %v", addons, got, ok)
+		}
+	}
+	req := modsTestRequestV2(modsVecKey, modsVecEpoch, modsVecXuid, 9, 6, modsNosSwitch|modsNosAllowed|modsNosBurning, modsAddonLightbars|modsAddonLightsOn, ug)
+	checkVector(t, "mods_request_v2.hex", req)
+	for _, typ := range []byte{2, 4, 5} {
+		d := append([]byte(nil), req...)
+		d[19] = typ
+		if modsParse(d) {
+			t.Errorf("request of type %d accepted", typ)
+		}
+	}
+}
+
+// A v2 player sees the others' bar flags in v2 replies; a v1 player (an older shim) gets v1 replies with the byte at 0, as before.
+func TestModsV2CarriesTheLightbar(t *testing.T) {
+	r := newModsRig(t, 3, false)
+	zero := make([]byte, modsUG)
+	sendV2 := func(i int, seq uint64, addons byte) []byte {
+		t.Helper()
+		p := r.peers[i]
+		before := len(r.sock.sent)
+		r.hub.Handle(modsTestRequestV2(r.keys[i], modsVecEpoch, p.Xuid, seq, byte(*p.CarID), 0, addons, zero), p.Addr)
+		if len(r.sock.sent) == before {
+			t.Fatalf("player %d got no reply", i)
+		}
+		reply := r.sock.sent[len(r.sock.sent)-1].data
+		if reply[19] != modsReplyV2 {
+			t.Fatalf("a v2 request got a type %d reply", reply[19])
+		}
+		return reply
+	}
+	sendV2(0, 1, modsAddonLightbars|modsAddonLightsOn)
+	r.send(1, 1, 0, zero) // v1: the rig's send insists on a type 2 reply
+	b := sendV2(2, 1, modsAddonLightbars)
+	flags := map[byte]byte{}
+	for _, rec := range modsRecords(b) {
+		flags[rec[0]] = rec[3]
+	}
+	if flags[1] != modsAddonLightbars|modsAddonLightsOn || flags[2] != 0 || len(flags) != 2 {
+		t.Fatalf("v2 reply's add-on flags by owner %v, want owner 1 flashing, owner 2 none", flags)
+	}
+	r.clk.t += 0.1
+	a := r.send(1, 2, 0, zero)
+	for _, rec := range modsRecords(a) {
+		if rec[3] != 0 {
+			t.Fatalf("a v1 reply carries add-on byte %#x for owner %d", rec[3], rec[0])
+		}
+	}
+	found := false
+	for _, l := range r.log {
+		found = found || strings.Contains(l, "mods: owner 1 car 3 no NitroSystem, underglow dark, PoliceLightbars flashing")
+	}
+	if !found {
+		t.Fatalf("no state line for the flashing bar: %q", r.log)
+	}
+}
+
+// The v2 reply the shim's test reads (tests/vectors/mods_reply_v2.hex): to the v2 vector request, owner 10 car 5 with a flashing bar.
+func TestModsReplyV2Vector(t *testing.T) {
+	req := modsTestRequestV2(modsVecKey, modsVecEpoch, modsVecXuid, 9, 6, modsNosSwitch|modsNosAllowed|modsNosBurning, modsAddonLightbars|modsAddonLightsOn, modsVecUG())
+	reply := append([]byte(nil), req[:modsHead]...)
+	reply[19], reply[53], reply[54] = modsReplyV2, modsServerNosOK, 1
+	rec := make([]byte, modsRecord)
+	rec[0], rec[1], rec[2], rec[3] = 10, 5, modsNosSwitch, modsAddonLightbars|modsAddonLightsOn
+	copy(rec[4:], modsVecUG())
+	reply = append(reply, rec...)
+	binary.LittleEndian.PutUint16(reply[9:], uint16(len(reply)+sideMacSize))
+	checkVector(t, "mods_reply_v2.hex", signed(reply, modsVecKey))
+}
