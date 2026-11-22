@@ -11,7 +11,8 @@ static unsigned char g_ticket_key[32];
 static int g_ticket_ready;
 static unsigned long long g_xuid;
 static int (WINAPI *g_r_wsasendto)(UINT_PTR,void *,DWORD,DWORD *,DWORD,const void *,int,void *,void *);
-static int read_game_memory(const void *p,void *out,SIZE_T n) { if(!p)return 0;memcpy(out,p,n);return 1; }
+static int g_reads;
+static int read_game_memory(const void *p,void *out,SIZE_T n) { g_reads++;if(!p)return 0;memcpy(out,p,n);return 1; }
 static int mem_equal(const unsigned char *a,const unsigned char *b,SIZE_T n) {return !memcmp(a,b,n);}
 static unsigned char *find_fh2_image(void) {return NULL;}
 static int plat_hook(const char *name,void *target,void *detour,void **original) {(void)name;(void)target;(void)detour;(void)original;return 0;}
@@ -112,6 +113,14 @@ int main(int argc,char **argv)
     g_light_animation_original=animation_observer;
     lighting_animation(car_memory);
     assert(car_memory[0x51a1]==0 && car_memory[0x51a2]==0 && car_memory[0x51bc]==1 && !car_memory[0x51bb]);
+    /* The per-car, per-frame path makes no system call: a car that is not another player's (the local car, a car with no player) is not
+     * read at all, and a player's car is read directly. */
+    {
+        static unsigned char other[0x5200]; light_scope scope;
+        g_reads=0;assert(!lighting_begin(other).active && !g_reads);
+        scope=lighting_begin(car_memory);assert(scope.active && !g_reads);lighting_end(car_memory,scope);
+        assert(car_memory[0x51a1]==0 && car_memory[0x51a2]==0 && car_memory[0x51bc]==1 && !car_memory[0x51bb]);
+    }
     g_light_cars[0].animation=NULL;assert(!lighting_begin(car_memory).active);
     g_light_cars[0].animation=&animation_token;
     g_light_cars[0].owner=11;assert(!lighting_begin(car_memory).active);
