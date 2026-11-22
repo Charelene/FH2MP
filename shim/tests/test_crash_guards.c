@@ -42,7 +42,12 @@ static int plat_hook(const char *name, void *target, void *detour, void **origin
     return 1;
 }
 
+/* VirtualQuery as the guard calls it, counted: the game's own function is not asked about (slow there, and the guard runs every frame) */
+static int g_queries;
+static SIZE_T counted_query(const void *p, MEMORY_BASIC_INFORMATION *m, SIZE_T n) { g_queries++; return VirtualQuery(p, m, n); }
+#define VirtualQuery counted_query
 #include "src/hook_guard.inc"
+#undef VirtualQuery
 #include "src/gameplaylog_guard.inc"
 #include "src/camanim_guard.inc"
 
@@ -82,7 +87,7 @@ static void point_at(unsigned char *fn, unsigned char *to)
     memcpy(fn + 1, &rel, 4);
 }
 
-static void reset(void) { g_raw[0] = 0; g_gauges_calls = g_detour_calls = 0; g_gauges_self = NULL; g_hg_logged = 0; }
+static void reset(void) { g_raw[0] = 0; g_gauges_calls = g_detour_calls = g_queries = 0; g_gauges_self = NULL; g_hg_logged = 0; }
 
 static void test_hook_guard(void)
 {
@@ -105,6 +110,7 @@ static void test_hook_guard(void)
     hg_speedometer(self, 4500.0f);
     CHECK(g_gauges_calls == 1 && g_gauges_self == self && g_gauges_rpm == 4500.0f);
     CHECK(g_raw[0] == 0);
+    CHECK(g_queries == 0);                                                /* nothing to ask about: no query on the frame's path */
 
     /* another mod's hook through a live relay: left alone, its detour runs */
     reset();
@@ -113,6 +119,7 @@ static void test_hook_guard(void)
     point_at(fn, relay + 0x24);
     hg_speedometer(self, 1000.0f);
     CHECK(g_detour_calls == 1 && g_gauges_calls == 0);
+    CHECK(g_queries > 0);                                                 /* the relay and what it leads to are asked about */
     CHECK(fn[0] == 0xe9);
     CHECK(g_raw[0] == 0);
 
