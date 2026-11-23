@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"math"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -248,3 +249,40 @@ func TestRefusedOnClassInviteeDoesNotHoldTheStart(t *testing.T) {
 		t.Fatalf("a refused answer still held the start: deadline %.1f, was %.1f", r.w.PendingRace.Deadline, deadline)
 	}
 }
+
+// The results screen report (code 7, shim results_wait.inc; issue 547) carries the server's view: which SessionHost update the race-over flag went out as,
+// how long ago, and the console flags it holds for the player.
+func TestResultsScreenReportShowsTheServersView(t *testing.T) {
+	r := newLoadRig(t, 2)
+	p := r.peers[0]
+	r.w.ClientReport(p, 7, 47, "results wait 47 s: no race over received (InRace last 1, 300 s ago); car still 47 s; console R1 S1 P1 I1 Y0 L1 G1", 0)
+	log := strings.Join(r.log, "\n")
+	for _, want := range []string{
+		"results screen wait [code 7, detail 47]: results wait 47 s: no race over received",
+		"the race-over flag has not been sent to it",
+		"finished=false, in the event=",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("report line lacks %q: %q", want, log)
+		}
+	}
+	before := p.HostSeq
+	r.clk.t += 5
+	r.w.SetSessionHostBool(SHInRace, 0, "test: race over")
+	if p.RaceOverSeq != before || p.HostSeq != (before+1)%0xFF || p.RaceOverAt != r.clk.t {
+		t.Fatalf("race-over bookkeeping: seq %d (sent as %d), host seq %d, at %v (now %v)", before, p.RaceOverSeq, p.HostSeq, p.RaceOverAt, r.clk.t)
+	}
+	r.clk.t += 50
+	r.log = nil
+	r.w.ClientReport(p, 7, 50, "results wait 50 s: race over received 50 s ago (update #2)", 0)
+	want := "the race-over flag went out 50 s ago as update #" + itoa(before) + " (next update #" + itoa(p.HostSeq) + ")"
+	if log := strings.Join(r.log, "\n"); !strings.Contains(log, want) {
+		t.Fatalf("report line lacks %q: %q", want, log)
+	}
+	r.w.SetSessionHostBool(SHInRace, 1, "test: next start")
+	if p.RaceOverAt != 0 {
+		t.Fatalf("a new race start left the race-over time at %v", p.RaceOverAt)
+	}
+}
+
+func itoa(n int) string { return strconv.Itoa(n) }

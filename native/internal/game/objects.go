@@ -599,6 +599,13 @@ func (w *World) sessionHostBoolTo(q *Peer, varID, value int) bool {
 		b.Bits(uint64(varID), netv2.SessionHostVarBits)
 		b.Bits(uint64(value), 1)
 	}))
+	if varID == SHInRace { // the results screen report (code 7) says which update the race over was
+		if value == 0 {
+			q.RaceOverSeq, q.RaceOverAt = q.HostSeq, w.Mono()
+		} else {
+			q.RaceOverAt = 0
+		}
+	}
 	q.HostSeq = (q.HostSeq + 1) % 0xFF
 	return true
 }
