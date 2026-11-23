@@ -116,7 +116,11 @@ func TestLightbarsCopyHasTheDLLsRows(t *testing.T) {
 // The real server database, where the rig has one (skipped elsewhere): every one of the 31 bodies gets its two hoods.
 func TestLightbarsCopyOfTheServersDatabase(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "azimuth", "win1", "fh2mp", FileName)
-	data, err := os.ReadFile(path)
+	// a rig with the add-on has the lightbars copy in place and keeps the server's own next to it (tools/rig/signin)
+	data, err := os.ReadFile(path + ".before-lightbars")
+	if err != nil {
+		data, err = os.ReadFile(path)
+	}
 	if err != nil {
 		t.Skip("no server database on this machine:", err)
 	}
