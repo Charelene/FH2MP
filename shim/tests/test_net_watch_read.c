@@ -145,6 +145,40 @@ int main(void)
     nw_disconnect(g_conn, 0x80600007u);
     CHECK(strstr(g_lines, "the refused message: id unreadable, starting at bit 120 of 96, bytes from there:\n") != NULL);
 
+    /* the server's race flag (SessionHost var 6, InRace) as the Go server encodes it: the start, then the race over; the game still gets its result */
+    {
+        static const unsigned char start[17] = {0x05, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x11, 0x00, 0x08, 0x03, 0x89, 0x02, 0xc0, 0x02};
+        static const unsigned char over[17] = {0x05, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x11, 0x00, 0x08, 0x03, 0x89, 0x02, 0xc0, 0x00};
+        static const unsigned char other_var[17] = {0x05, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x11, 0x00, 0x08, 0x03, 0xff, 0x02, 0x60, 0x02};
+        g_lines[0] = 0;
+        g_result = 0;
+        CHECK(g_nw_inrace == -1 && g_nw_over_at == 0);
+        memcpy(g_data, other_var, sizeof other_var);
+        stream_at(17 * 8, 88);
+        CHECK(nw_dispatch(NULL, NULL, g_stream, 0) == 0);
+        CHECK(g_nw_inrace == -1 && g_lines[0] == 0);                   /* var 3 is not the race flag */
+        memcpy(g_data, over, sizeof over);
+        stream_at(17 * 8, 88);
+        nw_dispatch(NULL, NULL, g_stream, 0);
+        CHECK(g_nw_inrace == 0 && g_nw_over_at == 0 && g_nw_inrace_seq == 18);   /* a 0 with no 1 before it is not a race over */
+        CHECK(strstr(g_lines, "netwatch: the game server sent SessionHost var 6 (InRace) = 0, update #18 (no start seen before it)\n") != NULL);
+        memcpy(g_data, start, sizeof start);
+        stream_at(17 * 8, 88);
+        CHECK(nw_dispatch(NULL, NULL, g_stream, 0) == 0);
+        CHECK(g_nw_inrace == 1 && g_nw_over_at == 0 && g_nw_inrace_at != 0);
+        CHECK(strstr(g_lines, "SessionHost var 6 (InRace) = 1, update #18 (the race has started)\n") != NULL);
+        memcpy(g_data, over, sizeof over);
+        stream_at(17 * 8, 88);
+        nw_dispatch(NULL, NULL, g_stream, 0);
+        CHECK(g_nw_inrace == 0 && g_nw_over_at != 0);
+        CHECK(strstr(g_lines, "SessionHost var 6 (InRace) = 0, update #18 (the race is over)\n") != NULL);
+        g_lines[0] = 0;
+        stream_at(17 * 8, 88);                                         /* before the connection is up the messages are not looked at */
+        g_nw_over_at = 0;
+        nw_dispatch(NULL, NULL, g_stream, 1);
+        CHECK(g_nw_over_at == 0 && g_lines[0] == 0);
+    }
+
     printf(g_failed ? "net watch read: FAIL\n" : "net watch read: all checks pass\n");
     return g_failed != 0;
 }

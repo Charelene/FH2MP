@@ -3240,6 +3240,7 @@ static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *
 #include "nos_flames.inc"
 #include "ug_remote.inc"
 #include "race_wait.inc"
+#include "results_wait.inc"
 #include "event_fix.inc"
 #include "event_stock.inc"
 #include "stall_trace.inc"
@@ -4060,6 +4061,7 @@ static DWORD WINAPI option_monitor(LPVOID unused)
         }
         eo_timelock_tick(img);
         activity_write(online_allowed());
+        results_wait_tick();
         if (g_gamedb_started && tick % 10 == 0) {
             gamedb_place();               /* a copy that failed, or a mod's apply_database putting the platform's copy back */
         }
