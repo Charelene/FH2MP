@@ -3238,6 +3238,7 @@ static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *
 #include "eventopts_sync.inc"
 #include "nos_flames.inc"
 #include "ug_remote.inc"
+#include "lightbars.inc"
 #include "race_wait.inc"
 #include "event_fix.inc"
 #include "event_stock.inc"
@@ -3518,6 +3519,7 @@ static int ui_dev_badge(void)
  */
 static WCHAR g_gamedb_path[MAX_PATH];
 static WCHAR g_gamedb_src[MAX_PATH];      /* the launcher's copy, put at g_gamedb_path by gamedb_place */
+static char g_gamedb_addons[64];            /* session gamedb_addons=: the add-ons whose rows the launcher's copy has ("lightbars") */
 static volatile LONG g_gamedb_placed;
 static volatile LONG g_gamedb_started;    /* every mod has started (the platform's own database step is done) */
 static int gamedb_place(void);
@@ -5222,6 +5224,21 @@ static void gamedb_put_back(void)
     }
 }
 
+/* 1 when the session's gamedb_addons (a comma list) names `name` */
+static int gamedb_has_addon(const char *name)
+{
+    const char *p = g_gamedb_addons;
+    int n = lstrlenA(name);
+    while (*p) {
+        int k = 0;
+        while (p[k] && p[k] != ',') k++;
+        if (k == n && mem_equal((const unsigned char *)p, (const unsigned char *)name, (SIZE_T)n)) return 1;
+        p += k;
+        if (*p == ',') p++;
+    }
+    return 0;
+}
+
 /* The mods (other than FH2MP) whose database changes the platform built into its copy, from fh2-mods\platform-db.txt (line 1: its
  * hash, then "mod<TAB>result" per mod), as "A, B"; the file is deleted so the platform builds its copy again next launch. */
 static void gamedb_drop_platform_copy(char *names, int cap)
@@ -5253,7 +5270,9 @@ static void gamedb_drop_platform_copy(char *names, int cap)
             i++;
             k++;
         }
-        if (k && buf[i] == '\t' && !(k == 5 && line[0] == 'F' && line[1] == 'H' && line[2] == '2' && line[3] == 'M' && line[4] == 'P')) {
+        /* PoliceLightbars' rows are in the server's copy the launcher got for it (session gamedb_addons=lightbars): its changes are on */
+        int covered = k == 15 && mem_equal((const unsigned char *)line, (const unsigned char *)"PoliceLightbars", 15) && gamedb_has_addon("lightbars");
+        if (k && buf[i] == '\t' && !covered && !(k == 5 && line[0] == 'F' && line[1] == 'H' && line[2] == '2' && line[3] == 'M' && line[4] == 'P')) {
             if (n && n + 2 < cap) {
                 names[n++] = ',';
                 names[n++] = ' ';
@@ -6121,6 +6140,8 @@ static int session_load(void)
                     g_token[n] = 0;
                 } else if (lstrcmpA(line, "run") == 0 && run_id_ok(eq)) {
                     lstrcpynA(g_run, eq, sizeof g_run);
+                } else if (lstrcmpA(line, "gamedb_addons") == 0) {
+                    lstrcpynA(g_gamedb_addons, eq, sizeof g_gamedb_addons);
                 } else if (lstrcmpA(line, "switches") == 0) {
                     session_switches(eq);
                 } else if (lstrcmpA(line, "gamedb") == 0 && eq[0]) {

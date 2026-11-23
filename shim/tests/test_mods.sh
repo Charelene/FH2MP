@@ -15,3 +15,8 @@ WINEPREFIX="$work/prefix" WINEDEBUG=-all wine "$work/test.exe" --vector > "$work
 [ "$(tr -d '\r\n' < "$work/vector")" = "$(tr -d '\r\n' < tests/vectors/mods_request.hex)" ] || { echo 'C request differs from the server wire format (tests/vectors/mods_request.hex)'; exit 1; }
 tr -d '\r' < tests/vectors/mods_reply.hex > "$work/reply"
 WINEPREFIX="$work/prefix" WINEDEBUG=-all wine "$work/test.exe" --reply "$work/reply"
+# v2: PoliceLightbars' flags (tests/vectors/mods_request_v2.hex, mods_reply_v2.hex)
+WINEPREFIX="$work/prefix" WINEDEBUG=-all wine "$work/test.exe" --vector2 > "$work/vector2"
+[ "$(tr -d '\r\n' < "$work/vector2")" = "$(tr -d '\r\n' < tests/vectors/mods_request_v2.hex)" ] || { echo 'C v2 request differs from the server wire format (tests/vectors/mods_request_v2.hex)'; exit 1; }
+tr -d '\r' < tests/vectors/mods_reply_v2.hex > "$work/reply2"
+WINEPREFIX="$work/prefix" WINEDEBUG=-all wine "$work/test.exe" --reply2 "$work/reply2"

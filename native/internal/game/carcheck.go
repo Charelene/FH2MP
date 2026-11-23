@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"fh2mp/internal/addons"
 	"fh2mp/internal/bits"
 	"fh2mp/internal/catalog"
 	"fh2mp/internal/diag"
@@ -412,8 +413,32 @@ func subOne(x bits.Int) bits.Int {
 }
 
 // CheckParts decodes before validating; returns (violation, withhold, size, payload).
+// lightbarHood: words (car's part list from peer) has one of PoliceLightbars' hoods, peer's game has the add-on (control "addons") and the
+// hood is of car's own body -> the hood's slot and the car's stock hood.
+func (w *World) lightbarHood(peer *Peer, words []uint32, car int64) (int, uint32, bool) {
+	if w.Hub == nil || !w.Hub.Addons[peer.Xuid][addons.Lightbars] {
+		return 0, 0, false
+	}
+	t := w.cat().Parts
+	for slot, table := range t.SlotTable {
+		if table != "CarBodyHood" || slot >= len(words) {
+			continue
+		}
+		stock, ok := addons.LightbarHood(words[slot])
+		if !ok {
+			return 0, 0, false
+		}
+		if list, ok := parts.StockList(t, car); !ok || slot >= len(list) || list[slot] != stock {
+			return 0, 0, false // another car's lightbar: the part check repairs it as any foreign part
+		}
+		return slot, stock, true
+	}
+	return 0, 0, false
+}
+
 func (w *World) CheckParts(peer *Peer, size int, payload bits.Int, oid int) (bool, bool, int, bits.Int) {
 	w.standinApplied = false
+	w.addonApplied = false
 	if PartPolicy == "off" {
 		return false, false, size, payload
 	}
@@ -474,6 +499,18 @@ func (w *World) CheckParts(peer *Peer, size int, payload bits.Int, oid int) (boo
 				peer.Addr.Port, peer.Owner, peer.Xuid, m.Uint64(), car, words[2])
 			return true, true, size, payload
 		}
+		if hood, stock, ok := w.lightbarHood(peer, words, car); ok {
+			// PoliceLightbars' roof lightbar (a Hood upgrade) on a player whose game has the add-on: the others who have it get the setup as
+			// sent (objhandle's real version, RealCarsFor), everyone else the car's stock hood, which their games can draw. The owner keeps theirs.
+			fixed := append([]uint32(nil), words...)
+			fixed[hood] = stock
+			if v, err := playersetup.PartsValue(fixed); err == nil {
+				w.addonApplied = true
+				words = fixed
+				payload = parts.WriteParts(payload, decoded[playersetup.Parts].Offset, words)
+				values[playersetup.Parts] = v
+			}
+		}
 		if peer.PartsRepairCar == nil || car != *peer.PartsRepairCar {
 			peer.PartsRepairCar = nil
 		}
@@ -483,6 +520,8 @@ func (w *World) CheckParts(peer *Peer, size int, payload bits.Int, oid int) (boo
 		}
 		errs := parts.IntegrityErrors(tables, words)
 		if len(errs) > 0 {
+			// other foreign parts: nobody gets the setup as sent (the real version would carry them too); the lightbar goes with the repair
+			w.addonApplied = false
 			peer.CarDoubtAt = peer.CarSeenAt
 			key := fmt.Sprint(words, PartPolicy)
 			if peer.PartLogged != key {
@@ -571,6 +610,9 @@ func (w *World) CheckParts(peer *Peer, size int, payload bits.Int, oid int) (boo
 		}
 	} else if words != nil {
 		payload = w.RentalChoices(peer, car, size, payload)
+	}
+	if repair != nil {
+		w.addonApplied = false // a repaired setup goes to everyone as repaired
 	}
 	return repair != nil, peer.KickReason != nil, size, payload
 }
@@ -1054,19 +1096,25 @@ func (w *World) HasCustomCars(p *Peer) bool {
 	return w.Hub != nil && len(w.Hub.CustomCars[p.Xuid]) > 0
 }
 
-// RealCarsFor: q may see sender's custom cars as they are, because q's game has every custom car sender's launcher listed (the same car pack).
-// Fixed for a pair for the whole session (the lists come at sign-in), so q gets one version of each of sender's objects, never a mix.
+// RealCarsFor: q may see sender's custom cars and add-on parts as they are, because q's game has every custom car sender's launcher listed
+// (the same car pack) and every add-on sender's game has (control "addons"). Fixed for a pair for the whole session (the lists come at
+// sign-in), so q gets one version of each of sender's objects, never a mix.
 func (w *World) RealCarsFor(sender, q *Peer) bool {
 	if w.Hub == nil {
 		return false
 	}
-	have := w.Hub.CustomCars[q.Xuid]
-	s := w.Hub.CustomCars[sender.Xuid]
-	if len(s) == 0 {
+	s, sa := w.Hub.CustomCars[sender.Xuid], w.Hub.Addons[sender.Xuid]
+	if len(s) == 0 && len(sa) == 0 {
 		return false
 	}
+	have, haveAddons := w.Hub.CustomCars[q.Xuid], w.Hub.Addons[q.Xuid]
 	for car := range s {
 		if !have[car] {
+			return false
+		}
+	}
+	for a := range sa {
+		if !haveAddons[a] {
 			return false
 		}
 	}

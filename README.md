@@ -77,8 +77,8 @@ installed. The server refuses launchers and shims older than the minimum it anno
 it needs an update before it can play.
 
 FH2MP 1.5.1 is made for Azimuth 1.0.4, FH2 Extra Options 0.6.1, FH2 Mod Platform 2.9.1, HonkHonk 1.0.0 and FH2 ANNA 1.2.4; Achievements
-1.0.2, NitroSystem 2.0.1 and Underglow 1.1.1 are optional. Encore installs that combination from FH2MP's server (the authors' releases are
-the fallback) and checks every file against its pinned hash.
+1.0.2, NitroSystem 2.0.1, Underglow 1.1.1 and PoliceLightbars 0.2.2 are optional. Encore installs that combination from FH2MP's server
+(the authors' releases are the fallback) and checks every file against its pinned hash.
 
 **Linux.** Azimuth runs under Wine/Proton. The game has to start with `WINEDLLOVERRIDES="winmm,dwrite,d3dcompiler_47=n,b"`, so Wine loads
 FH2 Extra Options (`winmm.dll`) and the FH2 Mod Platform (`DWrite.dll` and `d3dcompiler_47.dll`) instead of its own DLLs (see the
@@ -180,6 +180,9 @@ This project is **AI-assisted**. If that makes you close the tab, fair enough. I
 - **[NitroSystem](https://github.com/qiangqiang101/FH2-NitroSystem)** by qiangqiang101 (optional): nitro, switched off by FH2MP where it
   isn't allowed online through its own off switch.
 - **[Underglow](https://github.com/qiangqiang101/FH2-Underglow)** by qiangqiang101 (optional): underglow, shown to the other players online.
+- **[PoliceLightbars](https://github.com/suderek22/FH2_Lightbars)** by suderek22 (optional): amber and blue roof lightbars from FH6 on 31
+  cars, shown to the other players who have it and flashing by each owner's Police lights switch; the server serves a copy of its car
+  database with the add-on's own rows (`native/internal/addons`).
 
 Code contributed to FH2MP itself by **Trinculo54**: the Modded cars row of Event Options, the developer badge on name tags and
 crash guards in the shim (and the in-game Guide's Xbox 360 and Xbox One looks, which moved to Encore with the Guide).
@@ -200,6 +203,8 @@ Third-party mods FH2MP uses (not part of FH2MP and not redistributed by it; Enco
 - **[Achievements](https://github.com/Trinculo54/fh2-achievements)** © Trinculo54, GPL-3.0.
 - **[NitroSystem](https://github.com/qiangqiang101/FH2-NitroSystem)** © qiangqiang101, MIT License.
 - **[Underglow](https://github.com/qiangqiang101/FH2-Underglow)** © qiangqiang101, MIT License.
+- **[PoliceLightbars](https://github.com/suderek22/FH2_Lightbars)** © suderek22, MIT License. The server runs its 0.2.2 DLL's SQL
+  statements (copied into `native/internal/addons/lightbars.go`) on its car database.
 
 Libraries the server and the release tool (`native/`) are built with (Go modules, compiled in; `native/go.mod` has the versions):
 

@@ -1094,6 +1094,13 @@ func (s *Server) AnnounceStandins(xuid int64, field string) {
 	}
 }
 
+// AnnounceAddons: the add-ons whose parts a player's game has ("lightbars"), from its car database; "-" none.
+func (s *Server) AnnounceAddons(xuid int64, field string) {
+	if xuid != 0 && field != "" {
+		s.Hub.Control(fmt.Sprintf("addons %x %s", xuid, field))
+	}
+}
+
 // AnnounceAllow: a fresh sign-in lifts an earlier revoke of this player on the game server.
 func (s *Server) AnnounceAllow(xuid int64) {
 	if xuid != 0 {
