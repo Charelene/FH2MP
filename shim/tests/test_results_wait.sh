@@ -48,6 +48,11 @@ int main(void)
     in.idle_since = 150000;                                            /* the car moved, then stopped again: a new episode */
     CHECK(rs_step(&st, &in, 150000 + 10000, &secs) == RS_NONE);
     CHECK(rs_step(&st, &in, 150000 + 45000, &secs) == RS_OVER_MISSING);
+    /* the car stood still on the grid before the start: the wait counts from the start (dev 2026-11-23: still since 12 s before it) */
+    memset(&st, 0, sizeof st);
+    in.idle_since = 200000; in.host_at = 212000;
+    CHECK(rs_step(&st, &in, 200000 + 45000, &secs) == RS_NONE);
+    CHECK(rs_step(&st, &in, 212000 + 45000, &secs) == RS_OVER_MISSING && secs == 45);
     in.host = -1;                                                      /* no InRace update at all (joined late, or the hook is off) */
     in.hooked = 0;
     in.idle_since = 300000;

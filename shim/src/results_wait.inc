@@ -52,7 +52,8 @@ static int rs_episode(const rs_in *in, unsigned long long *since)
         return RS_OVER_SEEN;
     }
     if (in->in_race == 1 && in->host != 0 && in->idle_known) {
-        *since = in->idle_since;
+        /* counted from the start at the earliest: the car stands still on the grid (dev 2026-11-23: a report 33 s into a race, 12 s of it the grid) */
+        *since = in->host == 1 && in->host_at > in->idle_since ? in->host_at : in->idle_since;
         return RS_OVER_MISSING;
     }
     return RS_NONE;
