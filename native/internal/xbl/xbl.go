@@ -1079,6 +1079,14 @@ func (s *Server) AnnounceAuth(xuid int64, ip, key string) {
 	}
 }
 
+// AnnounceName tells the game server the gamertag of a signed-in xuid, for the senders of quick chat messages. Hex, so a gamertag with spaces
+// stays one field; a game server without quick chat ignores the line.
+func (s *Server) AnnounceName(xuid int64, gamertag string) {
+	if xuid != 0 && gamertag != "" {
+		s.Hub.Control(fmt.Sprintf("name %x %x", xuid, gamertag))
+	}
+}
+
 // AnnounceLogout: a session signed out; the game server forgets its ticket key and ends the connections that key opened (not a ban).
 func (s *Server) AnnounceLogout(xuid int64, key string) {
 	if xuid != 0 && key != "" {

@@ -351,6 +351,7 @@ type World struct {
 	carselRoutes     map[uint64]Addr
 	modsRoutes       map[uint64]Addr
 	eventoptsRoutes  map[uint64]Addr
+	quickchatRoutes  map[uint64]Addr
 }
 
 // NewWorld is Server(...) for a hub-owned world.

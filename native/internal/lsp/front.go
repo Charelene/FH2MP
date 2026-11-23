@@ -982,7 +982,7 @@ func (c *Core) identify(rw respWriter, r *Req, req *http.Request) bool {
 			if !c.gamedbOK(rw, r, req, acct) {
 				return false
 			}
-			c.AnnounceAuth(acct.Xuid, clientIP(req), token)
+			c.AnnounceAuth(acct.Xuid, clientIP(req), token, acct.Gamertag)
 			return true
 		}
 		if c.Auth.Mode == "required" {
@@ -1035,8 +1035,8 @@ func (c *Core) identify(rw respWriter, r *Req, req *http.Request) bool {
 // ---------------------------------------------------------------- tell the game server who is signed in
 
 // AnnounceAuth tells the game server (UDP, loopback) that this xuid is signed in from this address, so it accepts that player's OpenConnection, with the
-// UDP ticket key of the session token. Repeated at most every 20 s per player and session.
-func (c *Core) AnnounceAuth(xuid int64, ip, token string) {
+// UDP ticket key of the session token, and its gamertag (for quick chat) when given. Repeated at most every 20 s per player and session.
+func (c *Core) AnnounceAuth(xuid int64, ip, token, gamertag string) {
 	tkey := auth.UdpTicketKey(token)
 	k := authKey{xuid, ip, tkey}
 	f := &c.front
@@ -1051,6 +1051,7 @@ func (c *Core) AnnounceAuth(xuid int64, ip, token string) {
 	f.authAnnounce[k] = time.Now()
 	f.mu.Unlock()
 	c.Xbl.AnnounceAuth(xuid, ip, tkey)
+	c.Xbl.AnnounceName(xuid, gamertag)
 }
 
 // OnLogin is a fresh sign-in (launcher login / sign-up): it lifts an earlier ban or kick on the game server, then announces the address.
@@ -1060,7 +1061,7 @@ func (c *Core) OnLogin(xuid int64, ip, token string) {
 	f.mu.Lock()
 	delete(f.authAnnounce, authKey{xuid, ip, auth.UdpTicketKey(token)})
 	f.mu.Unlock()
-	c.AnnounceAuth(xuid, ip, token)
+	c.AnnounceAuth(xuid, ip, token, "")
 }
 
 // OnLogout is a launcher signing out (after the game exits, or a profile window closed): the connections that session's ticket opened end, and the
