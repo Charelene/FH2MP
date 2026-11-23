@@ -183,8 +183,10 @@ This project is **AI-assisted**. If that makes you close the tab, fair enough. I
 - **[PoliceLightbars](https://github.com/suderek22/FH2_Lightbars)** by suderek22 (optional): amber and blue roof lightbars from FH6 on 31
   cars, shown to the other players who have it and flashing by each owner's Police lights switch; the server serves a copy of its car
   database with the add-on's own rows (`native/internal/addons`).
+- **[QuickChat](https://github.com/Trinculo54/QuickChat)** by Trinculo54 (optional): 16 fixed phrases in FH2 ANNA's menu; FH2MP carries
+  the phrase a player picks to the other players of the world and shows it over the sender's car (`native/internal/game/quickchat.go`).
 
-Code contributed to FH2MP itself by **Trinculo54**: the Modded cars row of Event Options, the developer badge on name tags and
+Code contributed to FH2MP itself by **Trinculo54**: the Modded cars row of Event Options, the developer badge on name tags, quick chat and
 crash guards in the shim (and the in-game Guide's Xbox 360 and Xbox One looks, which moved to Encore with the Guide).
 
 ## License
@@ -205,6 +207,8 @@ Third-party mods FH2MP uses (not part of FH2MP and not redistributed by it; Enco
 - **[Underglow](https://github.com/qiangqiang101/FH2-Underglow)** © qiangqiang101, MIT License.
 - **[PoliceLightbars](https://github.com/suderek22/FH2_Lightbars)** © suderek22, MIT License. The server runs its 0.2.2 DLL's SQL
   statements (copied into `native/internal/addons/lightbars.go`) on its car database.
+- **[QuickChat](https://github.com/Trinculo54/QuickChat)** by Trinculo54 (optional): 16 fixed phrases in FH2 ANNA's menu; FH2MP carries
+  the phrase a player picks to the other players of the world and shows it over the sender's car (`native/internal/game/quickchat.go`).
 
 Libraries the server and the release tool (`native/`) are built with (Go modules, compiled in; `native/go.mod` has the versions):
 
