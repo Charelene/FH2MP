@@ -104,6 +104,34 @@ static unsigned net_watch_header_text(char *out, unsigned cap, const net_watch_c
     return (unsigned)(p - out);
 }
 
+/* A SessionHost bool update as the game server sends it (native/internal/netv2 SessionHostUpdate = ObjectMessage(MsgObjectUpdate, RouterLobby, ...)):
+ * id 8 (7 bits), router 6 (4), two key bits 0 0, object id (2), seq (8), body size 5 (14), then var (4) and the bool (1). `buf` holds `have` bytes of the stream
+ * from byte pos / 8 on, `pos` is the bit cursor before the id (net_watch_bits). -> 1 and the fields when the message at `pos` is that update. */
+#define NW_MSG_OBJECT_UPDATE 8
+#define NW_ROUTER_LOBBY 6
+#define NW_HOST_BOOL_BITS 5
+static int nw_field(const unsigned char *buf, unsigned have, unsigned pos, unsigned off, unsigned count, unsigned *out)
+{
+    unsigned skip = ((pos + off) >> 3) - (pos >> 3);   /* net_watch_bits wants the buffer to start at the byte of the bit it reads */
+    return skip < have && net_watch_bits(buf + skip, have - skip, pos + off, count, out);
+}
+
+static int net_watch_host_bool(const unsigned char *buf, unsigned have, unsigned pos, unsigned *var, unsigned *value, unsigned *seq)
+{
+    unsigned id, router, keys, obj, s, size, v, b;
+    if (!nw_field(buf, have, pos, 0, 7, &id) || id != NW_MSG_OBJECT_UPDATE) return 0;
+    if (!nw_field(buf, have, pos, 7, 4, &router) || router != NW_ROUTER_LOBBY) return 0;
+    if (!nw_field(buf, have, pos, 11, 2, &keys) || keys != 0) return 0;
+    if (!nw_field(buf, have, pos, 13, 2, &obj) || !nw_field(buf, have, pos, 15, 8, &s)) return 0;
+    if (!nw_field(buf, have, pos, 23, 14, &size) || size != NW_HOST_BOOL_BITS) return 0;
+    if (!nw_field(buf, have, pos, 37, 4, &v) || !nw_field(buf, have, pos, 41, 1, &b)) return 0;
+    (void)obj;
+    *var = v;
+    *value = b;
+    *seq = s;
+    return 1;
+}
+
 #ifndef NET_WATCH_LOGIC_ONLY
 
 typedef int (*nw_dispatch_fn)(void *dispatcher, void *context, void *stream, char connect_only);
@@ -167,10 +195,48 @@ static void nw_refused(void *stream, unsigned at, int result, int connect_only)
     }
 }
 
+/* The race flag the game server sends (SessionHost var 6, InRace: 1 at the start, 0 when the race is over). results_wait.inc reads these to say, for a game
+ * that sits on the results screen, whether the race-over update reached it (issue 547). Written on the network thread, read on the monitor's. */
+#define NW_HOST_VAR_INRACE 6
+static volatile LONG g_nw_inrace = -1, g_nw_inrace_seq, g_nw_inrace_hooked;
+static volatile LONGLONG g_nw_inrace_at, g_nw_over_at;   /* GetTickCount64 of the last update, and of the last 1 -> 0 (0 = none since a start) */
+
+/* Looks at the message the dispatcher is about to handle: a SessionHost InRace update is kept. */
+static void nw_observe(void *stream, unsigned at)
+{
+    unsigned char header[32], bytes[8];
+    UINT_PTR holder = 0, data = 0;
+    unsigned size, have, var, value, seq;
+    if (!stream || !read_game_memory(stream, header, sizeof header)) return;
+    memcpy(&size, header + 4, 4);
+    memcpy(&holder, header + 24, sizeof holder);
+    if (!holder || at + 42 > size || !read_game_memory((const void *)(holder + 16), &data, sizeof data) || !data) return;
+    have = ((size + 7) >> 3) - (at >> 3);
+    if (have > sizeof bytes) have = sizeof bytes;
+    if (!read_game_memory((const void *)(data + (at >> 3)), bytes, have)) return;
+    if (!net_watch_host_bool(bytes, have, at, &var, &value, &seq) || var != NW_HOST_VAR_INRACE) return;
+    {
+        ULONGLONG now = GetTickCount64();
+        LONG before = g_nw_inrace;
+        InterlockedExchange(&g_nw_inrace_seq, (LONG)seq);
+        InterlockedExchange64(&g_nw_inrace_at, (LONGLONG)now);
+        InterlockedExchange64(&g_nw_over_at, value == 0 && before == 1 ? (LONGLONG)now : 0);
+        InterlockedExchange(&g_nw_inrace, (LONG)value);
+        log_begin();
+        log_raw("netwatch: the game server sent SessionHost var 6 (InRace) = ");
+        log_dec(value);
+        log_raw(", update #");
+        log_dec(seq);
+        log_raw(value ? " (the race has started)\n" : before == 1 ? " (the race is over)\n" : " (no start seen before it)\n");
+    }
+}
+
 static int nw_dispatch(void *dispatcher, void *context, void *stream, char connect_only)
 {
     unsigned at = stream ? *(volatile unsigned *)((char *)stream + 0xc) : 0;   /* bit cursor before the 7-bit id */
-    int r = g_nw_dispatch_orig(dispatcher, context, stream, connect_only);
+    int r;
+    if (!connect_only) nw_observe(stream, at);
+    r = g_nw_dispatch_orig(dispatcher, context, stream, connect_only);
     if (net_watch_outcome(r, connect_only != 0) >= NW_DATAGRAM_DROPPED) nw_refused(stream, at, r, connect_only != 0);
     return r;
 }
@@ -255,6 +321,7 @@ static int patch_net_watch(void)
     }
     if (!plat_hook("netwatch: connection close reasons", img + 0x1761c40, (void *)nw_disconnect, (void **)&g_nw_disconnect_orig)) return 0;
     if (!plat_hook("netwatch: refused messages", img + 0x1761d60, (void *)nw_dispatch, (void **)&g_nw_dispatch_orig)) return 0;
+    g_nw_inrace_hooked = 1;
     log_begin();
     log_raw("hook: netwatch: each close of the game's connection to the game server is logged with its reason and the message that caused it "
             "(game+0x1761c40, game+0x1761d60)\n");

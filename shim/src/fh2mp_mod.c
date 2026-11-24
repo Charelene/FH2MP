@@ -3233,15 +3233,19 @@ static void udp_ticket_send(fh_sock s, const void *bufs, DWORD cnt, const void *
 #include "perf.inc"
 #include "lighting_sync.inc"
 #include "honk_sync.inc"
+#include "activity_report.inc"
 #include "carsel_sync.inc"
 #include "mods_sync.inc"
 #include "eventopts_sync.inc"
 #include "nos_flames.inc"
 #include "ug_remote.inc"
+#include "lightbars.inc"
 #include "race_wait.inc"
+#include "results_wait.inc"
 #include "event_fix.inc"
 #include "event_stock.inc"
 #include "stall_trace.inc"
+#include "quickchat_sync.inc"
 
 /*
  * #64: a Monthly Rival started from the pause menu inside an online session loaded for ever. The menu's launch (RivalsModule
@@ -3497,16 +3501,39 @@ static int ui_race_toast_layout(void)
     return ok;
 }
 
-/* Developer badge (src/dev_badge.inc): FH2MP's logo after a developer's gamertag on the name tag over their car. Disable with env FH2MP_NO_DEVBADGE. */
+/* The name tag over a car (UI.zip Scenes/Anthem/AR_OpponentLabel.xaml), one page the shim owns for two things: the developer badge
+ * (src/dev_badge.inc: FH2MP's logo after a developer's gamertag; env FH2MP_NO_DEVBADGE leaves it out) and QuickChat's message box over the
+ * sender's car (src/quickchat_box.inc; env FH2MP_NO_CHATBOX leaves it out). Only one mod can replace a game file, so QuickChat leaves the
+ * page to FH2MP when FH2MP is there. */
 #include "dev_badge.inc"
+#include "quickchat_box.inc"
 
-static int ui_dev_badge(void)
+static int ui_name_tag_page(void)
 {
-    int ok = stateflow_replace(L"\\media\\UI.zip", "Scenes/Anthem/AR_OpponentLabel.xaml", "UI/Scenes/Anthem/AR_OpponentLabel.xaml", DEV_BADGE_OLD,
-                               sizeof DEV_BADGE_OLD - 1, DEV_BADGE_NEW, sizeof DEV_BADGE_NEW - 1, "devbadge");
+    struct sf_pair pairs[3];
+    unsigned n = 0;
+    wchar_t tmp[8];
+    int badge = GetEnvironmentVariableW(L"FH2MP_NO_DEVBADGE", tmp, 8) == 0, box = GetEnvironmentVariableW(L"FH2MP_NO_CHATBOX", tmp, 8) == 0, ok;
+
+    if (badge) {
+        pairs[n].old = DEV_BADGE_OLD, pairs[n].olen = sizeof DEV_BADGE_OLD - 1, pairs[n].neu = DEV_BADGE_NEW, pairs[n].nlen = sizeof DEV_BADGE_NEW - 1;
+        n++;
+    }
+    if (box) {
+        pairs[n].old = QC_BOX_ROW_OLD, pairs[n].olen = sizeof QC_BOX_ROW_OLD - 1, pairs[n].neu = QC_BOX_ROW_NEW, pairs[n].nlen = sizeof QC_BOX_ROW_NEW - 1;
+        n++;
+        pairs[n].old = QC_BOX_RES_OLD, pairs[n].olen = sizeof QC_BOX_RES_OLD - 1, pairs[n].neu = QC_BOX_RES_NEW, pairs[n].nlen = sizeof QC_BOX_RES_NEW - 1;
+        n++;
+    }
+    if (!n) {
+        return 0;
+    }
+    ok = stateflow_replace_n(L"\\media\\UI.zip", "Scenes/Anthem/AR_OpponentLabel.xaml", "UI/Scenes/Anthem/AR_OpponentLabel.xaml", pairs, n, "nametag page");
     if (ok) {
         log_begin();
-        log_raw("devbadge: Scenes/Anthem/AR_OpponentLabel.xaml handed to the platform, FH2MP's developers have its logo after their gamertag on name tags\n");
+        log_raw("nametag page: Scenes/Anthem/AR_OpponentLabel.xaml handed to the platform, with ");
+        log_raw(badge && box ? "the developer badge and QuickChat's message box" : badge ? "the developer badge" : "QuickChat's message box");
+        log_raw("\n");
     }
     return ok;
 }
@@ -3518,6 +3545,7 @@ static int ui_dev_badge(void)
  */
 static WCHAR g_gamedb_path[MAX_PATH];
 static WCHAR g_gamedb_src[MAX_PATH];      /* the launcher's copy, put at g_gamedb_path by gamedb_place */
+static char g_gamedb_addons[64];            /* session gamedb_addons=: the add-ons whose rows the launcher's copy has ("lightbars") */
 static volatile LONG g_gamedb_placed;
 static volatile LONG g_gamedb_started;    /* every mod has started (the platform's own database step is done) */
 static int gamedb_place(void);
@@ -4058,6 +4086,8 @@ static DWORD WINAPI option_monitor(LPVOID unused)
             weather_sample(img);
         }
         eo_timelock_tick(img);
+        activity_write(online_allowed());
+        results_wait_tick();
         if (g_gamedb_started && tick % 10 == 0) {
             gamedb_place();               /* a copy that failed, or a mod's apply_database putting the platform's copy back */
         }
@@ -5222,6 +5252,21 @@ static void gamedb_put_back(void)
     }
 }
 
+/* 1 when the session's gamedb_addons (a comma list) names `name` */
+static int gamedb_has_addon(const char *name)
+{
+    const char *p = g_gamedb_addons;
+    int n = lstrlenA(name);
+    while (*p) {
+        int k = 0;
+        while (p[k] && p[k] != ',') k++;
+        if (k == n && mem_equal((const unsigned char *)p, (const unsigned char *)name, (SIZE_T)n)) return 1;
+        p += k;
+        if (*p == ',') p++;
+    }
+    return 0;
+}
+
 /* The mods (other than FH2MP) whose database changes the platform built into its copy, from fh2-mods\platform-db.txt (line 1: its
  * hash, then "mod<TAB>result" per mod), as "A, B"; the file is deleted so the platform builds its copy again next launch. */
 static void gamedb_drop_platform_copy(char *names, int cap)
@@ -5253,7 +5298,9 @@ static void gamedb_drop_platform_copy(char *names, int cap)
             i++;
             k++;
         }
-        if (k && buf[i] == '\t' && !(k == 5 && line[0] == 'F' && line[1] == 'H' && line[2] == '2' && line[3] == 'M' && line[4] == 'P')) {
+        /* PoliceLightbars' rows are in the server's copy the launcher got for it (session gamedb_addons=lightbars): its changes are on */
+        int covered = k == 15 && mem_equal((const unsigned char *)line, (const unsigned char *)"PoliceLightbars", 15) && gamedb_has_addon("lightbars");
+        if (k && buf[i] == '\t' && !covered && !(k == 5 && line[0] == 'F' && line[1] == 'H' && line[2] == '2' && line[3] == 'M' && line[4] == 'P')) {
             if (n && n + 2 < cap) {
                 names[n++] = ',';
                 names[n++] = ' ';
@@ -5737,6 +5784,7 @@ static DWORD WINAPI late_init(LPVOID unused)
             if (GetEnvironmentVariableW(L"FH2MP_NO_CARSELECT_HOLD", env, 8) == 0) patch_carsel();
             patch_mods(g_exe_dir);    /* NitroSystem's NOS rule (always online) and other players' NOS and underglow */
             if (GetEnvironmentVariableW(L"FH2MP_NO_RACEWAIT", env, 8) == 0) patch_race_wait();
+            if (GetEnvironmentVariableW(L"FH2MP_NO_QUICKCHAT", env, 8) == 0) start_quickchat();   /* nothing without QuickChat */
         }
         {
             wchar_t env[8];
@@ -5931,6 +5979,12 @@ static DWORD WINAPI late_init(LPVOID unused)
         }
         patch_copy_path();
         patch_contact_forecast();
+        {
+            wchar_t ar_env[8];
+            if (GetEnvironmentVariableW(L"FH2MP_NO_ACTIVITY", ar_env, 8) == 0) {
+                patch_activity_report();
+            }
+        }
     }
 #ifdef FH2MP_DEBUG_BUILD
     install_trace();
@@ -5987,6 +6041,13 @@ static DWORD WINAPI offline_guards(LPVOID unused)
     log_dec(tried);
     log_raw(" crash guards made");
     log_raw(made == tried ? "\n" : " (the lines above name the ones that were not)\n");
+    /* what the player is doing, for Encore (activity_report.inc): offline runs have no monitor, so this thread writes it */
+    if (GetEnvironmentVariableW(L"FH2MP_NO_ACTIVITY", env, 8) == 0 && patch_activity_report()) {
+        for (;;) {
+            activity_write(0);
+            Sleep(1000);
+        }
+    }
     return 0;
 }
 
@@ -6121,6 +6182,8 @@ static int session_load(void)
                     g_token[n] = 0;
                 } else if (lstrcmpA(line, "run") == 0 && run_id_ok(eq)) {
                     lstrcpynA(g_run, eq, sizeof g_run);
+                } else if (lstrcmpA(line, "gamedb_addons") == 0) {
+                    lstrcpynA(g_gamedb_addons, eq, sizeof g_gamedb_addons);
                 } else if (lstrcmpA(line, "switches") == 0) {
                     session_switches(eq);
                 } else if (lstrcmpA(line, "gamedb") == 0 && eq[0]) {
@@ -6676,9 +6739,7 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi *api)
         if (GetEnvironmentVariableW(L"FH2MP_NO_RACETOAST", tmp, 8) == 0) {
             ui_race_toast_layout();    /* now: the game reads its UI files when the first screen loads */
         }
-        if (GetEnvironmentVariableW(L"FH2MP_NO_DEVBADGE", tmp, 8) == 0) {
-            ui_dev_badge();
-        }
+        ui_name_tag_page();    /* the developer badge and QuickChat's message box, each with its own switch */
     }
     {
         wchar_t cp_env[8];

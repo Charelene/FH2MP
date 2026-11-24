@@ -30,6 +30,9 @@ type LauncherAPI interface {
 	BodyLimit(path string) int64
 	// GameDBInfo is the sha256 of the server's car database and its path; ok=false when it cannot be read.
 	GameDBInfo() (sha, path string, ok bool)
+	// GameDBAddon is the add-on whose copy of the server's database has sha256 sha ("" for none): a game playing with it is on the
+	// server's database plus exactly that add-on's rows.
+	GameDBAddon(sha string) string
 	Handle(r *Req, method, path string, h http.Header, body []byte, ip string) (status int, obj any, ctype string)
 }
 
@@ -64,7 +67,8 @@ type frontState struct {
 	mu            sync.Mutex
 	oldRemoved    map[int64]time.Time
 	ownCars       map[int64]time.Time
-	standinsGone  map[int64]bool // players whose stand-in list the game server was told to forget (their game runs the server's database)
+	standinsGone  map[int64]bool   // players whose stand-in list the game server was told to forget (their game runs the server's database)
+	addons        map[int64]string // the add-on each player's game database was last announced with to the game server ("-" none)
 	toolsAnnounce map[int64]toolsEntry
 	authAnnounce  map[authKey]time.Time
 	lastPoll      map[string]uint64
@@ -765,7 +769,33 @@ func (c *Core) gamedbOK(rw respWriter, r *Req, req *http.Request, acct *auth.Acc
 	}
 	have = strings.ToLower(strings.TrimSpace(have))
 	f := &c.front
-	if have == sha {
+	addon := ""
+	if have != sha && have != "" {
+		addon = c.Launcher.GameDBAddon(have)
+	}
+	if have == sha || addon != "" {
+		// the server's database, or its copy with an add-on's rows (a game with the add-on's parts: the game server shows that player's
+		// add-on parts as they are to the others who have it, and the stock part to the rest)
+		announce := addon
+		if announce == "" {
+			announce = "-"
+		}
+		f.mu.Lock()
+		changed := f.addons[acct.Xuid] != announce // the first time too: a game server that outlived the LSP may hold an older word
+		if changed {
+			if f.addons == nil || len(f.addons) > 20000 {
+				f.addons = map[int64]string{}
+			}
+			f.addons[acct.Xuid] = announce
+		}
+		f.mu.Unlock()
+		if changed {
+			c.Xbl.AnnounceAddons(acct.Xuid, announce)
+			if addon != "" {
+				c.Log(r, fmt.Sprintf("  car database %s is the server's with the %s rows: %s %#x has that add-on (shim %s)", cut(have, 16), addon,
+					pyjson.PyRepr(acct.Gamertag), acct.Xuid, c.shimOrNone(r)))
+			}
+		}
 		f.mu.Lock()
 		delete(f.ownCars, acct.Xuid)
 		forget := !f.standinsGone[acct.Xuid]
@@ -952,7 +982,7 @@ func (c *Core) identify(rw respWriter, r *Req, req *http.Request) bool {
 			if !c.gamedbOK(rw, r, req, acct) {
 				return false
 			}
-			c.AnnounceAuth(acct.Xuid, clientIP(req), token)
+			c.AnnounceAuth(acct.Xuid, clientIP(req), token, acct.Gamertag)
 			return true
 		}
 		if c.Auth.Mode == "required" {
@@ -1005,8 +1035,8 @@ func (c *Core) identify(rw respWriter, r *Req, req *http.Request) bool {
 // ---------------------------------------------------------------- tell the game server who is signed in
 
 // AnnounceAuth tells the game server (UDP, loopback) that this xuid is signed in from this address, so it accepts that player's OpenConnection, with the
-// UDP ticket key of the session token. Repeated at most every 20 s per player and session.
-func (c *Core) AnnounceAuth(xuid int64, ip, token string) {
+// UDP ticket key of the session token, and its gamertag (for quick chat) when given. Repeated at most every 20 s per player and session.
+func (c *Core) AnnounceAuth(xuid int64, ip, token, gamertag string) {
 	tkey := auth.UdpTicketKey(token)
 	k := authKey{xuid, ip, tkey}
 	f := &c.front
@@ -1021,6 +1051,7 @@ func (c *Core) AnnounceAuth(xuid int64, ip, token string) {
 	f.authAnnounce[k] = time.Now()
 	f.mu.Unlock()
 	c.Xbl.AnnounceAuth(xuid, ip, tkey)
+	c.Xbl.AnnounceName(xuid, gamertag)
 }
 
 // OnLogin is a fresh sign-in (launcher login / sign-up): it lifts an earlier ban or kick on the game server, then announces the address.
@@ -1030,7 +1061,7 @@ func (c *Core) OnLogin(xuid int64, ip, token string) {
 	f.mu.Lock()
 	delete(f.authAnnounce, authKey{xuid, ip, auth.UdpTicketKey(token)})
 	f.mu.Unlock()
-	c.AnnounceAuth(xuid, ip, token)
+	c.AnnounceAuth(xuid, ip, token, "")
 }
 
 // OnLogout is a launcher signing out (after the game exits, or a profile window closed): the connections that session's ticket opened end, and the

@@ -98,6 +98,11 @@ func signed(payload, key []byte) []byte {
 }
 
 func (h *Hub) whyUnmatched(xuid uint64, data []byte, now float64) (string, bool) {
+	return h.whyUnmatchedCar(xuid, data, now, true)
+}
+
+// whyUnmatchedCar is whyUnmatched; checkCar as findAuthedCar's.
+func (h *Hub) whyUnmatchedCar(xuid uint64, data []byte, now float64, checkCar bool) (string, bool) {
 	for mainAddr, binding := range h.Bound {
 		if binding.xuid != xuid {
 			continue
@@ -119,7 +124,7 @@ func (h *Hub) whyUnmatched(xuid uint64, data []byte, now float64) (string, bool)
 		if peer.Xuid != xuid || !(1 <= peer.Owner && peer.Owner <= 254) {
 			return fmt.Sprintf("the connection's xuid is %d and its owner id %d", peer.Xuid, peer.Owner), false
 		}
-		if peer.CarID == nil || *peer.CarID != int(data[52]) {
+		if checkCar && (peer.CarID == nil || *peer.CarID != int(data[52])) {
 			cs := "None"
 			if peer.CarID != nil {
 				cs = fmt.Sprint(*peer.CarID)
@@ -168,6 +173,8 @@ func (h *Hub) sideForged(kind jobKind, xuid uint64) {
 		lg, name = modsLog, "mod state"
 	case jobEventopts:
 		lg, name = eventoptsLog, "event options"
+	case jobQuickchat:
+		lg, name = quickchatLog, "quick chat"
 	}
 	if ok, skipped := sideRate.Allow([2]any{"side-forged", xuid}, rejectLogSeconds); ok {
 		extra := ""

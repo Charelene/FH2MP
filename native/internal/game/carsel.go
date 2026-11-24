@@ -214,6 +214,8 @@ func reportCodeName(code uint8) string {
 		return "other"
 	case 6:
 		return "race wait detail"
+	case 7:
+		return "results screen wait"
 	}
 	return "unknown"
 }
@@ -319,9 +321,30 @@ func (w *World) ClientReport(peer *Peer, code uint8, detail uint32, text string,
 	if code == 6 {
 		extra += w.raceWaitNames(peer, text)
 	}
+	if code == 7 {
+		extra += w.resultsView(peer)
+	}
 	w.Warnf("client report: owner %d xuid %#x, %s [code %d, detail %d]: %s (server: %s, last packet %.1f s ago, car %s)%s",
 		peer.Owner, peer.Xuid, reportCodeName(code), code, detail, text, state, now-peer.LastRx, modelStr(peer), extra)
 	w.ev("client_report", kv("xuid", fmt.Sprintf("%#x", peer.Xuid)), kv("code", int64(code)), kv("name", reportCodeName(code)), kv("detail", int64(detail)), kv("text", text))
+}
+
+// resultsView is the server's side of a results screen wait report (code 7, shim results_wait.inc; issue 547): when the race-over flag (SessionHost
+// var 6 = 0) went out to this player and as which update number (the report's text names the number its game received, if any), whether it finished,
+// and the console flags the server holds for it. A client that is back in Free Roam has RenderReady, ParticipatingInRace and RaceInProgress cleared.
+func (w *World) resultsView(peer *Peer) string {
+	ev := w.Event
+	if ev == nil {
+		return "; server's view: no event"
+	}
+	now := w.Mono()
+	over := "the race-over flag has not been sent to it"
+	if peer.RaceOverAt != 0 {
+		over = fmt.Sprintf("the race-over flag went out %.0f s ago as update #%d (next update #%d)", now-peer.RaceOverAt, peer.RaceOverSeq, peer.HostSeq)
+	}
+	_, finished := ev.Finished.Get(peer)
+	return fmt.Sprintf("; server's view: event stage %s, %s, finished=%v, in the event=%v, console RenderReady=%v ParticipatingInRace=%v RaceInProgress=%v Ready=%v",
+		ev.Stage, over, finished, ev.has(peer), peer.ConsoleVars[0], peer.ConsoleVars[2], peer.ConsoleVars[3], peer.ConsoleVars[4])
 }
 
 var (

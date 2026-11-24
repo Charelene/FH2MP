@@ -23,6 +23,7 @@ cat > "$tmp/test.c" <<'C'
 #include <stdio.h>
 #include <string.h>
 static WCHAR g_exe_dir[MAX_PATH], g_gamedb_path[MAX_PATH], g_gamedb_src[MAX_PATH];
+static char g_gamedb_addons[64];   /* fh2mp_mod.c: the session's gamedb_addons= (lightbars), outside the slice this test compiles */
 static void *g_mod;
 static void quiet(void *m, const char *s) { (void)m; (void)s; }
 static struct { WCHAR game_dir[MAX_PATH]; const char *platform_version; void (*log)(void *, const char *); } api;

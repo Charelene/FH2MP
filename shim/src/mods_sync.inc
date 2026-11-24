@@ -58,6 +58,11 @@ static volatile LONG g_nos_allowed;       /* 1 while the shim lets NOS burn (its
 static volatile LONG g_nos_server_ok;     /* the newest reply's MODS_SERVER_NOS_OK */
 static volatile LONG64 g_nos_server_at;   /* when that reply came (GetTickCount64), 0 none */
 static unsigned char *g_mods_img;
+static wchar_t g_mods_dir[MAX_PATH];        /* the Azimuth folder (PoliceLightbars.ini) */
+#define MODS_V2_WAIT_MS 3000u        /* a v2 request this long without any reply: the server is older (v1 only) */
+static unsigned char lb_flags(void);
+static void lb_read_switch(ULONGLONG now);
+static void lightbars_start(unsigned char *img, const wchar_t *azimuth_dir, int share);
 static volatile LONG g_mods_enabled;      /* the worker runs */
 static volatile LONG g_mods_share;        /* this player's underglow is read and sent (not FH2MP_NO_MODSYNC) */
 
@@ -317,14 +322,16 @@ static DWORD WINAPI mods_worker(void *unused)
     int (WSAAPI *option)(SOCKET, int, int, const char *, int) = NULL;
     int (WSAAPI *close_socket)(SOCKET) = NULL;
     u_long nb = 1;
-    int v6only = 0, socket_told = 0, silent_told = 0;
+    int v6only = 0, socket_told = 0, silent_told = 0, v2 = 1;
+    ULONGLONG v2_first = 0;
     unsigned rejected = 0;
-    unsigned char ug[MODS_UG], sent_ug[MODS_UG], sent_nos = 0xff;
+    unsigned char ug[MODS_UG], sent_ug[MODS_UG], sent_nos = 0xff, addons = 0, sent_addons = 0xff;
     unsigned u;
     (void)unused;
     for (u = 0; u < MODS_UG; u++) ug[u] = sent_ug[u] = 0;
     g_api->wait_for_mods(30000);
     nos_find();
+    if (g_mods_img) lightbars_start(g_mods_img, g_mods_dir, g_mods_share);
     if (ws) {
         make_socket = (void *)GetProcAddress(ws, "socket"); nonblocking = (void *)GetProcAddress(ws, "ioctlsocket");
         receive = (void *)GetProcAddress(ws, "recvfrom"); option = (void *)GetProcAddress(ws, "setsockopt");
@@ -355,6 +362,8 @@ static DWORD WINAPI mods_worker(void *unused)
             if (now >= ug_next) ug_next = now + (ug_read(ug) || !UG_LOADED() ? UG_READ_MS : UG_RETRY_MS);
         }
         nos = nos_flags();
+        lb_read_switch(now);
+        addons = lb_flags();
         AcquireSRWLockShared(&g_light_lock);
         length = g_light.address_len; predicted = g_light.prediction_at; car = g_light.car; current_generation = g_light.generation;
         light_copy(address, g_light.address, (unsigned)length);
@@ -362,7 +371,8 @@ static DWORD WINAPI mods_worker(void *unused)
         ReleaseSRWLockShared(&g_light_lock);
         if (generation != current_generation) {
             if (s != INVALID_SOCKET) close_socket(s);
-            s = INVALID_SOCKET; received = 0; generation = current_generation; polls = 0; rejected = 0; silent_told = 0; sent_nos = 0xff;
+            s = INVALID_SOCKET; received = 0; generation = current_generation; polls = 0; rejected = 0; silent_told = 0; sent_nos = sent_addons = 0xff;
+            v2 = 1; v2_first = 0;
             AcquireSRWLockExclusive(&g_mods_lock);
             g_mods.count = 0; g_mods.response_at = 0;
             ReleaseSRWLockExclusive(&g_mods_lock);
@@ -383,7 +393,7 @@ static DWORD WINAPI mods_worker(void *unused)
             socket_told = 0;
         }
         for (drained = 0; drained < 32 && (n = receive(s, (char *)packet, sizeof packet, 0, NULL, NULL)) > 0; drained++) {
-            if (mods_response(packet, (unsigned)n, g_ticket_key, g_xuid, seq, received, epoch, &server, records, &count)) {
+            if (mods_response_v(packet, (unsigned)n, g_ticket_key, g_xuid, seq, received, epoch, &server, records, &count, v2)) {
                 int first = !received;
                 ULONGLONG at;
                 AcquireSRWLockShared(&g_light_lock);
@@ -399,7 +409,7 @@ static DWORD WINAPI mods_worker(void *unused)
                 }
             } else rejected++;
         }
-        changed = nos != sent_nos;
+        changed = nos != sent_nos || addons != sent_addons;
         for (i = 0; i < (int)MODS_UG && !changed; i++) changed = ug[i] != sent_ug[i];
         busy = (nos & MODS_NOS_BURNING) != 0;
         if (!busy) {
@@ -410,10 +420,16 @@ static DWORD WINAPI mods_worker(void *unused)
         gap = busy ? MODS_POLL_BUSY_MS : MODS_POLL_IDLE_MS;
         if (changed ? now - last_send >= MODS_CHANGE_MS : now - last_send >= gap) {
             WSABUF b; DWORD sent = 0;
-            mods_request(packet, g_ticket_key, g_xuid, ++seq, epoch, car, nos, ug);
+            if (v2 && !received && v2_first && now - v2_first >= MODS_V2_WAIT_MS) {
+                v2 = 0;   /* an older server: v1 for the rest of this ticket epoch */
+                log_begin();
+                log_raw("mods: the server answers no v2 mod state request (older than this shim): v1 from now on; other players' lightbars are not shown flashing\n");
+            }
+            if (v2 && !v2_first) v2_first = now;
+            mods_request_v(packet, g_ticket_key, g_xuid, ++seq, epoch, car, nos, addons, ug, v2);
             b.len = MODS_REQUEST; b.buf = (char *)packet;
             g_r_wsasendto(s, &b, 1, &sent, 0, address, length, NULL, NULL);
-            last_send = now; sent_nos = nos;
+            last_send = now; sent_nos = nos; sent_addons = addons;
             for (i = 0; i < (int)MODS_UG; i++) sent_ug[i] = ug[i];
             if (++polls % 300 == 0) {
                 if (!received && !silent_told) {
@@ -454,7 +470,8 @@ static void patch_mods(const wchar_t *azimuth_dir)
     unsigned char *img = find_fh2_image();
     HANDLE thread;
     int share = GetEnvironmentVariableW(L"FH2MP_NO_MODSYNC", env, 8) == 0;
-    g_ug_ini[0] = g_ug_garage[0] = 0;
+    g_ug_ini[0] = g_ug_garage[0] = g_mods_dir[0] = 0;
+    if (azimuth_dir && lstrlenW(azimuth_dir) < MAX_PATH) lstrcpyW(g_mods_dir, azimuth_dir);
     if (azimuth_dir && lstrlenW(azimuth_dir) < MAX_PATH) {
         lstrcpyW(g_ug_ini, azimuth_dir); lstrcatW(g_ug_ini, L"\\fh2-mods\\Underglow.ini");
         lstrcpyW(g_ug_garage, azimuth_dir); lstrcatW(g_ug_garage, L"\\data\\titles\\1A96545B\\Underglow");

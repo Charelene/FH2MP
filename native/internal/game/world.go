@@ -259,6 +259,7 @@ type rxState struct {
 // World is one lobby: the peers of one world with their own race / Road Trip state (= fh2mp_server.Server).
 type World struct {
 	standinApplied bool // the last CheckParts put a stand-in car in place of a custom car (objhandle keeps the real version)
+	addonApplied   bool // the last CheckParts put a stock part in place of an add-on's (objhandle keeps the real version)
 	Tag            string
 	Out            *LogOut
 	Clk            Clock
@@ -350,6 +351,7 @@ type World struct {
 	carselRoutes     map[uint64]Addr
 	modsRoutes       map[uint64]Addr
 	eventoptsRoutes  map[uint64]Addr
+	quickchatRoutes  map[uint64]Addr
 }
 
 // NewWorld is Server(...) for a hub-owned world.
