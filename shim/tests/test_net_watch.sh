@@ -22,7 +22,7 @@ static unsigned hexbytes(const char *hex, unsigned char *out)
 int main(void)
 {
     unsigned char b[64];
-    unsigned v = 99, n;
+    unsigned v = 99, n, w = 99, s = 99;
     char text[96];
     net_watch_close c;
 
@@ -54,6 +54,38 @@ int main(void)
     CHECK(net_watch_bits(b, 2, 13, 7, &v) && v == 32);        /* the same bits when the buffer starts at byte 13 / 8 */
     CHECK(!net_watch_bits(b, 1, 5, 7, &v));                   /* not all in the buffer */
     CHECK(!net_watch_bits(b, 8, 0, 33, &v));
+
+
+    /* SessionHost bool updates as the Go server encodes them (netv2.SessionHostUpdate through PackMessages, seq 18 var 6 value 0 / 1 and seq 254 var 3):
+     * the message starts at bit 88, after the datagram header */
+    n = hexbytes("050000000000000001110008038902c000", b);
+    CHECK(net_watch_host_bool(b + 11, n - 11, 88, &v, &w, &s) && v == 6 && w == 0 && s == 18);
+    n = hexbytes("050000000000000001110008038902c002", b);
+    CHECK(net_watch_host_bool(b + 11, n - 11, 88, &v, &w, &s) && v == 6 && w == 1 && s == 18);
+    n = hexbytes("05000000000000000111000803ff026002", b);
+    CHECK(net_watch_host_bool(b + 11, n - 11, 88, &v, &w, &s) && v == 3 && w == 1 && s == 254);
+    /* the same message after another one, 5 bits into a byte: shift the message bytes left by 5 and read at bit 93 */
+    {
+        unsigned char m[8] = {0x08, 0x03, 0x89, 0x02, 0xc0, 0x00, 0, 0}, sh[9] = {0};
+        unsigned i;
+        for (i = 0; i < 6; i++) {
+            sh[i] |= (unsigned char)(m[i] << 5);
+            sh[i + 1] |= (unsigned char)(m[i] >> 3);
+        }
+        CHECK(net_watch_host_bool(sh, 8, 5, &v, &w, &s) && v == 6 && w == 0 && s == 18);
+        CHECK(net_watch_host_bool(sh + 1, 7, 13, &v, &w, &s) == 0);     /* misaligned: not that message */
+        CHECK(!net_watch_host_bool(sh, 5, 5, &v, &w, &s));              /* cut short */
+    }
+    /* other messages are not it: an object update on another router, a bigger body, another message id */
+    n = hexbytes("050000000000000001110008038902c000", b);
+    b[11] = 0x09;                                                      /* id 9 */
+    CHECK(!net_watch_host_bool(b + 11, n - 11, 88, &v, &w, &s));
+    n = hexbytes("050000000000000001110008038902c000", b);
+    b[12] = 0x04;                                                      /* router 8 */
+    CHECK(!net_watch_host_bool(b + 11, n - 11, 88, &v, &w, &s));
+    n = hexbytes("050000000000000001110008038902c000", b);
+    b[13] = 0x0a;                                                      /* body of 10 bits, not 5 */
+    CHECK(!net_watch_host_bool(b + 11, n - 11, 88, &v, &w, &s));
 
     c.seq = 3; c.reason = 0x80600006u; c.msg = 32; c.result = 0x80600006u; c.at = 118; c.size = 600;
     n = net_watch_header_text(text, sizeof text, &c);

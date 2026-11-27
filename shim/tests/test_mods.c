@@ -61,6 +61,10 @@ static int g_ug_loaded;
 #include "src/mods_sync.inc"
 #include "src/nos_flames.inc"
 #include "src/ug_remote.inc"
+static FH2Mod *g_mod;
+static const char *plat_tag(const char *name) { return name; }
+static void plat_failed(const char *name, const void *at, const char *step) { (void)name; (void)at; (void)step; }
+#include "src/lightbars.inc"
 
 /* ---- NitroSystem fake ---- */
 static char g_who[64];
@@ -177,13 +181,37 @@ int main(int argc, char **argv)
     assert(mods_ug_valid(ug));
     mods_request(packet, g_ticket_key, g_xuid, 9, epoch, 6, MODS_NOS_SWITCH | MODS_NOS_ALLOWED | MODS_NOS_BURNING, ug);
     if (argc > 1 && !strcmp(argv[1], "--vector")) { for (i = 0; i < MODS_REQUEST; i++) printf("%02x", packet[i]); puts(""); return 0; }
+    if (argc > 1 && !strcmp(argv[1], "--vector2")) {
+        /* v2: the same request with a flashing PoliceLightbars bar (tests/vectors/mods_request_v2.hex) */
+        mods_request_v(packet, g_ticket_key, g_xuid, 9, epoch, 6, MODS_NOS_SWITCH | MODS_NOS_ALLOWED | MODS_NOS_BURNING, MODS_ADDON_LIGHTS_ON, ug, 1);
+        for (i = 0; i < MODS_REQUEST; i++) printf("%02x", packet[i]);
+        puts("");
+        return 0;
+    }
+    if (argc > 2 && !strcmp(argv[1], "--reply2")) {
+        /* the server's v2 reply (tests/vectors/mods_reply_v2.hex): owner 10, car 5, NitroSystem not burning, its bar flashing */
+        unsigned char reply[MODS_LIMIT];
+        n = read_hex(argv[2], reply, sizeof reply);
+        assert(mods_response_v(reply, n, g_ticket_key, g_xuid, 9, 0, epoch, &server, out, &count, 1));
+        assert(server == MODS_SERVER_NOS_OK && count == 1 && out[0].owner == 10 && out[0].car == 5 && out[0].nos == MODS_NOS_SWITCH &&
+               out[0].addons == (MODS_ADDON_LIGHTBARS | MODS_ADDON_LIGHTS_ON));
+        assert(!memcmp(out[0].ug, ug, MODS_UG));
+        assert(!mods_response(reply, n, g_ticket_key, g_xuid, 9, 0, epoch, &server, out, &count));                   /* not the answer to a v1 request */
+        reply[MODS_HEAD + 3] = MODS_ADDON_LIGHTS_ON; hmac_sha256(g_ticket_key, 32, reply, n - 32, reply + n - 32);
+        assert(!mods_response_v(reply, n, g_ticket_key, g_xuid, 9, 0, epoch, &server, out, &count, 1));             /* flashing without the bar */
+        reply[MODS_HEAD + 3] = 0x04; hmac_sha256(g_ticket_key, 32, reply, n - 32, reply + n - 32);
+        assert(!mods_response_v(reply, n, g_ticket_key, g_xuid, 9, 0, epoch, &server, out, &count, 1));             /* an unknown add-on bit */
+        puts("mods v2 reply vector: ok");
+        return 0;
+    }
     if (argc > 2 && !strcmp(argv[1], "--reply")) {
         /* the server's reply to the request above (tests/vectors/mods_reply.hex): owner 10, car 5 burns NOS with the vector underglow, NOS ok here */
         unsigned char reply[MODS_LIMIT];
         n = read_hex(argv[2], reply, sizeof reply);
         assert(mods_response(reply, n, g_ticket_key, g_xuid, 9, 0, epoch, &server, out, &count));
         assert(server == MODS_SERVER_NOS_OK && count == 1 && out[0].owner == 10 && out[0].car == 5 && out[0].nos == (MODS_NOS_SWITCH | MODS_NOS_ALLOWED | MODS_NOS_BURNING));
-        assert(!memcmp(out[0].ug, ug, MODS_UG));
+        assert(!memcmp(out[0].ug, ug, MODS_UG) && out[0].addons == 0);
+        assert(!mods_response_v(reply, n, g_ticket_key, g_xuid, 9, 0, epoch, &server, out, &count, 1));            /* not the answer to a v2 request */
         assert(!mods_response(reply, n, g_ticket_key, g_xuid, 9, 9, epoch, &server, out, &count));                 /* already received */
         assert(!mods_response(reply, n, g_ticket_key, g_xuid, 9 + MODS_SEQ_WINDOW + 1, 0, epoch, &server, out, &count));   /* too old */
         assert(!mods_response(reply, n, g_ticket_key, g_xuid + 1, 9, 0, epoch, &server, out, &count));
@@ -361,6 +389,118 @@ int main(int argc, char **argv)
         mods_store(r, 1, MODS_SERVER_NOS_OK, GetTickCount64());
         assert(mods_snapshot(got, GetTickCount64()) == 1 && got[0].owner == 3 && g_nos_server_ok);
         assert(mods_snapshot(got, GetTickCount64() + MODS_FRESH_MS + 1) == 0);
+    }
+
+    /* PoliceLightbars: the DLL's pattern, this player's switch from its ini, other players' bars by their owners' switches */
+    {
+        float a, b;
+        lb_pattern(0, 1, &a, &b); assert(a == 1.0f && b == 0.0f);                       /* step 0: the first channel */
+        lb_pattern(95, 1, &a, &b); assert(a == 0.0f && b == 0.0f);                      /* odd steps dark */
+        lb_pattern(4 * 95, 1, &a, &b); assert(a == 0.0f && b == 1.0f);                  /* bit 2: the second */
+        lb_pattern(6 * 95 + 94, 1, &a, &b); assert(a == 0.0f && b == 1.0f);
+        lb_pattern(8 * 95, 1, &a, &b); assert(a == 1.0f && b == 0.0f);
+        lb_pattern(0, 0, &a, &b); assert(a == 0.0f && b == 0.0f);                       /* off: dark */
+    }
+    {
+        wchar_t dir[MAX_PATH];
+        HANDLE h;
+        FILETIME later;
+        ULONGLONG t;
+        assert(lb_flags() == 0);                                                        /* no DLL: nothing said */
+        GetTempPathW(MAX_PATH, dir);
+        lstrcpyW(g_lb_ini, dir); lstrcatW(g_lb_ini, L"fh2mp-test-PoliceLightbars.ini");
+        WritePrivateProfileStringW(L"Lighting", L"PoliceLights", L"0", g_lb_ini);
+        InterlockedExchange(&g_lb_loaded, 1);
+        t = GetTickCount64();
+        lb_read_switch(t);
+        assert(g_lb_switch == 0 && lb_flags() == MODS_ADDON_LIGHTBARS && strstr(g_log, "Police lights are off"));
+        WritePrivateProfileStringW(L"Lighting", L"PoliceLights", L"1", g_lb_ini);
+        h = CreateFileW(g_lb_ini, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+        GetSystemTimeAsFileTime(&later); later.dwHighDateTime += 1; SetFileTime(h, NULL, NULL, &later); CloseHandle(h);
+        lb_read_switch(t + 10);
+        assert(g_lb_switch == 0);                                                       /* looked at about once a second */
+        lb_read_switch(t + LB_INI_MS);
+        assert(g_lb_switch == 1 && lb_flags() == (MODS_ADDON_LIGHTBARS | MODS_ADDON_LIGHTS_ON));
+        DeleteFileW(g_lb_ini);
+        InterlockedExchange(&g_lb_loaded, 0);
+    }
+    {
+        /* a remote car (owner 7) whose presentation has one amber bar light, laid out as the game's (lightbars.inc, ug_remote.inc) */
+        static unsigned char car[0x4d40], pres[0x2000], context[0x400], manager[0x40], beams[0x60], asset[0x4c00], instance[0x54];
+        static unsigned char mapping[24], record[0x40], preset[0xc0], local[0x2000];
+        void *instances[1] = {instance};
+        ULONG_PTR vec[3];
+        unsigned zero = 0;
+        unsigned short type = LB_TYPE_A;
+        float amber[3] = {0.865f, 0.378f, 0.010f}, range = 8.0625f, one = 1.0f, ch[2];
+        unsigned char *img = (unsigned char *)(ULONG_PTR)0x140000000ull, *vt = img + CAR_PRES_VT1;
+        mods_record r[1];
+        FH2Context ctx;
+        int seen_a = 0, seen_b = 0, seen_dark = 0;
+        ULONGLONG start;
+        memcpy(car + CAR_PRES_OFFSET, &(void *){pres}, 8);
+        memcpy(pres, &vt, 8);
+        memcpy(local, &vt, 8);
+        memcpy(pres + UGR_PRES_CONTEXT, &(void *){context}, 8);
+        memcpy(pres + UGR_PRES_ASSET, &(void *){asset}, 8);
+        memcpy(context + UGR_CONTEXT_MANAGER, &(void *){manager}, 8);
+        memcpy(manager + UGR_MGR_BEAMS, &(void *){beams}, 8);
+        vec[0] = (ULONG_PTR)mapping; vec[1] = vec[0] + sizeof mapping; vec[2] = vec[1]; memcpy(manager + UGR_MGR_MAPPING, vec, sizeof vec);
+        vec[0] = (ULONG_PTR)record; vec[1] = vec[0] + sizeof record; vec[2] = vec[1]; memcpy(beams, vec, sizeof vec);
+        vec[0] = (ULONG_PTR)preset; vec[1] = vec[0] + sizeof preset; vec[2] = vec[1]; memcpy(beams + UGR_PRESET_POOL, vec, sizeof vec);
+        vec[0] = (ULONG_PTR)instances; vec[1] = vec[0] + sizeof instances; vec[2] = vec[1]; memcpy(asset + UGR_ASSET_INSTANCES, vec, sizeof vec);
+        memcpy(mapping, &zero, 4); memcpy(record + UGR_REC_PRESET, &zero, 4);
+        memcpy(preset + UGR_PRE_RGB, amber, 12); memcpy(preset + UGR_PRE_RANGE, &range, 4);
+        memcpy(instance + 4, &type, 2); memcpy(instance + 0x50, &zero, 4);
+        assert(lb_has_bar(pres));
+        g_lb_img = img;
+        AcquireSRWLockExclusive(&g_light_lock);
+        memset(g_light_cars, 0, sizeof g_light_cars);
+        g_light_cars[0].car = car; g_light_cars[0].owner = 7; g_light_cars[0].id = 5; g_light_cars[0].seen = GetTickCount64();
+        ReleaseSRWLockExclusive(&g_light_lock);
+        memset(r, 0, sizeof r); r[0].owner = 7; r[0].car = 5; r[0].addons = MODS_ADDON_LIGHTBARS | MODS_ADDON_LIGHTS_ON;
+        mods_store(r, 1, 0, GetTickCount64());
+        memset(&ctx, 0, sizeof ctx);
+        g_lb.mapped = 0;
+        start = GetTickCount64();
+        while (GetTickCount64() - start < 2 * 4 * LB_STEP_MS + 40) {                    /* a whole cycle: both channels lit in turn, dark between */
+            mods_store(r, 1, 0, GetTickCount64());                                          /* the replies keep coming (every 50-200 ms) */
+            memcpy(pres + LB_CHANNELS + 4 * LB_TYPE_A, &one, 4);                         /* the DLL's write, by this player's switch */
+            memcpy(pres + LB_CHANNELS + 4 * LB_TYPE_B, &one, 4);
+            ctx.r14 = (ULONG_PTR)pres;
+            lb_check(&ctx, NULL);
+            memcpy(ch, pres + LB_CHANNELS + 4 * LB_TYPE_A, 8);
+            assert((ch[0] == 1.0f && ch[1] == 0.0f) || (ch[0] == 0.0f && ch[1] == 1.0f) || (ch[0] == 0.0f && ch[1] == 0.0f));
+            seen_a |= ch[0] == 1.0f; seen_b |= ch[1] == 1.0f; seen_dark |= ch[0] == 0.0f && ch[1] == 0.0f;
+            Sleep(5);
+        }
+        assert(seen_a && seen_b && seen_dark && strstr(g_log, "owner 7's car has a lightbar: flashing"));
+        /* its owner turns the lights off: dark, whatever this player's switch made the DLL write */
+        r[0].addons = MODS_ADDON_LIGHTBARS;
+        mods_store(r, 1, 0, GetTickCount64());
+        g_lb.mapped = 0;
+        memcpy(pres + LB_CHANNELS + 4 * LB_TYPE_A, &one, 4);
+        lb_check(&ctx, NULL);
+        memcpy(ch, pres + LB_CHANNELS + 4 * LB_TYPE_A, 8);
+        assert(ch[0] == 0.0f && ch[1] == 0.0f && strstr(g_log, "Police lights are off)"));
+        /* a car that is not another player's (this player's own, an AI car): the DLL's channels stay */
+        memcpy(local + LB_CHANNELS + 4 * LB_TYPE_A, &one, 4);
+        ctx.r14 = (ULONG_PTR)local;
+        lb_check(&ctx, NULL);
+        memcpy(ch, local + LB_CHANNELS + 4 * LB_TYPE_A, 4);
+        assert(ch[0] == 1.0f);
+        /* a light of the bar's type with another range is not a bar: nothing written */
+        range = 5.0f; memcpy(preset + UGR_PRE_RANGE, &range, 4);
+        assert(!lb_has_bar(pres));
+        memset(g_lb.car, 0, sizeof g_lb.car); g_lb.n = 0; g_lb.mapped = 0;
+        memcpy(pres + LB_CHANNELS + 4 * LB_TYPE_A, &one, 4);
+        ctx.r14 = (ULONG_PTR)pres;
+        lb_check(&ctx, NULL);
+        memcpy(ch, pres + LB_CHANNELS + 4 * LB_TYPE_A, 4);
+        assert(ch[0] == 1.0f);
+        AcquireSRWLockExclusive(&g_light_lock);
+        memset(g_light_cars, 0, sizeof g_light_cars);
+        ReleaseSRWLockExclusive(&g_light_lock);
     }
     puts("mods: ok");
     return 0;

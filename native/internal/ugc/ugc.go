@@ -885,8 +885,25 @@ func (s *Store) Bump(fid int64, column string) error {
 	})
 }
 
-// RecordAction counts column of file fid once for this player and action ("download"/"like"); false for a repeat, the file's own creator or an
-// unknown / removed file.
+// ServedWindow: a fetch of a design's data within this long after the server handed that design to the player outside the storefront (a Drivatar
+// wearing its owner's livery and tune, the pause menu's featured tile) is that game feature loading it, not the player downloading it.
+const ServedWindow = 6 * 3600
+
+// MarkServed notes that the player was just handed these versioned items outside the storefront, so the fetches the game makes for them next
+// are not counted as downloads (RecordAction). Each hand-out restarts its window.
+func (s *Store) MarkServed(xuid int64, vids []int64) error {
+	if len(vids) == 0 {
+		return nil
+	}
+	return s.DB.Do(func(t *db.Tx) error {
+		_, err := t.Exec("INSERT INTO ugc_actions (file_id, xuid, action, at) SELECT id, ?, 'served', ? FROM ugc_files WHERE versioned_id = ANY(?::bigint[]) "+
+			"AND removed=0 ON CONFLICT (file_id, xuid, action) DO UPDATE SET at = EXCLUDED.at", xuid, float64(time.Now().UnixNano())/1e9, vids)
+		return err
+	})
+}
+
+// RecordAction counts column of file fid once for this player and action ("download"/"like"); false for a repeat, the file's own creator, an
+// unknown / removed file, or a download of a design the server handed the player outside the storefront in the last ServedWindow (MarkServed).
 func (s *Store) RecordAction(fid, xuid int64, action, column string) (bool, error) {
 	if (action != "download" && action != "like") || (column != "downloads" && column != "likes") {
 		panic("ugc: action " + action + " / column " + column)
@@ -897,7 +914,14 @@ func (s *Store) RecordAction(fid, xuid int64, action, column string) (bool, erro
 		if err != nil || f == nil || f.Int("owner") == xuid {
 			return err
 		}
-		res, err := t.Exec("INSERT INTO ugc_actions (file_id, xuid, action, at) VALUES (?,?,?,?) ON CONFLICT DO NOTHING", fid, xuid, action, float64(time.Now().UnixNano())/1e9)
+		now := float64(time.Now().UnixNano()) / 1e9
+		if action == "download" {
+			served, err := t.One("SELECT 1 FROM ugc_actions WHERE file_id=? AND xuid=? AND action='served' AND at >= ?", fid, xuid, now-ServedWindow)
+			if err != nil || served != nil {
+				return err
+			}
+		}
+		res, err := t.Exec("INSERT INTO ugc_actions (file_id, xuid, action, at) VALUES (?,?,?,?) ON CONFLICT DO NOTHING", fid, xuid, action, now)
 		if err != nil || res.RowsAffected == 0 {
 			return err
 		}

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"fh2mp/internal/addons"
 	"fh2mp/internal/auth"
 	"fh2mp/internal/crashreports"
 	"fh2mp/internal/db"
@@ -339,6 +340,9 @@ func (l *Launcher) GameDBInfo() (sha, path string, ok bool) {
 	}
 	return m.Sha256, l.GameDB.Path, true
 }
+
+// GameDBAddon is the add-on whose copy of the car database has sha256 sha ("" for none).
+func (l *Launcher) GameDBAddon(sha string) string { return l.GameDB.VariantOf(sha) }
 
 func (l *Launcher) boardsGet(kind string, n int) (any, error) {
 	if l.Boards == nil {
@@ -727,6 +731,31 @@ func (l *Launcher) route(r *Req, method, path string, h http.Header, body []byte
 			return 0, nil, "", auth.NewError(404, "no_gamedb", "this server does not set a car database").WithXuid(acct.Xuid).WithDetail("gamedb manifest is None")
 		}
 		return 200, pyjson.Obj{{K: "name", V: m.Name}, {K: "sha256", V: m.Sha256}, {K: "size", V: m.Size}, {K: "xzSize", V: m.XzSize}, {K: "path", V: m.Path}}, ok, nil
+	case p == gamedbsync.VariantManifestPath(addons.Lightbars) && method == "GET":
+		// the server's database with PoliceLightbars' rows, for a launcher that installed the add-on (front.gamedbOK knows its hash)
+		acct, err := a.Authenticate(bearer(h), ip)
+		if err != nil {
+			return 0, nil, "", err
+		}
+		m := l.GameDB.VariantManifest(addons.Lightbars)
+		if m == nil {
+			return 0, nil, "", auth.NewError(404, "no_gamedb", "this server has no car database for this add-on").WithXuid(acct.Xuid).WithDetail("lightbars copy is None")
+		}
+		return 200, pyjson.Obj{{K: "name", V: m.Name}, {K: "sha256", V: m.Sha256}, {K: "size", V: m.Size}, {K: "xzSize", V: m.XzSize}, {K: "path", V: m.Path}}, ok, nil
+	case p == gamedbsync.VariantPath(addons.Lightbars) && method == "GET":
+		acct, err := a.Authenticate(bearer(h), ip)
+		if err != nil {
+			return 0, nil, "", err
+		}
+		if !a.Hit([2]any{"gamedb", acct.Xuid}, 10, 3600) {
+			return 0, nil, "", auth.NewError(429, "rate_limited", "too many car database downloads, wait a while").WithXuid(acct.Xuid).WithDetail("gamedb downloads: over 10 per hour for this account")
+		}
+		blob := l.GameDB.VariantDownload(addons.Lightbars)
+		if blob == nil {
+			return 0, nil, "", auth.NewError(404, "no_gamedb", "this server has no car database for this add-on").WithXuid(acct.Xuid).WithDetail("lightbars copy could not be read")
+		}
+		c.Log(r, fmt.Sprintf("  v1 gamedb download (lightbars copy) %#x %d bytes", acct.Xuid, len(blob)))
+		return 200, blob, "application/x-xz", nil
 	case p == gamedbsync.DownloadPath && method == "GET":
 		acct, err := a.Authenticate(bearer(h), ip)
 		if err != nil {

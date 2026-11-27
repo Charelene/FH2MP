@@ -70,9 +70,11 @@ lane_unit() {
     run "shim session age" shim/tests/test_session_age.sh
     run "shim session switches" shim/tests/test_session_switches.sh
     run "shim health" shim/tests/test_health.sh
+    run "shim activity" shim/tests/test_activity.sh
     run "shim slice watch" shim/tests/test_slice_watch.sh
     run "shim heap watch" shim/tests/test_heap_watch.sh
     run "shim net watch" shim/tests/test_net_watch.sh
+    run "shim results wait" shim/tests/test_results_wait.sh
     run "shim guard counts" shim/tests/test_guard_counts.sh
     run "shim eo timelock" shim/tests/test_eo_timelock.sh
     run "shim eo routes" shim/tests/test_eo_routes.sh

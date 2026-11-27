@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"fh2mp/internal/addons"
 	"fh2mp/internal/bits"
 	"fh2mp/internal/capacity"
 	"fh2mp/internal/catalog"
@@ -97,6 +98,7 @@ type Hub struct {
 	Follow         map[uint64]bool
 	Standins       map[uint64]map[int64]int64 // a car-pack player's custom car -> the stock car the others see (control "standins")
 	CustomCars     map[uint64]map[int64]bool  // every custom car a player's launcher listed (control "standins"), with or without a stand-in
+	Addons         map[uint64]map[string]bool // the add-ons whose parts a player's game has (control "addons", from its car database)
 	Runs           map[uint64]string
 	Authed         map[uint64]authEnt
 	Flagged        *omap.Map[uint64, flagEnt]
@@ -152,7 +154,7 @@ func NewHub(cfg HubConfig) (*Hub, error) {
 		return nil, err
 	}
 	h := &Hub{cfg: cfg, Clk: cfg.Clock, Rng: cfg.Rng, Sock: cfg.Sock, Out: cfg.Out, Sinks: cfg.Sinks, CtlSend: cfg.CtlSend,
-		Assign: map[uint64]string{}, Follow: map[uint64]bool{}, Standins: map[uint64]map[int64]int64{}, CustomCars: map[uint64]map[int64]bool{}, Runs: map[uint64]string{}, Authed: map[uint64]authEnt{}, Flagged: omap.New[uint64, flagEnt](), Trusted: map[uint64]float64{}, Revoked: map[uint64]float64{},
+		Assign: map[uint64]string{}, Follow: map[uint64]bool{}, Standins: map[uint64]map[int64]int64{}, CustomCars: map[uint64]map[int64]bool{}, Addons: map[uint64]map[string]bool{}, Runs: map[uint64]string{}, Authed: map[uint64]authEnt{}, Flagged: omap.New[uint64, flagEnt](), Trusted: map[uint64]float64{}, Revoked: map[uint64]float64{},
 		Keys: map[uint64]map[string]float64{}, TicketEpochs: map[Addr][]byte{}, Bound: map[Addr]boundEnt{}, Nonces: omap.New[nonceKey, float64](), NonceCount: map[uint64]int{},
 		AuthLog: map[any]float64{}, Worlds: omap.New[WorldKey, *World](), Route: omap.New[Addr, *World](), EmptySince: map[WorldKey]float64{},
 		LightingRoutes: map[uint64]Addr{}, HonkRoutes: map[uint64]Addr{}, CarselRoutes: map[uint64]Addr{}, ModsRoutes: map[uint64]Addr{}, EvoRoutes: map[uint64]Addr{}, ChatRoutes: map[uint64]Addr{}, Gamertags: map[uint64]string{}, probeSeen: map[Addr]probeEnt{}, nxt: math.Inf(1)}
@@ -511,6 +513,45 @@ func (h *Hub) ControlText(text string, replyTo *Addr) {
 		}
 		h.CustomCars[xuid] = owned
 		h.Log(fmt.Sprintf("control: stand-ins for %s: %s", parts[1], strings.Join(notes, "; ")))
+	case n == 3 && parts[0] == "addons":
+		// the add-ons whose parts a player's game has (the LSP, from the car database the game reads): its cars' add-on parts reach the
+		// others who have the same add-on as they are, and the rest see the stock part (CheckParts, RealCarsFor)
+		xuid, err := parseHex(parts[1])
+		if err != nil {
+			h.ctlIgnored(parts, fmt.Sprintf("addons message unreadable (%v)", err))
+			return
+		}
+		had := h.Addons[xuid]
+		if parts[2] == "-" {
+			delete(h.Addons, xuid)
+			if len(had) > 0 {
+				h.Log(fmt.Sprintf("control: add-ons of %s forgotten: its game runs the server's car database without add-on rows", parts[1]))
+			}
+			return
+		}
+		set := map[string]bool{}
+		var unknown []string
+		for _, a := range strings.Split(parts[2], ",") {
+			if addons.Known(a) {
+				set[a] = true
+			} else if a != "" {
+				unknown = append(unknown, a)
+			}
+		}
+		if len(unknown) > 0 {
+			h.ctlIgnored(parts, fmt.Sprintf("addons message names add-ons this server does not know (%s)", strings.Join(unknown, ", ")))
+		}
+		if len(set) == 0 {
+			delete(h.Addons, xuid)
+			return
+		}
+		if len(h.Addons) >= 20000 {
+			h.Addons = map[uint64]map[string]bool{}
+		}
+		h.Addons[xuid] = set
+		if fmt.Sprint(had) != fmt.Sprint(set) {
+			h.Log(fmt.Sprintf("control: add-ons of %s: %s (its car database has their rows)", parts[1], parts[2]))
+		}
 	case (n == 3 || n == 4 && parts[3] == "follow") && parts[0] == "assign":
 		xuid, err := parseHex(parts[1])
 		if err != nil {

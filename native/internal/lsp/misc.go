@@ -60,6 +60,16 @@ func (c *Core) recStructs(recs []drivatar.Record) []any {
 	return out
 }
 
+// markDrivatarContent: the game fetches the livery and tune each Drivatar wears in full, exactly as a storefront download does; those fetches are not
+// downloads (ugc.MarkServed).
+func (c *Core) markDrivatarContent(r *Req, recs []drivatar.Record) {
+	var vids []int64
+	for _, o := range recs {
+		vids = append(vids, recInt(o, "LiveryId"), recInt(o, "TuneId"))
+	}
+	c.markServed(r, vids)
+}
+
 func drvForCache(c *Core, r *Req, req *xls.Struct) (*xls.Struct, error) {
 	xuid, tag := r.Xuid, c.Tag(r.Xuid)
 	if _, err := c.Drv.ForPlayer(xuid, tag); err != nil { // makes sure the requesting player has one (profile-based if needed)
@@ -71,6 +81,7 @@ func drvForCache(c *Core, r *Req, req *xls.Struct) (*xls.Struct, error) {
 		return nil, err
 	}
 	c.Log(r, fmt.Sprintf("  ForCache numberOfDrivatars=%d: serving %d", n, len(recs)))
+	c.markDrivatarContent(r, recs)
 	out := xls.NewStruct()
 	out.Set("drivatarInfos", c.recStructs(recs))
 	return out, nil
@@ -126,6 +137,7 @@ func drvForRace(c *Core, r *Req, req *xls.Struct) (*xls.Struct, error) {
 	}
 	c.Log(r, fmt.Sprintf("  ForRace bucket=%d n=%d skill=%d cached=%d+%d: me + %d others (%d friends, %d with the owner's livery or tune)", bucket,
 		req.Int("numberOfDrivatars"), req.Int("skillSelection"), len(req.List("cachedDrivatars")), len(req.List("cachedDrivatarsNewCars")), len(others), friends, cars))
+	c.markDrivatarContent(r, others)
 	out := xls.NewStruct()
 	out.Set("playerData", jsonToStruct(pyjson.Obj(me)))
 	out.Set("drivatarInfos", c.recStructs(others))

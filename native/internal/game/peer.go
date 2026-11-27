@@ -94,6 +94,8 @@ type Peer struct {
 	Objs                                  *omap.Map[ObjKey, []replay.Entry]
 	RealObjs                              map[ObjKey][]replay.Entry // the real version of objects relayed with a stand-in car, numbered like Objs
 	HostSeq                               int
+	RaceOverSeq                           int     // the SessionHost update number the race-over flag (InRace = 0) went out with to it, for the results screen report (issue 547)
+	RaceOverAt                            float64 // when (Mono); 0 = not sent since the last race start
 	RaceOverSentAt                        float64 // the last time a finished tag event's race-over flag was sent to it again (TagCollision)
 	RelayNext                             map[ObjKey]int
 	SeqShift                              map[OwnerObj]int

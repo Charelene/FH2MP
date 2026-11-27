@@ -12,6 +12,8 @@ import (
 // FH2-Underglow (qiangqiang101/FH2-Underglow 1.1.0). The reply carries the other players of the same world, and whether NOS may burn where this
 // player is: user decision 2026-11-12, NOS is on in online Free Roam lobbies only, off in events, Rivals and Road Trip. The shim keeps
 // NitroSystem's NOS switched off unless the server's last reply allows it, so a server without this channel leaves NOS off everywhere online.
+// v2 (2026-11-21) adds whether PoliceLightbars (suderek22/FH2_Lightbars 0.2.2) is loaded and its bar flashes; a shim sends v2 and goes back to
+// v1 when a server answers no v2 request, and a v2 reply goes only to a v2 request (a v1 shim refuses a record whose byte 3 is not 0).
 const (
 	modsMagic       = "FH2MPMD1"
 	modsUG          = 28
@@ -32,6 +34,14 @@ const (
 	modsNosAll      = 0x0F
 	modsServerNosOK = 0x01
 
+	// v2 (type 3 request, type 4 reply): byte 54 of a request and byte 3 of a record carry add-on flags (a v1 request and its reply keep
+	// them 0). PoliceLightbars (suderek22/FH2_Lightbars 0.2.2): its DLL is loaded, and its Police lights switch is on (the bar flashes).
+	modsReqV1, modsReplyV1 = 1, 2
+	modsReqV2, modsReplyV2 = 3, 4
+	modsAddonLightbars     = 0x01
+	modsAddonLightsOn      = 0x02
+	modsAddonAll           = 0x03
+
 	modsUGLights    = 64
 	modsUGEffects   = 61
 	modsUGWidthMax  = 3000
@@ -40,13 +50,15 @@ const (
 
 // ModState is a player's last mod state report.
 type ModState struct {
-	Epoch []byte
-	Seq   uint64
-	At    float64
-	Car   int
-	Nos   byte         // as reported, but the burning bit only where NOS is allowed
-	UG    [modsUG]byte // the underglow state as reported (validated)
-	NosAt float64      // the last report of an allowed NOS burn (0: none in this ticket epoch)
+	Epoch  []byte
+	Seq    uint64
+	At     float64
+	Car    int
+	Nos    byte         // as reported, but the burning bit only where NOS is allowed
+	UG     [modsUG]byte // the underglow state as reported (validated)
+	NosAt  float64      // the last report of an allowed NOS burn (0: none in this ticket epoch)
+	Addons byte         // add-on flags (v2 requests; 0 for v1)
+	V2     bool         // the request was v2: its reply is v2
 }
 
 // NosAllowed says whether NitroSystem's NOS may burn for p: a Free Roam world (not a Road Trip, not a Car Meet) and not taking part in its event.
@@ -79,8 +91,20 @@ func modsUGValid(ug []byte) bool {
 
 // modsParse checks a request's fields (its length, header and magic are checked by the caller).
 func modsParse(data []byte) bool {
-	return int(binary.LittleEndian.Uint16(data[9:11])) == len(data) && data[19] == 1 && data[52] <= 127 && data[53] <= modsNosAll && data[54] == 0 &&
-		modsUGValid(data[modsHead:modsBase])
+	addons := data[54]
+	switch data[19] {
+	case modsReqV1:
+		if addons != 0 {
+			return false
+		}
+	case modsReqV2:
+		if addons&^modsAddonAll != 0 || (addons&modsAddonLightsOn != 0 && addons&modsAddonLightbars == 0) {
+			return false
+		}
+	default:
+		return false
+	}
+	return int(binary.LittleEndian.Uint16(data[9:11])) == len(data) && data[52] <= 127 && data[53] <= modsNosAll && modsUGValid(data[modsHead:modsBase])
 }
 
 func (h *Hub) modsRoutes(only *World) map[uint64]Addr {
@@ -104,8 +128,8 @@ func (h *Hub) modsStateLive(other *Peer, now float64) bool {
 	return bytes.Equal(h.TicketEpochs[other.Addr], st.Epoch)
 }
 
-// modsRecordOf is other's record in a reply: the burning bit only while NOS is allowed for it now.
-func modsRecordOf(world *World, other *Peer) []byte {
+// modsRecordOf is other's record in a reply: the burning bit only while NOS is allowed for it now; its add-on flags only in a v2 reply.
+func modsRecordOf(world *World, other *Peer, v2 bool) []byte {
 	st := other.Mods
 	nos := st.Nos
 	if !world.NosAllowed(other) {
@@ -113,8 +137,21 @@ func modsRecordOf(world *World, other *Peer) []byte {
 	}
 	rec := make([]byte, modsRecord)
 	rec[0], rec[1], rec[2] = byte(other.Owner), byte(st.Car), nos
+	if v2 {
+		rec[3] = st.Addons
+	}
 	copy(rec[4:], st.UG[:])
 	return rec
+}
+
+func modsDescribeAddons(addons byte) string {
+	switch {
+	case addons&modsAddonLightsOn != 0:
+		return ", PoliceLightbars flashing"
+	case addons&modsAddonLightbars != 0:
+		return ", PoliceLightbars off"
+	}
+	return ""
 }
 
 func modsDescribe(nos byte, ug []byte) string {
@@ -148,8 +185,8 @@ func (h *Hub) modsHandle(data []byte, addr Addr, only *World) {
 			if skipped > 0 {
 				extra = fmt.Sprintf(" (+%d more since the last line)", skipped)
 			}
-			modsLog.Warn(fmt.Sprintf("request with the mod state magic is malformed and ignored: length field %d of %d bytes, type %d (expected 1), car %d (max 127), NOS flags %#x (max %#x), reserved byte %d (expected 0), underglow % x%s",
-				binary.LittleEndian.Uint16(data[9:11]), len(data), data[19], data[52], data[53], modsNosAll, data[54], data[modsHead:modsBase], extra))
+			modsLog.Warn(fmt.Sprintf("request with the mod state magic is malformed and ignored: length field %d of %d bytes, type %d (expected 1, or 3 for v2), car %d (max 127), NOS flags %#x (max %#x), add-on byte %#x (0 in v1; v2: %#x at most, lights on only with the bar), underglow % x%s",
+				binary.LittleEndian.Uint16(data[9:11]), len(data), data[19], data[52], data[53], modsNosAll, data[54], modsAddonAll, data[modsHead:modsBase], extra))
 		}
 		return
 	}
@@ -187,7 +224,7 @@ func (h *Hub) modsHandle(data []byte, addr Addr, only *World) {
 		carID = *peer.CarID
 	}
 	allowed := world.NosAllowed(peer)
-	st := &ModState{Epoch: epoch, Seq: seq, At: now, Car: carID, Nos: data[53]}
+	st := &ModState{Epoch: epoch, Seq: seq, At: now, Car: carID, Nos: data[53], Addons: data[54], V2: data[19] == modsReqV2}
 	copy(st.UG[:], data[modsHead:modsBase])
 	if same {
 		st.NosAt = old.NosAt
@@ -212,10 +249,10 @@ func (h *Hub) modsHandle(data []byte, addr Addr, only *World) {
 		}
 	}
 	peer.Mods = st
-	if old == nil || old.Car != carID || old.Nos&^modsNosBurning != st.Nos&^modsNosBurning || old.UG != st.UG {
+	if old == nil || old.Car != carID || old.Nos&^modsNosBurning != st.Nos&^modsNosBurning || old.UG != st.UG || old.Addons != st.Addons {
 		peer.ModsChanges++
 		if now-peer.ModsLoggedAt >= modsLogEvery || peer.ModsLoggedAt == 0 {
-			world.Logf("mods: owner %d car %d %s (%d change(s) in the last minute)", peer.Owner, carID, modsDescribe(st.Nos, st.UG[:]), peer.ModsChanges)
+			world.Logf("mods: owner %d car %d %s%s (%d change(s) in the last minute)", peer.Owner, carID, modsDescribe(st.Nos, st.UG[:]), modsDescribeAddons(st.Addons), peer.ModsChanges)
 			peer.ModsLoggedAt, peer.ModsChanges = now, 0
 		}
 	}
@@ -237,14 +274,17 @@ func (h *Hub) modsHandle(data []byte, addr Addr, only *World) {
 		if !h.modsStateLive(other, now) {
 			continue
 		}
-		records = append(records, modsRecordOf(world, other)...)
+		records = append(records, modsRecordOf(world, other, st.V2)...)
 		n++
 		if n == modsMaxRecs {
 			break
 		}
 	}
 	reply := append([]byte(nil), data[:modsHead]...)
-	reply[19], reply[53], reply[54] = 2, 0, byte(n)
+	reply[19], reply[53], reply[54] = modsReplyV1, 0, byte(n)
+	if st.V2 {
+		reply[19] = modsReplyV2
+	}
 	if allowed {
 		reply[53] = modsServerNosOK
 	}

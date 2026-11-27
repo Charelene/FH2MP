@@ -95,7 +95,7 @@ func (w *World) handleObject(peer *Peer, r rd, br *bits.Reader, mtype int, data 
 		if sup {
 			return handleContinue
 		}
-		if w.standinApplied && w.HasCustomCars(peer) {
+		if (w.standinApplied && w.HasCustomCars(peer)) || w.addonApplied {
 			real = &relayVariant{rs, rp}
 		}
 		payload = w.NotePlayerChoices(peer, rs, rp, size, payload)
