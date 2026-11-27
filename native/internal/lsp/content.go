@@ -496,6 +496,19 @@ func (c *Core) countDownload(r *Req, vid, xuid int64) {
 	}
 }
 
+// markServed notes versioned items handed to the player outside the storefront, so the game loading them is not counted as a download.
+func (c *Core) markServed(r *Req, vids []int64) {
+	var ids []int64
+	for _, v := range vids {
+		if v > 0 {
+			ids = append(ids, v)
+		}
+	}
+	if err := c.Ugc.MarkServed(r.Xuid, ids); err != nil {
+		c.Log(r, fmt.Sprintf("  could not note %d served item(s): %v", len(ids), err))
+	}
+}
+
 func cvGetLivery(c *Core, r *Req, req *xls.Struct) (*xls.Struct, error) {
 	vid := req.Int("versionedLiveryId")
 	v, err := c.Ugc.VersionedGet(vid)
@@ -1105,13 +1118,18 @@ func storeFeaturedLiveries(c *Core, r *Req, req *xls.Struct) (*xls.Struct, error
 	files := featuredPick(c.shown(r, all), int(max(1, req.Int("numCars"))))
 	tmpl := c.elemTemplate("ForzaStorefrontGetFeaturedLiveriesForRandomCars_Results", "liveryData")
 	rows := []any{}
+	var served []int64
 	for _, f := range files {
 		full, err := c.Ugc.FileGet(f.ID) // FileGet unpacks the preview
 		if err != nil {
 			return nil, err
 		}
 		rows = append(rows, c.heavy(full, tmpl))
+		if f.VersionedID != nil {
+			served = append(served, *f.VersionedID)
+		}
 	}
+	c.markServed(r, served) // the pause menu's featured tile loads these in full
 	out := xls.NewStruct()
 	out.Set("liveryData", rows)
 	return out, nil
@@ -1124,12 +1142,15 @@ func storeDrivatarLiveries(c *Core, r *Req, req *xls.Struct) (*xls.Struct, error
 		return nil, err
 	}
 	out := []any{}
+	var served []int64
 	for i := range rows {
 		s := xls.NewStruct()
 		s.Set("Id", rows[i].Int("id"))
 		s.Set("VersionedContentId", rows[i].Int("versioned_id"))
 		out = append(out, s)
+		served = append(served, rows[i].Int("versioned_id"))
 	}
+	c.markServed(r, served) // the Drivatars of this car wear these
 	res := xls.NewStruct()
 	res.Set("drivatarLiveries", out)
 	return res, nil
