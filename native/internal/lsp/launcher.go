@@ -21,6 +21,7 @@ import (
 	"fh2mp/internal/pngtool"
 	"fh2mp/internal/pyjson"
 	"fh2mp/internal/social"
+	"github.com/Charelene/encore-paddock/buildinfo"
 	"github.com/Charelene/encore-paddock/version"
 )
 
@@ -559,7 +560,7 @@ func (l *Launcher) route(r *Req, method, path string, h http.Header, body []byte
 	switch {
 	case p == "/v1/status" && method == "GET":
 		return 200, pyjson.Obj{{K: "env", V: a.Env}, {K: "online", V: c.OnlineCount()}, {K: "auth", V: a.Mode}, {K: "registration", V: a.Registration},
-			{K: "server", V: serverVersion}, {K: "time", V: now}, {K: "maintenance", V: objAny(l.Config.Get(), "maintenance")}}, ok, nil
+			{K: "server", V: serverVersion}, {K: "time", V: now}, {K: "maintenance", V: objAny(l.Config.Get(), "maintenance")}, {K: "build", V: buildStamp()}}, ok, nil
 	case p == "/v1/launcher/config" && method == "GET":
 		cf := l.Config.Get()
 		return 200, pyjson.Obj{{K: "env", V: a.Env}, {K: "motd", V: objAny(cf, "motd")}, {K: "links", V: objAny(cf, "links")}, {K: "minLauncher", V: objAny(cf, "minLauncher")},
@@ -897,4 +898,11 @@ func standinsOK(field string) bool {
 		}
 	}
 	return true
+}
+
+// buildStamp is the status answer's "build" object: the commit this server was built from (the Paddock's buildinfo, which is what
+// `encorectl status` reads). pyjson writes structs not at all, so the four keys are laid out in the Paddock's order.
+func buildStamp() pyjson.Obj {
+	b := buildinfo.Read()
+	return pyjson.Obj{{K: "commit", V: b.Commit}, {K: "time", V: b.Time}, {K: "modified", V: b.Modified}, {K: "goVersion", V: b.GoVersion}}
 }
