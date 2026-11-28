@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sort"
+
+	"fh2mp/internal/flags"
 )
 
 // Mod state side channel (magic FH2MPMD1, shim/src/mods_wire.h; same ride on the game port as lighting and horns). Each player's game reports
@@ -62,9 +64,9 @@ type ModState struct {
 }
 
 // NosAllowed says whether NitroSystem's NOS may burn for p: a Free Roam world (not a Road Trip, not a Car Meet) and not taking part in its event.
-// FH2MP_NO_NOS=1 turns NOS off everywhere.
+// FH2MP_NO_NOS=1 turns NOS off everywhere. So does the operator's nos switch (features file, internal/flags), which needs no restart.
 func (w *World) NosAllowed(p *Peer) bool {
-	return !w.IsIdle && !w.Roadtrip && !w.Carmeet && !w.inEvent(p) && envStr("FH2MP_NO_NOS", "") == ""
+	return !w.IsIdle && !w.Roadtrip && !w.Carmeet && !w.inEvent(p) && envStr("FH2MP_NO_NOS", "") == "" && flags.On(flags.NOS)
 }
 
 // nosBurningRecently says whether p reported an allowed NOS burn within modsNosGrace (the push check does not read those windows).

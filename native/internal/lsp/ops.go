@@ -1242,7 +1242,7 @@ func (o *Ops) getConfig() pyjson.Obj {
 	return pyjson.Obj{{K: "env", V: c.Auth.Env}, {K: "auth", V: c.Auth.Mode}, {K: "registration", V: c.Auth.Registration},
 		{K: "motd", V: objAny(cf, "motd")}, {K: "maintenance", V: objAny(cf, "maintenance")}, {K: "minLauncher", V: objAny(cf, "minLauncher")}, {K: "minShim", V: objAny(cf, "minShim")},
 		{K: "links", V: objAny(cf, "links")}, {K: "heroImage", V: hero}, {K: "news", V: news},
-		{K: "blockedNames", V: o.savedBlocklist("blockedNames")}, {K: "blockedWords", V: o.savedBlocklist("blockedWords")}}
+		{K: "blockedNames", V: o.savedBlocklist("blockedNames")}, {K: "blockedWords", V: o.savedBlocklist("blockedWords")}, {K: "features", V: featuresObj()}}
 }
 
 func isStr(v any) (string, bool) { s, ok := v.(string); return s, ok }
@@ -1457,6 +1457,10 @@ func (o *Ops) applyConfig(saved pyjson.Obj) {
 }
 
 func (o *Ops) setConfig(r *Req, d pyjson.Obj) pyjson.Obj {
+	d, featuresWritten := o.takeFeatures(r, d)
+	if featuresWritten && len(d) == 0 {
+		return o.getConfig()
+	}
 	newv := validateConfig(d)
 	saved := o.savedConfig()
 	before := o.getConfig()

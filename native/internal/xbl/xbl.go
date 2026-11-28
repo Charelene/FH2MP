@@ -22,6 +22,7 @@ import (
 	"fh2mp/internal/auth"
 	"fh2mp/internal/capacity"
 	"fh2mp/internal/diag"
+	"fh2mp/internal/flags"
 	"fh2mp/internal/pyjson"
 )
 
@@ -1447,6 +1448,9 @@ func (s *Server) refSession(ref *Dict) *Session {
 // one after another fill lobbies up (12, 12, 1) instead of leaving every lobby partly empty (8, 10, 6, 1). Players leave lobbies that were filled
 // earlier, so the newest lobby is not the only one with seats.
 func (s *Server) lobbyFor(scid, hopper string, attrs *Dict, ref *Dict, xuid string) (string, error) {
+	if !flags.On(flags.Lobbies) {
+		return "", errLobbiesOff(xuid)
+	}
 	key := LobbyKeyOf(scid, hopper, attrs)
 	pops, havePops := s.Populations() // up to 0.3 s when the game server is busy: tickets must not queue behind it
 	s.mu.Lock()

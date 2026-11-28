@@ -14,6 +14,7 @@ import (
 	"fmt"
 
 	"fh2mp/internal/diag"
+	"fh2mp/internal/flags"
 	"fh2mp/internal/netv2"
 	"github.com/Charelene/encore-paddock/bits"
 )
@@ -170,6 +171,9 @@ func (w *World) relayVoice(peer *Peer, br *bits.Reader) {
 		w.Warnf("%d voice: %s refused, the rest of the datagram is not relayed (owner %d xuid %#x; once per player)", peer.Addr.Port, bad, peer.Owner, peer.Xuid)
 	}
 	if len(payloads) == 0 {
+		return
+	}
+	if !flags.On(flags.Voice) { // the operator's voice switch (features file): the packets are read past and dropped
 		return
 	}
 	if !peer.Connected || !peer.Entered || peer.Xuid == 0 {
