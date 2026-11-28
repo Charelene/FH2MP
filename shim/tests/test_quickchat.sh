@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 work=$(mktemp -d)
 trap 'WINEPREFIX="$work/prefix" wineserver -k >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
 . tests/wine_prefix.sh; wine_prefix "$work/prefix"
-x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Wno-unused-function -Wno-cast-function-type -I . -I ../third_party/fh2-mod-platform tests/test_quickchat.c \
+x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -Wno-unused-function -Wno-cast-function-type -I . -I ../paddock/third_party/fh2-mod-platform tests/test_quickchat.c \
     -o "$work/test.exe" -lws2_32
 mkdir -p "$work/prefix"
 WINEPREFIX="$work/prefix" WINEDEBUG=-all wine "$work/test.exe"

@@ -8,7 +8,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 . release/reltool.sh
 VERSION=$(tr -d '[:space:]' < shim/VERSION)
-PLATFORM=$(tr -d '[:space:]' < third_party/fh2-mod-platform/VERSION)
+PLATFORM=$(tr -d '[:space:]' < paddock/third_party/fh2-mod-platform/VERSION)
 shim/build.sh
 mkdir -p dist
 rm -f "dist/fh2mp-shim-$VERSION.zip"
