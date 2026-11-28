@@ -55,6 +55,7 @@ type Core struct {
 
 	Launcher  LauncherAPI                      // /v1/* (nil: not served)
 	Ops       OpsAPI                           // /ops/* (nil: not served)
+	Encore    *EncoreID                        // /encore/* (nil: off, answers 404 disabled)
 	AddResult func(body []byte) (int64, error) // the game server's event result (site_stats.add_result); a *valErr is a 400
 	front     frontState
 

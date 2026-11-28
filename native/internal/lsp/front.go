@@ -271,6 +271,9 @@ func (c *Core) handle(rw respWriter, r *Req, req *http.Request) {
 	if strings.HasPrefix(path, "/v1/") && c.Launcher != nil {
 		limit = c.Launcher.BodyLimit(path)
 	}
+	if strings.HasPrefix(path, encorePrefix) {
+		limit = encoreBodyLimit
+	}
 	shown := limit
 	if strings.HasPrefix(path, "/ops/") {
 		shown = min(limit, 65536)
@@ -292,6 +295,10 @@ func (c *Core) handle(rw respWriter, r *Req, req *http.Request) {
 	peer := peerIP(req)
 	if strings.HasPrefix(path, "/ops/") {
 		c.serveOps(rw, r, req, body, proxied)
+		return
+	}
+	if strings.HasPrefix(path, encorePrefix) {
+		c.serveEncore(rw, req, body, proxied)
 		return
 	}
 	if (strings.HasPrefix(path, "/admin/") || strings.HasPrefix(path, "/api/")) && (!isLoopback(peer) || proxied) {

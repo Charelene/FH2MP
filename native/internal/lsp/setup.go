@@ -294,6 +294,16 @@ func (c *Core) SetupAuth() error {
 		nets[i] = n.String()
 	}
 	c.Log(nil, fmt.Sprintf("ops api: %s, allowed from %s", state, strings.Join(nets, ", ")))
+	enc, err := EncoreIDFromEnv(svc)
+	if err != nil {
+		return err
+	}
+	c.Encore = enc
+	if enc != nil {
+		c.Log(nil, "encore id api: enabled on /encore/v1/id/ (loopback only, service secret from "+encoreSecretEnv+")")
+	} else {
+		c.Log(nil, "encore id api: disabled ("+encoreSecretEnv+" unset)")
+	}
 	if c.setupLauncher != nil {
 		if err := c.setupLauncher(c); err != nil {
 			return err
