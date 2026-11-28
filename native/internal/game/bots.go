@@ -7,10 +7,10 @@ import (
 	"sort"
 	"strings"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/capacity"
 	"fh2mp/internal/netv2"
 	"fh2mp/internal/replay"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // Bot players for capacity and HUD tests on the dev server (= server/bots.py). A bot is a Peer that is NOT in World.Peers: it lives in World.Bots.

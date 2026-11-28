@@ -6,9 +6,9 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/netv2"
 	"fh2mp/internal/playersetup"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // A client's voice datagram as the game writes it (game+0x37f860): a header with no messages, then HeaderToServer and the payload for each.

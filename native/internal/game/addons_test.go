@@ -5,11 +5,11 @@ import (
 	"testing"
 
 	"fh2mp/internal/addons"
-	"fh2mp/internal/bits"
 	"fh2mp/internal/catalog"
 	"fh2mp/internal/parts"
 	"fh2mp/internal/playersetup"
 	"fh2mp/internal/pyrand"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // PoliceLightbars' hood (2038001, the 4C's amber bar) on a player whose game has the add-on: the setup goes on as the stock hood for everyone,

@@ -6,9 +6,9 @@ import (
 	"math"
 	"sort"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/catalog"
 	"fh2mp/internal/pyfmt"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // None is the "no part" word.

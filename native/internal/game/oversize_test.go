@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/netv2"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // bytesMsg is a message of n bytes whose type is 43 (0xab & 0x7f).

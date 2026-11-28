@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"fh2mp/internal/addons"
-	"fh2mp/internal/bits"
 	"fh2mp/internal/catalog"
 	"fh2mp/internal/diag"
 	"fh2mp/internal/gameopts"
@@ -20,6 +19,7 @@ import (
 	"fh2mp/internal/pyfmt"
 	"fh2mp/internal/pyjson"
 	"fh2mp/internal/traffic"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // DlcCars are car ids that exist in the game but not in the base catalog (data/dlc_cars.txt, env FH2MP_DLC_CARS).

@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"sort"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/netv2"
 	"fh2mp/internal/omap"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 type bitsWriter = bits.Writer

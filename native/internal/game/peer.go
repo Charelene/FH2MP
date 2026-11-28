@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"math"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/netv2"
 	"fh2mp/internal/omap"
 	"fh2mp/internal/reliable"
 	"fh2mp/internal/replay"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // Addr is a client address: a UDP (ip, port), a TCP tunnel's peer, or ("bot", serial) for a bot.

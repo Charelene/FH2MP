@@ -28,6 +28,7 @@ jobs:
       kind: ${{ steps.versions.outputs.kind }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { submodules: true }
       - name: versions agree with the tag
         id: versions
         run: |
@@ -48,6 +49,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { submodules: true }
       - uses: ./.github/actions/ci-image
       - run: release/ci.sh --container shim
         timeout-minutes: 10
@@ -68,6 +70,7 @@ jobs:
     env: { AZURE_CLIENT_ID: "${{ secrets.AZURE_CLIENT_ID }}" }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { submodules: true }
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { name: shim-unsigned, path: in }
       - name: unpack
@@ -107,6 +110,7 @@ jobs:
     environment: release              # add required reviewers to this environment in the repository settings to gate signing + publishing
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { submodules: true }
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with: { go-version-file: native/go.mod, cache: false }
       # The intermediate shim-unsigned artifact has the same ZIP filename as

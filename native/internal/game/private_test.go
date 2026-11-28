@@ -3,8 +3,8 @@ package game
 import (
 	"testing"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/netv2"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // A private game (dev 2026-11-12: "party leader is not being assigned, the invited car could start an event"). The game has its own

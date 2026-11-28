@@ -6,12 +6,12 @@ import (
 	"sort"
 	"strings"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/diag"
 	"fh2mp/internal/netv2"
 	"fh2mp/internal/pyfmt"
 	"fh2mp/internal/pyjson"
 	"fh2mp/internal/reliable"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // HandleFailed is a datagram whose handling raised: the server keeps serving; the rest of that datagram is lost.

@@ -4,9 +4,9 @@ import (
 	"reflect"
 	"testing"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/netv2"
 	"fh2mp/internal/omap"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // A client that keeps hitting in a King or Infection the server has ended did not get the race-over flag (it goes out once, unreliably): its hits make

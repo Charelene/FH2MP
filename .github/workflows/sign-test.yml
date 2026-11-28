@@ -12,6 +12,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+        with: { submodules: true }
       # the runner image usually has mingw already; the apt mirror has hung here, so install only if missing, with timeouts
       - run: command -v x86_64-w64-mingw32-gcc || sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 install -y gcc-mingw-w64-x86-64
         timeout-minutes: 5

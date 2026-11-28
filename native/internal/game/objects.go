@@ -7,12 +7,12 @@ import (
 	"sort"
 	"strings"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/bucketlist"
 	"fh2mp/internal/diag"
 	"fh2mp/internal/gameopts"
 	"fh2mp/internal/netv2"
 	"fh2mp/internal/replay"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // GameOptionsView is the settings last delivered to / written by a client (size, payload).

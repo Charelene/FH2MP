@@ -5,9 +5,9 @@ import (
 	"math"
 	"testing"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/gameopts"
 	"fh2mp/internal/netv2"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // The Car Meet Showdown (the game's wager race), as the game binary 1.0.0.64 runs it:

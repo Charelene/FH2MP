@@ -7,7 +7,7 @@ import (
 	"math"
 	"sort"
 
-	"fh2mp/internal/bits"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // Variable ids and limits.

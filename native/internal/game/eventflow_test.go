@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"fh2mp/internal/bits"
 	"fh2mp/internal/gameopts"
 	"fh2mp/internal/netv2"
+	"github.com/Charelene/encore-paddock/bits"
 )
 
 // flowRig: an A-class event (rule class 3) with two connected participants, started 0 s ago, the new flow on.
