@@ -27,7 +27,7 @@ func TestStatusAnswerCarriesTheBuildStamp(t *testing.T) {
 	for i, p := range o {
 		keys[i] = p.K
 	}
-	if got, want := strings.Join(keys, ","), "env,online,auth,registration,server,time,maintenance,build"; got != want {
+	if got, want := strings.Join(keys, ","), "env,online,auth,registration,server,time,maintenance,build,features"; got != want {
 		t.Fatalf("keys %s, want %s", got, want)
 	}
 	b, _ := o.Get("build")

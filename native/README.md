@@ -21,3 +21,24 @@ history up to that point. A package comment like `(= server/x.py)` names the Pyt
   launchers in the field depend on them.
 - The recorded fixtures in `testdata/` are frozen: their recorder needed the Python servers. A change that alters one edits the expected output
   by hand and says why in the commit.
+
+## Kill switches (live ops)
+
+A realm's features file (`FH2MP_FEATURES_FILE`, the same path in the LSP's and the game server's environment; documented in `internal/flags`) switches
+features off without a release. Both servers look at it again each second, so a write takes effect in about a second and nothing restarts.
+
+```json
+{"voice": true, "nos": true, "mt_chat": true, "lobbies": true}
+```
+
+| Switch | Off means |
+| --- | --- |
+| `voice` | the game server reads chat packets and drops them (nobody hears anybody) |
+| `nos` | NitroSystem's NOS may burn nowhere (like `FH2MP_NO_NOS=1`) |
+| `mt_chat` | the chat server closes new connections at once and the open ones within 30 s |
+| `lobbies` | no ticket is matched and no seat reserved (503 `lobbies_off`); players already in a world stay |
+
+A feature missing from the file, a missing file and an unset path all mean on, which is what the servers did before. A broken file keeps the last good
+switches; an unknown key or a value that is not `true`/`false` is logged and ignored while the rest applies. `PUT /ops/v1/config {"features": {"voice": false}}`
+writes the file; `GET /ops/v1/config` and `GET /v1/status` show the switches in force. The operator's maintenance text stays in `launcher.json`
+(`maintenance`, also settable with `PUT /ops/v1/config`).

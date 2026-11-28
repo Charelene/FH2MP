@@ -560,7 +560,7 @@ func (l *Launcher) route(r *Req, method, path string, h http.Header, body []byte
 	switch {
 	case p == "/v1/status" && method == "GET":
 		return 200, pyjson.Obj{{K: "env", V: a.Env}, {K: "online", V: c.OnlineCount()}, {K: "auth", V: a.Mode}, {K: "registration", V: a.Registration},
-			{K: "server", V: serverVersion}, {K: "time", V: now}, {K: "maintenance", V: objAny(l.Config.Get(), "maintenance")}, {K: "build", V: buildStamp()}}, ok, nil
+			{K: "server", V: serverVersion}, {K: "time", V: now}, {K: "maintenance", V: objAny(l.Config.Get(), "maintenance")}, {K: "build", V: buildStamp()}, {K: "features", V: featuresObj()}}, ok, nil
 	case p == "/v1/launcher/config" && method == "GET":
 		cf := l.Config.Get()
 		return 200, pyjson.Obj{{K: "env", V: a.Env}, {K: "motd", V: objAny(cf, "motd")}, {K: "links", V: objAny(cf, "links")}, {K: "minLauncher", V: objAny(cf, "minLauncher")},

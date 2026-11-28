@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"fh2mp/internal/diag"
+	"fh2mp/internal/flags"
 	"fh2mp/internal/mt"
 	"fh2mp/internal/pyfmt"
 )
@@ -46,6 +47,7 @@ func (c *Core) StartChat() error {
 	if err != nil {
 		return fmt.Errorf("chat server: listen on %s: %w", addr, err)
 	}
+	srv.Gate = func() bool { return flags.On(flags.MTChat) } // the operator's mt_chat switch (features file), looked at once a second
 	c.Chat = srv
 	// End-to-end DMs (P3): devices, secret chats, commitments and reports in the database. The chat server's janitor sweeps the stores
 	// every hour (stored updates and sealed bytes after mt.UpdateTTL, commitments and discarded chats after mt.SentTTL).

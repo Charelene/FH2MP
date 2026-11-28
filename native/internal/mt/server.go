@@ -207,6 +207,10 @@ type Server struct {
 	locals  map[int64]*Local
 	wg      sync.WaitGroup
 	stop    chan struct{}
+
+	// Gate, when set before Serve, says whether the server takes part at all (the operator's mt_chat switch, internal/flags): while it says false a new
+	// connection is closed at once, and the janitor (every 30 s) closes the ones still open.
+	Gate func() bool
 }
 
 // New builds a server around the RSA key; accounts verifies sign-ins and store keeps each account's update sequence.
@@ -278,12 +282,30 @@ func (s *Server) Serve(l net.Listener) error {
 			return err
 		}
 		delay = 0
+		if s.Gate != nil && !s.Gate() {
+			_ = nc.Close()
+			continue
+		}
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
 			s.serveConn(nc)
 		}()
 	}
+}
+
+// dropConns closes every open connection with a reason and says how many there were; the keys stay, so clients sign in again when the server is back.
+func (s *Server) dropConns(why string) int {
+	s.mu.Lock()
+	conns := make([]*clientConn, 0, len(s.conns))
+	for c := range s.conns {
+		conns = append(conns, c)
+	}
+	s.mu.Unlock()
+	for _, c := range conns {
+		c.close(why)
+	}
+	return len(conns)
 }
 
 // Close stops the listener, closes every connection and forgets every key (clients make new ones on their next connect).
@@ -1189,6 +1211,11 @@ func (s *Server) janitor() {
 		case <-s.stop:
 			return
 		case <-t.C:
+		}
+		if s.Gate != nil && !s.Gate() {
+			if n := s.dropConns("the chat server is switched off"); n > 0 {
+				log.Info(fmt.Sprintf("mt.switched_off: closed %d connection(s); chat stays down while the mt_chat switch is off", n))
+			}
 		}
 		now := s.cfg.Now()
 		s.sweep(now)

@@ -10,6 +10,7 @@ import (
 
 	"fh2mp/internal/auth"
 	"fh2mp/internal/capacity"
+	"fh2mp/internal/flags"
 	"fh2mp/internal/pyjson"
 )
 
@@ -147,6 +148,12 @@ func authErr(status int, code, message, xuid, detail string) *auth.Error {
 	return e
 }
 
+// errLobbiesOff is the answer while the operator's lobbies switch (internal/flags) is off: nobody is matched into a lobby or holds a seat in one; players
+// already in a world stay in it.
+func errLobbiesOff(xuid string) error {
+	return authErr(503, "lobbies_off", "Online lobbies are switched off for now. Try again later.", xuid, "the lobbies switch is off (features file)")
+}
+
 // Reserve leases a seat in a lobby (by name) or in a new one of a kind ("freeroam", "roadtrip").
 func (s *Server) Reserve(xuid, lobby, kind string) (*Hold, error) {
 	return s.reserve(xuid, lobby, kind, false)
@@ -159,6 +166,9 @@ func (s *Server) ReserveInvited(xuid, lobby string) (*Hold, error) {
 }
 
 func (s *Server) reserve(xuid, lobby, kind string, invited bool) (*Hold, error) {
+	if !flags.On(flags.Lobbies) {
+		return nil, errLobbiesOff(xuid)
+	}
 	if kind != "" && kind != "freeroam" && kind != "roadtrip" {
 		return nil, authErr(400, "bad_mode", "Choose Free Roam or Road Trip.", xuid, "kind "+pyRepr(trunc(kind, 20)))
 	}
