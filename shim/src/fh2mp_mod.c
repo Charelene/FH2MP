@@ -1,5 +1,5 @@
 /*
- * FH2MP shim: fh2-mods\FH2MP.dll, a mod for the FH2 Mod Platform (Trinculo54, MIT; third_party/fh2-mod-platform).
+ * FH2MP shim: fh2-mods\FH2MP.dll, a mod for the FH2 Mod Platform (Trinculo54, MIT; paddock/third_party/fh2-mod-platform).
  *
  * The platform is DWrite.dll (and the identical d3dcompiler_47.dll) next to azimuth.exe. It loads every DLL in fh2-mods and calls its fh2mod_init, so FH2MP
  * runs next to the other FH2 mods (FH2 Extra Options keeps winmm.dll, which is its own) and changes the game through the platform's

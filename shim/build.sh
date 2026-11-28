@@ -6,9 +6,9 @@ mkdir -p build
 CC=${CC:-x86_64-w64-mingw32-gcc}
 WINDRES=${WINDRES:-x86_64-w64-mingw32-windres}
 VERSION=${FH2MP_SHIM_VERSION:-$(tr -d '[:space:]' < VERSION)}
-PLATFORM=$(tr -d '[:space:]' < ../third_party/fh2-mod-platform/VERSION)
+PLATFORM=$(tr -d '[:space:]' < ../paddock/third_party/fh2-mod-platform/VERSION)
 IFS=. read -r V1 V2 V3 <<< "$(sed -E 's/^([0-9]+)\.([0-9]+)\.([0-9]+).*/\1.\2.\3/' <<< "$VERSION")"
-COMMON=(-I ../third_party/fh2-mod-platform -DFH2MOD_PLATFORM_VERSION="\"$PLATFORM\"" -O2 -Wall -Wextra -shared -s
+COMMON=(-I ../paddock/third_party/fh2-mod-platform -DFH2MOD_PLATFORM_VERSION="\"$PLATFORM\"" -O2 -Wall -Wextra -shared -s
         -nostartfiles -Wl,--entry=DllMain -static-libgcc -lkernel32)
 # Release build (default, what ships): no debugger server, no tracer, no probe files, no verbose request logging.
 # `shim/build.sh debug` builds the research variant build/FH2MP-debug.dll (live debugger on a localhost port, tracer, probes);

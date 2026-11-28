@@ -107,7 +107,7 @@ Encore, with the in-game Guide (`FH2MPGuide.dll`) and the chat client, is a proj
 the Guide (`guide/`) and the chat client (`client/`) were here up to 1.4.8 and are in the git history.
 
 **Shim.** Needs `x86_64-w64-mingw32-gcc` (and `windres`). It compiles against the FH2 Mod Platform's API header in
-`third_party/fh2-mod-platform`.
+`paddock/third_party/fh2-mod-platform` (the Paddock submodule).
 
 ```sh
 shim/build.sh          # release build -> shim/build/FH2MP.dll
@@ -195,8 +195,11 @@ crash guards in the shim (and the in-game Guide's Xbox 360 and Xbox One looks, w
 
 Third-party mods FH2MP uses (not part of FH2MP and not redistributed by it; Encore downloads their authors' own releases):
 
-- **FH2 Mod Platform** © 2026 Trinculo54, [MIT License](third_party/fh2-mod-platform/LICENSE). Its API header is in
-  `third_party/fh2-mod-platform` (the shim is built against it). The platform includes [MinHook](https://github.com/TsudaKageyu/minhook)
+- **FH2 Mod Platform** © 2026 Trinculo54, [MIT License](paddock/third_party/fh2-mod-platform/LICENSE). Its API header (`fh2mod.h`, release
+  v2.9.1 as `VERSION` says) lives in the Paddock submodule at `paddock/third_party/fh2-mod-platform`, and the shim is built against it. The
+  DLL itself is not in this repository or in FH2MP's releases: Encore downloads the author's release zip (pinned by the zip's and the DLL's
+  SHA-256, `encore-fh2` `pins.rs` `PLATFORM`) when the Azimuth folder has no platform or an older one. To move to a newer platform, update the
+  header, `LICENSE` and `VERSION` in the Paddock; Encore's pin moves with it. The platform includes [MinHook](https://github.com/TsudaKageyu/minhook)
   © 2009-2017 Tsuda Kageyu (BSD 2-Clause) and [SQLite](https://sqlite.org) (public domain); Encore keeps the release's
   `LICENSE.txt` (as `LICENSE-FH2ModPlatform.txt`) and `LICENSE-MinHook.txt` next to the DLL.
 - **[FH2 Extra Options](https://github.com/RokkuDayo/ForzaHorizon2_ExtraOptions)** © RokkuDayo, GPL-3.0.
